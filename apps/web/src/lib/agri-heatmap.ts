@@ -412,6 +412,16 @@ export type AgriHeatmapGeoJSON = GeoJSON.FeatureCollection<
     }
 >;
 
+export type AgriHeatmapPoints = GeoJSON.FeatureCollection<
+    GeoJSON.Point,
+    {
+        color: string;
+        value: number;
+        class?: string;
+        rgba?: [number, number, number, number];
+    }
+>;
+
 export interface AgriHeatmapImage {
     /** Continuous color-film PNG (primary MapLibre image source). */
     dataUrl?: string;
@@ -419,6 +429,13 @@ export interface AgriHeatmapImage {
     coordinates: [[number, number], [number, number], [number, number], [number, number]];
     /** Sparse 10 m UTM cells as WGS84 polygons — fallback if image overlay unavailable. */
     geojson: AgriHeatmapGeoJSON;
+    /**
+     * Lon/lat sample centers for MapLibre circle layer (preferred for OSS pixels_lonlat).
+     * Avoids turf.intersect on tiny ~10 m squares that often empty the fill layer.
+     */
+    points?: AgriHeatmapPoints;
+    /** True when built from OSS lon/lat pixels (WebMercator film / points). */
+    fromLonLat?: boolean;
     /** Source UTM grid (for field-boundary canvas mask / remask). */
     grid: AgriPixelGrid;
     width: number;
@@ -778,9 +795,13 @@ export function maskCanvasToFieldGeom(
  * before (transparent dataUrl → blank map, GeoJSON never ran). For EPSG:3857 /
  * 4326 lon/lat films, apply mask but restore unmasked when alpha is wiped.
  */
-/** Enable destination-in mask for WebMercator/lonlat grids; UTM path historically wiped film. */
-function shouldApplyCanvasFieldMask(grid: AgriPixelGrid): boolean {
-    return grid.epsg === 3857 || grid.epsg === 4326;
+/**
+ * Destination-in field masks have wiped the film before (esp. lonLat↔UTM).
+ * Lon/lat / WebMercator films are already parcel-sampled from OSS — skip mask.
+ * UTM path historically wiped film too — skip.
+ */
+function shouldApplyCanvasFieldMask(_grid: AgriPixelGrid): boolean {
+    return false;
 }
 
 function applyFieldMaskIfHealthy(
@@ -915,14 +936,6 @@ export function clipHeatmapToField(
             if (!turf.booleanIntersects(feat as GeoJSON.Feature, clipFeature as GeoJSON.Feature)) {
                 continue;
             }
-            const clipped = turf.intersect(
-                turf.featureCollection([
-                    turf.feature(feat.geometry) as GeoJSON.Feature<GeoJSON.Polygon>,
-                    clipFeature,
-                ]),
-            );
-            if (!clipped?.geometry) continue;
-            const geom = clipped.geometry;
             const props: AgriHeatmapGeoJSON["features"][number]["properties"] = {
                 color: feat.properties?.color ?? "#000000",
                 value: feat.properties?.value ?? 0,
@@ -931,6 +944,26 @@ export function clipHeatmapToField(
             if (feat.properties?.row != null) props.row = feat.properties.row;
             if (feat.properties?.col != null) props.col = feat.properties.col;
             if (feat.properties?.rgba) props.rgba = feat.properties.rgba;
+            // Tiny ~10 m lon/lat squares often fail turf.intersect (empty geom /
+            // winding). Keep the whole cell whenever it intersects the field.
+            let geom: GeoJSON.Polygon | GeoJSON.MultiPolygon | null = null;
+            try {
+                const clipped = turf.intersect(
+                    turf.featureCollection([
+                        turf.feature(feat.geometry) as GeoJSON.Feature<GeoJSON.Polygon>,
+                        clipFeature,
+                    ]),
+                );
+                if (clipped?.geometry && (clipped.geometry.type === "Polygon" || clipped.geometry.type === "MultiPolygon")) {
+                    geom = clipped.geometry;
+                }
+            } catch {
+                geom = null;
+            }
+            if (!geom) {
+                features.push({ type: "Feature", properties: props, geometry: feat.geometry });
+                continue;
+            }
             if (geom.type === "Polygon") {
                 features.push({ type: "Feature", properties: props, geometry: geom });
             } else if (geom.type === "MultiPolygon") {
@@ -946,6 +979,39 @@ export function clipHeatmapToField(
             /* skip degenerate intersections */
         }
     }
+    return { type: "FeatureCollection", features };
+}
+
+/**
+ * Soft field filter for lon/lat sample points: keep points inside the parcel via
+ * booleanPointInPolygon only (no polygon intersect). If filtering empties the
+ * set, return originals — OSS pixels are already land-sampled.
+ */
+export function filterHeatmapPointsInField(
+    points: AgriHeatmapPoints,
+    fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon | null | undefined,
+): AgriHeatmapPoints {
+    if (!fieldGeom || !points?.features?.length) return points;
+    let poly: GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon>;
+    try {
+        poly = turf.feature(fieldGeom) as GeoJSON.Feature<
+            GeoJSON.Polygon | GeoJSON.MultiPolygon
+        >;
+    } catch {
+        return points;
+    }
+    const features: AgriHeatmapPoints["features"] = [];
+    for (const feat of points.features) {
+        if (!feat?.geometry || feat.geometry.type !== "Point") continue;
+        try {
+            if (turf.booleanPointInPolygon(feat as GeoJSON.Feature<GeoJSON.Point>, poly)) {
+                features.push(feat);
+            }
+        } catch {
+            features.push(feat);
+        }
+    }
+    if (features.length === 0 && points.features.length > 0) return points;
     return { type: "FeatureCollection", features };
 }
 
@@ -1241,6 +1307,23 @@ export function rasterizeAgriLonLatPixels(
     });
     const geojson: AgriHeatmapGeoJSON = { type: "FeatureCollection", features };
 
+    const points: AgriHeatmapPoints = {
+        type: "FeatureCollection",
+        features: cellsWithRc.map((cell) => {
+            const props: AgriHeatmapPoints["features"][number]["properties"] = {
+                color: cell.color,
+                value: cell.value,
+                rgba: cell.rgba,
+            };
+            if (cell.class) props.class = cell.class;
+            return {
+                type: "Feature",
+                properties: props,
+                geometry: { type: "Point", coordinates: [cell.lon, cell.lat] },
+            };
+        }),
+    };
+
     const tl = webMercatorToLonLat(minX, maxY);
     const tr = webMercatorToLonLat(minX + width * resM, maxY);
     const br = webMercatorToLonLat(minX + width * resM, maxY - height * resM);
@@ -1296,6 +1379,8 @@ export function rasterizeAgriLonLatPixels(
         dataUrl,
         coordinates,
         geojson,
+        points,
+        fromLonLat: true,
         grid,
         width,
         height,
