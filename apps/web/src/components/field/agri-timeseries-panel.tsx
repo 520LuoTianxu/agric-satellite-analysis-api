@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
     agriApi,
@@ -206,6 +206,13 @@ export default function AgriTimeseriesPanel({
         index: string;
         mean: number | null;
     } | null>(null);
+    /** Bumps on every loadHeatmap call; stale async results are ignored. */
+    const heatmapLoadGenRef = useRef(0);
+    const loadHeatmapRef = useRef<(date: string, index: SeriesKey) => Promise<void>>(async () => {});
+    const enabledRef = useRef(enabled);
+    enabledRef.current = enabled;
+    const heatmapVisibleRef = useRef(heatmapVisible);
+    heatmapVisibleRef.current = heatmapVisible;
 
     useEffect(() => {
         if (modeProp && modeProp !== seriesInternal) {
@@ -238,7 +245,19 @@ export default function AgriTimeseriesPanel({
                     .filter((s) => s.sensor === sensor)
                     .map((s) => s.date)
                     .sort();
-                if (dates.length) setSelectedDate(dates[dates.length - 1]);
+                const latestDate = dates.length ? dates[dates.length - 1] : null;
+                if (latestDate) setSelectedDate(latestDate);
+                // Explicit first heatmap load (NDVI by default) — avoid relying only on
+                // effect ordering with modeProp / selectedDate / series, which left the
+                // overlay empty until the user switched to EVI.
+                if (
+                    !cancelled &&
+                    latestDate &&
+                    enabledRef.current &&
+                    heatmapVisibleRef.current
+                ) {
+                    await loadHeatmapRef.current(latestDate, nextSeries);
+                }
             } catch (e: any) {
                 if (!cancelled) setError(e?.detail || e?.message || "加载 agri 时序失败");
             } finally {
@@ -255,6 +274,7 @@ export default function AgriTimeseriesPanel({
 
     // When switching series, auto-pick latest date for that sensor
     useEffect(() => {
+        if (!scenes.length) return; // wait for initial scenes fetch; do not null out date early
         const sensor = sensorForIndex(series);
         const dates = scenes
             .filter((s) => s.sensor === sensor)
@@ -270,9 +290,12 @@ export default function AgriTimeseriesPanel({
     const loadHeatmap = useCallback(
         async (date: string, index: SeriesKey) => {
             if (!landId || !onHeatmapChange) return;
+            const gen = ++heatmapLoadGenRef.current;
             if (!heatmapVisible) {
-                onHeatmapChange(null);
-                setHeatmapMeta(null);
+                if (gen === heatmapLoadGenRef.current) {
+                    onHeatmapChange(null);
+                    setHeatmapMeta(null);
+                }
                 return;
             }
             const meta = SERIES_META[index];
@@ -285,6 +308,8 @@ export default function AgriTimeseriesPanel({
                     limit: 5,
                     includePixels: 1,
                 });
+                // Ignore stale overlapping NDVI/EVI (or date) loads
+                if (gen !== heatmapLoadGenRef.current) return;
                 const scene = res.items.find((s) => s.pixel_data?.pixels?.length) ?? res.items[0];
                 if (!scene?.pixel_data?.pixels?.length) {
                     onHeatmapChange(null);
@@ -296,6 +321,7 @@ export default function AgriTimeseriesPanel({
                     return;
                 }
                 const img = rasterizeAgriPixels(scene.pixel_data, index, meta.sensor);
+                if (gen !== heatmapLoadGenRef.current) return;
                 onHeatmapChange(img);
                 setHeatmapMeta(
                     img
@@ -313,20 +339,27 @@ export default function AgriTimeseriesPanel({
                     });
                 }
             } catch (e) {
+                if (gen !== heatmapLoadGenRef.current) return;
                 onHeatmapChange(null);
                 setHeatmapMeta(null);
                 console.warn("[agri-heatmap] load failed", e);
             } finally {
-                setHeatmapLoading(false);
+                if (gen === heatmapLoadGenRef.current) {
+                    setHeatmapLoading(false);
+                }
             }
         },
         [landId, onHeatmapChange, heatmapVisible],
     );
+    loadHeatmapRef.current = loadHeatmap;
 
     useEffect(() => {
         if (!enabled) {
+            // Invalidate in-flight loads so they cannot repaint after clear
+            heatmapLoadGenRef.current += 1;
             onHeatmapChange?.(null);
             setHeatmapMeta(null);
+            setHeatmapLoading(false);
             return;
         }
         if (!selectedDate) return;

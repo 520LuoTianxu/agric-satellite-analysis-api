@@ -491,20 +491,95 @@ function collectPaintedCells(
     }
 
     if (cells.length === 0) return null;
-    return { cells, sum, vmin, vmax };
+    return densifyPaintedHoles({ cells, sum, vmin, vmax }, width, height, 2, 3);
 }
 
-/** One 10 m UTM cell → WGS84 square polygon (ring closed). */
+const ORTHO_NEIGHBORS: [number, number][] = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1],
+];
+
+/**
+ * Fill empty grid cells that sit among painted neighbors (NN from orthogonal
+ * painted cells). Closes intermittent gaps inside the parcel strip without
+ * flooding the whole bbox. Limited passes keep fill local to the painted cluster.
+ */
+function densifyPaintedHoles(
+    painted: PaintedResult,
+    width: number,
+    height: number,
+    minNeighbors = 1,
+    maxPasses = 3,
+): PaintedResult {
+    const map = new Map<string, PaintedCell>();
+    for (const cell of painted.cells) {
+        map.set(`${cell.row},${cell.col}`, cell);
+    }
+    let sum = painted.sum;
+    let vmin = painted.vmin;
+    let vmax = painted.vmax;
+
+    for (let pass = 0; pass < maxPasses; pass++) {
+        const additions: PaintedCell[] = [];
+        for (let r = 0; r < height; r++) {
+            for (let c = 0; c < width; c++) {
+                const key = `${r},${c}`;
+                if (map.has(key)) continue;
+                const neighbors: PaintedCell[] = [];
+                for (const [dr, dc] of ORTHO_NEIGHBORS) {
+                    const n = map.get(`${r + dr},${c + dc}`);
+                    if (n) neighbors.push(n);
+                }
+                if (neighbors.length < minNeighbors) continue;
+                // All orthogonal neighbors are equidistant; pick donor with median value
+                // for smoother continuous fill along the parcel strip.
+                const sorted = [...neighbors].sort((a, b) => a.value - b.value);
+                const donor = sorted[Math.floor(sorted.length / 2)];
+                const filled: PaintedCell = {
+                    row: r,
+                    col: c,
+                    color: donor.color,
+                    rgba: [...donor.rgba] as [number, number, number, number],
+                    value: donor.value,
+                    class: donor.class,
+                };
+                additions.push(filled);
+            }
+        }
+        if (additions.length === 0) break;
+        for (const cell of additions) {
+            map.set(`${cell.row},${cell.col}`, cell);
+            sum += cell.value;
+            vmin = Math.min(vmin, cell.value);
+            vmax = Math.max(vmax, cell.value);
+        }
+    }
+
+    return {
+        cells: [...map.values()],
+        sum,
+        vmin,
+        vmax,
+    };
+}
+
+/** Expand cells slightly so UTM→lonlat seams do not show as hairline gaps. */
+const CELL_PAD_FRAC = 0.1; // 10% of resolution on each side (~overlap neighbors)
+
+/** One 10 m UTM cell → WGS84 square polygon (ring closed), with slight padding. */
 function cellPolygon(
     grid: AgriPixelGrid,
     row: number,
     col: number,
 ): GeoJSON.Polygon {
     const { origin_x, origin_y, resolution, epsg } = grid;
-    const west = origin_x + col * resolution;
-    const east = origin_x + (col + 1) * resolution;
-    const north = origin_y - row * resolution;
-    const south = origin_y - (row + 1) * resolution;
+    const pad = resolution * CELL_PAD_FRAC;
+    const west = origin_x + col * resolution - pad;
+    const east = origin_x + (col + 1) * resolution + pad;
+    const north = origin_y - row * resolution + pad;
+    const south = origin_y - (row + 1) * resolution - pad;
     const tl = utmToLonLat(west, north, epsg);
     const tr = utmToLonLat(east, north, epsg);
     const br = utmToLonLat(east, south, epsg);
