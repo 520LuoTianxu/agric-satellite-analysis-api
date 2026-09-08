@@ -25,8 +25,19 @@ const API = toOrigin(API_RAW);
 const PROTOMAPS_ORIGIN = toOrigin(PROTOMAPS);
 const MINIO = toOrigin(MINIO_RAW);
 
+// Browser calls /v1/* on the Next host; rewrite to the API container (or localhost in bare next dev).
+const INTERNAL_API = process.env.INTERNAL_API_URL || "http://localhost:8000";
+
 const nextConfig = {
     output: "standalone",
+    async rewrites() {
+        return [
+            {
+                source: "/v1/:path*",
+                destination: `${INTERNAL_API}/v1/:path*`,
+            },
+        ];
+    },
     async headers() {
         return [
             {

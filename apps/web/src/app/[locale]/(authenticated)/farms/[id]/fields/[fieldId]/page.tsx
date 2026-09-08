@@ -147,7 +147,9 @@ function removeAllIndexOverlays(map: maplibregl.Map) {
 }
 
 function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
+    // Fake agri:// placeholder COGs 500 on TiTiler — never add as raster tiles.
     if (!layer.tile_url || !field.geom) return;
+    if ((layer.cog_uri || "").startsWith("agri://") || layer.tile_url.includes("agri://")) return;
     const sourceId = indexSourceId(indexType);
     const layerId = indexLayerId(indexType);
     const bounds = computeGeomBounds(field.geom);

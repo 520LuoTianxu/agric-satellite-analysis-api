@@ -153,12 +153,21 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 monitoringApi.stats(fieldId, activeIndex),
             ]);
             if (gen !== loadGenRef.current) return; // stale - discard
-            setLayers(layersRes.items);
+            // Placeholder agri:// COGs from sync_agri_scenes_to_field_stats poison TiTiler —
+            // never expose tile_url for those; agri 色斑 uses pixel_data GeoJSON only.
+            const sanitized = layersRes.items.map((layer) => {
+                const cog = layer.cog_uri || "";
+                if (cog.startsWith("agri://")) {
+                    return { ...layer, tile_url: null };
+                }
+                return layer;
+            });
+            setLayers(sanitized);
             setStats(statsRes.items);
             onDataLoaded?.();
             // Auto-select latest date
-            if (layersRes.items.length > 0) {
-                setSelectedDate(layersRes.items[layersRes.items.length - 1].date);
+            if (sanitized.length > 0) {
+                setSelectedDate(sanitized[sanitized.length - 1].date);
             } else {
                 setSelectedDate(null);
             }
@@ -197,15 +206,24 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     }, [showWeatherOverlay, fieldId, stats]);
 
     // ── Show layer on map when selectedDate or visibility changes ──
+    // Agri fields: skip COG/TiTiler overlay entirely — only pixel_data GeoJSON 色斑.
     useEffect(() => {
         if (!onShowLayer) return;
+        if (isAgriField) {
+            onShowLayer(null, activeIndex);
+            return;
+        }
         if (!layerVisible || !selectedDate) {
             onShowLayer(null, activeIndex);
             return;
         }
         const layer = layers.find((l) => l.date === selectedDate);
-        onShowLayer(layer ?? null, activeIndex);
-    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex]);
+        if (layer?.cog_uri?.startsWith("agri://") || !layer?.tile_url) {
+            onShowLayer(null, activeIndex);
+            return;
+        }
+        onShowLayer(layer, activeIndex);
+    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
 
     // ── Job polling ─────────────────────────────────
     const pollJob = useCallback(

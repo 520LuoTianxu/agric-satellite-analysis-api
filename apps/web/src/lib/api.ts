@@ -5,7 +5,30 @@
  * All methods return typed responses; throws on HTTP errors.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/v1";
+/**
+ * Resolve API base URL.
+ * In the browser, prefer same-origin `/v1` (Next rewrite → INTERNAL_API_URL) when
+ * NEXT_PUBLIC_API_URL points at localhost:8000 — avoids ERR_CONNECTION_REFUSED
+ * when the API port is not published on the host.
+ */
+function getApiBase(): string {
+    const raw = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/v1";
+    if (typeof window !== "undefined") {
+        if (raw.startsWith("/")) return raw.replace(/\/$/, "") || "/v1";
+        try {
+            const u = new URL(raw);
+            if (
+                (u.hostname === "localhost" || u.hostname === "127.0.0.1") &&
+                (raw.includes(":8000"))
+            ) {
+                return "/v1";
+            }
+        } catch {
+            /* keep raw */
+        }
+    }
+    return raw.replace(/\/$/, "");
+}
 
 let cachedToken: string | null = null;
 let tokenExpiresAt: number = 0;
@@ -72,7 +95,7 @@ async function apiFetch<T>(
         headers["Content-Type"] = "application/json";
     }
 
-    const res = await fetch(`${API_BASE}${path}`, { ...fetchOpts, headers });
+    const res = await fetch(`${getApiBase()}${path}`, { ...fetchOpts, headers });
 
     if (!res.ok) {
         let detail = res.statusText;
@@ -961,7 +984,7 @@ export const shareApi = {
         apiFetch(`/fields/${fieldId}/share/${token}`, { method: "DELETE" }),
     /** Public endpoint - no auth required. Uses plain fetch. */
     async getReport(token: string): Promise<ShareReport> {
-        const res = await fetch(`${API_BASE}/share/${token}`);
+        const res = await fetch(`${getApiBase()}/share/${token}`);
         if (res.status === 410) throw new Error("expired");
         if (res.status === 404) throw new Error("not_found");
         if (!res.ok) throw new Error(`Report fetch failed: ${res.status}`);
