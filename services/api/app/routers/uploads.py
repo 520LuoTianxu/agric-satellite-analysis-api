@@ -1,4 +1,4 @@
-"""Uploads router - presigned URL for direct-to-MinIO photo upload."""
+"""Uploads router - presigned URL for direct-to-storage photo upload."""
 
 from __future__ import annotations
 
@@ -27,38 +27,24 @@ async def get_presigned_upload(
     body: PresignedUploadRequest,
     ctx: Annotated[OrgContext, Depends(_writer)],
 ):
-    """Generate a presigned PUT URL for direct-to-MinIO upload."""
+    """Generate a presigned PUT URL for direct-to-storage upload."""
     if body.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported content type. Allowed: {', '.join(sorted(_ALLOWED_CONTENT_TYPES))}",
         )
-    from minio import Minio
-    from app.core.config import settings
+    from datetime import timedelta
 
-    # For presigned URLs, the signature includes the host header.
-    # We must sign with the browser-reachable endpoint so the signature
-    # matches when the browser sends the PUT request.
-    # Setting region explicitly avoids a network call to discover it.
-    signing_endpoint = settings.minio_public_endpoint or settings.minio_endpoint
-    client = Minio(
-        signing_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-        region="us-east-1",
-    )
+    from app.core.storage import get_storage
 
     # Generate unique object key
     ext = body.filename.rsplit(".", 1)[-1] if "." in body.filename else "jpg"
     object_key = f"photos/{ctx.org_id}/{uuid.uuid4()}.{ext}"
 
-    from datetime import timedelta
-
-    url = client.presigned_put_object(
-        settings.minio_bucket,
+    url = get_storage().presigned_put(
         object_key,
         expires=timedelta(minutes=15),
+        content_type=body.content_type,
     )
 
     logger.info("presigned_upload", object_key=object_key, org_id=str(ctx.org_id))

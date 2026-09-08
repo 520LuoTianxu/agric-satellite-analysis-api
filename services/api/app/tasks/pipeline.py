@@ -19,7 +19,6 @@ from rasterio.transform import from_bounds
 from rasterio.warp import Resampling, reproject, transform_bounds
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
-from minio import Minio
 from pystac_client import Client as STACClient
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -27,6 +26,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
+from app.core.config import settings
 from app.tasks.indices import IndexDef
 
 logger = structlog.get_logger()
@@ -38,12 +38,6 @@ STAC_API_URL = os.environ.get(
 )
 STAC_COLLECTION = "sentinel-2-l2a"
 MAX_CLOUD_COVER = 20
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "openfarm")
-MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "openfarm_dev_secret")
-MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "openfarm")
-MINIO_SECURE = os.environ.get("MINIO_SECURE", "false").lower() == "true"
-
 # GDAL environment for reading remote COGs
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff")
@@ -55,16 +49,29 @@ os.environ.setdefault("VSI_CACHE_SIZE", "5000000")
 RETRY_DELAYS = [60, 300, 900]  # Per PRD Section 7.4
 
 
-# ── MinIO / DB helpers ───────────────────────────────────────────────
+# ── Storage / DB helpers ─────────────────────────────────────────────
 
 
-def get_minio_client() -> Minio:
-    return Minio(
-        MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        secure=MINIO_SECURE,
+def get_minio_client():
+    """Deprecated: prefer ``get_storage()``. Thin wrapper for MinIO only."""
+    import warnings
+    from minio import Minio
+
+    warnings.warn(
+        "get_minio_client is deprecated; use app.core.storage.get_storage()",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    return Minio(
+        settings.minio_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_secure,
+    )
+
+
+# Deprecated alias kept for callers that still import MINIO_BUCKET.
+MINIO_BUCKET = settings.minio_bucket
 
 
 def get_db_session():
@@ -215,7 +222,7 @@ def write_cog(
     scene_date: date,
     index_key: str,
 ) -> str:
-    """Write an index array as COG to MinIO. Returns the ``cog_uri``."""
+    """Write an index array as COG to object storage. Returns the ``cog_uri``."""
     object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{index_key}.tif"
     tmp_src_path = tempfile.mktemp(suffix="_src.tif")
     tmp_dst_path = tempfile.mktemp(suffix="_cog.tif")
@@ -239,11 +246,12 @@ def write_cog(
             tmp_src_path, tmp_dst_path, output_profile, overview_level=2, quiet=True
         )
 
-        get_minio_client().fput_object(
-            MINIO_BUCKET, object_key, tmp_dst_path, content_type="image/tiff"
-        )
+        from app.core.storage import get_storage
+
+        storage = get_storage()
+        storage.upload_file(object_key, tmp_dst_path, content_type="image/tiff")
         logger.info("cog_uploaded", object_key=object_key, index=index_key)
-        return f"s3://{MINIO_BUCKET}/{object_key}"
+        return storage.uri_for(object_key)
     finally:
         for p in [tmp_src_path, tmp_dst_path]:
             try:
