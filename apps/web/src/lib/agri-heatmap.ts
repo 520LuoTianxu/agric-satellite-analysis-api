@@ -1,6 +1,6 @@
 /**
- * Agri 色斑图 helpers — rasterize parcel_scene_products.pixel_data onto a canvas
- * and project UTM grid corners to WGS84 for MapLibre image sources.
+ * Agri 色斑图 helpers — convert parcel_scene_products.pixel_data sparse pixels
+ * into WGS84 GeoJSON fill cells (primary MapLibre overlay) + optional canvas.
  *
  * S2 pixel row: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
  * S1 pixel row: [row, col, vv, vh]
@@ -293,10 +293,18 @@ export type AgriHeatmapLegend =
           classes: { key: string; label: string; color: string }[];
       };
 
+export type AgriHeatmapGeoJSON = GeoJSON.FeatureCollection<
+    GeoJSON.Polygon,
+    { color: string; value: number; class?: string }
+>;
+
 export interface AgriHeatmapImage {
-    dataUrl: string;
-    /** MapLibre image coordinates: TL, TR, BR, BL as [lng, lat] */
+    /** Optional canvas data URL (legend / debug); map uses geojson. */
+    dataUrl?: string;
+    /** MapLibre image coordinates: TL, TR, BR, BL as [lng, lat] (legacy image overlay). */
     coordinates: [[number, number], [number, number], [number, number], [number, number]];
+    /** Sparse 10 m UTM cells as WGS84 polygons — primary map overlay. */
+    geojson: AgriHeatmapGeoJSON;
     width: number;
     height: number;
     index: AgriHeatIndex;
@@ -357,17 +365,34 @@ function gridCorners(grid: AgriPixelGrid): AgriHeatmapImage["coordinates"] {
     return [tl, tr, br, bl];
 }
 
-/**
- * Rasterize sparse pixel list onto a transparent canvas (origin = upper-left, row↓).
- * Empty cells stay alpha 0 so the satellite basemap shows through outside painted spots.
- * Sparse pixels already approximate the parcel; optional polygon clip is not required.
- */
-export function rasterizeAgriPixels(
+function rgbaToHex(r: number, g: number, b: number): string {
+    const h = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+    return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+interface PaintedCell {
+    row: number;
+    col: number;
+    color: string;
+    rgba: [number, number, number, number];
+    value: number;
+    class?: string;
+}
+
+interface PaintedResult {
+    cells: PaintedCell[];
+    sum: number;
+    vmin: number;
+    vmax: number;
+}
+
+/** Shared coloring for continuous / drought / flood modes. */
+function collectPaintedCells(
     pixelData: AgriPixelData,
     index: AgriHeatIndex,
     sensor: "S1" | "S2",
     rescale?: [number, number],
-): AgriHeatmapImage | null {
+): PaintedResult | null {
     const grid = pixelData?.grid;
     const pixels = pixelData?.pixels;
     if (!grid || !pixels?.length) return null;
@@ -375,18 +400,10 @@ export function rasterizeAgriPixels(
     const expected = sensorForIndex(index);
     if (sensor !== expected) return null;
 
-    const { width, height, origin_x, origin_y, resolution, epsg } = grid;
-    if (!width || !height || !resolution || !epsg) return null;
-    void origin_x;
-    void origin_y;
+    const { width, height } = grid;
+    if (!width || !height || !grid.resolution || !grid.epsg) return null;
 
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    const img = ctx.createImageData(width, height);
-    let painted = 0;
+    const cells: PaintedCell[] = [];
     let sum = 0;
     let vmin = Infinity;
     let vmax = -Infinity;
@@ -404,21 +421,22 @@ export function rasterizeAgriPixels(
             if (r < 0 || r >= height || c < 0 || c >= width) continue;
             if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) continue;
             const cls = classifyDrought(ndvi, ndmi);
-            const [rr, gg, bb, aa] = DROUGHT_CLASS_STYLE[cls].rgba;
-            if (aa === 0) continue;
-            const i = (r * width + c) * 4;
-            img.data[i] = rr;
-            img.data[i + 1] = gg;
-            img.data[i + 2] = bb;
-            img.data[i + 3] = aa;
-            painted += 1;
+            const rgba = DROUGHT_CLASS_STYLE[cls].rgba;
+            if (rgba[3] === 0) continue;
             const nddi = computeNddi(ndvi, ndmi);
             const metric = nddi ?? ndmi;
-            if (Number.isFinite(metric)) {
-                sum += metric;
-                vmin = Math.min(vmin, metric);
-                vmax = Math.max(vmax, metric);
-            }
+            if (!Number.isFinite(metric)) continue;
+            cells.push({
+                row: r,
+                col: c,
+                color: DROUGHT_CLASS_STYLE[cls].color,
+                rgba,
+                value: metric,
+                class: cls,
+            });
+            sum += metric;
+            vmin = Math.min(vmin, metric);
+            vmax = Math.max(vmax, metric);
         }
     } else if (index === "flood") {
         const iVv = S1_VALUE_INDEX.vv;
@@ -432,14 +450,16 @@ export function rasterizeAgriPixels(
             if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(vv)) continue;
             if (r < 0 || r >= height || c < 0 || c >= width) continue;
             const cls = classifyFlood(vv, Number.isFinite(vh) ? vh : null);
-            const [rr, gg, bb, aa] = FLOOD_CLASS_STYLE[cls].rgba;
-            if (aa === 0) continue; // dry → transparent
-            const i = (r * width + c) * 4;
-            img.data[i] = rr;
-            img.data[i + 1] = gg;
-            img.data[i + 2] = bb;
-            img.data[i + 3] = aa;
-            painted += 1;
+            const rgba = FLOOD_CLASS_STYLE[cls].rgba;
+            if (rgba[3] === 0) continue; // dry → transparent
+            cells.push({
+                row: r,
+                col: c,
+                color: FLOOD_CLASS_STYLE[cls].color,
+                rgba,
+                value: vv,
+                class: cls,
+            });
             sum += vv;
             vmin = Math.min(vmin, vv);
             vmax = Math.max(vmax, vv);
@@ -456,21 +476,123 @@ export function rasterizeAgriPixels(
             const v = Number(row[vi]);
             if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(v)) continue;
             if (r < 0 || r >= height || c < 0 || c >= width) continue;
-            const [rr, gg, bb, aa] = colorizeValue(v, cont, rs);
-            const i = (r * width + c) * 4;
-            img.data[i] = rr;
-            img.data[i + 1] = gg;
-            img.data[i + 2] = bb;
-            img.data[i + 3] = aa;
-            painted += 1;
+            const rgba = colorizeValue(v, cont, rs);
+            cells.push({
+                row: r,
+                col: c,
+                color: rgbaToHex(rgba[0], rgba[1], rgba[2]),
+                rgba,
+                value: v,
+            });
             sum += v;
             vmin = Math.min(vmin, v);
             vmax = Math.max(vmax, v);
         }
     }
 
-    if (painted === 0) return null;
-    ctx.putImageData(img, 0, 0);
+    if (cells.length === 0) return null;
+    return { cells, sum, vmin, vmax };
+}
+
+/** One 10 m UTM cell → WGS84 square polygon (ring closed). */
+function cellPolygon(
+    grid: AgriPixelGrid,
+    row: number,
+    col: number,
+): GeoJSON.Polygon {
+    const { origin_x, origin_y, resolution, epsg } = grid;
+    const west = origin_x + col * resolution;
+    const east = origin_x + (col + 1) * resolution;
+    const north = origin_y - row * resolution;
+    const south = origin_y - (row + 1) * resolution;
+    const tl = utmToLonLat(west, north, epsg);
+    const tr = utmToLonLat(east, north, epsg);
+    const br = utmToLonLat(east, south, epsg);
+    const bl = utmToLonLat(west, south, epsg);
+    return {
+        type: "Polygon",
+        coordinates: [[tl, tr, br, bl, tl]],
+    };
+}
+
+/**
+ * Sparse pixel cells → GeoJSON FeatureCollection of fill polygons.
+ * Transparent outside cells (no features). Properties drive MapLibre fill-color.
+ */
+export function pixelsToGeoJSON(
+    pixelData: AgriPixelData,
+    index: AgriHeatIndex,
+    sensor: "S1" | "S2",
+    rescale?: [number, number],
+): AgriHeatmapGeoJSON | null {
+    const painted = collectPaintedCells(pixelData, index, sensor, rescale);
+    if (!painted) return null;
+    const grid = pixelData.grid;
+    const features: AgriHeatmapGeoJSON["features"] = painted.cells.map((cell) => {
+        const props: { color: string; value: number; class?: string } = {
+            color: cell.color,
+            value: cell.value,
+        };
+        if (cell.class) props.class = cell.class;
+        return {
+            type: "Feature",
+            properties: props,
+            geometry: cellPolygon(grid, cell.row, cell.col),
+        };
+    });
+    return { type: "FeatureCollection", features };
+}
+
+/**
+ * Build agri 色斑图: GeoJSON fill cells (primary) + optional canvas dataUrl (legacy/debug).
+ * Empty cells stay absent so the satellite basemap shows through outside painted spots.
+ */
+export function rasterizeAgriPixels(
+    pixelData: AgriPixelData,
+    index: AgriHeatIndex,
+    sensor: "S1" | "S2",
+    rescale?: [number, number],
+): AgriHeatmapImage | null {
+    const painted = collectPaintedCells(pixelData, index, sensor, rescale);
+    if (!painted) return null;
+    const grid = pixelData.grid;
+    const { width, height } = grid;
+    const features: AgriHeatmapGeoJSON["features"] = painted.cells.map((cell) => {
+        const props: { color: string; value: number; class?: string } = {
+            color: cell.color,
+            value: cell.value,
+        };
+        if (cell.class) props.class = cell.class;
+        return {
+            type: "Feature",
+            properties: props,
+            geometry: cellPolygon(grid, cell.row, cell.col),
+        };
+    });
+    const geojson: AgriHeatmapGeoJSON = { type: "FeatureCollection", features };
+    if (features.length === 0) return null;
+
+    let dataUrl: string | undefined;
+    try {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            const img = ctx.createImageData(width, height);
+            for (const cell of painted.cells) {
+                const i = (cell.row * width + cell.col) * 4;
+                img.data[i] = cell.rgba[0];
+                img.data[i + 1] = cell.rgba[1];
+                img.data[i + 2] = cell.rgba[2];
+                img.data[i + 3] = cell.rgba[3];
+            }
+            ctx.putImageData(img, 0, 0);
+            dataUrl = canvas.toDataURL("image/png");
+        }
+    } catch {
+        /* canvas optional in non-DOM contexts */
+    }
 
     const legend =
         index === "drought"
@@ -479,16 +601,18 @@ export function rasterizeAgriPixels(
               ? floodLegend()
               : continuousLegend(index as Exclude<AgriHeatIndex, "drought" | "flood">);
 
+    const paintedCount = painted.cells.length;
     return {
-        dataUrl: canvas.toDataURL("image/png"),
+        dataUrl,
         coordinates: gridCorners(grid),
+        geojson,
         width,
         height,
         index,
-        pixelCount: painted,
-        mean: painted > 0 ? sum / painted : null,
-        min: Number.isFinite(vmin) ? vmin : null,
-        max: Number.isFinite(vmax) ? vmax : null,
+        pixelCount: paintedCount,
+        mean: paintedCount > 0 ? painted.sum / paintedCount : null,
+        min: Number.isFinite(painted.vmin) ? painted.vmin : null,
+        max: Number.isFinite(painted.vmax) ? painted.vmax : null,
         legend,
     };
 }

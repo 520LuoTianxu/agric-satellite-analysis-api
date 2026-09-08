@@ -316,19 +316,21 @@ export default function FieldDetailPage() {
     }, [currentOrg, loadField]);
 
     // Add field polygon (and NDVI if active) to map.
-    // When agri 色斑图 is active: fill opacity ~0 so green fill cannot cover sparse pixels;
-    // heatmap raster sits above fill and below outline.
+    // When agri 色斑图 is active: field fill opacity 0; GeoJSON pixel cells sit above fill, below outline.
     const setupMapLayers = useCallback((map: maplibregl.Map) => {
         const f = fieldRef.current;
         if (!f?.geom) return;
 
         const hm = agriHeatmapRef.current;
         const srcId = "agri-heatmap";
-        const layerId = "agri-heatmap-raster";
+        const layerId = "agri-heatmap-fill";
+        // Legacy image/raster ids from earlier overlay — strip if present
+        const legacyLayerId = "agri-heatmap-raster";
 
         // Remove existing layers/source first to avoid stale state / wrong z-order
         try {
             if (map.getLayer(layerId)) map.removeLayer(layerId);
+            if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
             if (map.getSource(srcId)) map.removeSource(srcId);
         } catch { /* ignore */ }
         if (map.getLayer("field-outline")) map.removeLayer("field-outline");
@@ -366,19 +368,22 @@ export default function FieldDetailPage() {
             addIndexOverlay(map, layer, f, activeIndexTypeRef.current);
         }
 
-        // Re-apply heatmap from ref AFTER polygon layers so z-order is fill < raster < outline
-        if (hm) {
+        // Re-apply heatmap GeoJSON cells: fill < agri-heatmap-fill < outline
+        if (hm?.geojson) {
             map.addSource(srcId, {
-                type: "image",
-                url: hm.dataUrl,
-                coordinates: hm.coordinates,
+                type: "geojson",
+                data: hm.geojson,
             });
             map.addLayer(
                 {
                     id: layerId,
-                    type: "raster",
+                    type: "fill",
                     source: srcId,
-                    paint: { "raster-opacity": 0.92, "raster-resampling": "nearest" },
+                    paint: {
+                        "fill-color": ["get", "color"],
+                        "fill-opacity": 0.85,
+                        "fill-outline-color": "rgba(0,0,0,0)",
+                    },
                 },
                 "field-outline",
             );
@@ -470,14 +475,16 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri pixel_data 色斑图 (image source) — primary overlay when COG/tiler empty
+    // Agri pixel_data 色斑图 (GeoJSON fill polygons) — primary overlay when COG/tiler empty
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
         const srcId = "agri-heatmap";
-        const layerId = "agri-heatmap-raster";
+        const layerId = "agri-heatmap-fill";
+        const legacyLayerId = "agri-heatmap-raster";
         try {
             if (map.getLayer(layerId)) map.removeLayer(layerId);
+            if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
             if (map.getSource(srcId)) map.removeSource(srcId);
         } catch { /* ignore */ }
 
@@ -488,26 +495,31 @@ export default function FieldDetailPage() {
             }
         } catch { /* ignore */ }
 
-        if (!agriHeatmap) return;
+        if (!agriHeatmap?.geojson) return;
+
         map.addSource(srcId, {
-            type: "image",
-            url: agriHeatmap.dataUrl,
-            coordinates: agriHeatmap.coordinates,
+            type: "geojson",
+            data: agriHeatmap.geojson,
         });
         // Place above fill, below outline
         const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
         map.addLayer(
             {
                 id: layerId,
-                type: "raster",
+                type: "fill",
                 source: srcId,
-                paint: { "raster-opacity": 0.92, "raster-resampling": "nearest" },
+                paint: {
+                    "fill-color": ["get", "color"],
+                    "fill-opacity": 0.85,
+                    "fill-outline-color": "rgba(0,0,0,0)",
+                },
             },
             beforeId,
         );
         return () => {
             try {
                 if (map.getLayer(layerId)) map.removeLayer(layerId);
+                if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
                 if (map.getSource(srcId)) map.removeSource(srcId);
                 if (map.getLayer("field-fill")) {
                     map.setPaintProperty("field-fill", "fill-opacity", 0.2);
@@ -952,7 +964,7 @@ export default function FieldDetailPage() {
                                             onAgriHeatmapChange={setAgriHeatmap}
                                             agriHeatMode={agriHeatMode}
                                             onAgriHeatModeChange={setAgriHeatMode}
-                                            agriHeatmapEnabled={activeTab === "ndvi"}
+                                            agriHeatmapEnabled={true}
                                         />
                                     </TabsContent>
 

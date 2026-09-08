@@ -247,7 +247,8 @@ export default function AgriTimeseriesPanel({
         })();
         return () => {
             cancelled = true;
-            onHeatmapChange?.(null);
+            // Do NOT clear heatmap here — React Strict Mode remount races with loadHeatmap
+            // and can wipe a just-loaded overlay. Clear only when enabled flips false or unmount via land change handled by next effect.
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [landId]);
@@ -325,9 +326,11 @@ export default function AgriTimeseriesPanel({
     useEffect(() => {
         if (!enabled) {
             onHeatmapChange?.(null);
+            setHeatmapMeta(null);
             return;
         }
         if (!selectedDate) return;
+        // enabled true → always (re)load so tab remount / Strict Mode recovery works
         void loadHeatmap(selectedDate, series);
     }, [selectedDate, series, loadHeatmap, enabled, onHeatmapChange]);
 
