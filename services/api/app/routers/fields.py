@@ -1,4 +1,8 @@
-"""Fields router - CRUD, import, with geometry handling."""
+"""Fields router - CRUD, import, with geometry handling.
+
+Legacy in this fork: primary 地块 model is agri.land_parcels via /v1/agri/lands.
+Use /v1/agri/lands/{land_id}/scenes for S1/S2 growth-curve indices.
+"""
 
 from __future__ import annotations
 

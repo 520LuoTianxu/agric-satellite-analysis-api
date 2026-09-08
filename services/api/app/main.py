@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.rate_limit import limiter
 from app.routers import (
+    agri,
     alerts,
     detection,
     farms,
@@ -85,6 +86,7 @@ app.include_router(users.router, prefix=PREFIX, tags=["users"])
 app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(fields.router, prefix=PREFIX, tags=["fields"])
+app.include_router(agri.router, prefix=PREFIX)  # agri-first: 项目区/地块/S1·S2
 app.include_router(monitoring.router, prefix=PREFIX, tags=["monitoring"])
 app.include_router(jobs.router, prefix=PREFIX, tags=["jobs"])
 app.include_router(alerts.router, prefix=PREFIX, tags=["alerts"])

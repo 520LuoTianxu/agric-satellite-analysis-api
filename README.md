@@ -157,6 +157,21 @@ Useful API routes (auth + `X-Org-Id` required):
 
 Offline ingest tooling (no secrets): `scripts/s1s2_parcel_oss_pg/`.
 
+
+
+## Agri schema (primary)
+
+This fork treats the Aliyun **`agri`** PostgreSQL schema as the primary product model:
+
+| Concept | Table | API |
+| --- | --- | --- |
+| 项目区 (~5km tile) | `agri.virtual_project_areas` | `GET /v1/agri/project-areas` |
+| 地块 | `agri.land_parcels` (`boundary_geojson`) | `GET /v1/agri/lands/{land_id}` |
+| S1/S2 产品时序 | `agri.parcel_scene_products` | `GET /v1/agri/lands/{land_id}/scenes` |
+
+Seed / import: see [`scripts/agri_seed/README.md`](scripts/agri_seed/README.md) (`make agri-seed`).  
+OpenFarm `/v1/farms` and `/v1/fields` remain available but are **legacy** for this product direction. Scene list APIs return S2 optical index averages and S1 VV/VH without `pixel_data` unless `?include_pixels=1`.
+
 ## Architecture / 架构
 
 Same 3-layer OpenFarm architecture:

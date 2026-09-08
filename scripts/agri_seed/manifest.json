@@ -1,0 +1,94 @@
+{
+  "generated_at": "2026-09-08T17:44:59+0800",
+  "schema": "agri",
+  "format": "plain SQL PostgreSQL dump",
+  "source_database": "agri_mate",
+  "tables": {
+    "ingest_batch_stats": 84879,
+    "ingest_runs": 18,
+    "ingested_oss_objects": 646948,
+    "land_parcels": 14050,
+    "parcel_scene_products": 646948,
+    "virtual_project_area_lands": 14050,
+    "virtual_project_areas": 6158
+  },
+  "export_policy": {
+    "parcel_scene_products": "按 (land_id, date, sensor, scene_id) 稳定排序导出 1000 条",
+    "other_tables": "全量导出"
+  },
+  "files": [
+    "01_schema_pre_data.sql",
+    "02_data_non_remote_full.sql",
+    "03_data_remote_sample_1000.sql",
+    "04_schema_post_data.sql",
+    "agri_export.sql",
+    "README_IMPORT.txt",
+    "manifest.json"
+  ],
+  "split_export": {
+    "original_zip": "agri_pg_export_20260908_174309.zip",
+    "original_agri_export_sql_sha256": "44da8f8a2094758408b21ef52f2ec061d5a437c72a7ae439fdd30b0019f1cf63",
+    "part_count": 8,
+    "max_archive_bytes": 20000000,
+    "parts": [
+      {
+        "zip": "agri_pg_export_part_001.zip",
+        "sql_part": "agri_export.sql.part-001.sql",
+        "raw_bytes": 31457265,
+        "zip_bytes": 9022553,
+        "sha256": "ee806d05efa26cb350ee8c12f492eea33f98dd639504a0b74dbe95ef00db0fbc"
+      },
+      {
+        "zip": "agri_pg_export_part_002.zip",
+        "sql_part": "agri_export.sql.part-002.sql",
+        "raw_bytes": 31457123,
+        "zip_bytes": 3177253,
+        "sha256": "f70c871c149b6edf3a05d5be01d19fea1e0991faa4e22d91e05a6aa40dc67d58"
+      },
+      {
+        "zip": "agri_pg_export_part_003.zip",
+        "sql_part": "agri_export.sql.part-003.sql",
+        "raw_bytes": 31457146,
+        "zip_bytes": 3348476,
+        "sha256": "699ba7c8ea1391dcac35841ee1b5bfbcf8b626f372ae923a6f3b6e85308e4c1c"
+      },
+      {
+        "zip": "agri_pg_export_part_004.zip",
+        "sql_part": "agri_export.sql.part-004.sql",
+        "raw_bytes": 31457127,
+        "zip_bytes": 3338893,
+        "sha256": "8a912b08f6bc1d34ac66e1707d3a6c18b0ea9135aceb78c7ee480541c56bed17"
+      },
+      {
+        "zip": "agri_pg_export_part_005.zip",
+        "sql_part": "agri_export.sql.part-005.sql",
+        "raw_bytes": 31457107,
+        "zip_bytes": 3393604,
+        "sha256": "90951b62bf2525d77e4af6e4197c0178e572e71a1e2c2483c51779577ae2fae5"
+      },
+      {
+        "zip": "agri_pg_export_part_006.zip",
+        "sql_part": "agri_export.sql.part-006.sql",
+        "raw_bytes": 31426329,
+        "zip_bytes": 5411084,
+        "sha256": "b6c1612b0abe739811ba10ff673f48e2b68a8697d9c86f430ec879b5387c1a17"
+      },
+      {
+        "zip": "agri_pg_export_part_007.zip",
+        "sql_part": "agri_export.sql.part-007.sql",
+        "raw_bytes": 31354373,
+        "zip_bytes": 10539564,
+        "sha256": "0af2e9695eed491960add62ebdc0b786fcc54dd0391c6c0fe055d4639ae9e528"
+      },
+      {
+        "zip": "agri_pg_export_part_008.zip",
+        "sql_part": "agri_export.sql.part-008.sql",
+        "raw_bytes": 2388722,
+        "zip_bytes": 813572,
+        "sha256": "f408d90736c1344c001f5bad77bd81dd16ac9e489561c2a70eabe14b52023aee"
+      }
+    ],
+    "current_part": 1,
+    "part_file": "agri_export.sql.part-001.sql"
+  }
+}
