@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import {
     rasterizeAgriPixels,
+    rasterizeAgriLonLatPixels,
     sensorForIndex,
     AGRI_MODE_LABELS,
     AGRI_PRIMARY_MODES,
@@ -310,17 +311,29 @@ export default function AgriTimeseriesPanel({
                 });
                 // Ignore stale overlapping NDVI/EVI (or date) loads
                 if (gen !== heatmapLoadGenRef.current) return;
-                const scene = res.items.find((s) => s.pixel_data?.pixels?.length) ?? res.items[0];
-                if (!scene?.pixel_data?.pixels?.length) {
+                const scene =
+                    res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ??
+                    res.items.find((s) => (s.pixel_data?.pixels?.length ?? 0) > 0) ??
+                    res.items[0];
+                const lonlat = scene?.pixels_lonlat;
+                const grid = scene?.pixel_data;
+                if (!(lonlat?.length || grid?.pixels?.length)) {
                     onHeatmapChange(null);
                     setHeatmapMeta(null);
-                    toast.message("该日期无 pixel_data，无法渲染色斑图", {
+                    toast.message("该日期无像素数据，无法渲染色斑图", {
                         description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
                     });
-                    console.warn("[agri-heatmap] missing pixel_data", { landId, date, index });
+                    console.warn("[agri-heatmap] missing pixels_lonlat/pixel_data", {
+                        landId,
+                        date,
+                        index,
+                        source: scene?.pixels_source,
+                    });
                     return;
                 }
-                const img = rasterizeAgriPixels(scene.pixel_data, index, meta.sensor);
+                const img = lonlat?.length
+                    ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
+                    : rasterizeAgriPixels(grid!, index, meta.sensor);
                 if (gen !== heatmapLoadGenRef.current) return;
                 onHeatmapChange(img);
                 setHeatmapMeta(
@@ -387,7 +400,7 @@ export default function AgriTimeseriesPanel({
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
                             地块 land_id={landId}
                             {summary ? ` · 共 ${summary.total} 景` : ""}
-                            {" · 直接读 pixel_data，无需 COG/Celery"}
+                            {" · 优先 OSS lon/lat 色膜，无需 COG/Celery"}
                         </p>
                     </div>
                     {summary && (

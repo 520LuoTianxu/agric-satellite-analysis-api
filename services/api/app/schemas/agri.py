@@ -150,7 +150,27 @@ class SceneProductOut(BaseModel):
     ingested_at: datetime | None = None
     pixel_data: dict[str, Any] | None = Field(
         default=None,
-        description="Only present when include_pixels=1; otherwise omitted.",
+        description=(
+            "Legacy gridified pixels {grid, pixels:[[row,col,...]]}. "
+            "Only used as fallback when OSS lon/lat fetch fails; omitted when "
+            "pixels_lonlat is populated. Present only with include_pixels=1."
+        ),
+    )
+    pixels_lonlat: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Preferred OSS lon/lat pixels when include_pixels=1. "
+            "S2: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}; "
+            "S1: {lon,lat,VV_db,VH_db}."
+        ),
+    )
+    heatmap_url: str | None = Field(
+        default=None,
+        description="Optional pre-rendered heatmap PNG URL from OSS JSON (include_pixels=1).",
+    )
+    pixels_source: Literal["oss", "db_grid"] | None = Field(
+        default=None,
+        description="Which pixel payload is authoritative when include_pixels=1.",
     )
 
 

@@ -314,9 +314,25 @@ def get_storage() -> ObjectStorage:
     )
 
 
+
+
+@lru_cache(maxsize=1)
+def get_parcel_product_storage() -> ObjectStorage:
+    """Storage used to read S1/S2 parcel product JSON (`json_oss_key`).
+
+    Parcel products live on Aliyun OSS (`agric-dev`) even when the app's
+    primary ``STORAGE_BACKEND`` is MinIO for user uploads. Prefer OSS whenever
+    credentials are configured; otherwise fall back to ``get_storage()``.
+    """
+    if settings.oss_access_key_id and settings.oss_access_key_secret:
+        return OssStorage()
+    return get_storage()
+
+
 def clear_storage_cache() -> None:
     """Clear the cached storage instance (mainly for tests)."""
     get_storage.cache_clear()
+    get_parcel_product_storage.cache_clear()
 
 
 __all__ = [
@@ -324,6 +340,7 @@ __all__ = [
     "MinioStorage",
     "OssStorage",
     "get_storage",
+    "get_parcel_product_storage",
     "parcel_product_prefix",
     "clear_storage_cache",
 ]

@@ -896,7 +896,7 @@ export interface AgriSceneProduct {
     vh_avg: number | null;
     vh_min: number | null;
     vh_max: number | null;
-    /** Present only when include_pixels=1 */
+    /** Present only when include_pixels=1 — legacy grid fallback */
     pixel_data?: {
         grid: {
             epsg: number;
@@ -908,6 +908,23 @@ export interface AgriSceneProduct {
         };
         pixels: number[][];
     } | null;
+    /** Preferred OSS lon/lat pixels when include_pixels=1 */
+    pixels_lonlat?: Array<{
+        lon: number;
+        lat: number;
+        clear?: number;
+        NDVI?: number;
+        EVI?: number;
+        NDMI?: number;
+        NDRE?: number;
+        CIre?: number;
+        MNDWI?: number;
+        VV_db?: number;
+        VH_db?: number;
+        [key: string]: number | undefined;
+    }> | null;
+    heatmap_url?: string | null;
+    pixels_source?: "oss" | "db_grid" | null;
 }
 
 export interface AgriSensorSceneSummary {
@@ -949,7 +966,7 @@ export const agriApi = {
             to?: string;
             limit?: number;
             offset?: number;
-            /** If 1, include pixel_data jsonb for 色斑图 (large). */
+            /** If 1, prefer OSS lon/lat pixels (pixels_lonlat); grid pixel_data is fallback. */
             includePixels?: 0 | 1;
         } = {},
     ) => {

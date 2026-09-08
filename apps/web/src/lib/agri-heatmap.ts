@@ -1,11 +1,14 @@
 /**
- * Agri 色斑图 helpers — convert parcel_scene_products.pixel_data sparse pixels
- * into a continuous canvas color film (MapLibre image source), with best-effort
- * field.geom mask (skipped if it would wipe the canvas). GeoJSON fill cells
- * (turf intersect) are the reliable fallback when the image is empty/transparent.
+ * Agri 色斑图 helpers — prefer OSS lon/lat pixels (pixels_lonlat) rasterized at
+ * ~10 m in Web Mercator into a continuous canvas color film (MapLibre image
+ * source). Legacy DB grid pixel_data ([row,col,...]) is fallback only.
+ * Optional field.geom mask (skipped if it would wipe the canvas). GeoJSON fill
+ * cells (turf intersect) remain the reliable fallback when the image is empty.
  *
- * S2 pixel row: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
- * S1 pixel row: [row, col, vv, vh]
+ * OSS S2 pixel: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}
+ * OSS S1 pixel: {lon,lat,VV_db,VH_db}
+ * Legacy S2 row: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
+ * Legacy S1 row: [row, col, vv, vh]
  *
  * Modes:
  * - Continuous vegetation/SAR indices (NDVI/EVI/…)
@@ -40,6 +43,24 @@ export interface AgriPixelData {
     grid: AgriPixelGrid;
     pixels: number[][];
 }
+
+/** Preferred OSS lon/lat pixel (S2 optical or S1 SAR). */
+export interface AgriLonLatPixel {
+    lon: number;
+    lat: number;
+    clear?: number;
+    NDVI?: number;
+    EVI?: number;
+    NDMI?: number;
+    NDRE?: number;
+    CIre?: number;
+    MNDWI?: number;
+    VV_db?: number;
+    VH_db?: number;
+    /** Allow alternate key casings from producers */
+    [key: string]: number | undefined;
+}
+
 
 const S2_VALUE_INDEX: Record<"evi" | "cire" | "ndmi" | "ndre" | "ndvi" | "mndwi", number> = {
     evi: 2,
@@ -280,6 +301,37 @@ export function utmToLonLat(
         Math.cos(phi1Rad);
 
     return [(lon * 180) / Math.PI + longOrigin, (lat * 180) / Math.PI];
+}
+
+
+/** WGS84 lon/lat → Web Mercator meters (EPSG:3857). */
+export function lonLatToWebMercator(lon: number, lat: number): [number, number] {
+    const x = (lon * 20037508.342789244) / 180;
+    let y = Math.log(Math.tan(((90 + lat) * Math.PI) / 360)) / (Math.PI / 180);
+    y = (y * 20037508.342789244) / 180;
+    return [x, y];
+}
+
+/** Web Mercator meters → WGS84 lon/lat. */
+export function webMercatorToLonLat(x: number, y: number): [number, number] {
+    const lon = (x / 20037508.342789244) * 180;
+    let lat = (y / 20037508.342789244) * 180;
+    lat = (180 / Math.PI) * (2 * Math.atan(Math.exp((lat * Math.PI) / 180)) - Math.PI / 2);
+    return [lon, lat];
+}
+
+function numProp(p: AgriLonLatPixel, ...keys: string[]): number {
+    for (const k of keys) {
+        const v = p[k];
+        if (typeof v === "number" && Number.isFinite(v)) return v;
+        const lower = k.toLowerCase();
+        for (const [pk, pv] of Object.entries(p)) {
+            if (pk.toLowerCase() === lower && typeof pv === "number" && Number.isFinite(pv)) {
+                return pv;
+            }
+        }
+    }
+    return NaN;
 }
 
 /** Convert lon/lat → WGS84 UTM easting/northing for the given EPSG:326xx / 327xx zone. */
@@ -611,7 +663,7 @@ export function pixelsToGeoJSON(
     return { type: "FeatureCollection", features };
 }
 
-/** Project a lon/lat ring into canvas pixel space (col, row) for the UTM grid. */
+/** Project a lon/lat ring into canvas pixel space (col, row) for the grid CRS. */
 function projectRingToCanvas(ring: number[][], grid: AgriPixelGrid): [number, number][] {
     const out: [number, number][] = [];
     for (const pt of ring) {
@@ -619,9 +671,18 @@ function projectRingToCanvas(ring: number[][], grid: AgriPixelGrid): [number, nu
         const lon = Number(pt[0]);
         const lat = Number(pt[1]);
         if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
-        const [e, n] = lonLatToUtm(lon, lat, grid.epsg);
-        const col = (e - grid.origin_x) / grid.resolution;
-        const row = (grid.origin_y - n) / grid.resolution;
+        let x: number;
+        let y: number;
+        if (grid.epsg === 4326) {
+            x = lon;
+            y = lat;
+        } else if (grid.epsg === 3857) {
+            [x, y] = lonLatToWebMercator(lon, lat);
+        } else {
+            [x, y] = lonLatToUtm(lon, lat, grid.epsg);
+        }
+        const col = (x - grid.origin_x) / grid.resolution;
+        const row = (grid.origin_y - y) / grid.resolution;
         out.push([col, row]);
     }
     return out;
@@ -714,11 +775,13 @@ export function maskCanvasToFieldGeom(
  */
 /**
  * Best-effort field mask. Destination-in lonLat↔UTM masks have wiped the film
- * before (transparent dataUrl → blank map, GeoJSON never ran). Default: keep the
- * unmasked parcel film (pixel_data is already parcel-scoped). If
- * APPLY_CANVAS_FIELD_MASK is enabled, still restore unmasked when alpha is wiped.
+ * before (transparent dataUrl → blank map, GeoJSON never ran). For EPSG:3857 /
+ * 4326 lon/lat films, apply mask but restore unmasked when alpha is wiped.
  */
-const APPLY_CANVAS_FIELD_MASK = false;
+/** Enable destination-in mask for WebMercator/lonlat grids; UTM path historically wiped film. */
+function shouldApplyCanvasFieldMask(grid: AgriPixelGrid): boolean {
+    return grid.epsg === 3857 || grid.epsg === 4326;
+}
 
 function applyFieldMaskIfHealthy(
     ctx: CanvasRenderingContext2D,
@@ -729,7 +792,7 @@ function applyFieldMaskIfHealthy(
     expectedPainted: number,
 ): number {
     const painted = countNonZeroAlpha(ctx, width, height);
-    if (!APPLY_CANVAS_FIELD_MASK) {
+    if (!shouldApplyCanvasFieldMask(grid)) {
         return painted;
     }
     if (
@@ -764,7 +827,7 @@ function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
 
 /**
  * Rebuild continuous color-film dataUrl from geojson cells.
- * Field mask is best-effort (see APPLY_CANVAS_FIELD_MASK); empty alpha → no dataUrl
+ * Field mask is best-effort (WebMercator/lonlat grids); empty alpha → no dataUrl
  * so the map apply path can fall back to turf-clipped GeoJSON.
  */
 export function clipHeatmapImageToField(
@@ -964,6 +1027,274 @@ export function rasterizeAgriPixels(
     return {
         dataUrl,
         coordinates: gridCorners(grid),
+        geojson,
+        grid,
+        width,
+        height,
+        index,
+        pixelCount: paintedCount,
+        mean: paintedCount > 0 ? painted.sum / paintedCount : null,
+        min: Number.isFinite(painted.vmin) ? painted.vmin : null,
+        max: Number.isFinite(painted.vmax) ? painted.vmax : null,
+        legend,
+    };
+}
+
+
+interface LonLatPainted {
+    lon: number;
+    lat: number;
+    color: string;
+    rgba: [number, number, number, number];
+    value: number;
+    class?: string;
+    row: number;
+    col: number;
+}
+
+function collectLonLatPainted(
+    pixels: AgriLonLatPixel[],
+    index: AgriHeatIndex,
+    sensor: "S1" | "S2",
+    rescale?: [number, number],
+): { cells: Omit<LonLatPainted, "row" | "col">[]; sum: number; vmin: number; vmax: number } | null {
+    if (!pixels?.length) return null;
+    const expected = sensorForIndex(index);
+    if (sensor !== expected) return null;
+
+    const cells: Omit<LonLatPainted, "row" | "col">[] = [];
+    let sum = 0;
+    let vmin = Infinity;
+    let vmax = -Infinity;
+
+    for (const p of pixels) {
+        const lon = Number(p.lon);
+        const lat = Number(p.lat);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+
+        if (index === "drought") {
+            const ndvi = numProp(p, "NDVI");
+            const ndmi = numProp(p, "NDMI");
+            if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) continue;
+            const cls = classifyDrought(ndvi, ndmi);
+            const rgba = DROUGHT_CLASS_STYLE[cls].rgba;
+            if (rgba[3] === 0) continue;
+            const nddi = computeNddi(ndvi, ndmi);
+            const metric = nddi ?? ndmi;
+            if (!Number.isFinite(metric)) continue;
+            cells.push({
+                lon,
+                lat,
+                color: DROUGHT_CLASS_STYLE[cls].color,
+                rgba,
+                value: metric,
+                class: cls,
+            });
+            sum += metric;
+            vmin = Math.min(vmin, metric);
+            vmax = Math.max(vmax, metric);
+            continue;
+        }
+
+        if (index === "flood") {
+            const vv = numProp(p, "VV_db", "VV", "vv");
+            const vh = numProp(p, "VH_db", "VH", "vh");
+            if (!Number.isFinite(vv)) continue;
+            const cls = classifyFlood(vv, Number.isFinite(vh) ? vh : null);
+            const rgba = FLOOD_CLASS_STYLE[cls].rgba;
+            if (rgba[3] === 0) continue;
+            cells.push({
+                lon,
+                lat,
+                color: FLOOD_CLASS_STYLE[cls].color,
+                rgba,
+                value: vv,
+                class: cls,
+            });
+            sum += vv;
+            vmin = Math.min(vmin, vv);
+            vmax = Math.max(vmax, vv);
+            continue;
+        }
+
+        const cont = index as Exclude<AgriHeatIndex, "drought" | "flood">;
+        const keyMap: Record<typeof cont, string[]> = {
+            ndvi: ["NDVI"],
+            evi: ["EVI"],
+            ndmi: ["NDMI"],
+            ndre: ["NDRE"],
+            mndwi: ["MNDWI"],
+            cire: ["CIre", "CIRE", "cire"],
+            vv: ["VV_db", "VV", "vv"],
+            vh: ["VH_db", "VH", "vh"],
+        };
+        const v = numProp(p, ...(keyMap[cont] ?? [cont.toUpperCase()]));
+        if (!Number.isFinite(v)) continue;
+        const rs = rescale ?? HEAT_RESCALE[cont];
+        const rgba = colorizeValue(v, cont, rs);
+        cells.push({
+            lon,
+            lat,
+            color: rgbaToHex(rgba[0], rgba[1], rgba[2]),
+            rgba,
+            value: v,
+        });
+        sum += v;
+        vmin = Math.min(vmin, v);
+        vmax = Math.max(vmax, v);
+    }
+
+    if (!cells.length) return null;
+    return { cells, sum, vmin, vmax };
+}
+
+function lonLatCellPolygon(lon: number, lat: number, halfDegLon: number, halfDegLat: number): GeoJSON.Polygon {
+    const west = lon - halfDegLon;
+    const east = lon + halfDegLon;
+    const south = lat - halfDegLat;
+    const north = lat + halfDegLat;
+    const tl: [number, number] = [west, north];
+    const tr: [number, number] = [east, north];
+    const br: [number, number] = [east, south];
+    const bl: [number, number] = [west, south];
+    return { type: "Polygon", coordinates: [[tl, tr, br, bl, tl]] };
+}
+
+/**
+ * Rasterize OSS lon/lat point list into a ~10 m WebMercator color film + GeoJSON cells.
+ * Primary path for 色膜 — avoids lossy DB grid row/col collisions/holes.
+ */
+export function rasterizeAgriLonLatPixels(
+    pixels: AgriLonLatPixel[],
+    index: AgriHeatIndex,
+    sensor: "S1" | "S2",
+    rescale?: [number, number],
+    fieldGeom?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null,
+    resM = 10,
+): AgriHeatmapImage | null {
+    const painted = collectLonLatPainted(pixels, index, sensor, rescale);
+    if (!painted) return null;
+
+    const merc = painted.cells.map((c) => {
+        const [x, y] = lonLatToWebMercator(c.lon, c.lat);
+        return { ...c, x, y };
+    });
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const c of merc) {
+        minX = Math.min(minX, c.x);
+        maxX = Math.max(maxX, c.x);
+        minY = Math.min(minY, c.y);
+        maxY = Math.max(maxY, c.y);
+    }
+    // Pad half a cell so edge points are fully inside the canvas.
+    const pad = resM * 0.5;
+    minX -= pad;
+    maxX += pad;
+    minY -= pad;
+    maxY += pad;
+
+    const width = Math.max(1, Math.ceil((maxX - minX) / resM));
+    const height = Math.max(1, Math.ceil((maxY - minY) / resM));
+    // Cap pathological sizes (should be small for single parcels).
+    if (width * height > 2000 * 2000) return null;
+
+    const grid: AgriPixelGrid = {
+        epsg: 3857,
+        width,
+        height,
+        origin_x: minX,
+        origin_y: maxY,
+        resolution: resM,
+    };
+
+    const meanLat =
+        painted.cells.reduce((s, c) => s + c.lat, 0) / Math.max(1, painted.cells.length);
+    const metersPerDegLat = 111320;
+    const metersPerDegLon = Math.max(1e-6, 111320 * Math.cos((meanLat * Math.PI) / 180));
+    const halfDegLat = (resM / 2) / metersPerDegLat;
+    const halfDegLon = (resM / 2) / metersPerDegLon;
+
+    const cellsWithRc: LonLatPainted[] = merc.map((c) => {
+        const col = Math.min(width - 1, Math.max(0, Math.floor((c.x - minX) / resM)));
+        const row = Math.min(height - 1, Math.max(0, Math.floor((maxY - c.y) / resM)));
+        return { ...c, row, col };
+    });
+
+    const features: AgriHeatmapGeoJSON["features"] = cellsWithRc.map((cell) => {
+        const props: AgriHeatmapGeoJSON["features"][number]["properties"] = {
+            color: cell.color,
+            value: cell.value,
+            row: cell.row,
+            col: cell.col,
+            rgba: cell.rgba,
+        };
+        if (cell.class) props.class = cell.class;
+        return {
+            type: "Feature",
+            properties: props,
+            geometry: lonLatCellPolygon(cell.lon, cell.lat, halfDegLon, halfDegLat),
+        };
+    });
+    const geojson: AgriHeatmapGeoJSON = { type: "FeatureCollection", features };
+
+    const tl = webMercatorToLonLat(minX, maxY);
+    const tr = webMercatorToLonLat(minX + width * resM, maxY);
+    const br = webMercatorToLonLat(minX + width * resM, maxY - height * resM);
+    const bl = webMercatorToLonLat(minX, maxY - height * resM);
+    const coordinates: AgriHeatmapImage["coordinates"] = [tl, tr, br, bl];
+
+    let dataUrl: string | undefined;
+    try {
+        if (typeof document !== "undefined") {
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                // Soft filled cells (~1.2 px) to reduce visible gaps between 10 m samples.
+                for (const cell of cellsWithRc) {
+                    const [r, g, b, a] = cell.rgba;
+                    ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
+                    const cx = cell.col + 0.5;
+                    const cy = cell.row + 0.5;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 0.65, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Also paint the native cell for denser film coverage.
+                    ctx.fillRect(cell.col, cell.row, 1, 1);
+                }
+                const alphaCount = applyFieldMaskIfHealthy(
+                    ctx,
+                    grid,
+                    fieldGeom,
+                    width,
+                    height,
+                    cellsWithRc.length,
+                );
+                if (alphaCount > 0) {
+                    dataUrl = canvas.toDataURL("image/png");
+                }
+            }
+        }
+    } catch {
+        /* canvas optional */
+    }
+
+    const legend =
+        index === "drought"
+            ? droughtLegend()
+            : index === "flood"
+              ? floodLegend()
+              : continuousLegend(index as Exclude<AgriHeatIndex, "drought" | "flood">);
+
+    const paintedCount = cellsWithRc.length;
+    return {
+        dataUrl,
+        coordinates,
         geojson,
         grid,
         width,

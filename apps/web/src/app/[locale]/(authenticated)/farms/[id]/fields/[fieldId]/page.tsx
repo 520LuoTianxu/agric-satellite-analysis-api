@@ -509,7 +509,7 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri pixel_data 色斑图 — GeoJSON clipped to field (reliable); opaque image if no cells
+    // Agri 色斑图 — prefer OSS lon/lat image film; GeoJSON clipped to field as fallback
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
@@ -539,8 +539,31 @@ export default function FieldDetailPage() {
             | undefined;
         const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
 
+        // Prefer continuous image film (OSS lon/lat WebMercator raster). GeoJSON
+        // fill is the fallback when the canvas film is empty/transparent.
         let drew = false;
-        if (agriHeatmap.geojson) {
+        const clippedImg = clipHeatmapImageToField(agriHeatmap, fieldGeom);
+        if (heatmapImageHasContent(clippedImg)) {
+            map.addSource(imgSrcId, {
+                type: "image",
+                url: clippedImg.dataUrl!,
+                coordinates: clippedImg.coordinates,
+            });
+            map.addLayer(
+                {
+                    id: imgLayerId,
+                    type: "raster",
+                    source: imgSrcId,
+                    paint: {
+                        "raster-opacity": 0.92,
+                        "raster-resampling": "nearest",
+                    },
+                },
+                beforeId,
+            );
+            drew = true;
+        }
+        if (!drew && agriHeatmap.geojson) {
             const clipped = clipHeatmapToField(agriHeatmap.geojson, fieldGeom);
             if (clipped.features.length) {
                 map.addSource(fillSrcId, {
@@ -556,29 +579,6 @@ export default function FieldDetailPage() {
                             "fill-color": ["get", "color"],
                             "fill-opacity": 0.85,
                             "fill-outline-color": "rgba(0,0,0,0)",
-                        },
-                    },
-                    beforeId,
-                );
-                drew = true;
-            }
-        }
-        if (!drew) {
-            const clippedImg = clipHeatmapImageToField(agriHeatmap, fieldGeom);
-            if (heatmapImageHasContent(clippedImg)) {
-                map.addSource(imgSrcId, {
-                    type: "image",
-                    url: clippedImg.dataUrl!,
-                    coordinates: clippedImg.coordinates,
-                });
-                map.addLayer(
-                    {
-                        id: imgLayerId,
-                        type: "raster",
-                        source: imgSrcId,
-                        paint: {
-                            "raster-opacity": 0.92,
-                            "raster-resampling": "nearest",
                         },
                     },
                     beforeId,
