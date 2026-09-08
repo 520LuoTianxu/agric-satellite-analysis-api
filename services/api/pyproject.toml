@@ -37,6 +37,15 @@ dev = [
     "ruff>=0.3.0",
 ]
 
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Historical Ruff default (pycodestyle E4/E7/E9 + Pyflakes). Pinning this
+# keeps CI stable as newer Ruff releases expand the default rule set.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 
