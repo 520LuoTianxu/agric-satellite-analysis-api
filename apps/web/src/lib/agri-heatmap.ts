@@ -1,7 +1,8 @@
 /**
  * Agri 色斑图 helpers — convert parcel_scene_products.pixel_data sparse pixels
- * into a continuous canvas color film (MapLibre image source) clipped to field.geom,
- * with GeoJSON fill cells only as fallback.
+ * into a continuous canvas color film (MapLibre image source), with best-effort
+ * field.geom mask (skipped if it would wipe the canvas). GeoJSON fill cells
+ * (turf intersect) are the reliable fallback when the image is empty/transparent.
  *
  * S2 pixel row: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
  * S1 pixel row: [row, col, vv, vh]
@@ -626,23 +627,53 @@ function projectRingToCanvas(ring: number[][], grid: AgriPixelGrid): [number, nu
     return out;
 }
 
+/** Count pixels with non-zero alpha on a canvas (post-paint / post-mask health check). */
+export function countNonZeroAlpha(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+): number {
+    if (!width || !height) return 0;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let n = 0;
+    for (let i = 3; i < data.length; i += 4) {
+        if (data[i] !== 0) n++;
+    }
+    return n;
+}
+
+/**
+ * True when a heatmap image overlay is safe to show on the map.
+ * Empty / fully-transparent dataUrls are truthy strings — callers must not treat
+ * them as success or GeoJSON fallback will never run.
+ */
+export function heatmapImageHasContent(
+    hm: Pick<AgriHeatmapImage, "dataUrl" | "pixelCount"> | null | undefined,
+): boolean {
+    if (!hm?.dataUrl) return false;
+    if (typeof hm.pixelCount === "number" && hm.pixelCount <= 0) return false;
+    return true;
+}
+
 /**
  * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
+ * Returns false if no usable ring was projected (caller should skip / restore).
  * Empty / outside stays transparent so the basemap shows through.
  */
 export function maskCanvasToFieldGeom(
     ctx: CanvasRenderingContext2D,
     grid: AgriPixelGrid,
     fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon,
-): void {
+): boolean {
     const polys =
         fieldGeom.type === "Polygon"
             ? [fieldGeom.coordinates]
             : fieldGeom.type === "MultiPolygon"
               ? fieldGeom.coordinates
               : [];
-    if (!polys.length) return;
+    if (!polys.length) return false;
 
+    let rings = 0;
     ctx.save();
     ctx.globalCompositeOperation = "destination-in";
     ctx.beginPath();
@@ -655,6 +686,7 @@ export function maskCanvasToFieldGeom(
             ctx.lineTo(exterior[i][0], exterior[i][1]);
         }
         ctx.closePath();
+        rings++;
         for (let h = 1; h < poly.length; h++) {
             const hole = projectRingToCanvas(poly[h], grid);
             if (hole.length < 3) continue;
@@ -665,8 +697,62 @@ export function maskCanvasToFieldGeom(
             ctx.closePath();
         }
     }
+    if (rings === 0) {
+        ctx.restore();
+        return false;
+    }
     ctx.fill("evenodd");
     ctx.restore();
+    return true;
+}
+
+/**
+ * Apply destination-in field mask only when it keeps enough painted alpha.
+ * Broken lonLat↔UTM masks can wipe the canvas to a transparent PNG — that must
+ * not become the MapLibre image source (GeoJSON fallback would never run).
+ * On failure, restores the unmasked film so color still shows near the boundary.
+ */
+/**
+ * Best-effort field mask. Destination-in lonLat↔UTM masks have wiped the film
+ * before (transparent dataUrl → blank map, GeoJSON never ran). Default: keep the
+ * unmasked parcel film (pixel_data is already parcel-scoped). If
+ * APPLY_CANVAS_FIELD_MASK is enabled, still restore unmasked when alpha is wiped.
+ */
+const APPLY_CANVAS_FIELD_MASK = false;
+
+function applyFieldMaskIfHealthy(
+    ctx: CanvasRenderingContext2D,
+    grid: AgriPixelGrid,
+    fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon | null | undefined,
+    width: number,
+    height: number,
+    expectedPainted: number,
+): number {
+    const painted = countNonZeroAlpha(ctx, width, height);
+    if (!APPLY_CANVAS_FIELD_MASK) {
+        return painted;
+    }
+    if (
+        !fieldGeom ||
+        (fieldGeom.type !== "Polygon" && fieldGeom.type !== "MultiPolygon") ||
+        painted === 0
+    ) {
+        return painted;
+    }
+    const unmasked = ctx.getImageData(0, 0, width, height);
+    const maskedOk = maskCanvasToFieldGeom(ctx, grid, fieldGeom);
+    if (!maskedOk) {
+        ctx.putImageData(unmasked, 0, 0);
+        return painted;
+    }
+    const after = countNonZeroAlpha(ctx, width, height);
+    const minKeep = Math.max(1, Math.floor(Math.min(painted, Math.max(expectedPainted, 1)) * 0.02));
+    if (after === 0 || after < minKeep) {
+        // Mask wiped (or nearly wiped) the film — keep unmasked pixels.
+        ctx.putImageData(unmasked, 0, 0);
+        return painted;
+    }
+    return after;
 }
 
 function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
@@ -677,8 +763,9 @@ function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
 }
 
 /**
- * Rebuild continuous color-film dataUrl from geojson cells and clip strictly to field.geom.
- * Used on the map apply path so the image never draws outside the green outline.
+ * Rebuild continuous color-film dataUrl from geojson cells.
+ * Field mask is best-effort (see APPLY_CANVAS_FIELD_MASK); empty alpha → no dataUrl
+ * so the map apply path can fall back to turf-clipped GeoJSON.
  */
 export function clipHeatmapImageToField(
     hm: AgriHeatmapImage,
@@ -696,6 +783,7 @@ export function clipHeatmapImageToField(
         if (!ctx) return hm;
 
         const img = ctx.createImageData(hm.width, hm.height);
+        let paintedCells = 0;
         for (const feat of hm.geojson?.features ?? []) {
             const row = Number(feat.properties?.row);
             const col = Number(feat.properties?.col);
@@ -717,10 +805,20 @@ export function clipHeatmapImageToField(
             img.data[i + 1] = g;
             img.data[i + 2] = b;
             img.data[i + 3] = a;
+            paintedCells++;
         }
         ctx.putImageData(img, 0, 0);
-        if (fieldGeom && (fieldGeom.type === "Polygon" || fieldGeom.type === "MultiPolygon")) {
-            maskCanvasToFieldGeom(ctx, grid, fieldGeom);
+        const painted = applyFieldMaskIfHealthy(
+            ctx,
+            grid,
+            fieldGeom,
+            hm.width,
+            hm.height,
+            paintedCells || hm.pixelCount || 0,
+        );
+        // Transparent PNG is still a truthy dataUrl — omit it so GeoJSON fallback runs.
+        if (painted === 0) {
+            return { ...hm, dataUrl: undefined };
         }
         return { ...hm, dataUrl: canvas.toDataURL("image/png") };
     } catch {
@@ -730,8 +828,8 @@ export function clipHeatmapImageToField(
 
 /**
  * Clip heatmap cell polygons to the field boundary (Polygon / MultiPolygon).
- * Fallback path only — primary overlay uses canvas image mask.
- * Drops cells with empty intersection so 色斑 never overflows the green outline.
+ * Reliable boundary clip via turf intersect — used when image film is empty/unusable.
+ * Drops cells with empty intersection so 色斑 stays near the green outline.
  */
 export function clipHeatmapToField(
     geojson: AgriHeatmapGeoJSON,
@@ -839,10 +937,17 @@ export function rasterizeAgriPixels(
                 img.data[i + 3] = cell.rgba[3];
             }
             ctx.putImageData(img, 0, 0);
-            if (fieldGeom && (fieldGeom.type === "Polygon" || fieldGeom.type === "MultiPolygon")) {
-                maskCanvasToFieldGeom(ctx, grid, fieldGeom);
+            const alphaCount = applyFieldMaskIfHealthy(
+                ctx,
+                grid,
+                fieldGeom,
+                width,
+                height,
+                painted.cells.length,
+            );
+            if (alphaCount > 0) {
+                dataUrl = canvas.toDataURL("image/png");
             }
-            dataUrl = canvas.toDataURL("image/png");
         }
     } catch {
         /* canvas optional in non-DOM contexts — GeoJSON fallback still returned */
