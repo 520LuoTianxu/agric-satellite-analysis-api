@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenFarm - Production Docker Compose
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# This file overrides docker-compose.yml for production:
+#   - Adds Caddy reverse proxy with auto-SSL (only ports 80/443 exposed)
+#   - Sets restart policies and resource limits
+#   - Reduces Celery concurrency for smaller VPS
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Resource limits & restart policies ─────────────────────────────
+  db:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+  redis:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  minio:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  api:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  processor:
+    restart: unless-stopped
+    command: >
+      celery -A app.worker worker
+      --loglevel=info
+      --concurrency=2
+    healthcheck:
+      interval: 60s
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+  ml-processor:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 3G
+
+  tiler:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1G
+
+  web:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ── Caddy (Reverse Proxy + Auto-SSL) ──────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_healthy
+      tiler:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+volumes:
+  caddy_data:
+  caddy_config:
