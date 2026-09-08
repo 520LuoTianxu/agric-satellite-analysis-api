@@ -1,6 +1,7 @@
 /**
  * Agri 色斑图 helpers — convert parcel_scene_products.pixel_data sparse pixels
- * into WGS84 GeoJSON fill cells (primary MapLibre overlay) + optional canvas.
+ * into a continuous canvas color film (MapLibre image source) clipped to field.geom,
+ * with GeoJSON fill cells only as fallback.
  *
  * S2 pixel row: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
  * S1 pixel row: [row, col, vv, vh]
@@ -280,6 +281,57 @@ export function utmToLonLat(
     return [(lon * 180) / Math.PI + longOrigin, (lat * 180) / Math.PI];
 }
 
+/** Convert lon/lat → WGS84 UTM easting/northing for the given EPSG:326xx / 327xx zone. */
+export function lonLatToUtm(lon: number, lat: number, epsg: number): [number, number] {
+    const northern = epsg >= 32601 && epsg <= 32660;
+    const zone = northern ? epsg - 32600 : epsg - 32700;
+    const a = 6378137.0;
+    const eccSquared = 0.00669438;
+    const k0 = 0.9996;
+    const longOrigin = (zone - 1) * 6 - 180 + 3;
+    const latRad = (lat * Math.PI) / 180;
+    const lonRad = (lon * Math.PI) / 180;
+    const longOriginRad = (longOrigin * Math.PI) / 180;
+    const eccPrimeSquared = eccSquared / (1 - eccSquared);
+    const N = a / Math.sqrt(1 - eccSquared * Math.sin(latRad) * Math.sin(latRad));
+    const T = Math.tan(latRad) * Math.tan(latRad);
+    const C = eccPrimeSquared * Math.cos(latRad) * Math.cos(latRad);
+    const A = Math.cos(latRad) * (lonRad - longOriginRad);
+    const M =
+        a *
+        ((1 -
+            eccSquared / 4 -
+            (3 * eccSquared * eccSquared) / 64 -
+            (5 * eccSquared * eccSquared * eccSquared) / 256) *
+            latRad -
+            ((3 * eccSquared) / 8 +
+                (3 * eccSquared * eccSquared) / 32 +
+                (45 * eccSquared * eccSquared * eccSquared) / 1024) *
+                Math.sin(2 * latRad) +
+            ((15 * eccSquared * eccSquared) / 256 +
+                (45 * eccSquared * eccSquared * eccSquared) / 1024) *
+                Math.sin(4 * latRad) -
+            ((35 * eccSquared * eccSquared * eccSquared) / 3072) * Math.sin(6 * latRad));
+    let easting =
+        k0 *
+            N *
+            (A +
+                ((1 - T + C) * A * A * A) / 6 +
+                ((5 - 18 * T + T * T + 72 * C - 58 * eccPrimeSquared) * A * A * A * A * A) / 120) +
+        500000.0;
+    let northing =
+        k0 *
+        (M +
+            N *
+                Math.tan(latRad) *
+                ((A * A) / 2 +
+                    ((5 - T + 9 * C + 4 * C * C) * A * A * A * A) / 24 +
+                    ((61 - 58 * T + T * T + 600 * C - 330 * eccPrimeSquared) * A * A * A * A * A * A) /
+                        720));
+    if (!northern) northing += 10000000.0;
+    return [easting, northing];
+}
+
 export type AgriHeatmapLegend =
     | {
           kind: "continuous";
@@ -297,16 +349,25 @@ export type AgriHeatmapLegend =
 
 export type AgriHeatmapGeoJSON = GeoJSON.FeatureCollection<
     GeoJSON.Polygon,
-    { color: string; value: number; class?: string }
+    {
+        color: string;
+        value: number;
+        class?: string;
+        row?: number;
+        col?: number;
+        rgba?: [number, number, number, number];
+    }
 >;
 
 export interface AgriHeatmapImage {
-    /** Optional canvas data URL (legend / debug); map uses geojson. */
+    /** Continuous color-film PNG (primary MapLibre image source). */
     dataUrl?: string;
-    /** MapLibre image coordinates: TL, TR, BR, BL as [lng, lat] (legacy image overlay). */
+    /** MapLibre image coordinates: TL, TR, BR, BL as [lng, lat]. */
     coordinates: [[number, number], [number, number], [number, number], [number, number]];
-    /** Sparse 10 m UTM cells as WGS84 polygons — primary map overlay. */
+    /** Sparse 10 m UTM cells as WGS84 polygons — fallback if image overlay unavailable. */
     geojson: AgriHeatmapGeoJSON;
+    /** Source UTM grid (for field-boundary canvas mask / remask). */
+    grid: AgriPixelGrid;
     width: number;
     height: number;
     index: AgriHeatIndex;
@@ -532,9 +593,12 @@ export function pixelsToGeoJSON(
     if (!painted) return null;
     const grid = pixelData.grid;
     const features: AgriHeatmapGeoJSON["features"] = painted.cells.map((cell) => {
-        const props: { color: string; value: number; class?: string } = {
+        const props: AgriHeatmapGeoJSON["features"][number]["properties"] = {
             color: cell.color,
             value: cell.value,
+            row: cell.row,
+            col: cell.col,
+            rgba: cell.rgba,
         };
         if (cell.class) props.class = cell.class;
         return {
@@ -546,8 +610,127 @@ export function pixelsToGeoJSON(
     return { type: "FeatureCollection", features };
 }
 
+/** Project a lon/lat ring into canvas pixel space (col, row) for the UTM grid. */
+function projectRingToCanvas(ring: number[][], grid: AgriPixelGrid): [number, number][] {
+    const out: [number, number][] = [];
+    for (const pt of ring) {
+        if (!pt || pt.length < 2) continue;
+        const lon = Number(pt[0]);
+        const lat = Number(pt[1]);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+        const [e, n] = lonLatToUtm(lon, lat, grid.epsg);
+        const col = (e - grid.origin_x) / grid.resolution;
+        const row = (grid.origin_y - n) / grid.resolution;
+        out.push([col, row]);
+    }
+    return out;
+}
+
+/**
+ * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
+ * Empty / outside stays transparent so the basemap shows through.
+ */
+export function maskCanvasToFieldGeom(
+    ctx: CanvasRenderingContext2D,
+    grid: AgriPixelGrid,
+    fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon,
+): void {
+    const polys =
+        fieldGeom.type === "Polygon"
+            ? [fieldGeom.coordinates]
+            : fieldGeom.type === "MultiPolygon"
+              ? fieldGeom.coordinates
+              : [];
+    if (!polys.length) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-in";
+    ctx.beginPath();
+    for (const poly of polys) {
+        if (!poly?.length) continue;
+        const exterior = projectRingToCanvas(poly[0], grid);
+        if (exterior.length < 3) continue;
+        ctx.moveTo(exterior[0][0], exterior[0][1]);
+        for (let i = 1; i < exterior.length; i++) {
+            ctx.lineTo(exterior[i][0], exterior[i][1]);
+        }
+        ctx.closePath();
+        for (let h = 1; h < poly.length; h++) {
+            const hole = projectRingToCanvas(poly[h], grid);
+            if (hole.length < 3) continue;
+            ctx.moveTo(hole[0][0], hole[0][1]);
+            for (let i = 1; i < hole.length; i++) {
+                ctx.lineTo(hole[i][0], hole[i][1]);
+            }
+            ctx.closePath();
+        }
+    }
+    ctx.fill("evenodd");
+    ctx.restore();
+}
+
+function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return [0, 0, 0, alpha];
+    const n = parseInt(m[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, alpha];
+}
+
+/**
+ * Rebuild continuous color-film dataUrl from geojson cells and clip strictly to field.geom.
+ * Used on the map apply path so the image never draws outside the green outline.
+ */
+export function clipHeatmapImageToField(
+    hm: AgriHeatmapImage,
+    fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon | null | undefined,
+): AgriHeatmapImage {
+    if (typeof document === "undefined") return hm;
+    const grid = hm.grid;
+    if (!grid?.width || !grid?.height) return hm;
+
+    try {
+        const canvas = document.createElement("canvas");
+        canvas.width = hm.width;
+        canvas.height = hm.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return hm;
+
+        const img = ctx.createImageData(hm.width, hm.height);
+        for (const feat of hm.geojson?.features ?? []) {
+            const row = Number(feat.properties?.row);
+            const col = Number(feat.properties?.col);
+            if (!Number.isFinite(row) || !Number.isFinite(col)) continue;
+            if (row < 0 || row >= hm.height || col < 0 || col >= hm.width) continue;
+            const rgbaProp = feat.properties?.rgba;
+            const [r, g, b, a] =
+                Array.isArray(rgbaProp) && rgbaProp.length >= 4
+                    ? [
+                          Number(rgbaProp[0]),
+                          Number(rgbaProp[1]),
+                          Number(rgbaProp[2]),
+                          Number(rgbaProp[3]),
+                      ]
+                    : hexToRgba(feat.properties?.color ?? "#000000", 230);
+            if (![r, g, b, a].every(Number.isFinite) || a === 0) continue;
+            const i = (row * hm.width + col) * 4;
+            img.data[i] = r;
+            img.data[i + 1] = g;
+            img.data[i + 2] = b;
+            img.data[i + 3] = a;
+        }
+        ctx.putImageData(img, 0, 0);
+        if (fieldGeom && (fieldGeom.type === "Polygon" || fieldGeom.type === "MultiPolygon")) {
+            maskCanvasToFieldGeom(ctx, grid, fieldGeom);
+        }
+        return { ...hm, dataUrl: canvas.toDataURL("image/png") };
+    } catch {
+        return hm;
+    }
+}
+
 /**
  * Clip heatmap cell polygons to the field boundary (Polygon / MultiPolygon).
+ * Fallback path only — primary overlay uses canvas image mask.
  * Drops cells with empty intersection so 色斑 never overflows the green outline.
  */
 export function clipHeatmapToField(
@@ -579,11 +762,14 @@ export function clipHeatmapToField(
             );
             if (!clipped?.geometry) continue;
             const geom = clipped.geometry;
-            const props: { color: string; value: number; class?: string } = {
+            const props: AgriHeatmapGeoJSON["features"][number]["properties"] = {
                 color: feat.properties?.color ?? "#000000",
                 value: feat.properties?.value ?? 0,
             };
             if (feat.properties?.class) props.class = feat.properties.class;
+            if (feat.properties?.row != null) props.row = feat.properties.row;
+            if (feat.properties?.col != null) props.col = feat.properties.col;
+            if (feat.properties?.rgba) props.rgba = feat.properties.rgba;
             if (geom.type === "Polygon") {
                 features.push({ type: "Feature", properties: props, geometry: geom });
             } else if (geom.type === "MultiPolygon") {
@@ -604,23 +790,28 @@ export function clipHeatmapToField(
 
 
 /**
- * Build agri heatmap: GeoJSON fill cells (primary) + optional canvas dataUrl (legacy/debug).
- * Empty cells stay absent so the satellite basemap shows through outside painted spots.
+ * Build agri heatmap: continuous canvas color film (primary) + GeoJSON cells (fallback).
+ * Empty grid cells stay transparent — basemap shows through; only real pixel_data values.
+ * Optional fieldGeom masks the canvas so nothing draws outside the parcel boundary.
  */
 export function rasterizeAgriPixels(
     pixelData: AgriPixelData,
     index: AgriHeatIndex,
     sensor: "S1" | "S2",
     rescale?: [number, number],
+    fieldGeom?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null,
 ): AgriHeatmapImage | null {
     const painted = collectPaintedCells(pixelData, index, sensor, rescale);
     if (!painted) return null;
     const grid = pixelData.grid;
     const { width, height } = grid;
     const features: AgriHeatmapGeoJSON["features"] = painted.cells.map((cell) => {
-        const props: { color: string; value: number; class?: string } = {
+        const props: AgriHeatmapGeoJSON["features"][number]["properties"] = {
             color: cell.color,
             value: cell.value,
+            row: cell.row,
+            col: cell.col,
+            rgba: cell.rgba,
         };
         if (cell.class) props.class = cell.class;
         return {
@@ -648,10 +839,13 @@ export function rasterizeAgriPixels(
                 img.data[i + 3] = cell.rgba[3];
             }
             ctx.putImageData(img, 0, 0);
+            if (fieldGeom && (fieldGeom.type === "Polygon" || fieldGeom.type === "MultiPolygon")) {
+                maskCanvasToFieldGeom(ctx, grid, fieldGeom);
+            }
             dataUrl = canvas.toDataURL("image/png");
         }
     } catch {
-        /* canvas optional in non-DOM contexts */
+        /* canvas optional in non-DOM contexts — GeoJSON fallback still returned */
     }
 
     const legend =
@@ -666,6 +860,7 @@ export function rasterizeAgriPixels(
         dataUrl,
         coordinates: gridCorners(grid),
         geojson,
+        grid,
         width,
         height,
         index,

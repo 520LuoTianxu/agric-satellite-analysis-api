@@ -9,7 +9,7 @@ import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
-import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapToField } from "@/lib/agri-heatmap";
+import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapImageToField, clipHeatmapToField } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -318,22 +318,23 @@ export default function FieldDetailPage() {
     }, [currentOrg, loadField]);
 
     // Add field polygon (and NDVI if active) to map.
-    // When agri 色斑图 is active: field fill opacity 0; GeoJSON pixel cells sit above fill, below outline.
+    // When agri 色斑图 is active: field fill opacity 0; continuous image film sits above fill, below outline.
     const setupMapLayers = useCallback((map: maplibregl.Map) => {
         const f = fieldRef.current;
         if (!f?.geom) return;
 
         const hm = agriHeatmapRef.current;
-        const srcId = "agri-heatmap";
-        const layerId = "agri-heatmap-fill";
-        // Legacy image/raster ids from earlier overlay — strip if present
-        const legacyLayerId = "agri-heatmap-raster";
+        const imgSrcId = "agri-heatmap";
+        const imgLayerId = "agri-heatmap-raster";
+        const fillSrcId = "agri-heatmap-geojson";
+        const fillLayerId = "agri-heatmap-fill";
 
         // Remove existing layers/source first to avoid stale state / wrong z-order
         try {
-            if (map.getLayer(layerId)) map.removeLayer(layerId);
-            if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
-            if (map.getSource(srcId)) map.removeSource(srcId);
+            if (map.getLayer(imgLayerId)) map.removeLayer(imgLayerId);
+            if (map.getLayer(fillLayerId)) map.removeLayer(fillLayerId);
+            if (map.getSource(imgSrcId)) map.removeSource(imgSrcId);
+            if (map.getSource(fillSrcId)) map.removeSource(fillSrcId);
         } catch { /* ignore */ }
         if (map.getLayer("field-outline")) map.removeLayer("field-outline");
         if (map.getLayer("field-fill")) map.removeLayer("field-fill");
@@ -370,27 +371,51 @@ export default function FieldDetailPage() {
             addIndexOverlay(map, layer, f, activeIndexTypeRef.current);
         }
 
-        // Re-apply heatmap GeoJSON cells: fill < agri-heatmap-fill < outline
-        // Clip cells to field.geom so AABB/pad squares never spill past the green outline.
-        if (hm?.geojson) {
-            const clipped = clipHeatmapToField(hm.geojson, f.geom as GeoJSON.Polygon | GeoJSON.MultiPolygon);
-            map.addSource(srcId, {
-                type: "geojson",
-                data: clipped,
-            });
-            map.addLayer(
-                {
-                    id: layerId,
-                    type: "fill",
-                    source: srcId,
-                    paint: {
-                        "fill-color": ["get", "color"],
-                        "fill-opacity": 0.85,
-                        "fill-outline-color": "rgba(0,0,0,0)",
+        // Continuous color film (image) preferred; GeoJSON cells only as fallback.
+        // Canvas is masked to field.geom so nothing draws outside the green outline.
+        if (hm) {
+            const fieldGeom = f.geom as GeoJSON.Polygon | GeoJSON.MultiPolygon;
+            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+            if (clippedImg.dataUrl) {
+                map.addSource(imgSrcId, {
+                    type: "image",
+                    url: clippedImg.dataUrl,
+                    coordinates: clippedImg.coordinates,
+                });
+                map.addLayer(
+                    {
+                        id: imgLayerId,
+                        type: "raster",
+                        source: imgSrcId,
+                        paint: {
+                            "raster-opacity": 0.92,
+                            "raster-resampling": "nearest",
+                        },
                     },
-                },
-                "field-outline",
-            );
+                    "field-outline",
+                );
+            } else if (hm.geojson) {
+                const clipped = clipHeatmapToField(hm.geojson, fieldGeom);
+                if (clipped.features.length) {
+                    map.addSource(fillSrcId, {
+                        type: "geojson",
+                        data: clipped,
+                    });
+                    map.addLayer(
+                        {
+                            id: fillLayerId,
+                            type: "fill",
+                            source: fillSrcId,
+                            paint: {
+                                "fill-color": ["get", "color"],
+                                "fill-opacity": 0.85,
+                                "fill-outline-color": "rgba(0,0,0,0)",
+                            },
+                        },
+                        "field-outline",
+                    );
+                }
+            }
         }
     }, []);
 
@@ -479,17 +504,19 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri pixel_data 色斑图 (GeoJSON fill polygons) — primary overlay when COG/tiler empty
+    // Agri pixel_data 色斑图 — continuous MapLibre image film clipped to field.geom
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
-        const srcId = "agri-heatmap";
-        const layerId = "agri-heatmap-fill";
-        const legacyLayerId = "agri-heatmap-raster";
+        const imgSrcId = "agri-heatmap";
+        const imgLayerId = "agri-heatmap-raster";
+        const fillSrcId = "agri-heatmap-geojson";
+        const fillLayerId = "agri-heatmap-fill";
         try {
-            if (map.getLayer(layerId)) map.removeLayer(layerId);
-            if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
-            if (map.getSource(srcId)) map.removeSource(srcId);
+            if (map.getLayer(imgLayerId)) map.removeLayer(imgLayerId);
+            if (map.getLayer(fillLayerId)) map.removeLayer(fillLayerId);
+            if (map.getSource(imgSrcId)) map.removeSource(imgSrcId);
+            if (map.getSource(fillSrcId)) map.removeSource(fillSrcId);
         } catch { /* ignore */ }
 
         // Hide solid green fill whenever 色斑 is active so sparse pixels stay visible
@@ -499,45 +526,67 @@ export default function FieldDetailPage() {
             }
         } catch { /* ignore */ }
 
-        if (!agriHeatmap?.geojson) return;
+        if (!agriHeatmap) return;
 
         const fieldGeom = fieldRef.current?.geom as
             | GeoJSON.Polygon
             | GeoJSON.MultiPolygon
             | undefined;
-        const clipped = clipHeatmapToField(agriHeatmap.geojson, fieldGeom);
-        if (!clipped.features.length) return;
-
-        map.addSource(srcId, {
-            type: "geojson",
-            data: clipped,
-        });
-        // Place above fill, below outline
         const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
-        map.addLayer(
-            {
-                id: layerId,
-                type: "fill",
-                source: srcId,
-                paint: {
-                    "fill-color": ["get", "color"],
-                    "fill-opacity": 0.85,
-                    "fill-outline-color": "rgba(0,0,0,0)",
+        const clippedImg = clipHeatmapImageToField(agriHeatmap, fieldGeom);
+
+        if (clippedImg.dataUrl) {
+            map.addSource(imgSrcId, {
+                type: "image",
+                url: clippedImg.dataUrl,
+                coordinates: clippedImg.coordinates,
+            });
+            map.addLayer(
+                {
+                    id: imgLayerId,
+                    type: "raster",
+                    source: imgSrcId,
+                    paint: {
+                        "raster-opacity": 0.92,
+                        "raster-resampling": "nearest",
+                    },
                 },
-            },
-            beforeId,
-        );
+                beforeId,
+            );
+        } else if (agriHeatmap.geojson) {
+            const clipped = clipHeatmapToField(agriHeatmap.geojson, fieldGeom);
+            if (!clipped.features.length) return;
+            map.addSource(fillSrcId, {
+                type: "geojson",
+                data: clipped,
+            });
+            map.addLayer(
+                {
+                    id: fillLayerId,
+                    type: "fill",
+                    source: fillSrcId,
+                    paint: {
+                        "fill-color": ["get", "color"],
+                        "fill-opacity": 0.85,
+                        "fill-outline-color": "rgba(0,0,0,0)",
+                    },
+                },
+                beforeId,
+            );
+        }
+
         return () => {
             try {
-                if (map.getLayer(layerId)) map.removeLayer(layerId);
-                if (map.getLayer(legacyLayerId)) map.removeLayer(legacyLayerId);
-                if (map.getSource(srcId)) map.removeSource(srcId);
+                if (map.getLayer(imgLayerId)) map.removeLayer(imgLayerId);
+                if (map.getLayer(fillLayerId)) map.removeLayer(fillLayerId);
+                if (map.getSource(imgSrcId)) map.removeSource(imgSrcId);
+                if (map.getSource(fillSrcId)) map.removeSource(fillSrcId);
                 if (map.getLayer("field-fill")) {
                     map.setPaintProperty("field-fill", "fill-opacity", 0.2);
                 }
             } catch { /* ignore */ }
         };
-    }, [agriHeatmap, mapInstance]);
+    }, [agriHeatmap, mapInstance, field]);
 
     const handleShowLayer = useCallback((layer: RasterLayer | null, indexType: IndexType) => {
         setIndexLayer(layer);

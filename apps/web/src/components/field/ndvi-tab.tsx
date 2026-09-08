@@ -154,7 +154,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             ]);
             if (gen !== loadGenRef.current) return; // stale - discard
             // Placeholder agri:// COGs from sync_agri_scenes_to_field_stats poison TiTiler —
-            // never expose tile_url for those; agri 色斑 uses pixel_data GeoJSON only.
+            // never expose tile_url for those; agri 色斑 uses pixel_data continuous image film.
             const sanitized = layersRes.items.map((layer) => {
                 const cog = layer.cog_uri || "";
                 if (cog.startsWith("agri://")) {
@@ -206,7 +206,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     }, [showWeatherOverlay, fieldId, stats]);
 
     // ── Show layer on map when selectedDate or visibility changes ──
-    // Agri fields: skip COG/TiTiler overlay entirely — only pixel_data GeoJSON 色斑.
+    // Agri fields: skip COG/TiTiler overlay entirely — only pixel_data continuous 色斑 film.
     useEffect(() => {
         if (!onShowLayer) return;
         if (isAgriField) {

@@ -1,0 +1,37 @@
+services:
+  processor:
+    command: >
+      celery -A app.worker worker
+      -Q default,celery
+      --loglevel=info
+      --concurrency=1
+  ml-processor:
+    profiles: ["ml"]
+  db:
+    ports:
+      - "5432:5432"
+  redis:
+    ports:
+      - "6379:6379"
+  api:
+    ports:
+      - "8000:8000"
+    environment:
+      MINIO_PUBLIC_ENDPOINT: localhost:9000
+  web:
+    ports:
+      - "3000:3000"
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
+        NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+        NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+        NEXT_PUBLIC_ENABLE_DEMO_LOGIN: "true"
+        INTERNAL_API_URL: http://api:8000
+    environment:
+      ENABLE_DEMO_LOGIN: "true"
+      NEXT_PUBLIC_ENABLE_DEMO_LOGIN: "true"
