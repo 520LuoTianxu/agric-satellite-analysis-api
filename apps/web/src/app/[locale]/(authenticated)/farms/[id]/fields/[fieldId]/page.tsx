@@ -8,6 +8,7 @@ import maplibregl from "maplibre-gl";
 import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
+import type { AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -222,10 +223,12 @@ export default function FieldDetailPage() {
 
     // Index overlay
     const [indexLayer, setIndexLayer] = useState<RasterLayer | null>(null);
+    const [agriHeatmap, setAgriHeatmap] = useState<AgriHeatmapImage | null>(null);
     const [activeIndexType, setActiveIndexType] = useState<IndexType>("NDVI");
     const indexLayerRef = useRef<RasterLayer | null>(null);
     const activeIndexTypeRef = useRef<IndexType>("NDVI");
     const fieldRef = useRef<Field | null>(null);
+    const agriHeatmapRef = useRef<AgriHeatmapImage | null>(null);
 
     // Available index types (only indices with computed layers)
     const [availableTypes, setAvailableTypes] = useState<IndexType[]>([]);
@@ -281,6 +284,9 @@ export default function FieldDetailPage() {
     useEffect(() => {
         fieldRef.current = field;
     }, [field]);
+    useEffect(() => {
+        agriHeatmapRef.current = agriHeatmap;
+    }, [agriHeatmap]);
 
     const loadField = useCallback(async () => {
         try {
@@ -326,13 +332,42 @@ export default function FieldDetailPage() {
             id: "field-outline",
             type: "line",
             source: "field-polygon",
-            paint: { "line-color": tokenColor("--map-field-stroke"), "line-width": 2 },
+            paint: {
+                "line-color": tokenColor("--map-field-stroke"),
+                "line-width": 3.5,
+                "line-opacity": 1,
+            },
         });
 
         // Re-add index overlay if active
         const layer = indexLayerRef.current;
         if (layer?.tile_url) {
             addIndexOverlay(map, layer, f, activeIndexTypeRef.current);
+        }
+
+        // Re-add agri 色斑图 after style reload
+        const hm = agriHeatmapRef.current;
+        if (hm) {
+            const srcId = "agri-heatmap";
+            const layerId = "agri-heatmap-raster";
+            try {
+                if (map.getLayer(layerId)) map.removeLayer(layerId);
+                if (map.getSource(srcId)) map.removeSource(srcId);
+            } catch { /* ignore */ }
+            map.addSource(srcId, {
+                type: "image",
+                url: hm.dataUrl,
+                coordinates: hm.coordinates,
+            });
+            map.addLayer(
+                {
+                    id: layerId,
+                    type: "raster",
+                    source: srcId,
+                    paint: { "raster-opacity": 0.78, "raster-resampling": "nearest" },
+                },
+                "field-outline",
+            );
         }
     }, []);
 
@@ -356,6 +391,24 @@ export default function FieldDetailPage() {
         },
         [field, setupMapLayers],
     );
+
+    // When field arrives after the map is already ready, draw/fit the boundary
+    // (handleMapReady often runs with field still null — race with loadField).
+    useEffect(() => {
+        if (!mapInstance || !field?.geom) return;
+        if (!mapInstance.isStyleLoaded()) return;
+        setupMapLayers(mapInstance);
+        try {
+            const bounds = new maplibregl.LngLatBounds();
+            const coords = getAllCoords(field.geom);
+            coords.forEach(([lng, lat]) => bounds.extend([lng, lat]));
+            if (!bounds.isEmpty()) {
+                mapInstance.fitBounds(bounds, { padding: 60, maxZoom: 17 });
+            }
+        } catch {
+            /* ignore fit errors on incomplete geom */
+        }
+    }, [field, mapInstance, setupMapLayers]);
 
     // Location search
     const handleLocationSelect = useCallback(
@@ -402,6 +455,39 @@ export default function FieldDetailPage() {
             addIndexOverlay(map, indexLayer, field, activeIndexType);
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
+
+    // Agri pixel_data 色斑图 (image source) — primary overlay when COG/tiler empty
+    useEffect(() => {
+        const map = mapInstance;
+        if (!map || !map.isStyleLoaded()) return;
+        const srcId = "agri-heatmap";
+        const layerId = "agri-heatmap-raster";
+        try {
+            if (map.getLayer(layerId)) map.removeLayer(layerId);
+            if (map.getSource(srcId)) map.removeSource(srcId);
+        } catch { /* ignore */ }
+        if (!agriHeatmap) return;
+        map.addSource(srcId, {
+            type: "image",
+            url: agriHeatmap.dataUrl,
+            coordinates: agriHeatmap.coordinates,
+        });
+        map.addLayer(
+            {
+                id: layerId,
+                type: "raster",
+                source: srcId,
+                paint: { "raster-opacity": 0.78, "raster-resampling": "nearest" },
+            },
+            map.getLayer("field-outline") ? "field-outline" : undefined,
+        );
+        return () => {
+            try {
+                if (map.getLayer(layerId)) map.removeLayer(layerId);
+                if (map.getSource(srcId)) map.removeSource(srcId);
+            } catch { /* ignore */ }
+        };
+    }, [agriHeatmap, mapInstance]);
 
     const handleShowLayer = useCallback((layer: RasterLayer | null, indexType: IndexType) => {
         setIndexLayer(layer);
@@ -785,10 +871,12 @@ export default function FieldDetailPage() {
                                     <TabsContent value="ndvi" className="mt-0 p-4">
                                         <NdviTab
                                             fieldId={fieldId}
+                                            fieldTags={field?.tags ?? null}
                                             onShowLayer={handleShowLayer}
                                             activeIndexOverride={activeIndexType}
                                             onActiveIndexChange={setActiveIndexType}
                                             onDataLoaded={refreshAvailableTypes}
+                                            onAgriHeatmapChange={setAgriHeatmap}
                                         />
                                     </TabsContent>
 

@@ -7,6 +7,7 @@ import {
     jobsApi,
     fieldsApi,
     weatherApi,
+    parseAgriLandId,
     type RasterLayer,
     type FieldStat,
     type NdviJob,
@@ -47,6 +48,10 @@ const NdviChart = dynamic(() => import("@/components/charts/ndvi-chart"), {
     ),
 });
 
+const AgriTimeseriesPanel = dynamic(() => import("@/components/field/agri-timeseries-panel"), {
+    ssr: false,
+});
+
 /* ── Util: dd days ago as YYYY-MM-DD ─────────────────────────── */
 function daysAgo(days: number): string {
     const d = new Date();
@@ -79,6 +84,8 @@ function getStepLabels(
 
 interface NdviTabProps {
     fieldId: string;
+    /** Field tags — used to detect agri:<land_id> for RS fallback */
+    fieldTags?: string[] | null;
     /** Called when a tile layer should be shown on the map */
     onShowLayer?: (layer: RasterLayer | null, indexType: IndexType) => void;
     /** Called when the active index changes - parent renders the selector */
@@ -87,10 +94,14 @@ interface NdviTabProps {
     activeIndexOverride?: IndexType;
     /** Called after data loads so parent can refresh available index types */
     onDataLoaded?: () => void;
+    /** Agri pixel_data 色斑图 → parent map overlay */
+    onAgriHeatmapChange?: (heatmap: import("@/lib/agri-heatmap").AgriHeatmapImage | null) => void;
 }
 
-export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded }: NdviTabProps) {
+export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange }: NdviTabProps) {
     const tMon = useTranslations("monitoring");
+    const agriLandId = parseAgriLandId(fieldTags);
+    const isAgriField = !!agriLandId;
     // ── Index selector ───────────────────────────────
     const [activeIndex, setActiveIndex] = useState<IndexType>("NDVI");
     const config = INDEX_CONFIG[activeIndex];
@@ -157,15 +168,16 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
         loadData();
     }, [loadData]);
 
-    // ── Check backfill status on mount ───────────────
+    // ── Check backfill status on mount (skip for agri — RS from parcel_scene_products) ──
     useEffect(() => {
+        if (isAgriField) return;
         fieldsApi.backfillStatus(fieldId)
             .then((res) => {
                 setBackfillActive(res.has_active_backfill);
                 if (res.has_active_backfill) setBackfillTriggered(true);
             })
             .catch(() => { }); // silent - endpoint may not exist in older deployments
-    }, [fieldId]);
+    }, [fieldId, isAgriField]);
 
     // ── Fetch weather data when overlay is toggled on ──
     useEffect(() => {
@@ -352,7 +364,9 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
 
     return (
         <div className="space-y-4">
-            {/* ── Section: Run Analysis + Backfill ─────── */}
+            {/* ── Section: Run Analysis + Backfill (classic OpenFarm only) ─────── */}
+            {/* agri 地块遥感直接读 agri.parcel_scene_products，不走 Celery NDVI / backfill-indices */}
+            {!isAgriField && (
             <div className="flex gap-2">
                 <Button
                     variant="outline"
@@ -384,8 +398,9 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
                     <span className="hidden sm:inline">{tMon("backfill.buttonLabel")}</span>
                 </Button>
             </div>
+            )}
 
-            {showJobForm && (
+            {!isAgriField && showJobForm && (
                 <Card className="mt-2">
                     <CardContent className="space-y-3 pt-4">
                         {/* Index checkboxes */}
@@ -481,7 +496,7 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
             )}
 
             {/* ── Backfill in-progress banner ──────────── */}
-            {stats.length < 10 && (backfillActive || backfillTriggered || stats.length === 0) && !loading && !activeJob && (
+            {!isAgriField && stats.length < 10 && (backfillActive || backfillTriggered || stats.length === 0) && !loading && !activeJob && (
                 <Card className="bg-info-subtle">
                     <CardContent className="flex items-start gap-2 p-3">
                         <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
@@ -556,7 +571,17 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
                 </Card>
             )}
 
+            {/* ── Agri S1/S2 fallback (when field tagged agri:*) ── */}
+            {!loading && parseAgriLandId(fieldTags) && (
+                <AgriTimeseriesPanel
+                    fieldTags={fieldTags}
+                    hasMonitoringData={layers.length > 0 || stats.length > 0}
+                    onHeatmapChange={onAgriHeatmapChange}
+                />
+            )}
+
             {/* ── Section: Chart ────────────────────────── */}
+            {(layers.length > 0 || stats.length > 0) && (
             <Card>
                 <CardHeader className="pb-2 pt-3 px-3">
                     <div className="flex items-center justify-between">
@@ -585,6 +610,7 @@ export default function NdviTab({ fieldId, onShowLayer, onActiveIndexChange, act
                     />
                 </CardContent>
             </Card>
+            )}
 
             {/* ── Section: Layer Selector ───────────────── */}
             {layers.length > 0 && (
