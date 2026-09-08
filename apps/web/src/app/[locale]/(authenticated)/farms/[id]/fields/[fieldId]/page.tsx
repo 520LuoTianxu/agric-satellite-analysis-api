@@ -9,7 +9,7 @@ import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
-import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES } from "@/lib/agri-heatmap";
+import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapToField } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -371,10 +371,12 @@ export default function FieldDetailPage() {
         }
 
         // Re-apply heatmap GeoJSON cells: fill < agri-heatmap-fill < outline
+        // Clip cells to field.geom so AABB/pad squares never spill past the green outline.
         if (hm?.geojson) {
+            const clipped = clipHeatmapToField(hm.geojson, f.geom as GeoJSON.Polygon | GeoJSON.MultiPolygon);
             map.addSource(srcId, {
                 type: "geojson",
-                data: hm.geojson,
+                data: clipped,
             });
             map.addLayer(
                 {
@@ -499,9 +501,16 @@ export default function FieldDetailPage() {
 
         if (!agriHeatmap?.geojson) return;
 
+        const fieldGeom = fieldRef.current?.geom as
+            | GeoJSON.Polygon
+            | GeoJSON.MultiPolygon
+            | undefined;
+        const clipped = clipHeatmapToField(agriHeatmap.geojson, fieldGeom);
+        if (!clipped.features.length) return;
+
         map.addSource(srcId, {
             type: "geojson",
-            data: agriHeatmap.geojson,
+            data: clipped,
         });
         // Place above fill, below outline
         const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
