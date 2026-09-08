@@ -96,9 +96,14 @@ interface NdviTabProps {
     onDataLoaded?: () => void;
     /** Agri pixel_data 色斑图 → parent map overlay */
     onAgriHeatmapChange?: (heatmap: import("@/lib/agri-heatmap").AgriHeatmapImage | null) => void;
+    /** Controlled agri 色斑 mode (NDVI/EVI/干旱/洪涝) from map-bottom chips */
+    agriHeatMode?: import("@/lib/agri-heatmap").AgriHeatIndex;
+    onAgriHeatModeChange?: (mode: import("@/lib/agri-heatmap").AgriHeatIndex) => void;
+    /** When false (left 指数 tab), clear overlay; when true again, reload */
+    agriHeatmapEnabled?: boolean;
 }
 
-export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange }: NdviTabProps) {
+export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
     const tMon = useTranslations("monitoring");
     const agriLandId = parseAgriLandId(fieldTags);
     const isAgriField = !!agriLandId;
@@ -577,6 +582,9 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                     fieldTags={fieldTags}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
                     onHeatmapChange={onAgriHeatmapChange}
+                    mode={agriHeatMode}
+                    onModeChange={onAgriHeatModeChange}
+                    enabled={agriHeatmapEnabled}
                 />
             )}
 
