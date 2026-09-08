@@ -844,6 +844,109 @@ export const soilApi = {
         apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
 };
 
+// ── Agri (地块 S1/S2 场景产品) ────────────────────────────────────
+
+export type AgriSensor = "S1" | "S2";
+
+export interface AgriSceneProduct {
+    land_id: string;
+    tile_id: string;
+    date: string;
+    sensor: AgriSensor;
+    scene_id: string;
+    land_name: string | null;
+    cloud_cover: number | null;
+    parcel_cloud_cover_pct: number | null;
+    ndvi_avg: number | null;
+    ndvi_min: number | null;
+    ndvi_max: number | null;
+    evi_avg: number | null;
+    evi_min: number | null;
+    evi_max: number | null;
+    ndmi_avg: number | null;
+    ndre_avg: number | null;
+    mndwi_avg: number | null;
+    cire_avg: number | null;
+    vv_avg: number | null;
+    vv_min: number | null;
+    vv_max: number | null;
+    vh_avg: number | null;
+    vh_min: number | null;
+    vh_max: number | null;
+    /** Present only when include_pixels=1 */
+    pixel_data?: {
+        grid: {
+            epsg: number;
+            width: number;
+            height: number;
+            origin_x: number;
+            origin_y: number;
+            resolution: number;
+        };
+        pixels: number[][];
+    } | null;
+}
+
+export interface AgriSensorSceneSummary {
+    sensor: AgriSensor;
+    count: number;
+    date_min: string | null;
+    date_max: string | null;
+    latest_ndvi_avg: number | null;
+    latest_evi_avg: number | null;
+    latest_vv_avg: number | null;
+    latest_vh_avg: number | null;
+    latest_date: string | null;
+}
+
+export interface AgriLandScenesSummary {
+    land_id: string;
+    total: number;
+    sensors: AgriSensorSceneSummary[];
+}
+
+/** Parse agri:<land_id> tag from field.tags */
+export function parseAgriLandId(tags: string[] | null | undefined): string | null {
+    if (!tags?.length) return null;
+    for (const tag of tags) {
+        if (typeof tag === "string" && tag.startsWith("agri:")) {
+            const id = tag.slice(5).trim();
+            if (id) return id;
+        }
+    }
+    return null;
+}
+
+export const agriApi = {
+    scenes: (
+        landId: string,
+        opts: {
+            sensor?: AgriSensor;
+            from?: string;
+            to?: string;
+            limit?: number;
+            offset?: number;
+            /** If 1, include pixel_data jsonb for 色斑图 (large). */
+            includePixels?: 0 | 1;
+        } = {},
+    ) => {
+        const params = new URLSearchParams();
+        if (opts.sensor) params.set("sensor", opts.sensor);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.includePixels != null) params.set("include_pixels", String(opts.includePixels));
+        params.set("limit", String(opts.limit ?? 200));
+        params.set("offset", String(opts.offset ?? 0));
+        return apiFetch<Paginated<AgriSceneProduct>>(
+            `/agri/lands/${encodeURIComponent(landId)}/scenes?${params}`,
+        );
+    },
+    scenesSummary: (landId: string) =>
+        apiFetch<AgriLandScenesSummary>(
+            `/agri/lands/${encodeURIComponent(landId)}/scenes/summary`,
+        ),
+};
+
 // ── Share Links ──────────────────────────────────────────────────
 
 export const shareApi = {

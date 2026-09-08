@@ -121,3 +121,21 @@ OpenFarm `/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should targe
 - `import_agri_seed.sh` — join + import helper
 - `join_export.sh` — concatenate `agri_export.sql.part-*.sql`
 - `manifest.json` — part checksums + expected joined sha256
+
+
+## Bridge agri scenes → OpenFarm monitoring (optional)
+
+For OpenFarm fields tagged `agri:<land_id>`, copy S1/S2 index averages into
+`raster_layers` + `field_stats` so classic NdviTab charts work without Celery:
+
+```bash
+python3 scripts/agri_seed/sync_agri_scenes_to_field_stats.py
+```
+
+Idempotent (`ON CONFLICT` on `uq_raster_field_date_type`). Placeholder
+`cog_uri` values look like `agri://land/{land_id}/{sensor}/{date}`.
+
+**色斑图** does **not** use this sync — the web UI reads
+`parcel_scene_products.pixel_data` directly via
+`GET /v1/agri/lands/{id}/scenes?include_pixels=1` and rasterizes a MapLibre
+image overlay client-side.
