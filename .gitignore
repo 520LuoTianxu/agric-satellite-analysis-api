@@ -65,3 +65,10 @@ deploy/terraform/crash.log
 deploy/terraform/crash.*.log
 deploy/terraform/tfplan
 deploy/terraform/*.tfplan
+
+# ── Agri seed dumps (large; do not commit) ───────────────────────────
+data/agri_export.sql
+data/agri_export_clean.sql
+data/*.part-*.sql
+data/agri_export.sql.part-*.sql
+**/agri_export.sql.part-*.sql
