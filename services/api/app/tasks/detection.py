@@ -46,8 +46,6 @@ from app.tasks.pipeline import (
     STAC_API_URL,
     STAC_COLLECTION,
     MAX_CLOUD_COVER,
-    MINIO_BUCKET,
-    get_minio_client,
     get_db_session,
     update_job_progress,
     complete_step,
@@ -181,7 +179,7 @@ def _stack_bitemporal(
 
 
 def _ensure_model_checkpoint() -> str:
-    """Ensure FTW model checkpoint is available locally. Download from MinIO if needed."""
+    """Ensure FTW model checkpoint is available locally. Download from storage if needed."""
     from app.core.config import settings
 
     cache_dir = Path(settings.ftw_model_cache_dir)
@@ -194,9 +192,10 @@ def _ensure_model_checkpoint() -> str:
         logger.info("model_cache_hit", path=str(local_path))
         return str(local_path)
 
-    logger.info("downloading_model", minio_path=settings.ftw_model_path)
-    client = get_minio_client()
-    client.fget_object(MINIO_BUCKET, settings.ftw_model_path, str(local_path))
+    from app.core.storage import get_storage
+
+    logger.info("downloading_model", storage_path=settings.ftw_model_path)
+    get_storage().download_file(settings.ftw_model_path, str(local_path))
     logger.info("model_downloaded", path=str(local_path))
     return str(local_path)
 

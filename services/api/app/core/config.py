@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_ttl_seconds: int = 3600  # 1 hour
 
+    # Object storage backend: minio | oss
+    storage_backend: str = "minio"
+
     # MinIO
     minio_endpoint: str = "minio:9000"
     # Browser-reachable endpoint for presigned URLs (empty = use minio_endpoint)
@@ -23,6 +26,15 @@ class Settings(BaseSettings):
     minio_secret_key: str = "openfarm_dev_secret"
     minio_bucket: str = "openfarm"
     minio_secure: bool = False
+
+    # Aliyun OSS (used when storage_backend=oss)
+    oss_region: str = "oss-cn-beijing"
+    oss_endpoint: str = "https://oss-cn-beijing.aliyuncs.com"
+    oss_access_key_id: str = ""
+    oss_access_key_secret: str = ""
+    oss_bucket: str = "agric-dev"
+    # Fixed product directory for S1/S2 parcel JSON
+    oss_prefix: str = "s1s2_parcel/json/"
 
     # CORS
     cors_origins: str = "http://localhost:3000"

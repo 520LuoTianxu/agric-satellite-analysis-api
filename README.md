@@ -126,6 +126,37 @@ Leave both `false` in production unless you want a shared demo user. After enabl
 
 Messages: `apps/web/messages/{zh,en,es}.json`. Routing: `apps/web/src/i18n/routing.ts`. Switch languages with the globe control in the header / sidebar.
 
+
+## Object storage / 对象存储（MinIO ↔ Aliyun OSS）
+
+The API and Celery workers talk to object storage through `app.core.storage.get_storage()`, selected by `STORAGE_BACKEND`:
+
+| `STORAGE_BACKEND` | Use case |
+|---|---|
+| `minio` (default) | Local / self-hosted MinIO (`MINIO_*`) |
+| `oss` | Aliyun OSS (`OSS_*`) — e.g. S1/S2 parcel JSON under `OSS_PREFIX` |
+
+```bash
+# .env
+STORAGE_BACKEND=minio   # or oss
+
+# When STORAGE_BACKEND=oss (do not commit real secrets):
+OSS_REGION=oss-cn-beijing
+OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com
+OSS_ACCESS_KEY_ID=
+OSS_ACCESS_KEY_SECRET=
+OSS_BUCKET=agric-dev
+OSS_PREFIX=s1s2_parcel/json/
+```
+
+Useful API routes (auth + `X-Org-Id` required):
+
+- `GET /v1/storage/backend` — active backend / bucket / parcel prefix
+- `GET /v1/storage/objects` — list keys
+- `POST /v1/storage/parcel-products/pull` — fetch parcel JSON summary from the fixed prefix
+
+Offline ingest tooling (no secrets): `scripts/s1s2_parcel_oss_pg/`.
+
 ## Architecture / 架构
 
 Same 3-layer OpenFarm architecture:
