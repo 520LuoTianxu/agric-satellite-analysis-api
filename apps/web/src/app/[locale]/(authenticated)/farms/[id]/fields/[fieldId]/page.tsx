@@ -667,7 +667,7 @@ export default function FieldDetailPage() {
                 }
             } catch { /* ignore */ }
         };
-    }, [agriHeatmap, mapInstance, field, applyAgriHeatmapToMap]);
+    }, [agriHeatmap, mapInstance, field, applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
     const handleShowLayer = useCallback((layer: RasterLayer | null, indexType: IndexType) => {
         setIndexLayer(layer);
