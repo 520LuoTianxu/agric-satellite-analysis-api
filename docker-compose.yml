@@ -1,0 +1,239 @@
+services:
+  # ── Postgres + PostGIS ──────────────────────────────────────────────
+  db:
+    # imresamu/postgis = multi-arch (amd64 + arm64) build of postgis/postgis,
+    # which publishes amd64 only and cannot run on ARM hosts (Ampere/Apple)
+    image: imresamu/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # ── Redis ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory-policy noeviction
+      --save "900 1"
+      --save "300 10"
+      --save "60 10000"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── MinIO (Object Storage) ─────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO Bootstrap (create bucket) ────────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb --ignore-existing local/${MINIO_BUCKET};
+      mc anonymous set download local/${MINIO_BUCKET}/basemap;
+      mc anonymous set download local/${MINIO_BUCKET}/photos;
+      exit 0;
+      "
+
+  # ── FastAPI (API service) ──────────────────────────────────────────
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      TITILER_PUBLIC_URL: ${TITILER_PUBLIC_URL:-http://localhost:8080}
+      STAC_API_URL: ${STAC_API_URL}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Celery Worker (Processor) ──────────────────────────────────────
+  processor:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    command: >
+      celery -A app.worker worker
+      -Q default,celery
+      --loglevel=info
+      --concurrency=4
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      STAC_API_URL: ${STAC_API_URL}
+      SOILGRIDS_WCS_BASE_URL: ${SOILGRIDS_WCS_BASE_URL}
+      POLARIS_S3_BUCKET: ${POLARIS_S3_BUCKET}
+      SOIL_FETCH_TIMEOUT_SECONDS: ${SOIL_FETCH_TIMEOUT_SECONDS}
+      SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.worker inspect ping --timeout 5 2>/dev/null | grep -q OK",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── ML Processor (Boundary Detection) ──────────────────────────────
+  ml-processor:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile.ml
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      STAC_API_URL: ${STAC_API_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.worker inspect ping --timeout 5 2>/dev/null | grep -q OK",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── TiTiler ────────────────────────────────────────────────────────
+  tiler:
+    build:
+      context: ./services/tiler
+      dockerfile: Dockerfile
+    environment:
+      OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT: minio:9000
+      AWS_VIRTUAL_HOSTING: "FALSE"
+      AWS_HTTPS: "NO"
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      TITILER_API_CORS_ORIGINS: ${CORS_ORIGINS}
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Next.js (Web UI) ──────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
+        NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+        NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+        NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
+    environment:
+      # Next.js standalone binds to $HOSTNAME, which Docker sets to the
+      # container ID; bind all interfaces so the healthcheck can reach it
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      ENABLE_DEMO_LOGIN: ${ENABLE_DEMO_LOGIN:-false}
+      NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
+      OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
+      NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+      NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+      DATABASE_URL: ${DATABASE_URL_SYNC}
+      INTERNAL_API_URL: http://api:8000
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      # the web image has no curl; probe with node's built-in fetch
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

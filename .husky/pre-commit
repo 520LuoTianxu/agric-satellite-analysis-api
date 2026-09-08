@@ -1,0 +1,36 @@
+#!/bin/sh
+
+echo "Running pre-commit checks..."
+
+# ── Web: lint + type-check ───────────────────────────────────────────
+CHANGED_WEB=$(git diff --cached --name-only -- 'apps/web/')
+if [ -n "$CHANGED_WEB" ]; then
+  echo "▸ Web: lint"
+  cd apps/web
+  npm run lint --silent || { echo "FAIL: Web lint failed"; exit 1; }
+
+  echo "▸ Web: type-check"
+  npm run type-check --silent || { echo "FAIL: Web type-check failed"; exit 1; }
+  cd ../..
+fi
+
+# ── API: ruff check + format ────────────────────────────────────────
+CHANGED_API=$(git diff --cached --name-only -- 'services/api/')
+if [ -n "$CHANGED_API" ]; then
+  echo "▸ API: ruff check"
+  cd services/api
+  ruff check . || python3 -m ruff check . || { echo "FAIL: API ruff check failed"; exit 1; }
+
+  echo "▸ API: ruff format"
+  ruff format --check . || python3 -m ruff format --check . || { echo "FAIL: API ruff format failed"; exit 1; }
+  cd ../..
+fi
+
+# ── Config: every documented variable reaches its consumer ──────────
+CHANGED_ENV=$(git diff --cached --name-only -- '.env.example' 'docker-compose*.yml' 'apps/web/Dockerfile' 'services/api/app/core/config.py' 'apps/web/src/')
+if [ -n "$CHANGED_ENV" ]; then
+  echo "▸ Config: env parity"
+  python3 scripts/check-env-parity.py || { echo "FAIL: env parity check failed"; exit 1; }
+fi
+
+echo "OK: All checks passed"

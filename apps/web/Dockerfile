@@ -1,0 +1,48 @@
+FROM node:20-alpine AS base
+
+# Install deps
+FROM base AS deps
+WORKDIR /app
+COPY apps/web/package.json ./
+RUN npm install
+
+# Build
+FROM base AS builder
+WORKDIR /app
+
+# NEXT_PUBLIC_* vars must be present at build time (inlined by Next.js)
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000/v1
+ARG NEXT_PUBLIC_TITILER_URL=http://localhost:8080
+ARG NEXT_PUBLIC_PROTOMAPS_URL=http://localhost:9000/openfarm/basemap
+ARG NEXT_PUBLIC_SITE_URL=http://localhost:3000
+ARG NEXT_PUBLIC_MINIO_URL=http://localhost:9000/openfarm
+ARG NEXT_PUBLIC_ENABLE_DEMO_LOGIN=false
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_TITILER_URL=$NEXT_PUBLIC_TITILER_URL
+ENV NEXT_PUBLIC_PROTOMAPS_URL=$NEXT_PUBLIC_PROTOMAPS_URL
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
+ENV NEXT_PUBLIC_MINIO_URL=$NEXT_PUBLIC_MINIO_URL
+ENV NEXT_PUBLIC_ENABLE_DEMO_LOGIN=$NEXT_PUBLIC_ENABLE_DEMO_LOGIN
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY apps/web/ .
+# Copy CHANGELOG.md into public/ so the API route can read it at runtime
+COPY CHANGELOG.md ./public/CHANGELOG.md
+RUN npm run build
+
+# Production
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+CMD ["node", "server.js"]
