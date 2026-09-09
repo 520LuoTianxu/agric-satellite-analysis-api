@@ -163,6 +163,86 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
         });
 }
 
+
+/** Avg field used to score a scene for default-date picking. */
+function sceneSeriesAvg(scene: AgriSceneProduct, key: SeriesKey): number | null {
+    const avgKey = SERIES_META[key].avgKey ?? SERIES_META[key].chartKey;
+    if (!avgKey) return null;
+    const v = scene[avgKey];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function isLowCloud(scene: AgriSceneProduct): boolean {
+    if (scene.cloud_cover_over_30 === false) return true;
+    if (scene.cloud_cover_over_30 === true) return false;
+    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
+        return scene.cloud_cover <= 30;
+    }
+    if (
+        typeof scene.parcel_cloud_cover_pct === "number" &&
+        Number.isFinite(scene.parcel_cloud_cover_pct)
+    ) {
+        return scene.parcel_cloud_cover_pct <= 30;
+    }
+    return false;
+}
+
+/** Optical veg indices where avg > 0.1 is a useful clear-sky signal. */
+const VEG_AVG_KEYS = new Set<SeriesKey>(["ndvi", "evi", "ndmi", "ndre", "cire", "drought"]);
+
+/**
+ * Prefer latest scene with usable vegetation / low cloud — not raw latest
+ * (which is often fully cloudy → solid red NDVI film).
+ */
+function pickBestDefaultDate(scenes: AgriSceneProduct[], key: SeriesKey): string | null {
+    const sensor = sensorForIndex(key);
+    const list = scenes.filter((s) => s.sensor === sensor);
+    if (!list.length) return null;
+    const sorted = [...list].sort((a, b) => a.date.localeCompare(b.date));
+
+    // S1 / flood: cloud/NDVI heuristics do not apply — raw latest.
+    if (sensor === "S1") {
+        return sorted[sorted.length - 1]!.date;
+    }
+
+    // 1) Latest with low cloud AND (for veg modes) avg > 0.1
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const s = sorted[i]!;
+        if (!isLowCloud(s)) continue;
+        const avg = sceneSeriesAvg(s, key);
+        if (avg == null) continue;
+        if (VEG_AVG_KEYS.has(key) && !(avg > 0.1)) continue;
+        return s.date;
+    }
+
+    // 2) Fallback: date with max series avg (prefer strongest veg signal)
+    const scoreKey = SERIES_META[key].chartKey ?? ("ndvi_avg" as const);
+    let bestDate: string | null = null;
+    let bestAvg = -Infinity;
+    for (const s of sorted) {
+        const v = s[scoreKey];
+        if (typeof v === "number" && Number.isFinite(v) && v > bestAvg) {
+            bestAvg = v;
+            bestDate = s.date;
+        }
+    }
+    if (bestDate) return bestDate;
+
+    // 3) Last resort: raw latest
+    return sorted[sorted.length - 1]!.date;
+}
+
+function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: SeriesKey): boolean {
+    if (!scene || sensorForIndex(key) !== "S2") return false;
+    const cloudy =
+        scene.cloud_cover_over_30 === true ||
+        (typeof scene.cloud_cover === "number" && scene.cloud_cover > 30) ||
+        (typeof scene.parcel_cloud_cover_pct === "number" && scene.parcel_cloud_cover_pct > 30);
+    const avg = sceneSeriesAvg(scene, key);
+    const lowVeg = avg != null && avg <= 0.1;
+    return cloudy || lowVeg;
+}
+
 export interface AgriTimeseriesPanelProps {
     fieldTags: string[] | null | undefined;
     /** When true, parent already has monitoring layers */
@@ -247,17 +327,12 @@ export default function AgriTimeseriesPanel({
                 const nextSeries: SeriesKey = modeProp ?? (hasS2 ? "ndvi" : "vv");
                 setSeriesInternal(nextSeries);
                 onModeChange?.(nextSeries);
-                const sensor = sensorForIndex(nextSeries);
-                const dates = all
-                    .filter((s) => s.sensor === sensor)
-                    .map((s) => s.date)
-                    .sort();
-                const latestDate = dates.length ? dates[dates.length - 1] : null;
-                if (latestDate) setSelectedDate(latestDate);
+                const bestDate = pickBestDefaultDate(all, nextSeries);
+                if (bestDate) setSelectedDate(bestDate);
                 // Prefetch include_pixels=1 as soon as land scenes load (even if 指数 tab
                 // inactive). Map overlay is only published when enabled===true.
-                if (!cancelled && latestDate) {
-                    await loadHeatmapRef.current(latestDate, nextSeries);
+                if (!cancelled && bestDate) {
+                    await loadHeatmapRef.current(bestDate, nextSeries);
                 }
             } catch (e: any) {
                 if (!cancelled) setError(e?.detail || e?.message || "加载 agri 时序失败");
@@ -273,7 +348,7 @@ export default function AgriTimeseriesPanel({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [landId]);
 
-    // When switching series, auto-pick latest date for that sensor
+    // When switching series, keep date if still valid; else prefer usable optical scene
     useEffect(() => {
         if (!scenes.length) return; // wait for initial scenes fetch; do not null out date early
         const sensor = sensorForIndex(series);
@@ -285,7 +360,9 @@ export default function AgriTimeseriesPanel({
             setSelectedDate(null);
             return;
         }
-        setSelectedDate((prev) => (prev && dates.includes(prev) ? prev : dates[dates.length - 1]));
+        setSelectedDate((prev) =>
+            prev && dates.includes(prev) ? prev : (pickBestDefaultDate(scenes, series) ?? dates[dates.length - 1]),
+        );
     }, [series, scenes]);
 
     const publishHeatmap = useCallback(
@@ -374,6 +451,21 @@ export default function AgriTimeseriesPanel({
     );
     loadHeatmapRef.current = loadHeatmap;
 
+    const selectDateExplicit = useCallback(
+        (date: string) => {
+            setSelectedDate(date);
+            const sensor = sensorForIndex(series);
+            const scene = scenes.find((s) => s.sensor === sensor && s.date === date);
+            if (sceneLooksCloudyOrLowVeg(scene, series)) {
+                toast.message("该日多为云或植被指数极低，色膜偏红属正常", {
+                    description: `${date} · ${AGRI_MODE_LABELS[series]}`,
+                });
+            }
+        },
+        [scenes, series],
+    );
+
+
     // Prefetch/reload film whenever date or series changes (tab may be inactive).
     useEffect(() => {
         if (!selectedDate) return;
@@ -428,7 +520,7 @@ export default function AgriTimeseriesPanel({
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
                             地块 land_id={landId}
                             {summary ? ` · 共 ${summary.total} 景` : ""}
-                            {" · 优先 OSS lon/lat 色膜，无需 COG/Celery"}
+                            {" · 优先 DB lonlat_v1 色膜，无需 COG/Celery"}
                         </p>
                     </div>
                     {summary && (
@@ -525,7 +617,7 @@ export default function AgriTimeseriesPanel({
                             <NdviChart
                                 stats={stats}
                                 selectedDate={selectedDate}
-                                onDateSelect={(d) => setSelectedDate(d)}
+                                onDateSelect={(d) => selectDateExplicit(d)}
                                 height={200}
                                 indexType={chartIndexType}
                             />
@@ -558,7 +650,7 @@ export default function AgriTimeseriesPanel({
                                                 size="sm"
                                                 variant={selectedDate === s.date ? "default" : "outline"}
                                                 className="h-6 text-[10px] px-1.5 tabular-nums shrink-0"
-                                                onClick={() => setSelectedDate(s.date)}
+                                                onClick={() => selectDateExplicit(s.date)}
                                             >
                                                 {s.date.slice(5)}
                                             </Button>

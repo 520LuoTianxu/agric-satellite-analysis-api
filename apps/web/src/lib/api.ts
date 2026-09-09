@@ -879,6 +879,7 @@ export interface AgriSceneProduct {
     scene_id: string;
     land_name: string | null;
     cloud_cover: number | null;
+    cloud_cover_over_30: boolean | null;
     parcel_cloud_cover_pct: number | null;
     ndvi_avg: number | null;
     ndvi_min: number | null;
@@ -908,7 +909,7 @@ export interface AgriSceneProduct {
         };
         pixels: number[][];
     } | null;
-    /** Preferred OSS lon/lat pixels when include_pixels=1 */
+    /** Preferred DB lonlat_v1 (or OSS) lon/lat pixels when include_pixels=1 */
     pixels_lonlat?: Array<{
         lon: number;
         lat: number;
@@ -966,7 +967,7 @@ export const agriApi = {
             to?: string;
             limit?: number;
             offset?: number;
-            /** If 1, prefer OSS lon/lat pixels (pixels_lonlat); grid pixel_data is fallback. */
+            /** If 1, prefer DB lonlat_v1 pixels (pixels_lonlat); grid pixel_data is fallback. */
             includePixels?: 0 | 1;
         } = {},
     ) => {

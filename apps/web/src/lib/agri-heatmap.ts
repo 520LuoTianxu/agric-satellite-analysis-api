@@ -1240,10 +1240,24 @@ function collectLonLatPainted(
     let vmin = Infinity;
     let vmax = -Infinity;
 
+    // Continuous optical/SAR indices: if any clear=true pixels exist, skip clear=false
+    // so cloudy zeros do not paint over valid vegetation signal. If ALL clear=false,
+    // keep painting (caller may show a cloudy/low-veg hint).
+    const continuous =
+        index !== "drought" && index !== "flood";
+    const anyClear = continuous
+        ? pixels.some((p) => Number(p.clear) === 1)
+        : false;
+
     for (const p of pixels) {
         const lon = Number(p.lon);
         const lat = Number(p.lat);
         if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+
+        // clear===0 → cloudy; skip only when the scene also has clear pixels
+        if (continuous && anyClear && Number(p.clear) === 0) {
+            continue;
+        }
 
         if (index === "drought") {
             const ndvi = numProp(p, "NDVI");
