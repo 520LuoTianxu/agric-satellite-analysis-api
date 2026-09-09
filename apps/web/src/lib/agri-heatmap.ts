@@ -752,7 +752,9 @@ export function dataUrlToObjectUrl(dataUrl: string): string {
         bytes = new Uint8Array(decoded.length);
         for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
     }
-    return URL.createObjectURL(new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)], { type: mime }));
+        const ab = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(ab).set(bytes);
+    return URL.createObjectURL(new Blob([ab], { type: mime }));
 }
 
 /**
