@@ -924,7 +924,7 @@ export interface AgriSceneProduct {
         [key: string]: number | undefined;
     }> | null;
     heatmap_url?: string | null;
-    pixels_source?: "oss" | "db_grid" | null;
+    pixels_source?: "db_lonlat" | "oss" | "db_grid" | null;
 }
 
 export interface AgriSensorSceneSummary {

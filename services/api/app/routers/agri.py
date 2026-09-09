@@ -70,9 +70,8 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return d
 
 
-
-def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
-    """Keep only dict lon/lat pixel objects from OSS JSON."""
+def _normalize_lonlat_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
+    """Keep only dict lon/lat pixel objects (DB lonlat_v1 or OSS JSON)."""
     if not isinstance(raw_pixels, list):
         return []
     out: list[dict[str, Any]] = []
@@ -90,6 +89,21 @@ def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
             continue
         out.append(p)
     return out
+
+
+def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
+    """Keep only dict lon/lat pixel objects from OSS JSON."""
+    return _normalize_lonlat_pixels(raw_pixels)
+
+
+def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
+    """Extract lonlat_v1 pixels from agri.parcel_scene_products.pixel_data."""
+    if not isinstance(pixel_data, dict):
+        return None
+    if pixel_data.get("format") != "lonlat_v1":
+        return None
+    pixels = _normalize_lonlat_pixels(pixel_data.get("pixels"))
+    return pixels or None
 
 
 def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
@@ -348,8 +362,8 @@ async def list_land_scenes(
         ge=0,
         le=1,
         description=(
-            "If 1, prefer OSS lon/lat pixels via json_oss_key (pixels_lonlat); "
-            "fall back to legacy grid pixel_data only if OSS fetch fails."
+            "If 1, prefer DB lonlat_v1 pixels (pixels_source=db_lonlat); "
+            "else try OSS via json_oss_key; else legacy grid pixel_data (db_grid)."
         ),
     ),
     limit: int = Query(100, ge=1, le=500),
@@ -414,22 +428,32 @@ async def list_land_scenes(
             d.pop("heatmap_url", None)
             d.pop("pixels_source", None)
         else:
-            oss_payload = _load_oss_scene_pixels(d.get("json_oss_key"))
-            if oss_payload:
-                d["pixels_lonlat"] = oss_payload["pixels_lonlat"]
-                d["heatmap_url"] = oss_payload.get("heatmap_url")
-                d["pixels_source"] = "oss"
-                # Prefer OSS lon/lat; drop lossy grid to avoid frontend using it.
-                d["pixel_data"] = None
-                if oss_payload.get("pixel_count") and not d.get("pixel_count"):
-                    d["pixel_count"] = oss_payload["pixel_count"]
-            else:
-                d["pixels_lonlat"] = None
+            db_lonlat = _pixels_from_db_lonlat(d.get("pixel_data"))
+            if db_lonlat:
+                d["pixels_lonlat"] = db_lonlat
                 d["heatmap_url"] = None
-                if d.get("pixel_data"):
-                    d["pixels_source"] = "db_grid"
+                d["pixels_source"] = "db_lonlat"
+                # Prefer DB lon/lat; drop grid payload so clients use pixels_lonlat.
+                d["pixel_data"] = None
+                if not d.get("pixel_count"):
+                    d["pixel_count"] = len(db_lonlat)
+            else:
+                oss_payload = _load_oss_scene_pixels(d.get("json_oss_key"))
+                if oss_payload:
+                    d["pixels_lonlat"] = oss_payload["pixels_lonlat"]
+                    d["heatmap_url"] = oss_payload.get("heatmap_url")
+                    d["pixels_source"] = "oss"
+                    # Prefer OSS lon/lat; drop lossy grid to avoid frontend using it.
+                    d["pixel_data"] = None
+                    if oss_payload.get("pixel_count") and not d.get("pixel_count"):
+                        d["pixel_count"] = oss_payload["pixel_count"]
                 else:
-                    d["pixels_source"] = None
+                    d["pixels_lonlat"] = None
+                    d["heatmap_url"] = None
+                    if d.get("pixel_data"):
+                        d["pixels_source"] = "db_grid"
+                    else:
+                        d["pixels_source"] = None
         items.append(SceneProductOut.model_validate(d))
     payload = PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
     if not include_pixels:

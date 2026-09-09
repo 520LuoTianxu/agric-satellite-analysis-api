@@ -152,15 +152,15 @@ class SceneProductOut(BaseModel):
         default=None,
         description=(
             "Legacy gridified pixels {grid, pixels:[[row,col,...]]}. "
-            "Only used as fallback when OSS lon/lat fetch fails; omitted when "
-            "pixels_lonlat is populated. Present only with include_pixels=1."
+            "Only used as fallback when DB lonlat_v1 / OSS lon/lat are unavailable; "
+            "omitted when pixels_lonlat is populated. Present only with include_pixels=1."
         ),
     )
     pixels_lonlat: list[dict[str, Any]] | None = Field(
         default=None,
         description=(
-            "Preferred OSS lon/lat pixels when include_pixels=1. "
-            "S2: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}; "
+            "Preferred lon/lat pixels when include_pixels=1 (DB lonlat_v1 primary, "
+            "else OSS). S2: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}; "
             "S1: {lon,lat,VV_db,VH_db}."
         ),
     )
@@ -168,9 +168,12 @@ class SceneProductOut(BaseModel):
         default=None,
         description="Optional pre-rendered heatmap PNG URL from OSS JSON (include_pixels=1).",
     )
-    pixels_source: Literal["oss", "db_grid"] | None = Field(
+    pixels_source: Literal["db_lonlat", "oss", "db_grid"] | None = Field(
         default=None,
-        description="Which pixel payload is authoritative when include_pixels=1.",
+        description=(
+            "Which pixel payload is authoritative when include_pixels=1: "
+            "db_lonlat (DB pixel_data.format=lonlat_v1), oss, or db_grid."
+        ),
     )
 
 
