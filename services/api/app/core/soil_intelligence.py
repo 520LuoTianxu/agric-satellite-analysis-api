@@ -1328,7 +1328,7 @@ def compute_sampling_zones(
             "properties": {
                 "zone_type": "reference",
                 "priority": 1,
-                "rationale": "Field centroid - baseline reference point",
+                "rationale": "田块中心点 — 基线参考采样点",
             },
         }
     )
@@ -1345,8 +1345,9 @@ def compute_sampling_zones(
                 "properties": {
                     "zone_type": "high_clay_variability",
                     "priority": 2,
-                    "rationale": f"High clay variation ({variability['clay']:.0f}% range across depths)"
-                    " - verify texture transition",
+                    "rationale": (
+                        f"黏粒垂向变幅约 {variability['clay']:.0f}% — 建议核实质地过渡"
+                    ),
                 },
             }
         )
@@ -1363,8 +1364,9 @@ def compute_sampling_zones(
                 "properties": {
                     "zone_type": "high_soc_variability",
                     "priority": 2,
-                    "rationale": f"High SOC variation ({variability['soc']:.1f} g/kg difference)"
-                    " - check organic matter distribution",
+                    "rationale": (
+                        f"SOC 垂向差约 {variability['soc']:.1f} g/kg — 建议核查有机质分布"
+                    ),
                 },
             }
         )
@@ -1381,8 +1383,9 @@ def compute_sampling_zones(
                 "properties": {
                     "zone_type": "ph_variability",
                     "priority": 2 if variability["ph"] > 1.5 else 3,
-                    "rationale": f"pH varies by {variability['ph']:.1f} units across depth"
-                    " - check liming needs",
+                    "rationale": (
+                        f"pH 垂向变幅约 {variability['ph']:.1f} — 建议关注调酸/石灰需求"
+                    ),
                 },
             }
         )
@@ -1402,7 +1405,7 @@ def compute_sampling_zones(
                     "properties": {
                         "zone_type": "water_holding_variability",
                         "priority": 3,
-                        "rationale": "High AWC variability - verify water-holding capacity",
+                        "rationale": "有效持水量变异高 — 建议核实保水能力",
                     },
                 }
             )
@@ -1422,7 +1425,7 @@ def compute_sampling_zones(
                 "properties": {
                     "zone_type": "field_boundary",
                     "priority": 3,
-                    "rationale": "Field boundary zone - edge effects and compaction risk",
+                    "rationale": "田块边界区域 — 边缘效应与压实风险",
                 },
             }
         )
@@ -1523,7 +1526,7 @@ def assess_crop_suitability(
                 soil_score *= 1.0 - min(1.0, ph_dist / 2.0) * 0.4
                 if ph_dist > 0.5:
                     limiting.append(
-                        f"pH {avg_ph:.1f} outside optimal {req.ph_min}–{req.ph_max}"
+                        f"pH {avg_ph:.1f} 超出适宜范围 {req.ph_min}–{req.ph_max}"
                     )
 
         # AWC
@@ -1533,18 +1536,18 @@ def assess_crop_suitability(
                 soil_score *= max(0.3, ratio)
                 if ratio < 0.8:
                     limiting.append(
-                        f"AWC {awc_mm:.0f}mm below {req.min_awc_mm:.0f}mm minimum"
+                        f"有效持水量 {awc_mm:.0f} mm，低于最低要求 {req.min_awc_mm:.0f} mm"
                     )
 
         # Texture
         if texture and texture not in req.preferred_textures:
             soil_score *= 0.75
-            limiting.append(f"Texture '{texture}' not preferred")
+            limiting.append(f"质地「{texture}」非优选")
 
         # Drainage
         if drainage and drainage not in req.drainage_tolerance:
             soil_score *= 0.65
-            limiting.append(f"Drainage '{drainage}' not suitable")
+            limiting.append(f"排水「{drainage}」不适宜")
 
         # SOC
         if topsoil_soc is not None and req.min_soc_g_kg > 0:
@@ -1553,7 +1556,7 @@ def assess_crop_suitability(
                 soil_score *= max(0.5, ratio)
                 if ratio < 0.8:
                     limiting.append(
-                        f"SOC {topsoil_soc:.1f}g/kg below {req.min_soc_g_kg:.0f}g/kg"
+                        f"SOC {topsoil_soc:.1f} g/kg，低于最低要求 {req.min_soc_g_kg:.0f} g/kg"
                     )
 
         # Clay constraints
@@ -1561,12 +1564,12 @@ def assess_crop_suitability(
             if topsoil_clay > req.max_clay_pct:
                 soil_score *= 0.6
                 limiting.append(
-                    f"Clay {topsoil_clay:.0f}% exceeds {req.max_clay_pct:.0f}% max"
+                    f"黏粒 {topsoil_clay:.0f}%，超过上限 {req.max_clay_pct:.0f}%"
                 )
             if topsoil_clay < req.min_clay_pct:
                 soil_score *= 0.7
                 limiting.append(
-                    f"Clay {topsoil_clay:.0f}% below {req.min_clay_pct:.0f}% min"
+                    f"黏粒 {topsoil_clay:.0f}%，低于下限 {req.min_clay_pct:.0f}%"
                 )
 
         # CEC
@@ -1576,7 +1579,7 @@ def assess_crop_suitability(
                 soil_score *= max(0.5, ratio)
                 if ratio < 0.7:
                     limiting.append(
-                        f"CEC {topsoil_cec:.1f} below {req.min_cec_cmol_kg:.0f} cmol/kg"
+                        f"CEC {topsoil_cec:.1f}，低于最低要求 {req.min_cec_cmol_kg:.0f} cmol/kg"
                     )
 
         # ── Pillar 2: Water Match (25%) ───────────────────────────
@@ -1592,7 +1595,7 @@ def assess_crop_suitability(
                 water_score *= max(0.2, ratio)
                 if ratio < 0.7:
                     limiting.append(
-                        f"Rainfall {annual_rain:.0f}mm below {req.min_annual_rainfall_mm:.0f}mm min"
+                        f"年降雨 {annual_rain:.0f} mm，低于最低要求 {req.min_annual_rainfall_mm:.0f} mm"
                     )
             elif annual_rain > req.max_annual_rainfall_mm:
                 excess = (
@@ -1603,14 +1606,14 @@ def assess_crop_suitability(
                 water_score *= max(0.3, 1.0 / excess)
                 if excess > 1.5:
                     limiting.append(
-                        f"Rainfall {annual_rain:.0f}mm exceeds {req.max_annual_rainfall_mm:.0f}mm max"
+                        f"年降雨 {annual_rain:.0f} mm，超过上限 {req.max_annual_rainfall_mm:.0f} mm"
                     )
 
         if water_balance is not None and water_balance < -50:
             deficit_penalty = min(0.4, abs(water_balance) / 500)
             water_score *= 1.0 - deficit_penalty
             if water_balance < -100:
-                limiting.append(f"Water deficit {water_balance:.0f}mm (30-day)")
+                limiting.append(f"近30天水分亏缺 {water_balance:.0f} mm")
 
         # ── Pillar 3: Climate Fit (20%) ───────────────────────────
         climate_score = 1.0
@@ -1621,27 +1624,27 @@ def assess_crop_suitability(
                 climate_score *= max(0.2, 1.0 - gap / 15.0)
                 if gap > 3:
                     limiting.append(
-                        f"Avg temp {avg_temp:.1f}°C below {req.min_temp_c:.0f}°C min"
+                        f"平均气温 {avg_temp:.1f}°C，低于最低要求 {req.min_temp_c:.0f}°C"
                     )
             elif avg_temp > req.max_temp_c:
                 gap = avg_temp - req.max_temp_c
                 climate_score *= max(0.2, 1.0 - gap / 15.0)
                 if gap > 3:
                     limiting.append(
-                        f"Avg temp {avg_temp:.1f}°C above {req.max_temp_c:.0f}°C max"
+                        f"平均气温 {avg_temp:.1f}°C，超过上限 {req.max_temp_c:.0f}°C"
                     )
 
         if min_temp is not None and min_temp < req.min_temp_c - 5:
             frost_gap = (req.min_temp_c - 5) - min_temp
             climate_score *= max(0.3, 1.0 - frost_gap / 20.0)
             if frost_gap > 5:
-                limiting.append(f"Extreme cold {min_temp:.0f}°C risks frost damage")
+                limiting.append(f"极端低温 {min_temp:.0f}°C，有霜冻风险")
 
         if max_temp is not None and max_temp > req.max_temp_c + 5:
             heat_gap = max_temp - (req.max_temp_c + 5)
             climate_score *= max(0.3, 1.0 - heat_gap / 20.0)
             if heat_gap > 5:
-                limiting.append(f"Extreme heat {max_temp:.0f}°C risks heat stress")
+                limiting.append(f"极端高温 {max_temp:.0f}°C，有热胁迫风险")
 
         # ── Pillar 4: Stress Resilience (15%) ─────────────────────
         stress_score = 1.0
@@ -1651,7 +1654,7 @@ def assess_crop_suitability(
             stress_score *= max(0.1, 1.0 - drought_severity * vulnerability)
             if drought_severity > 0.4 and req.drought_tolerance < 0.4:
                 limiting.append(
-                    f"Low drought tolerance ({req.drought_tolerance:.0%}) under active drought"
+                    f"当前干旱条件下耐旱性偏低（{req.drought_tolerance:.0%}）"
                 )
 
         # Flood/waterlogging: positive drought_idx indicates wet conditions
@@ -1660,9 +1663,7 @@ def assess_crop_suitability(
             vulnerability = 1.0 - req.flood_tolerance
             stress_score *= max(0.1, 1.0 - flood_severity * vulnerability)
             if flood_severity > 0.3 and req.flood_tolerance < 0.3:
-                limiting.append(
-                    f"Low flood tolerance ({req.flood_tolerance:.0%}) under wet conditions"
-                )
+                limiting.append(f"过湿条件下耐涝性偏低（{req.flood_tolerance:.0%}）")
 
         # ── Weighted combination ──────────────────────────────────
         combined = (
@@ -1748,44 +1749,44 @@ def classify_nutrient_risk(
     if avg_cec is not None:
         if avg_cec < 5:
             loss_score += 0.35
-            factors.append(f"Very low CEC ({avg_cec:.1f} cmol/kg)")
+            factors.append(f"CEC 偏低 ({avg_cec:.1f} cmol/kg)")
         elif avg_cec < 12:
             responsive_score += 0.25
-            factors.append(f"Moderate CEC ({avg_cec:.1f} cmol/kg)")
+            factors.append(f"CEC 中等 ({avg_cec:.1f} cmol/kg)")
         else:
             retain_score += 0.35
-            factors.append(f"High CEC ({avg_cec:.1f} cmol/kg)")
+            factors.append(f"CEC 很高 ({avg_cec:.1f} cmol/kg)")
 
     # Sand/clay-based
     if avg_sand is not None and avg_sand > 70:
         loss_score += 0.25
-        factors.append(f"High sand ({avg_sand:.0f}%)")
+        factors.append(f"砂粒含量高 ({avg_sand:.0f}%)")
     elif avg_clay is not None and avg_clay > 35:
         retain_score += 0.25
-        factors.append(f"High clay ({avg_clay:.0f}%)")
+        factors.append(f"黏粒含量高 ({avg_clay:.0f}%)")
 
     # SOC-based
     if avg_soc is not None:
         if avg_soc < 10:
             responsive_score += 0.2
-            factors.append(f"Low SOC ({avg_soc:.1f} g/kg)")
+            factors.append(f"SOC 偏低 ({avg_soc:.1f} g/kg)")
         elif avg_soc > 25:
             retain_score += 0.15
-            factors.append(f"High SOC ({avg_soc:.1f} g/kg)")
+            factors.append(f"SOC 较高 ({avg_soc:.1f} g/kg)")
 
     # pH-based
     if ph is not None:
         if ph < 5.5:
             responsive_score += 0.15
-            factors.append(f"Acidic pH ({ph:.1f})")
+            factors.append(f"酸性 pH ({ph:.1f})")
         elif ph > 7.5:
             responsive_score += 0.1
-            factors.append(f"Alkaline pH ({ph:.1f})")
+            factors.append(f"碱性 pH ({ph:.1f})")
 
     # Leaching risk integration
     if leaching is not None and leaching > 0.5:
         loss_score += 0.2
-        factors.append(f"High leaching risk ({leaching:.2f})")
+        factors.append(f"淋失风险高 ({leaching:.2f})")
 
     # Determine dominant classification
     scores = {
@@ -1798,19 +1799,15 @@ def classify_nutrient_risk(
 
     interpretations = {
         "nutrient_loss_risk": (
-            "This soil has a high risk of nutrient leaching due to coarse "
-            "texture and/or low cation exchange capacity. Applied nutrients "
-            "may be lost quickly through drainage."
+            "质地偏粗和/或阳离子交换量偏低，养分淋失风险较高，"
+            "施用养分可能随排水较快流失。"
         ),
         "nutrient_retentive": (
-            "This soil has good nutrient retention characteristics due to "
-            "fine texture, high CEC, and/or organic matter content. Applied "
-            "nutrients are likely to remain plant-available."
+            "该土壤因质地偏细、CEC 较高和/或有机质含量较好，保肥能力较强，"
+            "施用养分较易保留在作物可利用状态。"
         ),
         "nutrient_responsive": (
-            "This soil is likely to respond well to nutrient inputs due to "
-            "moderate capacity with room for improvement. Targeted "
-            "amendments may be particularly effective."
+            "保肥能力中等、仍有提升空间，针对性培肥/调理可能效果更明显。"
         ),
     }
 
@@ -1877,9 +1874,8 @@ def estimate_sequestration_potential(
         sequestration_potential_t_ha=seq_potential,
         climate_zone=climate_zone,
         disclaimer=(
-            "These are rough estimates based on soil type and climate zone. "
-            "Not suitable for carbon credit verification. Actual sequestration "
-            "depends on management practices, crop residue inputs, and local conditions."
+            "以上为基于土壤类型与气候带的粗略估算，不适用于碳汇核证。"
+            "实际固碳量取决于田间管理、秸秆还田与当地条件。"
         ),
     )
 
@@ -2001,10 +1997,10 @@ def compute_soil_weather_stress(
         return SoilWeatherStress(
             status="unknown",
             severity=0.0,
-            moisture_status="Insufficient data to assess",
+            moisture_status="数据不足，无法评估",
             awc_rootzone_mm=awc,
             water_balance_30d_mm=water_balance_30d_mm,
-            factors=["Missing soil AWC or weather data"],
+            factors=["缺少土壤有效持水量或天气数据"],
         )
 
     # Drought stress: water deficit exceeds soil storage capacity
@@ -2012,8 +2008,7 @@ def compute_soil_weather_stress(
         severity = min(1.0, abs(water_balance_30d_mm + awc) / awc) if awc > 0 else 0.5
         status = "drought_stress"
         factors.append(
-            f"Water deficit ({water_balance_30d_mm:.0f}mm) exceeds "
-            f"rootzone capacity ({awc:.0f}mm)"
+            f"水分亏缺（{water_balance_30d_mm:.0f} mm）超过根区持水能力（{awc:.0f} mm）"
         )
 
     # Waterlogging: water excess + poor drainage
@@ -2027,8 +2022,7 @@ def compute_soil_weather_stress(
             severity = min(1.0, (water_balance_30d_mm - awc) / awc) if awc > 0 else 0.5
             status = "wet_stress"
             factors.append(
-                f"Water surplus ({water_balance_30d_mm:.0f}mm) with "
-                f"poor drainage ({drainage})"
+                f"水分盈余（{water_balance_30d_mm:.0f} mm），排水不良（{drainage}）"
             )
         else:
             # Moderate excess but reasonable drainage
@@ -2037,14 +2031,14 @@ def compute_soil_weather_stress(
             )
             if severity > 0.2:
                 status = "wet_stress"
-                factors.append(f"Moderate water surplus ({water_balance_30d_mm:.0f}mm)")
+                factors.append(f"中等水分盈余（{water_balance_30d_mm:.0f} mm）")
     else:
         # Within bounds - check if approaching stress
         water_ratio = water_balance_30d_mm / awc if awc > 0 else 0
         if water_ratio < -0.5:
             severity = 0.3
             status = "approaching_drought"
-            factors.append("Water balance trending toward deficit")
+            factors.append("水分平衡趋向亏缺")
 
     # Additional context from drought index
     if drought_index is not None:
@@ -2052,33 +2046,33 @@ def compute_soil_weather_stress(
             severity = max(severity, 0.6)
             if status == "optimal":
                 status = "drought_stress"
-            factors.append(f"Drought index: {drought_index:.1f}")
+            factors.append(f"干旱指数：{drought_index:.1f}")
         elif drought_index > 1.5:
             severity = max(severity, 0.4)
             if status == "optimal":
                 status = "wet_stress"
-            factors.append(f"Wet anomaly index: {drought_index:.1f}")
+            factors.append(f"偏湿异常指数：{drought_index:.1f}")
 
     # Soil moisture crosscheck
     if soil_moisture_top is not None:
         if soil_moisture_top < 0.1 and status != "wet_stress":
             severity = max(severity, 0.4)
-            factors.append(f"Very low top-soil moisture ({soil_moisture_top:.3f})")
+            factors.append(f"表层土壤水分很低（{soil_moisture_top:.3f}）")
         elif soil_moisture_top > 0.4 and status != "drought_stress":
-            factors.append(f"High top-soil moisture ({soil_moisture_top:.3f})")
+            factors.append(f"表层土壤水分偏高（{soil_moisture_top:.3f}）")
 
     statuses = {
-        "drought_stress": "Dry stress - water deficit exceeds rootzone capacity",
-        "approaching_drought": "Approaching moisture deficit",
-        "optimal": "Adequate moisture conditions",
-        "wet_stress": "Wet stress - waterlogging risk present",
-        "unknown": "Insufficient data",
+        "drought_stress": "干旱胁迫 — 水分亏缺超过根区持水能力",
+        "approaching_drought": "水分趋向亏缺",
+        "optimal": "水分条件适宜",
+        "wet_stress": "过湿胁迫 — 存在渍水风险",
+        "unknown": "数据不足",
     }
 
     return SoilWeatherStress(
         status=status,
         severity=round(severity, 2),
-        moisture_status=statuses.get(status, "Unknown"),
+        moisture_status=statuses.get(status, "未知"),
         awc_rootzone_mm=awc,
         water_balance_30d_mm=water_balance_30d_mm,
         factors=factors,
@@ -2166,7 +2160,7 @@ def evaluate_soil_alerts(
                 SoilAlertCandidate(
                     rule_name="soil_ph_very_low",
                     severity="high",
-                    message=f"Very low soil pH ({ph:.1f}) - aluminum toxicity risk",
+                    message=f"土壤 pH 极低（{ph:.1f}）— 存在铝毒风险",
                     soil_context={"ph": ph, "threshold": 4.5},
                 )
             )
@@ -2175,7 +2169,7 @@ def evaluate_soil_alerts(
                 SoilAlertCandidate(
                     rule_name="soil_ph_low",
                     severity="medium",
-                    message=f"Low soil pH ({ph:.1f}) - may limit nutrient availability",
+                    message=f"土壤 pH 偏低（{ph:.1f}）— 可能限制养分有效性",
                     soil_context={"ph": ph, "threshold": 5.5},
                 )
             )
@@ -2187,7 +2181,7 @@ def evaluate_soil_alerts(
                 SoilAlertCandidate(
                     rule_name="soil_soc_very_low",
                     severity="high",
-                    message=f"Very low organic carbon ({topsoil_soc:.1f} g/kg) - soil health concern",
+                    message=f"有机碳极低（{topsoil_soc:.1f} g/kg）— 土壤健康需关注",
                     soil_context={
                         "soc_g_kg": round(topsoil_soc, 1),
                         "depth": "0-30cm",
@@ -2200,7 +2194,7 @@ def evaluate_soil_alerts(
                 SoilAlertCandidate(
                     rule_name="soil_soc_low",
                     severity="medium",
-                    message=f"Low organic carbon ({topsoil_soc:.1f} g/kg) - consider organic amendments",
+                    message=f"有机碳偏低（{topsoil_soc:.1f} g/kg）— 建议增施有机物料",
                     soil_context={
                         "soc_g_kg": round(topsoil_soc, 1),
                         "depth": "0-30cm",
@@ -2215,7 +2209,7 @@ def evaluate_soil_alerts(
             SoilAlertCandidate(
                 rule_name="soil_sand_high",
                 severity="medium",
-                message=f"High sand content ({topsoil_sand:.0f}%) - high nutrient leaching risk",
+                message=f"砂粒含量高（{topsoil_sand:.0f}%）— 养分淋失风险高",
                 soil_context={"sand_pct": round(topsoil_sand, 1), "threshold": 80.0},
             )
         )
@@ -2226,7 +2220,7 @@ def evaluate_soil_alerts(
             SoilAlertCandidate(
                 rule_name="soil_cec_low",
                 severity="medium",
-                message=f"Very low CEC ({topsoil_cec:.1f} cmol/kg) - poor nutrient retention",
+                message=f"CEC 很低（{topsoil_cec:.1f} cmol/kg）— 保肥能力差",
                 soil_context={"cec_cmol_kg": round(topsoil_cec, 1), "threshold": 5.0},
             )
         )
@@ -2237,7 +2231,7 @@ def evaluate_soil_alerts(
             SoilAlertCandidate(
                 rule_name="soil_compaction",
                 severity="high" if compaction > 0.8 else "medium",
-                message=f"High compaction risk (score: {compaction:.2f}) - may restrict root growth",
+                message=f"压实风险高（评分：{compaction:.2f}）— 可能限制根系生长",
                 soil_context={"compaction_risk": compaction, "threshold": 0.6},
             )
         )
@@ -2248,8 +2242,8 @@ def evaluate_soil_alerts(
             SoilAlertCandidate(
                 rule_name="soil_waterlogging",
                 severity="high" if waterlogging > 0.8 else "medium",
-                message=f"High waterlogging risk (score: {waterlogging:.2f})"
-                + (f" with {drainage}" if drainage else ""),
+                message=f"渍水风险高（评分：{waterlogging:.2f}）"
+                + (f"，排水等级：{drainage}" if drainage else ""),
                 soil_context={
                     "waterlogging_risk": waterlogging,
                     "drainage_class": drainage,
