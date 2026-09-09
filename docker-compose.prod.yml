@@ -28,6 +28,7 @@ services:
           cpus: "0.25"
           memory: 256M
 
+  # MinIO only when started with --profile minio (see base compose)
   minio:
     restart: unless-stopped
     deploy:

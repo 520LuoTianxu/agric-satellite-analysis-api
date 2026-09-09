@@ -3,6 +3,8 @@
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Default object store: Aliyun OSS (no MinIO). Optional:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile minio up --build
 #
 # Exposes service ports to localhost for local development and debugging.
 # Not used in production - see docker-compose.prod.yml instead.

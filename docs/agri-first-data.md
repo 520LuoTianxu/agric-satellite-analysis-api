@@ -2,6 +2,11 @@
 
 How OpenFarm fields relate to the `agri` schema after the lonlat_v1 / no-OSS work.
 
+## Object storage (uploads / COGs)
+
+Default object store is **Aliyun OSS** (`STORAGE_BACKEND=oss`). MinIO is optional and only starts with `docker compose --profile minio up`. Celery `write_cog` and uploads go through `app.core.storage.get_storage()`; TiTiler reads COGs via the OSS S3-compatible API (`TILER_*` / `OSS_*`). See README § Object storage.
+
+
 ## Remote sensing (truth)
 
 | Source | Role |
