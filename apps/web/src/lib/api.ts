@@ -207,7 +207,7 @@ export interface FieldImportResult {
 
 // ── Index Configuration ──────────────────────────────────────────────
 
-export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI" | "NDMI" | "NDRE" | "CIRE" | "MNDWI";
+export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI" | "NDMI" | "NDRE" | "CIRE" | "MNDWI" | "VV" | "VH";
 
 export interface IndexConfig {
     label: string;
@@ -286,6 +286,23 @@ export const INDEX_CONFIG: Record<IndexType, IndexConfig> = {
         gradient: "var(--ramp-water)",
         threshold: 0.0,
     },
+    VV: {
+        label: "VV",
+        colormap: "viridis",
+        // Sentinel-1 σ⁰ approx in dB (typical agri range)
+        rescaleMin: -25,
+        rescaleMax: 0,
+        gradient: "var(--ramp-water)",
+        threshold: -18,
+    },
+    VH: {
+        label: "VH",
+        colormap: "viridis",
+        rescaleMin: -30,
+        rescaleMax: -5,
+        gradient: "var(--ramp-water)",
+        threshold: -22,
+    },
 };
 
 export const ALL_INDEX_TYPES: IndexType[] = [
@@ -297,6 +314,8 @@ export const ALL_INDEX_TYPES: IndexType[] = [
     "NDRE",
     "CIRE",
     "MNDWI",
+    "VV",
+    "VH",
 ];
 
 // ── Monitoring Types ─────────────────────────────────────────────────
