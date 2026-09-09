@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useLocale, useTranslations } from "next-intl";
-import { ChevronLeft, ChevronRight, Download, Loader2 } from "lucide-react";
+import { ChevronRight, Download, Loader2 } from "lucide-react";
 import {
     agriApi,
     cropsApi,
@@ -12,7 +12,6 @@ import {
     type OverviewChild,
     type OverviewLevel,
     type OverviewStats,
-    type OverviewWeakParcel,
 } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,7 +28,6 @@ const CHINA_BOUNDS: [[number, number], [number, number]] = [
 const CHINA_CENTER: [number, number] = [104.5, 35.5];
 
 const DEFAULT_PHENOLOGY_MONTHS = [6, 7, 8, 9];
-const WEAK_PAGE_SIZE = 20;
 
 type DrillState = {
     level: OverviewLevel;
@@ -182,10 +180,6 @@ export default function OverviewPage() {
     const [mapReady, setMapReady] = useState(false);
     const [mapError, setMapError] = useState<string | null>(null);
 
-    const [weakItems, setWeakItems] = useState<OverviewWeakParcel[]>([]);
-    const [weakTotal, setWeakTotal] = useState(0);
-    const [weakOffset, setWeakOffset] = useState(0);
-    const [weakLoading, setWeakLoading] = useState(false);
 
     const mapContainerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<maplibregl.Map | null>(null);
@@ -321,40 +315,6 @@ export default function OverviewPage() {
         [drill, fromDate, toDate, crop, t],
     );
 
-    // Reset weak pagination when filters / drill change
-    useEffect(() => {
-        setWeakOffset(0);
-    }, [drill, fromDate, toDate, crop]);
-
-    const loadWeak = useCallback(
-        async (d: DrillState, from: string, to: string, cropKey: string, offset: number) => {
-            setWeakLoading(true);
-            try {
-                const res = await agriApi.overviewWeakParcels({
-                    level: d.level,
-                    code: d.code,
-                    name: d.name,
-                    from,
-                    to,
-                    crop: cropKey || undefined,
-                    limit: WEAK_PAGE_SIZE,
-                    offset,
-                });
-                setWeakItems(res.items);
-                setWeakTotal(res.total);
-            } catch {
-                setWeakItems([]);
-                setWeakTotal(0);
-            } finally {
-                setWeakLoading(false);
-            }
-        },
-        [],
-    );
-
-    useEffect(() => {
-        void loadWeak(drill, fromDate, toDate, crop, weakOffset);
-    }, [drill, fromDate, toDate, crop, weakOffset, loadWeak]);
 
     const drillToChild = useCallback((child: OverviewChild) => {
         setDrill({ level: child.level, code: child.code ?? undefined, name: child.name });
@@ -677,8 +637,6 @@ export default function OverviewPage() {
     ];
 
     const legendColor = metricHighColor(metric);
-    const weakPage = Math.floor(weakOffset / WEAK_PAGE_SIZE) + 1;
-    const weakPages = Math.max(1, Math.ceil(weakTotal / WEAK_PAGE_SIZE));
 
     return (
         <div className="flex h-[calc(100vh-0px)] min-h-0 flex-1 flex-col gap-1.5 p-2 lg:p-3">
@@ -785,7 +743,7 @@ export default function OverviewPage() {
             </nav>
 
             <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_200px]">
-                {/* Map + children list + weak table */}
+                {/* Map */}
                 <div className="flex min-h-0 flex-col gap-1.5 overflow-hidden">
                     {/* Metric toggle */}
                     <div className="flex flex-wrap items-center gap-1">
@@ -851,126 +809,6 @@ export default function OverviewPage() {
                             {t("clickMapHint")}
                         </div>
                     </div>
-
-                    <Card className="max-h-28 shrink-0 overflow-hidden">
-                        <CardHeader className="px-2 py-1.5">
-                            <CardTitle className="text-xs font-medium">{t("children")}</CardTitle>
-                        </CardHeader>
-                        <CardContent className="max-h-20 overflow-y-auto px-1 pb-1.5 pt-0">
-                            {!stats?.children?.length ? (
-                                <p className="px-2 text-xs text-muted-foreground">{t("noChildren")}</p>
-                            ) : (
-                                <ul className="space-y-0.5">
-                                    {stats.children.map((c) => (
-                                        <li key={`${c.level}-${c.code ?? c.name}`}>
-                                            <Button
-                                                variant="ghost"
-                                                className="h-auto w-full justify-between px-2 py-1.5 text-left"
-                                                onClick={() => drillToChild(c)}
-                                            >
-                                                <span className="truncate font-medium">{c.name}</span>
-                                                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                                                    {c.parcel_count} · 旱{c.drought_alert ?? c.drought_severe} · 涝
-                                                    {c.flood_alert ?? c.flood} · 弱{c.weak_growth}
-                                                </span>
-                                            </Button>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </CardContent>
-                    </Card>
-
-                    {/* Weak-growth parcels table */}
-                    <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 px-2 py-1.5">
-                            <CardTitle className="text-xs font-medium">{t("weakParcelsTitle")}</CardTitle>
-                            <span className="text-xs text-muted-foreground tabular-nums">
-                                {t("weakParcelsTotal", { total: weakTotal })}
-                            </span>
-                        </CardHeader>
-                        <CardContent className="px-2 pb-3 pt-0">
-                            {weakLoading ? (
-                                <div className="flex items-center justify-center py-6">
-                                    <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                                </div>
-                            ) : !weakItems.length ? (
-                                <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-                                    {t("weakParcelsEmpty")}
-                                </p>
-                            ) : (
-                                <>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full text-xs">
-                                            <thead>
-                                                <tr className="border-b text-left text-muted-foreground">
-                                                    <th className="px-2 py-1.5 font-medium">{t("colName")}</th>
-                                                    <th className="px-2 py-1.5 font-medium">{t("colArea")}</th>
-                                                    <th className="px-2 py-1.5 font-medium">{t("colNdvi")}</th>
-                                                    <th className="px-2 py-1.5 font-medium">{t("colDate")}</th>
-                                                    <th className="px-2 py-1.5 font-medium">{t("colAdmin")}</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {weakItems.map((row) => (
-                                                    <tr key={row.land_id} className="border-b border-border/40">
-                                                        <td className="max-w-[140px] truncate px-2 py-1.5 font-medium">
-                                                            {row.land_name || row.land_id}
-                                                        </td>
-                                                        <td className="px-2 py-1.5 tabular-nums">
-                                                            {Math.round(row.land_area_mu).toLocaleString()}
-                                                        </td>
-                                                        <td className="px-2 py-1.5 tabular-nums">
-                                                            {row.ndvi_avg.toFixed(3)}
-                                                        </td>
-                                                        <td className="px-2 py-1.5 tabular-nums">
-                                                            {row.scene_date ?? "—"}
-                                                        </td>
-                                                        <td className="max-w-[160px] truncate px-2 py-1.5 text-muted-foreground">
-                                                            {[row.province_name, row.city_name, row.county_name]
-                                                                .filter(Boolean)
-                                                                .join(" / ") || "—"}
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                    {weakTotal > WEAK_PAGE_SIZE && (
-                                        <div className="mt-2 flex items-center justify-between px-2">
-                                            <Button
-                                                type="button"
-                                                size="sm"
-                                                variant="outline"
-                                                className="h-7"
-                                                disabled={weakOffset <= 0 || weakLoading}
-                                                onClick={() =>
-                                                    setWeakOffset((o) => Math.max(0, o - WEAK_PAGE_SIZE))
-                                                }
-                                            >
-                                                <ChevronLeft className="h-3.5 w-3.5" />
-                                                {t("prevPage")}
-                                            </Button>
-                                            <span className="text-[11px] text-muted-foreground tabular-nums">
-                                                {weakPage} / {weakPages}
-                                            </span>
-                                            <Button
-                                                type="button"
-                                                size="sm"
-                                                variant="outline"
-                                                className="h-7"
-                                                disabled={weakOffset + WEAK_PAGE_SIZE >= weakTotal || weakLoading}
-                                                onClick={() => setWeakOffset((o) => o + WEAK_PAGE_SIZE)}
-                                            >
-                                                {t("nextPage")}
-                                                <ChevronRight className="h-3.5 w-3.5" />
-                                            </Button>
-                                        </div>
-                                    )}
-                                </>
-                            )}
-                        </CardContent>
-                    </Card>
                 </div>
 
                 {/* Right panel cards */}
