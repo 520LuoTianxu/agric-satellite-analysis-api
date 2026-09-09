@@ -110,6 +110,37 @@ async function apiFetch<T>(
     return res.json();
 }
 
+/** Authenticated binary/CSV download → triggers browser save. */
+async function apiDownload(path: string, fallbackName: string): Promise<void> {
+    const token = await getToken();
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+    };
+    const org = getOrgId();
+    if (org) headers["X-Org-Id"] = org;
+    const res = await fetch(`${getApiBase()}${path}`, { headers });
+    if (!res.ok) {
+        let detail = res.statusText;
+        try {
+            const body = await res.json();
+            detail = body.detail || JSON.stringify(body);
+        } catch { /* ignore */ }
+        throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/.exec(cd);
+    const filename = m?.[1] || fallbackName;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface Paginated<T> {
@@ -1078,6 +1109,92 @@ export function parseAgriLandId(tags: string[] | null | undefined): string | nul
 }
 
 export const agriApi = {
+    overviewStats: (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        /** Crop key — phenology months for weak-growth only (does not filter parcels). */
+        crop?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        return apiFetch<OverviewStats>(`/agri/overview/stats?${params}`);
+    },
+    overviewWeakParcels: (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+        limit?: number;
+        offset?: number;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        params.set("limit", String(opts.limit ?? 50));
+        params.set("offset", String(opts.offset ?? 0));
+        return apiFetch<OverviewWeakParcels>(`/agri/overview/weak-parcels?${params}`);
+    },
+    overviewRegions: (opts: {
+        parentLevel?: OverviewLevel;
+        parentCode?: string;
+        parentName?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.parentLevel) params.set("parent_level", opts.parentLevel);
+        if (opts.parentCode) params.set("parent_code", opts.parentCode);
+        if (opts.parentName) params.set("parent_name", opts.parentName);
+        return apiFetch<OverviewRegions>(`/agri/overview/regions?${params}`);
+    },
+    overviewExportStatsCsv: async (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        return apiDownload(`/agri/overview/export/stats.csv?${params}`, "overview-stats.csv");
+    },
+    overviewExportWeakParcelsCsv: async (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+        limit?: number;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        params.set("limit", String(opts.limit ?? 5000));
+        return apiDownload(`/agri/overview/export/weak-parcels.csv?${params}`, "overview-weak-parcels.csv");
+    },
     scenes: (
         landId: string,
         opts: {
@@ -1106,6 +1223,109 @@ export const agriApi = {
             `/agri/lands/${encodeURIComponent(landId)}/scenes/summary`,
         ),
 };
+
+
+// ── China overview (全国态势) ──────────────────────────────────────
+
+export type OverviewLevel = "country" | "province" | "city" | "county";
+
+export interface OverviewRegionPathNode {
+    level: OverviewLevel;
+    code: string | null;
+    name: string;
+}
+
+export interface OverviewChild {
+    level: OverviewLevel;
+    code: string | null;
+    name: string;
+    parcel_count: number;
+    drought_severe: number;
+    /** severe + moderate + mild */
+    drought_alert: number;
+    /** open water: flood_severe + flood_moderate */
+    flood: number;
+    /** flood_severe + flood_moderate + flood_mild */
+    flood_alert?: number;
+    weak_growth: number;
+    area_mu: number;
+}
+
+export interface OverviewStats {
+    region: {
+        level: OverviewLevel;
+        code: string | null;
+        name: string;
+        path: OverviewRegionPathNode[];
+        adcode?: string | null;
+    };
+    filters: {
+        from: string;
+        to: string;
+        /** Crop key used for phenology months; null when default Jun–Sep. */
+        crop: string | null;
+        cloud_max_pct: number;
+        phenology_months: number[];
+        weak_ndvi_lt: number;
+        drought_source?: "pixels" | "scene_avg" | "cache";
+        cache_hit?: boolean;
+        pixels_parcels?: number;
+        pixels_classified?: number;
+    };
+    totals: { parcel_count: number; area_mu: number };
+    drought: {
+        severe: number;
+        moderate: number;
+        mild: number;
+        normal: number;
+        unknown: number;
+        area_mu: Record<string, number>;
+    };
+    flood: {
+        flood_severe?: number;
+        flood_moderate?: number;
+        flood_mild?: number;
+        /** open water = severe+moderate (compat) */
+        flood: number;
+        /** alias of flood_mild */
+        wet: number;
+        dry: number;
+        unknown: number;
+        area_mu: Record<string, number>;
+    };
+    weak_growth: { parcel_count: number; area_mu: number };
+    children: OverviewChild[];
+}
+
+export interface OverviewRegions {
+    parent_level: OverviewLevel | null;
+    parent_code: string | null;
+    parent_name: string | null;
+    children: {
+        level: OverviewLevel;
+        code: string | null;
+        name: string;
+        parcel_count: number;
+        area_mu: number;
+    }[];
+}
+
+export interface OverviewWeakParcel {
+    land_id: string;
+    land_name: string | null;
+    province_name: string | null;
+    city_name: string | null;
+    county_name: string | null;
+    land_area_mu: number;
+    ndvi_avg: number;
+    scene_date: string | null;
+    cloud_pct: number | null;
+}
+
+export interface OverviewWeakParcels {
+    total: number;
+    items: OverviewWeakParcel[];
+}
 
 // ── Share Links ──────────────────────────────────────────────────
 

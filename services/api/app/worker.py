@@ -37,6 +37,7 @@ celery_app.conf.update(
         "app.tasks.agri_alerts",
         "app.tasks.sentinel1",
         "app.tasks.assessment_report",
+        "app.tasks.overview_preagg",
     ],
     # Celery Beat schedule
     beat_schedule={
@@ -47,6 +48,11 @@ celery_app.conf.update(
         "fetch-weather-daily": {
             "task": "app.tasks.weather.schedule_daily_weather_fetch",
             "schedule": crontab(hour=8, minute=0),
+        },
+        # 02:30 Asia/Shanghai → 18:30 UTC (CST/CST no DST)
+        "refresh-overview-stats-daily": {
+            "task": "app.tasks.overview_preagg.refresh_overview_stats",
+            "schedule": crontab(hour=18, minute=30),
         },
     },
 )

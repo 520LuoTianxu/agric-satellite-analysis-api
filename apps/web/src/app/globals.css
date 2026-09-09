@@ -407,3 +407,15 @@
     padding: 1px 6px;
     font-size: 10px;
 }
+/* China overview map hover tooltip */
+.overview-hover-popup .maplibregl-popup-content {
+  padding: 8px 10px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  background: #fff;
+  color: #111827;
+}
+.overview-hover-popup .maplibregl-popup-tip {
+  border-top-color: #fff;
+}

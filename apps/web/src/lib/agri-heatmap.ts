@@ -156,7 +156,7 @@ export const VEG_GRADIENT_CSS =
     "linear-gradient(90deg, rgb(165,0,38), rgb(215,48,39), rgb(244,109,67), rgb(253,174,97), rgb(254,224,139), rgb(255,255,191), rgb(217,239,139), rgb(166,217,106), rgb(102,189,99), rgb(26,152,80), rgb(0,104,55))";
 
 export type AgriDroughtClass = "severe" | "moderate" | "mild" | "normal";
-export type AgriFloodClass = "flood" | "wet" | "dry";
+export type AgriFloodClass = "flood_severe" | "flood_moderate" | "flood_mild" | "dry";
 
 export const DROUGHT_CLASS_STYLE: Record<
     AgriDroughtClass,
@@ -173,9 +173,10 @@ export const FLOOD_CLASS_STYLE: Record<
     AgriFloodClass,
     { label: string; color: string; rgba: [number, number, number, number] }
 > = {
-    // Open water / flood: deep blue; wet soils: light blue; dry: transparent.
-    flood: { label: "积水/洪涝", color: "#08519c", rgba: [8, 81, 156, 235] },
-    wet: { label: "偏湿", color: "#6baed6", rgba: [107, 174, 214, 200] },
+    // Finer S1 flood tiers: 重/中/轻 + dry (transparent).
+    flood_severe: { label: "重度洪涝", color: "#08306b", rgba: [8, 48, 107, 240] },
+    flood_moderate: { label: "中度洪涝", color: "#08519c", rgba: [8, 81, 156, 230] },
+    flood_mild: { label: "轻度洪涝", color: "#6baed6", rgba: [107, 174, 214, 200] },
     dry: { label: "干燥地表", color: "#74c476", rgba: [116, 196, 118, 0] }, // alpha 0
 };
 
@@ -218,10 +219,12 @@ export function classifyDrought(ndvi: number, ndmi: number): AgriDroughtClass {
 export function classifyFlood(vvDb: number, vhDb: number | null): AgriFloodClass {
     if (!Number.isFinite(vvDb)) return "dry";
     const vh = vhDb != null && Number.isFinite(vhDb) ? vhDb : null;
-    // Strong water: VV very low; dual-pol confirms when VH available
-    if (vvDb <= -18 && (vh == null || vh <= -22)) return "flood";
-    if (vvDb <= -18) return "flood";
-    if (vvDb <= -15 || (vh != null && vvDb <= -14 && vh <= -20)) return "wet";
+    // 重: VV ≤ -20, or (VV ≤ -18 and VH ≤ -24)
+    if (vvDb <= -20 || (vvDb <= -18 && vh != null && vh <= -24)) return "flood_severe";
+    // 中: former open-water / flood band
+    if (vvDb <= -18) return "flood_moderate";
+    // 轻: former wet band
+    if (vvDb <= -15 || (vh != null && vvDb <= -14 && vh <= -20)) return "flood_mild";
     return "dry";
 }
 
@@ -490,8 +493,8 @@ function floodLegend(): AgriHeatmapLegend {
     return {
         kind: "classes",
         label: "洪涝 S1",
-        hint: "VV/VH 后向散射阈值 · 积水≈VV≲−18 dB",
-        classes: (["flood", "wet"] as AgriFloodClass[]).map((k) => ({
+        hint: "VV/VH 后向散射 · 重/中/轻 (VV≲−20 / −18 / −15 dB)",
+        classes: (["flood_severe", "flood_moderate", "flood_mild"] as AgriFloodClass[]).map((k) => ({
             key: k,
             label: FLOOD_CLASS_STYLE[k].label,
             color: FLOOD_CLASS_STYLE[k].color,
