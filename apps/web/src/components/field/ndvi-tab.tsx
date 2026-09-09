@@ -13,6 +13,7 @@ import {
     type NdviJob,
     type IndexType,
     type WeatherDaily,
+    type BackfillStatusResponse,
     INDEX_CONFIG,
     ALL_INDEX_TYPES,
 } from "@/lib/api";
@@ -136,11 +137,13 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     const [backfilling, setBackfilling] = useState(false);
     const [backfillTriggered, setBackfillTriggered] = useState(false);
     const [backfillActive, setBackfillActive] = useState(false);
+    const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
 
     // ── Active job tracking ──────────────────────────
     const [activeJob, setActiveJob] = useState<NdviJob | null>(null);
     const [jobIndices, setJobIndices] = useState<IndexType[]>([]);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const loadGenRef = useRef(0); // prevents stale fetch results
 
     // ── Load layers + stats for active index ─────────
@@ -192,16 +195,62 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
         loadData();
     }, [loadData]);
 
-    // ── Check backfill status on mount ──
+    const stopBackfillPoll = useCallback(() => {
+        if (backfillPollRef.current) {
+            clearInterval(backfillPollRef.current);
+            backfillPollRef.current = null;
+        }
+    }, []);
+
+    const startBackfillPoll = useCallback(() => {
+        if (isAgriField) return;
+        stopBackfillPoll();
+        let wasActive = true;
+        const tick = async () => {
+            try {
+                const res = await fieldsApi.backfillStatus(fieldId);
+                setBackfillProgress(res);
+                setBackfillActive(res.has_active_backfill);
+                if (res.has_active_backfill) {
+                    setBackfillTriggered(true);
+                    wasActive = true;
+                } else {
+                    if (wasActive) {
+                        setBackfillTriggered(false);
+                        loadData();
+                        onDataLoaded?.();
+                    }
+                    wasActive = false;
+                    stopBackfillPoll();
+                }
+            } catch {
+                /* ignore */
+            }
+        };
+        void tick();
+        backfillPollRef.current = setInterval(tick, 5000);
+    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
+
+    // One-shot on mount — resume interval only if current wave is active
     useEffect(() => {
         if (isAgriField) return; // agri panel polls its own backfill status
+        let cancelled = false;
         fieldsApi.backfillStatus(fieldId)
             .then((res) => {
+                if (cancelled) return;
+                setBackfillProgress(res);
                 setBackfillActive(res.has_active_backfill);
-                if (res.has_active_backfill) setBackfillTriggered(true);
+                if (res.has_active_backfill) {
+                    setBackfillTriggered(true);
+                    startBackfillPoll();
+                }
             })
-            .catch(() => { }); // silent - endpoint may not exist in older deployments
-    }, [fieldId, isAgriField]);
+            .catch(() => { });
+        return () => {
+            cancelled = true;
+            stopBackfillPoll();
+        };
+    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Fetch weather data when overlay is toggled on ──
     useEffect(() => {
@@ -264,6 +313,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     useEffect(() => {
         return () => {
             if (pollRef.current) clearInterval(pollRef.current);
+            if (backfillPollRef.current) clearInterval(backfillPollRef.current);
         };
     }, []);
 
@@ -329,11 +379,13 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             setBackfillTriggered(true);
             setBackfillActive(true);
             toast.success(tMon("backfill.started"));
+            startBackfillPoll();
         } catch (err: any) {
             const msg = err.detail || tMon("backfill.failed");
             if (err.status === 409) {
                 setBackfillActive(true);
                 setBackfillTriggered(true);
+                startBackfillPoll();
             }
             toast.error(msg);
         } finally {
@@ -533,17 +585,45 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             )}
 
             {/* ── Backfill in-progress banner ──────────── */}
-            {!isAgriField && stats.length < 10 && (backfillActive || backfillTriggered || stats.length === 0) && !loading && !activeJob && (
+            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
                 <Card className="bg-info-subtle">
-                    <CardContent className="flex items-start gap-2 p-3">
-                        <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
-                        <div>
-                            <p className="text-sm font-medium text-info">
-                                {tMon("backfill.processing")}
-                            </p>
-                            <p className="text-xs text-info/80">
-                                {tMon("backfill.processingDesc")}
-                            </p>
+                    <CardContent className="p-3 space-y-2">
+                        <div className="flex items-start gap-2">
+                            <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-info">
+                                    {backfillProgress?.phase === "bridge"
+                                        ? tMon("backfill.progressBridge")
+                                        : backfillProgress?.message || tMon("backfill.processing")}
+                                </p>
+                                <p className="text-xs text-info/80">
+                                    {backfillProgress
+                                        ? tMon("backfill.progressCounts", {
+                                              done: backfillProgress.completed_jobs,
+                                              total: Math.max(
+                                                  backfillProgress.total_jobs,
+                                                  backfillProgress.completed_jobs
+                                                      + backfillProgress.pending_jobs
+                                                      + backfillProgress.running_jobs,
+                                              ),
+                                              running: backfillProgress.running_jobs,
+                                              pending: backfillProgress.pending_jobs,
+                                          })
+                                        : tMon("backfill.processingDesc")}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="h-1.5 w-full rounded-full bg-info/15 overflow-hidden">
+                            <div
+                                className="h-full rounded-full bg-info transition-all duration-500"
+                                style={{
+                                    width: `${
+                                        backfillProgress?.phase === "bridge"
+                                            ? 100
+                                            : Math.min(100, Math.max(2, backfillProgress?.percent ?? 0))
+                                    }%`,
+                                }}
+                            />
                         </div>
                     </CardContent>
                 </Card>

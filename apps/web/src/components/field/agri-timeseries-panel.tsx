@@ -8,6 +8,7 @@ import {
     parseAgriLandId,
     type AgriLandScenesSummary,
     type AgriSceneProduct,
+    type BackfillStatusResponse,
     type FieldStat,
     type IndexType,
 } from "@/lib/api";
@@ -273,7 +274,9 @@ export default function AgriTimeseriesPanel({
     const landId = useMemo(() => parseAgriLandId(fieldTags), [fieldTags]);
     const [backfilling, setBackfilling] = useState(false);
     const [backfillActive, setBackfillActive] = useState(false);
+    const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
+    const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [summary, setSummary] = useState<AgriLandScenesSummary | null>(null);
     const [scenes, setScenes] = useState<AgriSceneProduct[]>([]);
     const [loading, setLoading] = useState(false);
@@ -357,43 +360,96 @@ export default function AgriTimeseriesPanel({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [landId, reloadKey]);
 
-    // Poll backfill status; when it finishes, reload agri scenes
-    useEffect(() => {
+    const stopBackfillPoll = useCallback(() => {
+        if (backfillPollRef.current) {
+            clearInterval(backfillPollRef.current);
+            backfillPollRef.current = null;
+        }
+    }, []);
+
+    const applyBackfillStatus = useCallback(
+        (res: BackfillStatusResponse, opts?: { wasActive?: boolean }) => {
+            setBackfillProgress(res);
+            setBackfillActive(res.has_active_backfill);
+            if (res.has_active_backfill) return true;
+            if (opts?.wasActive) {
+                setReloadKey((k) => k + 1);
+                toast.success(t("refreshComplete"));
+            }
+            return false;
+        },
+        [t],
+    );
+
+    const startBackfillPoll = useCallback(() => {
         if (!fieldId) return;
-        let cancelled = false;
-        let wasActive = false;
+        stopBackfillPoll();
+        let wasActive = true;
         const tick = async () => {
             try {
                 const res = await fieldsApi.backfillStatus(fieldId);
-                if (cancelled) return;
-                setBackfillActive(res.has_active_backfill);
-                if (res.has_active_backfill) {
+                const stillActive = applyBackfillStatus(res, { wasActive });
+                if (stillActive) {
                     wasActive = true;
-                } else if (wasActive) {
+                } else {
                     wasActive = false;
-                    setReloadKey((k) => k + 1);
+                    stopBackfillPoll();
                 }
+            } catch {
+                /* ignore transient poll errors */
+            }
+        };
+        void tick();
+        backfillPollRef.current = setInterval(tick, 5000);
+    }, [fieldId, applyBackfillStatus, stopBackfillPoll]);
+
+    // One-shot on mount: resume polling only if a current-wave job is truly active
+    useEffect(() => {
+        if (!fieldId) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fieldsApi.backfillStatus(fieldId);
+                if (cancelled) return;
+                const active = applyBackfillStatus(res);
+                if (active) startBackfillPoll();
             } catch {
                 /* ignore */
             }
-        };
-        tick();
-        const id = setInterval(tick, 8000);
+        })();
         return () => {
             cancelled = true;
-            clearInterval(id);
+            stopBackfillPoll();
         };
-    }, [fieldId]);
+    }, [fieldId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleRefreshRs = async () => {
         setBackfilling(true);
         try {
             await fieldsApi.backfillIndices(fieldId);
             setBackfillActive(true);
+            setBackfillProgress((prev) =>
+                prev
+                    ? { ...prev, has_active_backfill: true, phase: "stac", message: t("refreshInProgress") }
+                    : {
+                          field_id: fieldId,
+                          has_active_backfill: true,
+                          pending_jobs: 0,
+                          running_jobs: 0,
+                          completed_jobs: 0,
+                          failed_jobs: 0,
+                          total_jobs: 0,
+                          percent: 0,
+                          phase: "stac",
+                          message: t("refreshInProgress"),
+                      },
+            );
             toast.success(t("refreshStarted"));
+            startBackfillPoll();
         } catch (e: any) {
             if (e?.status === 409) {
                 setBackfillActive(true);
+                startBackfillPoll();
             }
             toast.error(e?.detail || t("refreshFailed"));
         } finally {
@@ -617,10 +673,41 @@ export default function AgriTimeseriesPanel({
             </CardHeader>
             <CardContent className="px-3 pb-3 pt-0 space-y-2">
                 {backfillActive && (
-                    <p className="text-[11px] text-info flex items-center gap-1.5">
-                        <History className="h-3 w-3" />
-                        {t("refreshInProgress")}
-                    </p>
+                    <div className="rounded-md border border-info/30 bg-info-subtle/60 px-2.5 py-2 space-y-1.5">
+                        <p className="text-[11px] text-info flex items-center gap-1.5 font-medium">
+                            <History className="h-3 w-3 shrink-0" />
+                            {backfillProgress?.phase === "bridge"
+                                ? t("progressBridge")
+                                : backfillProgress?.message || t("refreshInProgress")}
+                        </p>
+                        {backfillProgress && backfillProgress.phase !== "bridge" && (
+                            <p className="text-[10px] text-info/80 tabular-nums">
+                                {t("progressCounts", {
+                                    done: backfillProgress.completed_jobs,
+                                    total: Math.max(
+                                        backfillProgress.total_jobs,
+                                        backfillProgress.completed_jobs
+                                            + backfillProgress.pending_jobs
+                                            + backfillProgress.running_jobs,
+                                    ),
+                                    running: backfillProgress.running_jobs,
+                                    pending: backfillProgress.pending_jobs,
+                                })}
+                            </p>
+                        )}
+                        <div className="h-1.5 w-full rounded-full bg-info/15 overflow-hidden">
+                            <div
+                                className="h-full rounded-full bg-info transition-all duration-500"
+                                style={{
+                                    width: `${
+                                        backfillProgress?.phase === "bridge"
+                                            ? 100
+                                            : Math.min(100, Math.max(2, backfillProgress?.percent ?? 0))
+                                    }%`,
+                                }}
+                            />
+                        </div>
+                    </div>
                 )}
                 {loading && (
                     <div className="flex items-center justify-center py-8 gap-2 text-muted-foreground text-xs">

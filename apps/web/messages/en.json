@@ -451,7 +451,10 @@
             "started": "Remote-sensing refresh started. Reload the panel when complete.",
             "failed": "Failed to start remote-sensing refresh",
             "inProgressTitle": "Remote-sensing refresh already in progress",
-            "agriStarted": "STAC backfill started; results will bridge into the agri index panel."
+            "agriStarted": "STAC backfill started; results will bridge into the agri index panel.",
+            "progressBridge": "Writing agri lonlat…",
+            "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})",
+            "progressBanner": "Fetching remote sensing… {message}"
         },
         "jobFailed": "Job failed",
         "jobFailedWith": "{names} job failed: {error}",
@@ -645,7 +648,8 @@
         "vpdLow": "Low - stomata closed",
         "vpdIdeal": "Ideal - active transpiration",
         "vpdModerate": "Moderate - stress risk",
-        "vpdHigh": "High - severe stress"
+        "vpdHigh": "High - severe stress",
+        "fetchingProgress": "Fetching weather data…"
     },
     "soil": {
         "title": "Soil profile",
@@ -768,7 +772,8 @@
         "priority": "Priority",
         "priorityHigh": "High",
         "priorityMedium": "Medium",
-        "priorityLow": "Low"
+        "priorityLow": "Low",
+        "fetchingProgress": "Fetching soil data…"
     },
     "seo": {
         "title": "OpenFarm: Open Source Crop Intelligence Platform",
@@ -869,6 +874,9 @@
         "heatmapDate": "Heatmap date: {date} · {mode}",
         "pickDate": "Select a date on the chart to load the heatmap",
         "pixelsMeta": " · {pixels} pixels",
-        "meanMeta": " · mean≈{mean}"
+        "meanMeta": " · mean≈{mean}",
+        "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
+        "progressBridge": "Writing agri lonlat…",
+        "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})"
     }
 }

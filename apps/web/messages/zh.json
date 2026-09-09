@@ -451,7 +451,10 @@
             "started": "已开始重新拉取遥感数据。完成后请刷新面板查看。",
             "failed": "启动遥感数据拉取失败",
             "inProgressTitle": "遥感数据拉取已在进行中",
-            "agriStarted": "已启动 STAC 遥感回填，完成后将桥接到 agri 指数面板。"
+            "agriStarted": "已启动 STAC 遥感回填，完成后将桥接到 agri 指数面板。",
+            "progressBridge": "正在写入 agri lonlat…",
+            "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）",
+            "progressBanner": "正在拉取遥感数据… {message}"
         },
         "jobFailed": "任务失败",
         "jobFailedWith": "{names} 任务失败：{error}",
@@ -645,7 +648,8 @@
         "vpdLow": "低 - 气孔关闭",
         "vpdIdeal": "适宜 - 蒸腾活跃",
         "vpdModerate": "中等 - 存在胁迫风险",
-        "vpdHigh": "高 - 严重胁迫"
+        "vpdHigh": "高 - 严重胁迫",
+        "fetchingProgress": "正在拉取气象数据…"
     },
     "soil": {
         "title": "土壤剖面",
@@ -768,7 +772,8 @@
         "priority": "优先级",
         "priorityHigh": "高",
         "priorityMedium": "中",
-        "priorityLow": "低"
+        "priorityLow": "低",
+        "fetchingProgress": "正在拉取土壤数据…"
     },
     "seo": {
         "title": "农业卫星分析：开源作物智能平台（基于 OpenFarm）",
@@ -869,6 +874,9 @@
         "heatmapDate": "色斑图日期：{date} · {mode}",
         "pickDate": "选择曲线上的日期以加载色斑图",
         "pixelsMeta": " · {pixels} 像素",
-        "meanMeta": " · 均≈{mean}"
+        "meanMeta": " · 均≈{mean}",
+        "refreshComplete": "遥感数据拉取完成，已刷新场景",
+        "progressBridge": "正在写入 agri lonlat…",
+        "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）"
     }
 }

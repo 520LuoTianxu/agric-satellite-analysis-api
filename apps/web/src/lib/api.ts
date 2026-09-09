@@ -531,6 +531,21 @@ export const farmsApi = {
 
 // ── Fields ───────────────────────────────────────────────────────────
 
+export type BackfillPhase = "idle" | "stac" | "bridge" | "done";
+
+export interface BackfillStatusResponse {
+    field_id: string;
+    has_active_backfill: boolean;
+    pending_jobs: number;
+    running_jobs: number;
+    completed_jobs: number;
+    failed_jobs: number;
+    total_jobs: number;
+    percent: number;
+    phase: BackfillPhase | string;
+    message: string;
+}
+
 export const fieldsApi = {
     get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
     create: (data: { farm_id: string; name: string; geom: any; crop_type?: string; season?: string; tags?: string[] }) =>
@@ -550,7 +565,7 @@ export const fieldsApi = {
             { method: "POST", body: JSON.stringify({ months, force }) },
         ),
     backfillStatus: (fieldId: string) =>
-        apiFetch<{ field_id: string; has_active_backfill: boolean; pending_jobs: number; running_jobs: number; completed_jobs: number }>(
+        apiFetch<BackfillStatusResponse>(
             `/fields/${fieldId}/backfill-status`,
         ),
 };

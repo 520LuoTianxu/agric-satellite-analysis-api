@@ -427,7 +427,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                     <div className="mt-4 w-full max-w-[260px] rounded-lg border border-primary-border bg-primary-subtle p-3">
                         <div className="flex items-center gap-2 mb-2">
                             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                            <span className="text-xs font-medium text-primary">{t("processingTitle")}</span>
+                            <span className="text-xs font-medium text-primary">{t("fetchingProgress")}</span>
                         </div>
                         {getJobProgress() && (
                             <ul className="space-y-1">
@@ -868,7 +868,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                 <div className="rounded-lg border border-primary-border bg-primary-subtle p-3">
                     <div className="flex items-center gap-2 mb-2">
                         <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                        <span className="text-xs font-medium text-primary">{t("processingTitle")}</span>
+                        <span className="text-xs font-medium text-primary">{t("fetchingProgress")}</span>
                     </div>
                     {getJobProgress() && (
                         <ul className="space-y-1">
