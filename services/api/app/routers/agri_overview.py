@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import csv
+import io
+import json
+from urllib.parse import quote
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +19,10 @@ from app.core.agri_classify import (
     PHENOLOGY_MONTHS,
     WEAK_NDVI_LT,
     classify_drought,
+    classify_drought_from_pixels,
     classify_flood,
+    is_flood_alert,
+    is_open_water_flood,
 )
 from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
@@ -55,6 +63,28 @@ _LEVEL_NAME_COL = {
     "city": "city_name",
     "county": "county_name",
 }
+
+_CACHE_FRESH_HOURS = 36
+
+_ENSURE_CACHE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS agri.overview_stats_daily (
+    as_of_date date NOT NULL,
+    level text NOT NULL,
+    region_code text NOT NULL DEFAULT '',
+    region_name text,
+    parent_code text,
+    metric_json jsonb NOT NULL,
+    window_from date NOT NULL,
+    window_to date NOT NULL,
+    crop text NOT NULL DEFAULT '',
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (as_of_date, level, region_code, window_from, window_to, crop)
+)
+"""
+_ENSURE_CACHE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS overview_stats_daily_lookup_idx
+    ON agri.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
+"""
 
 
 def _default_window() -> tuple[date, date]:
@@ -115,6 +145,13 @@ async def _agri_ready(db: AsyncSession) -> None:
         )
 
 
+async def ensure_overview_cache_table(db: AsyncSession) -> None:
+    """CREATE TABLE IF NOT EXISTS for overview pre-agg cache."""
+    await db.execute(text(_ENSURE_CACHE_TABLE_SQL))
+    await db.execute(text(_ENSURE_CACHE_INDEX_SQL))
+    await db.flush()
+
+
 def _region_where(
     level: OverviewLevel,
     code: str | None,
@@ -129,11 +166,9 @@ def _region_where(
     clauses: list[str] = []
     if code:
         params["region_code"] = code.strip()
-        # Also accept padded 6-digit forms for province/city
         padded = _pad_adcode(level, code)
         if padded and padded != code.strip():
             params["region_code_padded"] = padded
-            # Match short or padded: e.g. province 37 OR 370000 stored oddly
             clauses.append(
                 f"(p.{code_col} = :region_code OR p.{code_col} = :region_code_padded)"
             )
@@ -147,10 +182,8 @@ def _region_where(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"level={level} requires code or name",
         )
-    # Prefer code when both given: AND them for precision; if code sparse, name alone works
     if len(clauses) == 1:
         return clauses[0]
-    # Both code and name: require both (precise); callers may pass only one.
     return " AND ".join(clauses)
 
 
@@ -201,7 +234,6 @@ async def _build_path(
     if level == "country":
         return path
 
-    # Load one parcel matching region to fill ancestors
     params: dict[str, Any] = {}
     wh = _region_where(level, code, name, params)
     row = (
@@ -219,7 +251,6 @@ async def _build_path(
         )
     ).fetchone()
     if not row:
-        # Still show requested node
         resolved_code, resolved_name = await _resolve_region_label(
             db, level, code, name
         )
@@ -252,28 +283,85 @@ async def _build_path(
     return path
 
 
-@router.get("/overview/stats", response_model=OverviewStatsOut)
-async def overview_stats(
-    ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-    level: OverviewLevel = Query("country"),
-    code: str | None = Query(None),
-    name: str | None = Query(None),
-    from_: date | None = Query(None, alias="from"),
-    to: date | None = Query(None),
-    crop: str | None = Query(
-        None,
-        description="Crop key (e.g. corn) — sets phenology months for weak-growth only; does not filter parcels by planted crop.",
-    ),
-):
-    """Aggregate drought / flood / weak-growth stats for a China admin region."""
-    await _agri_ready(db)
-    default_from, default_to = _default_window()
-    from_d = from_ or default_from
-    to_d = to or default_to
-    if from_d > to_d:
-        raise HTTPException(status_code=400, detail="from must be <= to")
+def _stats_to_dict(out: OverviewStatsOut) -> dict[str, Any]:
+    return out.model_dump(mode="json", by_alias=True)
 
+
+def _stats_from_cache_json(payload: dict[str, Any]) -> OverviewStatsOut:
+    return OverviewStatsOut.model_validate(payload)
+
+
+async def _read_cache(
+    db: AsyncSession,
+    *,
+    level: OverviewLevel,
+    region_code: str | None,
+    from_d: date,
+    to_d: date,
+    crop_key: str | None,
+) -> OverviewStatsOut | None:
+    """Return cached stats if a fresh row exists (updated_at within 36h)."""
+    await ensure_overview_cache_table(db)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_CACHE_FRESH_HOURS)
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT metric_json, updated_at
+                FROM agri.overview_stats_daily
+                WHERE level = :level
+                  AND region_code = :region_code
+                  AND window_from = :from_d
+                  AND window_to = :to_d
+                  AND crop = :crop
+                  AND updated_at >= :cutoff
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "level": level,
+                "region_code": region_code or "",
+                "from_d": from_d,
+                "to_d": to_d,
+                "crop": crop_key or "",
+                "cutoff": cutoff,
+            },
+        )
+    ).fetchone()
+    if not row:
+        return None
+    payload = row.metric_json
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        return None
+    try:
+        out = _stats_from_cache_json(payload)
+    except Exception:
+        return None
+    # Annotate source
+    filters = dict(out.filters or {})
+    filters["drought_source"] = "cache"
+    filters["cache_hit"] = True
+    filters["cache_updated_at"] = (
+        row.updated_at.isoformat() if row.updated_at else None
+    )
+    return out.model_copy(update={"filters": filters})
+
+
+async def _compute_live_stats(
+    db: AsyncSession,
+    *,
+    level: OverviewLevel,
+    code: str | None,
+    name: str | None,
+    from_d: date,
+    to_d: date,
+    crop: str | None,
+    allow_pixels: bool,
+) -> OverviewStatsOut:
+    """Compute live overview stats; pixel drought when allow_pixels and data exists."""
     crop_key = normalize_crop_key(crop) if crop else None
     pheno_months = _phenology_months(crop)
 
@@ -286,7 +374,6 @@ async def overview_stats(
     region_wh = _region_where(level, code, name, params)
     month_wh = _month_in_clause(pheno_months, params)
 
-    # Parcels in region
     parcels = (
         await db.execute(
             text(
@@ -304,18 +391,22 @@ async def overview_stats(
         )
     ).fetchall()
 
-    parcel_ids = [r.land_id for r in parcels]
     area_by_land = {r.land_id: float(r.area_mu or 0) for r in parcels}
     total_area = sum(area_by_land.values())
     total_count = len(parcels)
 
     drought_counts = {"severe": 0, "moderate": 0, "mild": 0, "normal": 0, "unknown": 0}
     drought_area = {k: 0.0 for k in drought_counts}
-    flood_counts = {"flood": 0, "wet": 0, "dry": 0, "unknown": 0}
-    flood_area = {k: 0.0 for k in flood_counts}
+    flood_keys = (
+        "flood_severe",
+        "flood_moderate",
+        "flood_mild",
+        "dry",
+        "unknown",
+    )
+    flood_counts = {k: 0 for k in flood_keys}
+    flood_area = {k: 0.0 for k in flood_keys}
     weak_lands: set[str] = set()
-    drought_by_land: dict[str, str] = {}
-    flood_by_land: dict[str, str] = {}
 
     child_level = _CHILD_LEVEL[level]
     child_agg: dict[tuple[str | None, str], dict[str, Any]] = {}
@@ -347,6 +438,7 @@ async def overview_stats(
                 "drought_severe": 0,
                 "drought_alert": 0,
                 "flood": 0,
+                "flood_alert": 0,
                 "weak_growth": 0,
             }
         child_agg[ck]["parcel_count"] += 1
@@ -358,14 +450,20 @@ async def overview_stats(
         if ck is not None:
             land_to_child[row.land_id] = ck
 
-    if parcel_ids:
-        # Latest clear S2 per parcel in window (join region parcels — no ANY array bind)
+    drought_source: Literal["pixels", "scene_avg", "cache"] = "scene_avg"
+    pixels_used = 0
+    pixels_parcels = 0
+
+    if parcels:
+        # Latest clear S2 — optionally include pixel_data for sub-country levels
+        pixel_col = ", s.pixel_data" if allow_pixels else ""
         s2_rows = (
             await db.execute(
                 text(
                     f"""
                     SELECT DISTINCT ON (s.land_id)
                            s.land_id, s.ndvi_avg, s.ndmi_avg
+                           {pixel_col}
                     FROM agri.parcel_scene_products s
                     JOIN agri.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
@@ -383,10 +481,19 @@ async def overview_stats(
         ).fetchall()
 
         for r in s2_rows:
-            cls = classify_drought(r.ndvi_avg, r.ndmi_avg)
+            cls = None
+            if allow_pixels:
+                pdata = getattr(r, "pixel_data", None)
+                if pdata is not None:
+                    maj, _severe_share, n = classify_drought_from_pixels(pdata)
+                    if maj is not None and n > 0:
+                        cls = maj
+                        pixels_used += n
+                        pixels_parcels += 1
+            if cls is None:
+                cls = classify_drought(r.ndvi_avg, r.ndmi_avg)
             if cls is None:
                 continue
-            drought_by_land[r.land_id] = cls
             drought_counts[cls] += 1
             drought_area[cls] += area_by_land.get(r.land_id, 0.0)
             ck = land_to_child.get(r.land_id)
@@ -396,7 +503,10 @@ async def overview_stats(
                 if cls in ("severe", "moderate", "mild"):
                     child_agg[ck]["drought_alert"] += 1
 
-        # Latest S1 per parcel (no cloud filter)
+        if allow_pixels and pixels_parcels > 0:
+            drought_source = "pixels"
+
+        # Latest S1 per parcel (scene averages; flood tiers)
         s1_rows = (
             await db.execute(
                 text(
@@ -419,14 +529,15 @@ async def overview_stats(
             cls = classify_flood(r.vv_avg, r.vh_avg)
             if cls is None:
                 continue
-            flood_by_land[r.land_id] = cls
             flood_counts[cls] += 1
             flood_area[cls] += area_by_land.get(r.land_id, 0.0)
             ck = land_to_child.get(r.land_id)
-            if ck and cls == "flood" and ck in child_agg:
-                child_agg[ck]["flood"] += 1
+            if ck and ck in child_agg:
+                if is_open_water_flood(cls):
+                    child_agg[ck]["flood"] += 1
+                if is_flood_alert(cls):
+                    child_agg[ck]["flood_alert"] += 1
 
-        # Weak growth: mean ndvi of clear in-season S2 < threshold
         weak_rows = (
             await db.execute(
                 text(
@@ -458,24 +569,23 @@ async def overview_stats(
             if ck and ck in child_agg:
                 child_agg[ck]["weak_growth"] += 1
 
-    # Unknown = parcels with no classifiable scene
     drought_counts["unknown"] = total_count - sum(
         drought_counts[k] for k in ("severe", "moderate", "mild", "normal")
     )
     drought_area["unknown"] = total_area - sum(
         drought_area[k] for k in ("severe", "moderate", "mild", "normal")
     )
-    flood_counts["unknown"] = total_count - sum(
-        flood_counts[k] for k in ("flood", "wet", "dry")
-    )
-    flood_area["unknown"] = total_area - sum(
-        flood_area[k] for k in ("flood", "wet", "dry")
-    )
+    flood_known = ("flood_severe", "flood_moderate", "flood_mild", "dry")
+    flood_counts["unknown"] = total_count - sum(flood_counts[k] for k in flood_known)
+    flood_area["unknown"] = total_area - sum(flood_area[k] for k in flood_known)
 
     weak_area = sum(area_by_land[lid] for lid in weak_lands)
 
     resolved_code, resolved_name = await _resolve_region_label(db, level, code, name)
     path = await _build_path(db, level, code, name)
+
+    open_water = flood_counts["flood_severe"] + flood_counts["flood_moderate"]
+    mild = flood_counts["flood_mild"]
 
     children = [
         OverviewChildOut(
@@ -486,6 +596,7 @@ async def overview_stats(
             drought_severe=v["drought_severe"],
             drought_alert=v["drought_alert"],
             flood=v["flood"],
+            flood_alert=v["flood_alert"],
             weak_growth=v["weak_growth"],
             area_mu=round(v["area_mu"], 2),
         )
@@ -493,6 +604,18 @@ async def overview_stats(
             child_agg.values(), key=lambda x: (-x["parcel_count"], x["name"])
         )
     ]
+
+    flood_area_out = {
+        "flood_severe": round(flood_area["flood_severe"], 2),
+        "flood_moderate": round(flood_area["flood_moderate"], 2),
+        "flood_mild": round(flood_area["flood_mild"], 2),
+        "flood": round(
+            flood_area["flood_severe"] + flood_area["flood_moderate"], 2
+        ),
+        "wet": round(flood_area["flood_mild"], 2),
+        "dry": round(flood_area["dry"], 2),
+        "unknown": round(flood_area["unknown"], 2),
+    }
 
     return OverviewStatsOut(
         region={
@@ -511,6 +634,10 @@ async def overview_stats(
             "cloud_max_pct": CLOUD_MAX_PCT,
             "phenology_months": pheno_months,
             "weak_ndvi_lt": WEAK_NDVI_LT,
+            "drought_source": drought_source,
+            "cache_hit": False,
+            "pixels_parcels": pixels_parcels if allow_pixels else 0,
+            "pixels_classified": pixels_used if allow_pixels else 0,
         },
         totals=OverviewTotals(parcel_count=total_count, area_mu=round(total_area, 2)),
         drought=OverviewDroughtCounts(
@@ -522,17 +649,196 @@ async def overview_stats(
             area_mu={k: round(v, 2) for k, v in drought_area.items()},
         ),
         flood=OverviewFloodCounts(
-            flood=flood_counts["flood"],
-            wet=flood_counts["wet"],
+            flood_severe=flood_counts["flood_severe"],
+            flood_moderate=flood_counts["flood_moderate"],
+            flood_mild=mild,
+            flood=open_water,
+            wet=mild,
             dry=flood_counts["dry"],
             unknown=flood_counts["unknown"],
-            area_mu={k: round(v, 2) for k, v in flood_area.items()},
+            area_mu=flood_area_out,
         ),
         weak_growth=OverviewWeakGrowth(
             parcel_count=len(weak_lands), area_mu=round(weak_area, 2)
         ),
         children=children,
     )
+
+
+@router.get("/overview/stats", response_model=OverviewStatsOut)
+async def overview_stats(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    from_: date | None = Query(None, alias="from"),
+    to: date | None = Query(None),
+    crop: str | None = Query(
+        None,
+        description="Crop key (e.g. corn) — sets phenology months for weak-growth only; does not filter parcels by planted crop.",
+    ),
+    use_cache: bool | None = Query(
+        None,
+        description="Prefer pre-agg cache when fresh. Default true for level=country.",
+    ),
+    live: int = Query(
+        0,
+        ge=0,
+        le=1,
+        description="Force live compute (skip cache). live=1 disables cache.",
+    ),
+):
+    """Aggregate drought / flood / weak-growth stats for a China admin region."""
+    await _agri_ready(db)
+    default_from, default_to = _default_window()
+    from_d = from_ or default_from
+    to_d = to or default_to
+    if from_d > to_d:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    crop_key = normalize_crop_key(crop) if crop else None
+    prefer_cache = (use_cache if use_cache is not None else (level == "country")) and (
+        live != 1
+    )
+
+    if prefer_cache:
+        cached = await _read_cache(
+            db,
+            level=level,
+            region_code=code,
+            from_d=from_d,
+            to_d=to_d,
+            crop_key=crop_key,
+        )
+        if cached is not None:
+            return cached
+
+    # Country live: scene averages only (avoid loading all pixel_data blobs → OOM).
+    # Province/city/county: pixel-level drought when pixel_data present.
+    allow_pixels = level != "country"
+    return await _compute_live_stats(
+        db,
+        level=level,
+        code=code,
+        name=name,
+        from_d=from_d,
+        to_d=to_d,
+        crop=crop,
+        allow_pixels=allow_pixels,
+    )
+
+
+def _csv_response(filename: str, rows: list[dict[str, Any]]) -> Response:
+    buf = io.StringIO()
+    # UTF-8 BOM for Excel
+    buf.write("\ufeff")
+    if rows:
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    else:
+        buf.write("")
+    data = buf.getvalue().encode("utf-8")
+    # ASCII fallback + RFC 5987 for non-ASCII names (Starlette headers are latin-1)
+    safe = "".join(ch if ord(ch) < 128 else "_" for ch in filename) or "export.csv"
+    if not safe.endswith(".csv"):
+        safe = f"{safe}.csv"
+    disp = (
+        f'attachment; filename="{safe}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    return Response(
+        content=data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": disp},
+    )
+
+
+@router.get("/overview/export/stats.csv")
+async def overview_export_stats_csv(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    from_: date | None = Query(None, alias="from"),
+    to: date | None = Query(None),
+    crop: str | None = Query(None),
+    live: int = Query(0, ge=0, le=1),
+):
+    """CSV of children rows from overview stats (UTF-8 BOM)."""
+    stats = await overview_stats(
+        ctx=ctx,
+        db=db,
+        level=level,
+        code=code,
+        name=name,
+        from_=from_,
+        to=to,
+        crop=crop,
+        use_cache=None,
+        live=live,
+    )
+    rows = [
+        {
+            "level": c.level,
+            "code": c.code or "",
+            "name": c.name,
+            "parcel_count": c.parcel_count,
+            "drought_severe": c.drought_severe,
+            "drought_alert": c.drought_alert,
+            "flood": c.flood,
+            "flood_alert": c.flood_alert,
+            "weak_growth": c.weak_growth,
+            "area_mu": c.area_mu,
+        }
+        for c in stats.children
+    ]
+    region = (stats.region or {}).get("name") or level
+    return _csv_response(f"overview-stats-{region}.csv", rows)
+
+
+@router.get("/overview/export/weak-parcels.csv")
+async def overview_export_weak_parcels_csv(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    from_: date | None = Query(None, alias="from"),
+    to: date | None = Query(None),
+    crop: str | None = Query(None),
+    limit: int = Query(5000, ge=1, le=5000),
+):
+    """CSV of weak-growth parcels (same filters as weak-parcels; limit ≤5000)."""
+    res = await overview_weak_parcels(
+        ctx=ctx,
+        db=db,
+        level=level,
+        code=code,
+        name=name,
+        from_=from_,
+        to=to,
+        crop=crop,
+        limit=limit,
+        offset=0,
+    )
+    rows = [
+        {
+            "land_id": it.land_id,
+            "land_name": it.land_name or "",
+            "province_name": it.province_name or "",
+            "city_name": it.city_name or "",
+            "county_name": it.county_name or "",
+            "land_area_mu": it.land_area_mu,
+            "ndvi_avg": it.ndvi_avg,
+            "scene_date": it.scene_date.isoformat() if it.scene_date else "",
+            "cloud_pct": it.cloud_pct if it.cloud_pct is not None else "",
+        }
+        for it in res.items
+    ]
+    return _csv_response("overview-weak-parcels.csv", rows)
 
 
 @router.get("/overview/regions", response_model=OverviewRegionsOut)
@@ -545,7 +851,6 @@ async def overview_regions(
 ):
     """List child regions under a parent (for map labels)."""
     await _agri_ready(db)
-    # Default: country children = provinces
     pl: OverviewLevel = parent_level or "country"
     child_level = _CHILD_LEVEL.get(pl)
     if child_level is None:
@@ -613,7 +918,7 @@ async def overview_weak_parcels(
         None,
         description="Crop key — phenology months for weak-growth only (no parcel crop filter).",
     ),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ):
     """List parcels with weak growth (clear S2 mean NDVI in phenology months < threshold)."""

@@ -257,7 +257,12 @@ class OverviewDroughtCounts(BaseModel):
 
 
 class OverviewFloodCounts(BaseModel):
+    flood_severe: int = 0
+    flood_moderate: int = 0
+    flood_mild: int = 0
+    # Backward: open water ≈ severe+moderate
     flood: int = 0
+    # Alias of flood_mild (former wet band)
     wet: int = 0
     dry: int = 0
     unknown: int = 0
@@ -276,7 +281,8 @@ class OverviewChildOut(BaseModel):
     parcel_count: int = 0
     drought_severe: int = 0
     drought_alert: int = 0  # severe + moderate + mild
-    flood: int = 0
+    flood: int = 0  # open water: severe + moderate
+    flood_alert: int = 0  # severe + moderate + mild
     weak_growth: int = 0
     area_mu: float = 0.0
 

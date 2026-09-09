@@ -110,6 +110,37 @@ async function apiFetch<T>(
     return res.json();
 }
 
+/** Authenticated binary/CSV download → triggers browser save. */
+async function apiDownload(path: string, fallbackName: string): Promise<void> {
+    const token = await getToken();
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+    };
+    const org = getOrgId();
+    if (org) headers["X-Org-Id"] = org;
+    const res = await fetch(`${getApiBase()}${path}`, { headers });
+    if (!res.ok) {
+        let detail = res.statusText;
+        try {
+            const body = await res.json();
+            detail = body.detail || JSON.stringify(body);
+        } catch { /* ignore */ }
+        throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/.exec(cd);
+    const filename = m?.[1] || fallbackName;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface Paginated<T> {
@@ -1128,6 +1159,42 @@ export const agriApi = {
         if (opts.parentName) params.set("parent_name", opts.parentName);
         return apiFetch<OverviewRegions>(`/agri/overview/regions?${params}`);
     },
+    overviewExportStatsCsv: async (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        return apiDownload(`/agri/overview/export/stats.csv?${params}`, "overview-stats.csv");
+    },
+    overviewExportWeakParcelsCsv: async (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+        limit?: number;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        params.set("limit", String(opts.limit ?? 5000));
+        return apiDownload(`/agri/overview/export/weak-parcels.csv?${params}`, "overview-weak-parcels.csv");
+    },
     scenes: (
         landId: string,
         opts: {
@@ -1176,7 +1243,10 @@ export interface OverviewChild {
     drought_severe: number;
     /** severe + moderate + mild */
     drought_alert: number;
+    /** open water: flood_severe + flood_moderate */
     flood: number;
+    /** flood_severe + flood_moderate + flood_mild */
+    flood_alert?: number;
     weak_growth: number;
     area_mu: number;
 }
@@ -1197,6 +1267,10 @@ export interface OverviewStats {
         cloud_max_pct: number;
         phenology_months: number[];
         weak_ndvi_lt: number;
+        drought_source?: "pixels" | "scene_avg" | "cache";
+        cache_hit?: boolean;
+        pixels_parcels?: number;
+        pixels_classified?: number;
     };
     totals: { parcel_count: number; area_mu: number };
     drought: {
@@ -1208,7 +1282,12 @@ export interface OverviewStats {
         area_mu: Record<string, number>;
     };
     flood: {
+        flood_severe?: number;
+        flood_moderate?: number;
+        flood_mild?: number;
+        /** open water = severe+moderate (compat) */
         flood: number;
+        /** alias of flood_mild */
         wet: number;
         dry: number;
         unknown: number;
