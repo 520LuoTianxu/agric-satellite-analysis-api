@@ -209,6 +209,12 @@ export default function AgriTimeseriesPanel({
     } | null>(null);
     /** Bumps on every loadHeatmap call; stale async results are ignored. */
     const heatmapLoadGenRef = useRef(0);
+    /** Prefetched film — kept even when enabled=false (map cleared, cache retained). */
+    const cachedHeatmapRef = useRef<{
+        date: string;
+        index: SeriesKey;
+        img: AgriHeatmapImage | null;
+    } | null>(null);
     const loadHeatmapRef = useRef<(date: string, index: SeriesKey) => Promise<void>>(async () => {});
     const enabledRef = useRef(enabled);
     enabledRef.current = enabled;
@@ -248,14 +254,9 @@ export default function AgriTimeseriesPanel({
                     .sort();
                 const latestDate = dates.length ? dates[dates.length - 1] : null;
                 if (latestDate) setSelectedDate(latestDate);
-                // If 指数 already active when scenes arrive, load NDVI film immediately
-                // (include_pixels=1). If still disabled, the enabled-rising effect loads later.
-                if (
-                    !cancelled &&
-                    latestDate &&
-                    enabledRef.current &&
-                    heatmapVisibleRef.current
-                ) {
+                // Prefetch include_pixels=1 as soon as land scenes load (even if 指数 tab
+                // inactive). Map overlay is only published when enabled===true.
+                if (!cancelled && latestDate) {
                     await loadHeatmapRef.current(latestDate, nextSeries);
                 }
             } catch (e: any) {
@@ -287,17 +288,20 @@ export default function AgriTimeseriesPanel({
         setSelectedDate((prev) => (prev && dates.includes(prev) ? prev : dates[dates.length - 1]));
     }, [series, scenes]);
 
+    const publishHeatmap = useCallback(
+        (img: AgriHeatmapImage | null) => {
+            if (!onHeatmapChange) return;
+            if (enabledRef.current && heatmapVisibleRef.current) {
+                onHeatmapChange(img);
+            }
+        },
+        [onHeatmapChange],
+    );
+
     const loadHeatmap = useCallback(
         async (date: string, index: SeriesKey) => {
-            if (!landId || !onHeatmapChange) return;
+            if (!landId) return;
             const gen = ++heatmapLoadGenRef.current;
-            if (!heatmapVisible) {
-                if (gen === heatmapLoadGenRef.current) {
-                    onHeatmapChange(null);
-                    setHeatmapMeta(null);
-                }
-                return;
-            }
             const meta = SERIES_META[index];
             setHeatmapLoading(true);
             try {
@@ -317,11 +321,14 @@ export default function AgriTimeseriesPanel({
                 const lonlat = scene?.pixels_lonlat;
                 const grid = scene?.pixel_data;
                 if (!(lonlat?.length || grid?.pixels?.length)) {
-                    onHeatmapChange(null);
+                    cachedHeatmapRef.current = { date, index, img: null };
                     setHeatmapMeta(null);
-                    toast.message("该日期无像素数据，无法渲染色斑图", {
-                        description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
-                    });
+                    publishHeatmap(null);
+                    if (enabledRef.current) {
+                        toast.message("该日期无像素数据，无法渲染色斑图", {
+                            description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
+                        });
+                    }
                     console.warn("[agri-heatmap] missing pixels_lonlat/pixel_data", {
                         landId,
                         date,
@@ -334,7 +341,7 @@ export default function AgriTimeseriesPanel({
                     ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
                     : rasterizeAgriPixels(grid!, index, meta.sensor);
                 if (gen !== heatmapLoadGenRef.current) return;
-                onHeatmapChange(img);
+                cachedHeatmapRef.current = { date, index, img };
                 setHeatmapMeta(
                     img
                         ? {
@@ -345,15 +352,17 @@ export default function AgriTimeseriesPanel({
                           }
                         : null,
                 );
-                if (!img) {
+                publishHeatmap(img);
+                if (!img && enabledRef.current) {
                     toast.message("色斑图未绘制任何像素", {
                         description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                     });
                 }
             } catch (e) {
                 if (gen !== heatmapLoadGenRef.current) return;
-                onHeatmapChange(null);
+                cachedHeatmapRef.current = { date, index, img: null };
                 setHeatmapMeta(null);
+                publishHeatmap(null);
                 console.warn("[agri-heatmap] load failed", e);
             } finally {
                 if (gen === heatmapLoadGenRef.current) {
@@ -361,26 +370,43 @@ export default function AgriTimeseriesPanel({
                 }
             }
         },
-        [landId, onHeatmapChange, heatmapVisible],
+        [landId, publishHeatmap],
     );
     loadHeatmapRef.current = loadHeatmap;
 
-    // Rising-edge / dep change: when 指数 enables the panel, immediately fetch
-    // include_pixels=1 for current series (default ndvi) + selectedDate (latest S2).
-    // forceMount keeps us alive while inactive; enabled flip must still trigger one load.
+    // Prefetch/reload film whenever date or series changes (tab may be inactive).
+    useEffect(() => {
+        if (!selectedDate) return;
+        const cache = cachedHeatmapRef.current;
+        if (cache && cache.date === selectedDate && cache.index === series) {
+            // Already have this film — publish if tab active, else keep cache warm
+            if (enabledRef.current && heatmapVisibleRef.current) {
+                onHeatmapChange?.(cache.img);
+            }
+            return;
+        }
+        void loadHeatmap(selectedDate, series);
+    }, [selectedDate, series, loadHeatmap, onHeatmapChange]);
+
+    // enabled gate: clear map overlay only (keep cached film). On rise → apply cache or fetch.
     useEffect(() => {
         if (!enabled) {
-            // Invalidate in-flight loads so they cannot repaint after clear
-            heatmapLoadGenRef.current += 1;
+            // Do NOT bump gen / cancel prefetch — keep in-flight include_pixels result
             onHeatmapChange?.(null);
-            setHeatmapMeta(null);
-            setHeatmapLoading(false);
+            return;
+        }
+        if (!heatmapVisible) {
+            onHeatmapChange?.(null);
             return;
         }
         if (!selectedDate) return;
-        // enabled true → always (re)load so tab click / Strict Mode recovery works
+        const cache = cachedHeatmapRef.current;
+        if (cache && cache.date === selectedDate && cache.index === series) {
+            onHeatmapChange?.(cache.img);
+            return;
+        }
         void loadHeatmap(selectedDate, series);
-    }, [selectedDate, series, loadHeatmap, enabled, onHeatmapChange]);
+    }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
     const total = summary?.total ?? 0;

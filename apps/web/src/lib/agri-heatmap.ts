@@ -928,7 +928,7 @@ export function clipHeatmapImageToField(
 
         // Full-cell film (expand slightly) — same style as rasterizeAgriLonLatPixels.
         ctx.imageSmoothingEnabled = false;
-        const expand = 1.15;
+        const expand = 1.35;
         const inset = (expand - 1) / 2;
         let paintedCells = 0;
         for (const feat of hm.geojson?.features ?? []) {
@@ -1399,10 +1399,10 @@ export function rasterizeAgriLonLatPixels(
             const ctx = canvas.getContext("2d", { willReadFrequently: true });
             if (ctx) {
                 // Continuous solid film: each sample paints its full ~10 m cell.
-                // Slightly expand (≥1.15) to kill hairline gaps between adjacent cells.
+                // Slightly expand (≥1.35) to kill hairline gaps between adjacent cells.
                 // No arcs/circles — those leave satellite basemap showing through.
                 ctx.imageSmoothingEnabled = false;
-                const expand = 1.15;
+                const expand = 1.35;
                 const inset = (expand - 1) / 2;
                 for (const cell of cellsWithRc) {
                     const [r, g, b, a] = cell.rgba;
