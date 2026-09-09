@@ -9,7 +9,7 @@ import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
-import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapImageToField, clipHeatmapToField, heatmapImageHasContent } from "@/lib/agri-heatmap";
+import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, clipHeatmapToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -237,6 +237,10 @@ export default function FieldDetailPage() {
     const activeIndexTypeRef = useRef<IndexType>("NDVI");
     const fieldRef = useRef<Field | null>(null);
     const agriHeatmapRef = useRef<AgriHeatmapImage | null>(null);
+    /** blob: URL currently fed to MapLibre ImageSource — revoke on clear/replace. */
+    const agriHeatmapBlobUrlRef = useRef<string | null>(null);
+    /** Bump to cancel in-flight canvas.toBlob apply. */
+    const agriHeatmapApplyGenRef = useRef(0);
 
     // Available index types (only indices with computed layers)
     const [availableTypes, setAvailableTypes] = useState<IndexType[]>([]);
@@ -318,6 +322,10 @@ export default function FieldDetailPage() {
     }, [currentOrg, loadField]);
 
     const clearAgriHeatmapLayers = useCallback((map: maplibregl.Map) => {
+        // Cancel any in-flight canvas.toBlob → ImageSource apply
+        agriHeatmapApplyGenRef.current += 1;
+        revokeHeatmapObjectUrl(agriHeatmapBlobUrlRef.current);
+        agriHeatmapBlobUrlRef.current = null;
         const ids: [string, string][] = [
             ["agri-heatmap-raster", "agri-heatmap"],
             ["agri-heatmap-fill", "agri-heatmap-geojson"],
@@ -334,10 +342,10 @@ export default function FieldDetailPage() {
     }, []);
 
     /**
-     * Draw agri 色膜 as a continuous MapLibre image raster (canvas film).
-     * Primary path: lon/lat → WebMercator ~10 m cells → PNG image source.
-     * Circle layer is not used (gappy dots). GeoJSON fill is fallback only when
-     * the image is empty/unusable. Do not turf.intersect tiny cells as primary.
+     * Draw agri 色膜: MapLibre image raster (blob:/data: film) + GeoJSON fill co-primary.
+     * Image uses canvas.toBlob → createObjectURL when possible (CSP connect-src needs blob:/data:).
+     * Lon/lat cells: abutting squares, no turf.intersect wipe. GeoJSON always applied so the
+     * film still shows if ImageSource fetch is blocked.
      */
     const applyAgriHeatmapToMap = useCallback(
         (
@@ -350,41 +358,12 @@ export default function FieldDetailPage() {
             const imgLayerId = "agri-heatmap-raster";
             const fillSrcId = "agri-heatmap-geojson";
             const fillLayerId = "agri-heatmap-fill";
-            let drew = false;
+            let drewFill = false;
             let clipEmptied = false;
 
-            // 1) Primary: continuous canvas color film (nearest = crisp cells)
-            // clipHeatmapImageToField remasks in WebMercator canvas space; if the
-            // mask would wipe alpha it restores the unmasked film.
-            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
-            if (heatmapImageHasContent(clippedImg)) {
-                try {
-                    map.addSource(imgSrcId, {
-                        type: "image",
-                        url: clippedImg.dataUrl!,
-                        coordinates: clippedImg.coordinates,
-                    });
-                    map.addLayer(
-                        {
-                            id: imgLayerId,
-                            type: "raster",
-                            source: imgSrcId,
-                            paint: {
-                                "raster-opacity": 0.92,
-                                "raster-resampling": "nearest",
-                            },
-                        },
-                        beforeId,
-                    );
-                    drew = true;
-                } catch (e) {
-                    console.warn("[agri-heatmap] image overlay failed", e);
-                }
-            }
-
-            // 2) Fallback only: GeoJSON fill cells when image is empty/unusable.
-            // Lon/lat cells skip turf clip (tiny squares emptied features before).
-            if (!drew && hm.geojson) {
+            // 1) Co-primary: GeoJSON fill from lon/lat (or UTM) cell polygons.
+            // Lon/lat skips turf clip — tiny squares were wiped by intersect before.
+            if (hm.geojson?.features?.length) {
                 const beforeClip = hm.geojson.features.length;
                 const clipped = hm.fromLonLat
                     ? hm.geojson
@@ -399,25 +378,132 @@ export default function FieldDetailPage() {
                           ? hm.geojson
                           : clipped;
                 if (data.features.length) {
-                    map.addSource(fillSrcId, { type: "geojson", data });
-                    map.addLayer(
-                        {
-                            id: fillLayerId,
-                            type: "fill",
-                            source: fillSrcId,
-                            paint: {
-                                "fill-color": ["get", "color"],
-                                "fill-opacity": 0.85,
-                                "fill-outline-color": "rgba(0,0,0,0)",
+                    try {
+                        map.addSource(fillSrcId, { type: "geojson", data });
+                        map.addLayer(
+                            {
+                                id: fillLayerId,
+                                type: "fill",
+                                source: fillSrcId,
+                                paint: {
+                                    "fill-color": ["get", "color"],
+                                    "fill-opacity": 0.85,
+                                    "fill-outline-color": "rgba(0,0,0,0)",
+                                },
                             },
-                        },
-                        beforeId,
-                    );
-                    drew = true;
+                            beforeId,
+                        );
+                        drewFill = true;
+                    } catch (e) {
+                        console.warn("[agri-heatmap] geojson fill failed", e);
+                    }
                 }
             }
 
-            if (hm.pixelCount > 0 && !drew) {
+            // 2) Continuous canvas color film (nearest). Prefer blob: object URL.
+            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+            const addImageLayer = (url: string) => {
+                try {
+                    if (map.getLayer(imgLayerId)) map.removeLayer(imgLayerId);
+                } catch { /* ignore */ }
+                try {
+                    if (map.getSource(imgSrcId)) map.removeSource(imgSrcId);
+                } catch { /* ignore */ }
+                map.addSource(imgSrcId, {
+                    type: "image",
+                    url,
+                    coordinates: clippedImg.coordinates,
+                });
+                // Same beforeId as fill → image stacks above fill, below outline.
+                const before =
+                    beforeId && map.getLayer(beforeId)
+                        ? beforeId
+                        : map.getLayer(fillLayerId)
+                          ? fillLayerId
+                          : undefined;
+                map.addLayer(
+                    {
+                        id: imgLayerId,
+                        type: "raster",
+                        source: imgSrcId,
+                        paint: {
+                            "raster-opacity": 0.92,
+                            "raster-resampling": "nearest",
+                        },
+                    },
+                    before,
+                );
+            };
+
+            if (heatmapImageHasContent(clippedImg) && clippedImg.dataUrl) {
+                const dataUrl = clippedImg.dataUrl;
+                const gen = ++agriHeatmapApplyGenRef.current;
+
+                const commitUrl = (url: string) => {
+                    if (gen !== agriHeatmapApplyGenRef.current) {
+                        revokeHeatmapObjectUrl(url !== dataUrl ? url : null);
+                        return;
+                    }
+                    try {
+                        revokeHeatmapObjectUrl(agriHeatmapBlobUrlRef.current);
+                        agriHeatmapBlobUrlRef.current = url.startsWith("blob:") ? url : null;
+                        addImageLayer(url);
+                    } catch (e) {
+                        console.warn("[agri-heatmap] image overlay failed", e);
+                        if (url !== dataUrl) {
+                            try {
+                                addImageLayer(dataUrl);
+                            } catch (e2) {
+                                console.warn("[agri-heatmap] image overlay failed", e2);
+                            }
+                        }
+                    }
+                };
+
+                // Prefer canvas.toBlob → createObjectURL (MapLibre fetches via connect-src).
+                const img = new Image();
+                img.onload = () => {
+                    if (gen !== agriHeatmapApplyGenRef.current) return;
+                    const canvas = document.createElement("canvas");
+                    canvas.width = img.naturalWidth || img.width;
+                    canvas.height = img.naturalHeight || img.height;
+                    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+                    if (!ctx || !canvas.width || !canvas.height) {
+                        try {
+                            commitUrl(dataUrlToObjectUrl(dataUrl));
+                        } catch {
+                            commitUrl(dataUrl);
+                        }
+                        return;
+                    }
+                    ctx.drawImage(img, 0, 0);
+                    void canvasToObjectUrl(canvas)
+                        .then((blobUrl) => commitUrl(blobUrl))
+                        .catch(() => {
+                            try {
+                                commitUrl(dataUrlToObjectUrl(dataUrl));
+                            } catch {
+                                commitUrl(dataUrl);
+                            }
+                        });
+                };
+                img.onerror = () => {
+                    if (gen !== agriHeatmapApplyGenRef.current) return;
+                    try {
+                        commitUrl(dataUrlToObjectUrl(dataUrl));
+                    } catch (e) {
+                        console.warn("[agri-heatmap] image overlay failed", e);
+                        try {
+                            commitUrl(dataUrl);
+                        } catch (e2) {
+                            console.warn("[agri-heatmap] image overlay failed", e2);
+                        }
+                    }
+                };
+                img.src = dataUrl;
+            }
+
+            if (hm.pixelCount > 0 && !drewFill && !heatmapImageHasContent(clippedImg)) {
                 const msg = "色斑有像素但地图要素为 0（clip/渲染失败）";
                 console.warn("[agri-heatmap]", msg, {
                     index: hm.index,
@@ -581,7 +667,7 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri 色斑图 — continuous canvas image film (gapless cells); GeoJSON fallback only
+    // Agri 色斑图 — canvas image film (blob:/data:) + GeoJSON fill co-primary
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;

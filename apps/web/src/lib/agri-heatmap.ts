@@ -733,6 +733,62 @@ export function heatmapImageHasContent(
     return true;
 }
 
+
+/** Decode a data:image/...;base64 URL into a blob: object URL (MapLibre ImageSource). */
+export function dataUrlToObjectUrl(dataUrl: string): string {
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) throw new Error("invalid data URL");
+    const header = dataUrl.slice(0, comma);
+    const payload = dataUrl.slice(comma + 1);
+    const mime = /data:([^;,]+)/i.exec(header)?.[1] || "image/png";
+    const isBase64 = /;base64/i.test(header);
+    let bytes: Uint8Array;
+    if (isBase64) {
+        const bin = atob(payload);
+        bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } else {
+        const decoded = decodeURIComponent(payload);
+        bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+    }
+    return URL.createObjectURL(new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)], { type: mime }));
+}
+
+/**
+ * Prefer canvas.toBlob → URL.createObjectURL for MapLibre ImageSource.
+ * Falls back to toDataURL → blob URL if toBlob yields null.
+ */
+export function canvasToObjectUrl(canvas: HTMLCanvasElement): Promise<string> {
+    return new Promise((resolve, reject) => {
+        try {
+            canvas.toBlob((blob) => {
+                if (blob) {
+                    resolve(URL.createObjectURL(blob));
+                    return;
+                }
+                try {
+                    resolve(dataUrlToObjectUrl(canvas.toDataURL("image/png")));
+                } catch (e) {
+                    reject(e);
+                }
+            }, "image/png");
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+/** Revoke blob: object URLs created for heatmap ImageSource. */
+export function revokeHeatmapObjectUrl(url: string | null | undefined): void {
+    if (!url || !url.startsWith("blob:")) return;
+    try {
+        URL.revokeObjectURL(url);
+    } catch {
+        /* ignore */
+    }
+}
+
 /**
  * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
  * Returns false if no usable ring was projected (caller should skip / restore).
@@ -864,7 +920,7 @@ export function clipHeatmapImageToField(
         const canvas = document.createElement("canvas");
         canvas.width = hm.width;
         canvas.height = hm.height;
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return hm;
 
         // Full-cell film (expand slightly) — same style as rasterizeAgriLonLatPixels.
@@ -1055,7 +1111,7 @@ export function rasterizeAgriPixels(
         const canvas = document.createElement("canvas");
         canvas.width = width;
         canvas.height = height;
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (ctx) {
             const img = ctx.createImageData(width, height);
             for (const cell of painted.cells) {
@@ -1281,8 +1337,9 @@ export function rasterizeAgriLonLatPixels(
         painted.cells.reduce((s, c) => s + c.lat, 0) / Math.max(1, painted.cells.length);
     const metersPerDegLat = 111320;
     const metersPerDegLon = Math.max(1e-6, 111320 * Math.cos((meanLat * Math.PI) / 180));
-    const halfDegLat = (resM / 2) / metersPerDegLat;
-    const halfDegLon = (resM / 2) / metersPerDegLon;
+    // Slight expand so adjacent ~10 m cells abut without hairline gaps (no turf clip).
+    const halfDegLat = ((resM / 2) * 1.02) / metersPerDegLat;
+    const halfDegLon = ((resM / 2) * 1.02) / metersPerDegLon;
 
     const cellsWithRc: LonLatPainted[] = merc.map((c) => {
         const col = Math.min(width - 1, Math.max(0, Math.floor((c.x - minX) / resM)));
@@ -1336,7 +1393,7 @@ export function rasterizeAgriLonLatPixels(
             const canvas = document.createElement("canvas");
             canvas.width = width;
             canvas.height = height;
-            const ctx = canvas.getContext("2d");
+            const ctx = canvas.getContext("2d", { willReadFrequently: true });
             if (ctx) {
                 // Continuous solid film: each sample paints its full ~10 m cell.
                 // Slightly expand (1.12) to kill hairline gaps between adjacent cells.
