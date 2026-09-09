@@ -25,7 +25,7 @@ def bridge_field_stac_to_agri_task(
     field_id: str,
     land_id: str | None = None,
 ) -> dict:
-    """Sample MinIO COGs for field and upsert agri lonlat_v1 scene products."""
+    """Sample active-store (OSS) COGs for field and upsert agri lonlat_v1."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import bridge_field_stac_to_agri
 
     try:

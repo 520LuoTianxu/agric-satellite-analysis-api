@@ -66,6 +66,20 @@ export default function NdviChart({
 }: NdviChartProps) {
     const config = INDEX_CONFIG[indexType];
     const seriesName = `Mean ${config.label}`;
+    const isSar = indexType === "VV" || indexType === "VH";
+    const dataVals = stats
+        .map((s) => s.mean)
+        .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    let yMin = config.rescaleMin;
+    let yMax = config.rescaleMax + 0.1;
+    if (isSar && dataVals.length > 0) {
+        const dMin = Math.min(...dataVals);
+        const dMax = Math.max(...dataVals);
+        const pad = Math.max(1, (dMax - dMin) * 0.15 || 2);
+        yMin = Math.min(config.rescaleMin, dMin - pad);
+        yMax = Math.max(config.rescaleMax, dMax + pad);
+    }
+
 
     // Weather data sorted by date for overlay
     const weatherSorted = useMemo(() => {
@@ -114,8 +128,10 @@ export default function NdviChart({
                         if (p.seriesName === "p10" || p.seriesName === "p90") continue;
                         const val = Array.isArray(p.value) ? p.value[1] : p.value;
                         if (val == null) continue;
-                        const unit = p.seriesName === seriesName ? "" : " mm";
-                        lines.push(`${p.marker} ${p.seriesName}: ${Number(val).toFixed(p.seriesName === seriesName ? 3 : 1)}${unit}`);
+                        const isIndex = p.seriesName === seriesName;
+                        const unit = isIndex ? (isSar ? " dB" : "") : " mm";
+                        const digits = isIndex ? (isSar ? 2 : 3) : 1;
+                        lines.push(`${p.marker} ${p.seriesName}: ${Number(val).toFixed(digits)}${unit}`);
                     }
                     return lines.join("<br/>");
                 },
@@ -127,10 +143,10 @@ export default function NdviChart({
             },
             yAxis: hasWeather
                 ? [
-                    valueAxis({ min: config.rescaleMin, max: config.rescaleMax + 0.1 }),
+                    valueAxis({ min: yMin, max: yMax }),
                     secondaryValueAxis({ name: "mm", nameTextStyle: axisLabel() }),
                 ]
-                : valueAxis({ min: config.rescaleMin, max: config.rescaleMax + 0.1 }),
+                : valueAxis({ min: yMin, max: yMax }),
             dataZoom: [
                 {
                     type: "inside" as const,
@@ -178,8 +194,10 @@ export default function NdviChart({
                     },
                     symbolSize: (value: any) => {
                         const d = Array.isArray(value) ? value[0] : null;
-                        return d === selectedDate ? 10 : 4;
+                        if (d === selectedDate) return 10;
+                        return isSar && stats.length <= 3 ? 8 : 4;
                     },
+                    showSymbol: isSar || stats.length <= 3 ? true : undefined,
                     markLine: {
                         silent: true,
                         data: [thresholdMarkLine(config.threshold, "Threshold")],
@@ -211,7 +229,7 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType]);
+    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar]);
 
     const onEvents = useMemo(
         () => ({

@@ -300,6 +300,77 @@ def parcel_product_prefix() -> str:
     return prefix
 
 
+def configure_gdal_vsis3(storage: ObjectStorage | None = None) -> dict[str, str]:
+    """Point rasterio/GDAL ``/vsis3/`` at the active object store.
+
+    Returns the previous env values for keys we touch (caller may restore).
+    Uses assignment (not setdefault) so a prior MinIO config cannot stick
+    when ``STORAGE_BACKEND=oss``.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    storage = storage or get_storage()
+    keys = (
+        "AWS_S3_ENDPOINT",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_VIRTUAL_HOSTING",
+        "AWS_HTTPS",
+        "AWS_NO_SIGN_REQUEST",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    )
+    previous = {k: os.environ[k] for k in keys if k in os.environ}
+
+    if storage.backend == "oss":
+        parsed = urlparse(settings.oss_endpoint)
+        endpoint = parsed.netloc or parsed.path or "oss-cn-beijing.aliyuncs.com"
+        # Strip scheme leftovers
+        endpoint = endpoint.replace("https://", "").replace("http://", "")
+        os.environ["AWS_S3_ENDPOINT"] = endpoint
+        os.environ["AWS_ACCESS_KEY_ID"] = settings.oss_access_key_id
+        os.environ["AWS_SECRET_ACCESS_KEY"] = settings.oss_access_key_secret
+        os.environ["AWS_VIRTUAL_HOSTING"] = "TRUE"
+        os.environ["AWS_HTTPS"] = "YES"
+        os.environ["AWS_NO_SIGN_REQUEST"] = "NO"
+        os.environ["AWS_REGION"] = settings.oss_region or "oss-cn-beijing"
+        os.environ["AWS_DEFAULT_REGION"] = settings.oss_region or "oss-cn-beijing"
+    else:
+        os.environ["AWS_S3_ENDPOINT"] = settings.minio_endpoint
+        os.environ["AWS_ACCESS_KEY_ID"] = settings.minio_access_key
+        os.environ["AWS_SECRET_ACCESS_KEY"] = settings.minio_secret_key
+        os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
+        os.environ["AWS_HTTPS"] = "YES" if settings.minio_secure else "NO"
+        os.environ["AWS_NO_SIGN_REQUEST"] = "NO"
+        os.environ["AWS_REGION"] = "us-east-1"
+        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+    return previous
+
+
+def restore_gdal_env(
+    previous: dict[str, str], touched: tuple[str, ...] | None = None
+) -> None:
+    """Restore env keys after ``configure_gdal_vsis3`` / public S3 reads."""
+    import os
+
+    keys = touched or (
+        "AWS_S3_ENDPOINT",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_VIRTUAL_HOSTING",
+        "AWS_HTTPS",
+        "AWS_NO_SIGN_REQUEST",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    )
+    for k in keys:
+        if k in previous:
+            os.environ[k] = previous[k]
+        else:
+            os.environ.pop(k, None)
+
+
 @lru_cache(maxsize=1)
 def get_storage() -> ObjectStorage:
     """Return a cached storage backend instance for the configured backend."""
@@ -340,4 +411,6 @@ __all__ = [
     "get_parcel_product_storage",
     "parcel_product_prefix",
     "clear_storage_cache",
+    "configure_gdal_vsis3",
+    "restore_gdal_env",
 ]

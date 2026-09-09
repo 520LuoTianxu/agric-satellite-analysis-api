@@ -623,6 +623,9 @@ export default function AgriTimeseriesPanel({
         cire: "CIRE",
         mndwi: "MNDWI",
         drought: "NDVI",
+        vv: "VV",
+        vh: "VH",
+        flood: "VV",
     };
     const chartIndexType: IndexType = CHART_INDEX_TYPE[series] ?? "NDVI";
 

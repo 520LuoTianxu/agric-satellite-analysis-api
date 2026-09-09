@@ -334,13 +334,13 @@ def _backfill_wave_message(
     if phase == "idle":
         return "当前无进行中的遥感回填"
     if phase == "bridge":
-        return "正在写入 agri lonlat…"
+        return "正在写入 agri lonlat（光学+雷达）…"
     if phase == "done":
         return f"遥感回填已完成（{completed}/{total}）"
     # stac
     done = completed
     return (
-        f"正在拉取遥感数据… 已完成 {done}/{max(total, done + pending + running)}"
+        f"正在拉取光学+雷达遥感数据… 已完成 {done}/{max(total, done + pending + running)}"
         f"（进行中 {running}，排队 {pending}"
         + (f"，失败 {failed}" if failed else "")
         + f"，约 {percent:.0f}%）"
@@ -501,9 +501,9 @@ async def backfill_field_indices(
             bridge_job_id=str(bridge_job.id),
         )
         message = (
-            f"已启动 {months} 个月遥感回填（agri 地块）。"
-            "将先通过 STAC 刷新 COG，再桥接到 agri lonlat_v1（parcel_scene_products）；"
-            "完成后请刷新指数面板查看新数据。"
+            f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
+            "将通过 STAC 拉取 Sentinel-2 指数与 Sentinel-1 VV/VH 到 OSS，"
+            "再桥接/写入 agri lonlat_v1；完成后请刷新指数面板查看色斑。"
         )
     else:
         message = (

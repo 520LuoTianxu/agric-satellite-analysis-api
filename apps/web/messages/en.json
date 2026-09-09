@@ -867,7 +867,7 @@
         "showHeatmap": "Show heatmap",
         "rendering": " · rendering…",
         "refreshRs": "Re-fetch remote sensing",
-        "refreshRsTitle": "Refresh COGs via STAC and bridge to agri lonlat_v1",
+        "refreshRsTitle": "Pull optical+radar via STAC to OSS and bridge to agri lonlat_v1",
         "refreshStarted": "Remote-sensing refresh started",
         "refreshFailed": "Failed to start remote-sensing refresh",
         "refreshInProgress": "Remote-sensing refresh in progress…",

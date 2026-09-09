@@ -446,7 +446,7 @@
         },
         "backfill": {
             "buttonLabel": "重新拉取遥感数据",
-            "buttonTitle": "重新拉取过去 24 个月的遥感指数（STAC → COG，agri 地块会桥接到 lonlat_v1）",
+            "buttonTitle": "重新拉取过去 24 个月光学+雷达（STAC → OSS COG，agri 地块桥接 lonlat_v1）",
             "processing": "正在处理历史数据",
             "processingDesc": "正在分析过去 24 个月的卫星影像。数据就绪后会自动显示。",
             "started": "已开始重新拉取遥感数据。完成后请刷新面板查看。",
@@ -867,7 +867,7 @@
         "showHeatmap": "显示色斑图",
         "rendering": " · 渲染中…",
         "refreshRs": "重新拉取遥感数据",
-        "refreshRsTitle": "通过 STAC 刷新 COG 并桥接到 agri lonlat_v1",
+        "refreshRsTitle": "通过 STAC 拉取光学+雷达到 OSS 并桥接到 agri lonlat_v1",
         "refreshStarted": "已开始重新拉取遥感数据",
         "refreshFailed": "启动遥感数据拉取失败",
         "refreshInProgress": "遥感数据拉取进行中…",
