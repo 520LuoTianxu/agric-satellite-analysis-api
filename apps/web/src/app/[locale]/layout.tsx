@@ -94,7 +94,11 @@ export async function generateMetadata({
         },
         icons: {
             icon: [
-                { url: "/favicon.svg", type: "image/svg+xml" },
+                { url: "/favicon.ico", sizes: "any" },
+                { url: "/icon-32.png", type: "image/png", sizes: "32x32" },
+            ],
+            apple: "/apple-icon.png",
+        },
             ],
             apple: "/apple-icon",
         },
