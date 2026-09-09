@@ -87,6 +87,8 @@ interface NdviTabProps {
     fieldId: string;
     /** Field crop_type for agri season calendar / grade shares */
     cropType?: string | null;
+    /** Field area (ha) — agri NDVI donut center shows 亩 */
+    areaHa?: number | null;
     /** Field tags — used to detect agri:<land_id> for RS fallback */
     fieldTags?: string[] | null;
     /** Called when a tile layer should be shown on the map */
@@ -106,7 +108,7 @@ interface NdviTabProps {
     agriHeatmapEnabled?: boolean;
 }
 
-export default function NdviTab({ fieldId, fieldTags, cropType, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
+export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
     const tMon = useTranslations("monitoring");
     const agriLandId = parseAgriLandId(fieldTags);
     const isAgriField = !!agriLandId;
@@ -697,6 +699,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, onShowLayer, onA
                     fieldId={fieldId}
                     fieldTags={fieldTags}
                     cropType={cropType}
+                    areaHa={areaHa}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
                     onHeatmapChange={onAgriHeatmapChange}
                     mode={agriHeatMode}

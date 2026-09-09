@@ -31,11 +31,25 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { haToMu } from "@/lib/area";
+import type { DayGradeShare } from "@/components/charts/ndvi-grade-shares-chart";
+import {
+    computePixelNdviGradeShares,
+    NDVI_DAY_GRADE_RULE_ZH,
+} from "@/components/charts/ndvi-grade-shares-chart";
 
 const NdviChart = dynamic(() => import("@/components/charts/ndvi-chart"), {
     ssr: false,
     loading: () => <Skeleton className="h-[200px] w-full rounded-md" />,
 });
+
+const NdviGradeSharesChart = dynamic(
+    () => import("@/components/charts/ndvi-grade-shares-chart"),
+    {
+        ssr: false,
+        loading: () => <Skeleton className="h-[220px] w-full rounded-md" />,
+    },
+);
 
 type SeriesKey = AgriHeatIndex;
 
@@ -250,14 +264,6 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
 }
 
 const UNCROPPED_NDVI = 0.25;
-const NDVI_GRADE_RULE_ZH = "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3";
-
-function classifyNdviGrade(v: number): "优" | "良" | "中" | "差" {
-    if (v >= 0.7) return "优";
-    if (v >= 0.5) return "良";
-    if (v >= 0.3) return "中";
-    return "差";
-}
 
 /** Default maize-like stage bands (month ranges) — overridden by crop season when available */
 const DEFAULT_STAGE_BANDS = [
@@ -272,6 +278,8 @@ export interface AgriTimeseriesPanelProps {
     fieldTags: string[] | null | undefined;
     /** Bound crop key / label for season calendar */
     cropType?: string | null;
+    /** Field area in hectares — donut center shows 亩 (×15) */
+    areaHa?: number | null;
     /** When true, parent already has monitoring layers */
     hasMonitoringData?: boolean;
     /** Push 色斑图 overlay to the field map */
@@ -287,6 +295,7 @@ export default function AgriTimeseriesPanel({
     fieldId,
     fieldTags,
     cropType,
+    areaHa = null,
     hasMonitoringData = false,
     onHeatmapChange,
     mode: modeProp,
@@ -323,6 +332,11 @@ export default function AgriTimeseriesPanel({
         index: string;
         mean: number | null;
     } | null>(null);
+    /** Per-date pixel NDVI grade shares (图一 bands) — fills as heatmaps/prefetch load. */
+    const [dayGradeByDate, setDayGradeByDate] = useState<Record<string, DayGradeShare>>({});
+    const dayGradeByDateRef = useRef(dayGradeByDate);
+    dayGradeByDateRef.current = dayGradeByDate;
+    const gradePrefetchDoneRef = useRef<string | null>(null);
     /** Bumps on every loadHeatmap call; stale async results are ignored. */
     const heatmapLoadGenRef = useRef(0);
     /** Prefetched film — kept even when enabled=false (map cleared, cache retained). */
@@ -371,6 +385,8 @@ export default function AgriTimeseriesPanel({
         let cancelled = false;
         setLoading(true);
         setError(null);
+        setDayGradeByDate({});
+        gradePrefetchDoneRef.current = null;
         (async () => {
             try {
                 const [sum, s2, s1] = await Promise.all([
@@ -570,6 +586,20 @@ export default function AgriTimeseriesPanel({
                     });
                     return;
                 }
+                // Day pixel NDVI grade shares (图一) — prefer lonlat; clear pixels preferred
+                if (meta.sensor === "S2" && (index === "ndvi" || index === "drought" || index === "evi")) {
+                    const sharePixels = lonlat?.length
+                        ? lonlat
+                        : null;
+                    if (sharePixels?.length) {
+                        const share = computePixelNdviGradeShares(sharePixels);
+                        if (share) {
+                            setDayGradeByDate((prev) =>
+                                prev[date] && prev[date]!.n === share.n ? prev : { ...prev, [date]: share },
+                            );
+                        }
+                    }
+                }
                 const img = lonlat?.length
                     ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
                     : rasterizeAgriPixels(grid!, index, meta.sensor);
@@ -612,6 +642,35 @@ export default function AgriTimeseriesPanel({
         [landId, publishHeatmap],
     );
     loadHeatmapRef.current = loadHeatmap;
+
+    /** Background-only: fetch pixels for grade shares without touching map overlay. */
+    const prefetchDayGradeShares = useCallback(
+        async (dates: string[]) => {
+            if (!landId || !dates.length) return;
+            for (const date of dates) {
+                if (dayGradeByDateRef.current[date]) continue;
+                try {
+                    const res = await agriApi.scenes(landId, {
+                        sensor: "S2",
+                        from: date,
+                        to: date,
+                        limit: 3,
+                        includePixels: 1,
+                    });
+                    const scene =
+                        res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ?? res.items[0];
+                    const lonlat = scene?.pixels_lonlat;
+                    if (!lonlat?.length) continue;
+                    const share = computePixelNdviGradeShares(lonlat);
+                    if (!share) continue;
+                    setDayGradeByDate((prev) => (prev[date] ? prev : { ...prev, [date]: share }));
+                } catch {
+                    /* ignore prefetch errors */
+                }
+            }
+        },
+        [landId],
+    );
 
     const selectDateExplicit = useCallback(
         (date: string) => {
@@ -680,54 +739,54 @@ export default function AgriTimeseriesPanel({
         return DEFAULT_STAGE_BANDS;
     }, [seasonMonths]);
 
-    const gradeShares = useMemo(() => {
-        if (series !== "ndvi" && series !== "drought") return null;
-        const counts = { 优: 0, 良: 0, 中: 0, 差: 0 };
-        let n = 0;
-        for (const s of scenes) {
-            if (s.sensor !== "S2") continue;
-            const v = typeof s.ndvi_avg === "number" ? s.ndvi_avg : null;
-            if (v == null) continue;
-            const m = Number(String(s.date).slice(5, 7));
-            if (!seasonMonths.includes(m)) continue;
-            if (peakMonths.includes(m) && v < UNCROPPED_NDVI) continue; // bare peak
-            if (typeof s.cloud_cover === "number" && s.cloud_cover > 40) continue;
-            counts[classifyNdviGrade(v)] += 1;
-            n += 1;
-        }
-        if (!n) return null;
-        const pct = Object.fromEntries(
-            (Object.keys(counts) as (keyof typeof counts)[]).map((k) => [
-                k,
-                Math.round((counts[k] * 1000) / n) / 10,
-            ]),
-        ) as Record<"优" | "良" | "中" | "差", number>;
-        return { n, counts, pct };
-    }, [scenes, series, seasonMonths, peakMonths]);
-
     const selectedBare = useMemo(() => {
-        if (!selectedDate || (series !== "ndvi" && series !== "drought")) return false;
+        if (!selectedDate || (series !== "ndvi" && series !== "drought" && series !== "evi")) return false;
         const st = stats.find((s) => s.date === selectedDate);
         if (!st || st.mean == null) return false;
         const m = Number(selectedDate.slice(5, 7));
         return peakMonths.includes(m) && st.mean < UNCROPPED_NDVI;
     }, [selectedDate, stats, series, peakMonths]);
 
-    const selectedStageLabel = useMemo(() => {
+    const areaMu = useMemo(() => {
+        if (areaHa == null || !Number.isFinite(areaHa)) return null;
+        return haToMu(areaHa);
+    }, [areaHa]);
+
+    const selectedDayShare = useMemo(() => {
         if (!selectedDate) return null;
-        const m = Number(selectedDate.slice(5, 7));
-        const d = Number(selectedDate.slice(8, 10));
-        if (!seasonMonths.includes(m)) return "非生育期";
-        if (stageBands) {
-            for (const b of stageBands) {
-                const afterStart = m > b.startMonth || (m === b.startMonth && d >= (b.startDay ?? 1));
-                const beforeEnd = m < b.endMonth || (m === b.endMonth && d <= (b.endDay ?? 28));
-                if (afterStart && beforeEnd) return b.name;
+        return dayGradeByDate[selectedDate] ?? null;
+    }, [selectedDate, dayGradeByDate]);
+
+    const sceneMeanByDate = useMemo(() => {
+        const out: Record<string, number | null> = {};
+        for (const s of scenes) {
+            if (s.sensor !== "S2") continue;
+            if (typeof s.ndvi_avg === "number" && Number.isFinite(s.ndvi_avg)) {
+                out[s.date] = s.ndvi_avg;
             }
         }
-        if (peakMonths.includes(m)) return "旺长期";
-        return "生育期";
-    }, [selectedDate, seasonMonths, peakMonths, stageBands]);
+        return out;
+    }, [scenes]);
+
+    // Prefetch up to ~12 recent in-season S2 dates for stacked 图一 (no map publish)
+    useEffect(() => {
+        if (!landId || !scenes.length) return;
+        const s2Dates = [
+            ...new Set(
+                scenes
+                    .filter((s) => s.sensor === "S2" && typeof s.ndvi_avg === "number")
+                    .map((s) => s.date),
+            ),
+        ].sort();
+        const inSeason = s2Dates.filter((d) => seasonMonths.includes(Number(d.slice(5, 7))));
+        const pool = (inSeason.length ? inSeason : s2Dates).slice(-12);
+        const prefetchKey = `${landId}:${pool.join(",")}`;
+        if (gradePrefetchDoneRef.current === prefetchKey) return;
+        gradePrefetchDoneRef.current = prefetchKey;
+        const missing = pool.filter((d) => !dayGradeByDateRef.current[d]);
+        if (!missing.length) return;
+        void prefetchDayGradeShares(missing);
+    }, [landId, scenes, seasonMonths, prefetchDayGradeShares]);
 
     const total = summary?.total ?? 0;
 
@@ -909,17 +968,12 @@ export default function AgriTimeseriesPanel({
                             </p>
                         )}
                         {(series === "ndvi" || series === "evi" || series === "drought") && (
-                            <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1.5">
+                            <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-2">
                                 <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="text-[11px] font-medium text-foreground">生育周期概览</span>
+                                    <span className="text-[11px] font-medium text-foreground">长势等级（当日像元）</span>
                                     <Badge variant="secondary" className="text-[10px]">
                                         {cropOption?.season_label_zh || "夏玉米季（6–9月）"}
                                     </Badge>
-                                    {selectedStageLabel && (
-                                        <Badge variant="outline" className="text-[10px]">
-                                            当前：{selectedStageLabel}
-                                        </Badge>
-                                    )}
                                     {selectedBare && (
                                         <Badge variant="destructive" className="text-[10px]">
                                             疑似未种植/裸地（旺季 NDVI 低于 {UNCROPPED_NDVI}）
@@ -927,28 +981,17 @@ export default function AgriTimeseriesPanel({
                                     )}
                                 </div>
                                 <p className="text-[10px] text-muted-foreground leading-snug">
-                                    图中色带≈苗期/拔节抽穗/旺长/成熟；淡色点为非生育期，灰色点为旺季极低绿度（不宜当「差长势」）。
-                                    分档：{NDVI_GRADE_RULE_ZH}
+                                    分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}。圆环中心为地块面积（亩）。
+                                    下方时序图色带≈苗期/拔节抽穗/旺长/成熟；淡色点为非生育期。
                                 </p>
-                                {gradeShares && (
-                                    <div className="flex flex-wrap gap-1.5 text-[10px] tabular-nums">
-                                        {(["优", "良", "中", "差"] as const).map((g) => (
-                                            <span
-                                                key={g}
-                                                className={cn(
-                                                    "rounded px-1.5 py-0.5 border",
-                                                    g === "优" && "bg-emerald-50 border-emerald-200 text-emerald-800",
-                                                    g === "良" && "bg-lime-50 border-lime-200 text-lime-800",
-                                                    g === "中" && "bg-amber-50 border-amber-200 text-amber-800",
-                                                    g === "差" && "bg-orange-50 border-orange-200 text-orange-800",
-                                                )}
-                                            >
-                                                {g} {gradeShares.pct[g]}%（{gradeShares.counts[g]}）
-                                            </span>
-                                        ))}
-                                        <span className="text-muted-foreground self-center">n={gradeShares.n} 景</span>
-                                    </div>
-                                )}
+                                <NdviGradeSharesChart
+                                    selectedShare={selectedDayShare}
+                                    historyByDate={dayGradeByDate}
+                                    meanByDate={sceneMeanByDate}
+                                    areaMu={areaMu}
+                                    selectedDate={selectedDate}
+                                    height={210}
+                                />
                             </div>
                         )}
                         {stats.length > 0 ? (
