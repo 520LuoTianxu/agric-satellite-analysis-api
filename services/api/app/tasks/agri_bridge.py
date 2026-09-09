@@ -13,6 +13,22 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 
+def _dispatch_agri_alerts(field_id: str, land_id: str | None = None) -> None:
+    """Fire-and-forget RS alert re-eval after lonlat upsert."""
+    try:
+        from app.tasks.agri_alerts import evaluate_agri_alerts_for_field
+
+        evaluate_agri_alerts_for_field.delay(
+            field_id, land_id=land_id, replace_open=True
+        )
+    except Exception as e:
+        logger.warning(
+            "agri_alerts_dispatch_failed",
+            field_id=field_id,
+            error=str(e),
+        )
+
+
 @celery_app.task(
     name="app.tasks.agri_bridge.bridge_field_stac_to_agri",
     bind=True,
@@ -37,6 +53,7 @@ def bridge_field_stac_to_agri_task(
             upserted=result.get("upserted"),
             skipped=result.get("skipped"),
         )
+        _dispatch_agri_alerts(field_id, land_id=result.get("land_id") or land_id)
         return result
     except Exception as e:
         logger.error(
@@ -127,6 +144,7 @@ def bridge_after_backfill(
             field_id=field_id,
             upserted=result.get("upserted"),
         )
+        _dispatch_agri_alerts(field_id, land_id=land_id or result.get("land_id"))
         if bridge_job:
             bridge_job = session.get(Job, uuid.UUID(bridge_job_id))
             if bridge_job:

@@ -109,6 +109,7 @@ def generate_assessment_pdf(
         field_meta={
             "boundary_source": field.get("boundary_source"),
             "land_id": field.get("land_id"),
+            "crop_type": field.get("crop_type"),
         },
     )
 

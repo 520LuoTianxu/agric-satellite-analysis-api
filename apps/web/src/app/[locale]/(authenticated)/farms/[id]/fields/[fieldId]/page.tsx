@@ -7,6 +7,7 @@ import dynamic from "next/dynamic";
 import maplibregl from "maplibre-gl";
 import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
+import CropSelect from "@/components/field/crop-select";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
@@ -1064,11 +1065,11 @@ export default function FieldDetailPage() {
                                             <Label htmlFor="edit-crop" className="text-xs">
                                                 {t("cropType")}
                                             </Label>
-                                            <Input
+                                            <CropSelect
                                                 id="edit-crop"
                                                 value={editCropType}
-                                                onChange={(e) => setEditCropType(e.target.value)}
-                                                className="h-9"
+                                                onChange={setEditCropType}
+                                                placeholder={t("cropType")}
                                             />
                                         </div>
                                         <div className="space-y-1.5">
@@ -1216,7 +1217,13 @@ export default function FieldDetailPage() {
                                     </TabsContent>
 
                                     <TabsContent value="land-report" className="mt-0">
-                                        <LandReportTab fieldId={fieldId} />
+                                        <LandReportTab
+                                            fieldId={fieldId}
+                                            cropType={field?.crop_type}
+                                            onCropBound={(key) => {
+                                                setField((prev) => (prev ? { ...prev, crop_type: key } : prev));
+                                            }}
+                                        />
                                     </TabsContent>
 
                                     <TabsContent value="scouting" className="mt-0">

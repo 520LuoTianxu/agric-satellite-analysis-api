@@ -567,7 +567,7 @@ export interface BackfillStatusResponse {
 
 export const fieldsApi = {
     get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
-    create: (data: { farm_id: string; name: string; geom: any; crop_type?: string; season?: string; tags?: string[] }) =>
+    create: (data: { farm_id: string; name: string; geom: any; crop_type: string; season?: string; tags?: string[] }) =>
         apiFetch<Field>("/fields", { method: "POST", body: JSON.stringify(data) }),
     update: (fieldId: string, data: { name?: string; geom?: any; crop_type?: string; season?: string; tags?: string[] }) =>
         apiFetch<Field>(`/fields/${fieldId}`, { method: "PUT", body: JSON.stringify(data) }),
@@ -619,9 +619,25 @@ export const jobsApi = {
 // ── Alerts ───────────────────────────────────────────────────────────
 
 
+export interface CropOption {
+    key: string;
+    name: string;
+    name_zh: string;
+    season_months: number[];
+    peak_months: number[];
+    season_label_zh: string;
+}
+
+export const cropsApi = {
+    list: () => apiFetch<CropOption[]>("/crops"),
+};
+
 export const assessmentApi = {
-    generate: (fieldId: string) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, { method: "POST" }),
+    generate: (fieldId: string, body?: { crop_type?: string }) =>
+        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
+            method: "POST",
+            body: JSON.stringify(body || {}),
+        }),
     latestMeta: (fieldId: string) =>
         apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
     downloadLatest: async (fieldId: string) => {

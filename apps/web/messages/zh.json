@@ -307,8 +307,9 @@
         "nameRequired": "地块名称为必填项",
         "drawFirst": "请先在地图上绘制多边形",
         "placeholderName": "例如：地块 A1",
-        "placeholderCrop": "例如：水稻、小麦、棉花",
-        "placeholderSeason": "例如：2025 年早稻、2026 年冬小麦"
+        "placeholderCrop": "从目录选择作物",
+        "placeholderSeason": "例如：2025 年早稻、2026 年冬小麦",
+        "cropRequired": "请选择作物"
     },
     "fieldDetail": {
         "backToFarm": "返回农场",
@@ -882,7 +883,7 @@
     },
     "landReportTab": {
         "title": "选地体检报告",
-        "description": "一键生成白话版选地体检 PDF：大分数、红绿灯、分项卡片与常见问题。面积按亩统计；长势按玉米季（6–9 月）而非全年平均。",
+        "description": "一键生成白话版选地体检 PDF：大分数、红绿灯、分项卡片。面积按亩；长势按地块绑定作物的生育季，而非全年平均。",
         "generate": "一键生成 PDF",
         "generating": "正在生成…",
         "download": "下载 PDF",
@@ -897,8 +898,16 @@
         "status_failed": "失败",
         "empty": "还没有选地报告，点击上方按钮生成。",
         "generatedAt": "生成时间：{time}",
-        "noteVigor": "长势口径：夏玉米 6–9 月生育期、7–8 月旺长期，不看全年 NDVI 平均。",
+        "noteVigor": "长势口径：按地块绑定作物的生育季/峰值月，不看全年 NDVI 平均。",
         "noteFlood": "涝/旱：没有硬证据不打红灯；相对偏湿或绿度偏低只作提醒。",
-        "noteArea": "面积单位：亩（1 公顷 = 15 亩）。"
+        "noteArea": "面积单位：亩（1 公顷 = 15 亩）。",
+        "cropRequired": "请先选择并绑定作物",
+        "cropGateHint": "历史地块还没有绑定作物。选地报告需要作物才能按正确物候打分，请先选择一种作物。",
+        "selectCrop": "选择作物",
+        "bindCrop": "仅绑定作物",
+        "bindAndGenerate": "绑定并生成 PDF",
+        "cropBound": "作物已绑定",
+        "cropBindFailed": "绑定作物失败",
+        "boundCrop": "当前作物"
     }
 }

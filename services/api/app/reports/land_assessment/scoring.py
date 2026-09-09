@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Season-aware maize land-assessment scoring (白话选地体检).
+"""Season-aware land-assessment scoring (白话选地体检).
 
 Rules:
-- Vigor by crop season (夏玉米 Jun–Sep / Jul–Aug peak), not annual NDVI avg.
+- Vigor by bound crop season (from ``app.core.crops``), not annual NDVI avg.
 - Flood/drought: no red without hard evidence; relative wetness/NDVI dips
   are reminders only.
 - Area reported in 亩 (1 ha = 15 亩) by callers.
@@ -89,18 +89,19 @@ def _cluster(dates_list: list[str], typ: str) -> list[dict[str, Any]]:
     return out
 
 
-def _pick_corn_suit(suit: dict[str, Any] | None) -> dict[str, Any]:
+def _pick_crop_suit(suit: dict[str, Any] | None, crop_key: str) -> dict[str, Any]:
+    """Prefer suitability row matching the field's bound crop."""
     suit = suit or {}
-    rice = suit.get("field_crop_suitability") or {}
-    crop_name = (rice.get("crop") or "").lower()
-    if crop_name in ("corn", "maize"):
-        return rice
+    key = (crop_key or "corn").lower()
+    bound = suit.get("field_crop_suitability") or {}
+    if (bound.get("crop") or "").lower() == key:
+        return bound
     for c in suit.get("crops") or []:
         name = (c.get("crop") or c.get("name") or "").lower()
-        if "corn" in name or "maize" in name or "玉米" in name:
+        if name == key or key in name:
             return c
-    return rice or {
-        "crop": "corn",
+    return bound or {
+        "crop": key,
         "score": 72.0,
         "rating": "fair",
         "limiting_factors": [],
@@ -121,6 +122,18 @@ def compute_assessment(
     """
     weather_stress = weather_stress or {}
     field_meta = field_meta or {}
+
+    from app.core.crops import (
+        crop_name_zh,
+        get_crop_season,
+        normalize_crop_key,
+    )
+
+    crop_key = normalize_crop_key(field_meta.get("crop_type")) or "corn"
+    season = get_crop_season(crop_key)
+    season_months = set(season.season_months)
+    peak_months = set(season.peak_months)
+    crop_label = crop_name_zh(crop_key)
 
     by: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     qualities: list[float] = []
@@ -151,9 +164,9 @@ def compute_assessment(
     def _wet_layer(d: str) -> dict[str, Any] | None:
         return by[d].get("NDWI") or by[d].get("MNDWI")
 
-    season_dates = [d for d in dates if _month(d) in SEASON_MONTHS and "NDVI" in by[d]]
-    peak_dates = [d for d in dates if _month(d) in PEAK_MONTHS and "NDVI" in by[d]]
-    off_dates = [d for d in dates if _month(d) not in SEASON_MONTHS and "NDVI" in by[d]]
+    season_dates = [d for d in dates if _month(d) in season_months and "NDVI" in by[d]]
+    peak_dates = [d for d in dates if _month(d) in peak_months and "NDVI" in by[d]]
+    off_dates = [d for d in dates if _month(d) not in season_months and "NDVI" in by[d]]
 
     ndvi_s = [by[d]["NDVI"]["mean"] for d in season_dates]
     ndvi_p = [by[d]["NDVI"]["mean"] for d in peak_dates]
@@ -233,7 +246,7 @@ def compute_assessment(
     for d in growth_flags + wet_flags:
         month_hits[str(_month(d))] += 1
 
-    focus = "生育期长势（玉米季）"
+    focus = f"生育期长势（{crop_label}）"
     if growth_flags and wet_flags:
         focus = "生育期长势低谷与相对偏湿并存"
     elif wet_flags:
@@ -259,8 +272,7 @@ def compute_assessment(
         "seasons": seasons,
         "month_hits": dict(month_hits),
         "method_note": (
-            "长势与事件仅用玉米生育期(6–9月)及峰值期(7–8月)；"
-            "阈值来自生育期内部分位，非全年平均。"
+            f"长势与事件仅用{season.label_zh}；阈值来自生育期内部分位，非全年平均。"
         ),
     }
 
@@ -298,7 +310,7 @@ def compute_assessment(
         rs_drought = "低"
 
     rs = {
-        "method": "seasonal_maize_6_9_peak_7_8",
+        "method": f"seasonal_{crop_key}_{sorted(season_months)}_{sorted(peak_months)}",
         "counts": {"season_scenes": len(season_dates), "peak_scenes": len(peak_dates)},
         "ndvi_range": [
             round(float(np.min(ndvi_s_arr)), 3),
@@ -329,8 +341,8 @@ def compute_assessment(
     }
 
     # ---- dimension scores ----
-    corn = _pick_corn_suit(suitability)
-    crop_score = float(corn.get("score") or 72.0)
+    crop_suit = _pick_crop_suit(suitability, crop_key)
+    crop_score = float(crop_suit.get("score") or 72.0)
 
     wl = float(soil.get("waterlogging_risk") or 0)
     ph = float(soil.get("avg_ph") or 7)
@@ -350,18 +362,20 @@ def compute_assessment(
         soil_bits.append("有一定渍水风险")
     drain = soil.get("drainage_class") or ""
     if "well" in drain.lower():
-        soil_bits.append("排水较好（玉米一般合适，过干年份要看墒）")
+        soil_bits.append(f"排水较好（{crop_label}一般合适，过干年份要看墒）")
     soil_score = max(35.0, min(95.0, soil_score))
 
     if not peak_dates and not season_dates:
         vigor = 55.0
-        vigor_plain = "暂无足够的玉米季遥感场景，长势分按中性占位，请先回填指数后再生成"
+        vigor_plain = (
+            f"暂无足够的{crop_label}季遥感场景，长势分按中性占位，请先回填指数后再生成"
+        )
     elif peak_mean >= PEAK_GOOD:
         vigor = 85.0
-        vigor_plain = f"峰值期(7–8月)平均 NDVI≈{peak_mean:.2f}，达到较好玉米冠层水平"
+        vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，达到较好{crop_label}冠层水平"
     elif peak_mean >= PEAK_OK:
         vigor = 70.0
-        vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，玉米季冠层中等偏好"
+        vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，{crop_label}季冠层中等偏好"
     elif peak_mean >= PEAK_WEAK:
         vigor = 55.0
         vigor_plain = (
@@ -467,12 +481,12 @@ def compute_assessment(
     dims = [
         {
             "key": "crop",
-            "name": "作物匹配（玉米）",
+            "name": f"作物匹配（{crop_label}）",
             "score": round(crop_score, 1),
             "light": _light(crop_score),
             "plain": (
-                f"系统给玉米 {crop_score} 分（{corn.get('rating') or '—'}）。限制："
-                + ("；".join(corn.get("limiting_factors") or ["—"]))
+                f"系统给{crop_label} {crop_score} 分（{crop_suit.get('rating') or '—'}）。限制："
+                + ("；".join(crop_suit.get("limiting_factors") or ["—"]))
             ),
             "weight": "25%",
         },
@@ -533,20 +547,18 @@ def compute_assessment(
 
     hard_flood = abs_water >= 1
     if not hard_flood and not hard_drought and overall >= 70:
-        one_liner = (
-            "能种玉米，夏天长势不错；没有真涝真旱硬证据，涝旱项已按保守提醒重算。"
-        )
+        one_liner = f"适合{crop_label}，生长季长势不错；没有真涝真旱硬证据，涝旱项已按保守提醒重算。"
     elif overall >= 70:
         one_liner = "生育期长势尚可，综合条件中等偏好"
     elif overall >= 55:
-        one_liner = "能种玉米，但要盯生育期水肥与局部未种植斑块"
+        one_liner = f"能种{crop_label}，但要盯生育期水肥与局部未种植斑块"
     else:
         one_liner = "短板明显，建议先核实种植记录再谈改种"
 
     thinking = (
-        f"按华北夏玉米生育期(6–9月，峰值7–8月)重算，不用全年 NDVI 平均。"
+        f"按{season.label_zh}重算，不用全年 NDVI 平均。{season.vigor_note}"
         f"峰值期均 NDVI≈{peak_mean:.2f}（最高≈{peak_max:.2f}），淡季≈{off_mean:.2f}。"
-        f"玉米适宜性 {crop_score}。土壤 {texture or '—'}、pH {ph:.2f}。"
+        f"{crop_label}适宜性 {crop_score}。土壤 {texture or '—'}、pH {ph:.2f}。"
         f"涝硬证据明水面={abs_water} 景；旱无成灾档案。"
         f"疑似未种植/极低绿度年份：{uncropped_years or '未发现（地块均值口径）'}。"
         f"分数仍是开源体检不是买地判决。"
@@ -569,15 +581,16 @@ def compute_assessment(
             ),
         },
         "howto": (
-            "长势分只看玉米生育期/峰值期，不看全年平均。"
+            f"长势分只看{crop_label}生育期/峰值期，不看全年平均。"
             "绿灯≥70，黄灯55–69，红灯<55。"
             "峰值期整景极低绿度单独标「可能未种植」。"
             "无硬涝/旱证据不打红灯。"
         ),
         "method": {
-            "crop": "corn",
-            "season_months": sorted(SEASON_MONTHS),
-            "peak_months": sorted(PEAK_MONTHS),
+            "crop": crop_key,
+            "crop_name_zh": crop_label,
+            "season_months": sorted(season_months),
+            "peak_months": sorted(peak_months),
             "uncropped_ndvi": UNCROPPED_NDVI,
             "peak_ndvi_mean": round(peak_mean, 3),
             "annual_ndvi_mean_NOT_used": (

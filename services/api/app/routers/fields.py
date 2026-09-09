@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
+from app.core.crops import normalize_crop_key as _norm_crop
 from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import AuditEvent, Farm, Field, Job
@@ -93,6 +94,13 @@ async def create_field(
     except (ValueError, Exception) as e:
         raise HTTPException(status_code=400, detail=f"Invalid geometry: {e}")
 
+    from app.core.crops import require_crop_key
+
+    try:
+        crop_key = require_crop_key(body.crop_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
     # Compute area in hectares (approximate using geodesic area)
     from shapely.ops import transform
     import pyproj
@@ -109,7 +117,7 @@ async def create_field(
         name=body.name,
         geom=from_shape(multi, srid=4326),
         area_ha=round(area_ha, 4),
-        crop_type=body.crop_type,
+        crop_type=crop_key,
         season=body.season,
         tags_json=body.tags,
         created_by=ctx.user.id,
@@ -212,7 +220,20 @@ async def update_field(
     if body.name is not None:
         field.name = body.name
     if body.crop_type is not None:
-        field.crop_type = body.crop_type
+        from app.core.crops import require_crop_key
+
+        raw = (
+            body.crop_type.strip()
+            if isinstance(body.crop_type, str)
+            else body.crop_type
+        )
+        if raw == "" or raw is None:
+            field.crop_type = None
+        else:
+            try:
+                field.crop_type = require_crop_key(str(raw))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
     if body.season is not None:
         field.season = body.season
     if body.tags is not None:
@@ -299,7 +320,7 @@ async def import_fields(
                 name=name,
                 geom=from_shape(multi, srid=4326),
                 area_ha=area_ha,
-                crop_type=props.get("crop_type"),
+                crop_type=_norm_crop(props.get("crop_type")),
                 season=props.get("season"),
                 created_by=ctx.user.id,
             )
@@ -500,10 +521,23 @@ async def backfill_field_indices(
             land_id=str(land_id) if land_id is not None else None,
             bridge_job_id=str(bridge_job.id),
         )
+        # Re-run RS alerts from existing agri lonlat immediately; bridge will
+        # dispatch again after upsert so new scenes are covered.
+        try:
+            from app.tasks.agri_alerts import evaluate_agri_alerts_for_field
+
+            evaluate_agri_alerts_for_field.delay(
+                str(field_id),
+                land_id=str(land_id) if land_id is not None else None,
+                replace_open=True,
+            )
+        except Exception:
+            pass
         message = (
             f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
             "将通过 STAC 拉取 Sentinel-2 指数与 Sentinel-1 VV/VH 到 OSS，"
             "再桥接/写入 agri lonlat_v1；完成后请刷新指数面板查看色斑。"
+            "预警将按 agri 指数重跑。"
         )
     else:
         message = (

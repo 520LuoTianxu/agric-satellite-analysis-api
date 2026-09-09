@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { assessmentApi, jobsApi, type NdviJob } from "@/lib/api";
+import { assessmentApi, fieldsApi, jobsApi, type NdviJob } from "@/lib/api";
+import CropSelect from "@/components/field/crop-select";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,6 +19,8 @@ import { useTranslations } from "next-intl";
 
 interface LandReportTabProps {
     fieldId: string;
+    cropType?: string | null;
+    onCropBound?: (cropKey: string) => void;
 }
 
 function lightBadge(light?: string) {
@@ -27,13 +30,26 @@ function lightBadge(light?: string) {
     return "bg-muted text-muted-foreground";
 }
 
-export default function LandReportTab({ fieldId }: LandReportTabProps) {
+function isCropRequiredError(err: any): boolean {
+    const d = err?.detail ?? err?.message;
+    if (d && typeof d === "object" && d.code === "crop_required") return true;
+    if (typeof d === "string" && d.includes("crop_required")) return true;
+    return false;
+}
+
+export default function LandReportTab({ fieldId, cropType, onCropBound }: LandReportTabProps) {
     const t = useTranslations("landReportTab");
     const [latest, setLatest] = useState<NdviJob | null>(null);
     const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
     const [downloading, setDownloading] = useState(false);
+    const [boundCrop, setBoundCrop] = useState(cropType || "");
+    const [pickCrop, setPickCrop] = useState("");
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    useEffect(() => {
+        setBoundCrop(cropType || "");
+    }, [cropType]);
 
     const refreshMeta = useCallback(async () => {
         try {
@@ -83,10 +99,17 @@ export default function LandReportTab({ fieldId }: LandReportTabProps) {
         }, 2000);
     };
 
-    const handleGenerate = async () => {
+    const runGenerate = async (cropKey?: string) => {
         setGenerating(true);
         try {
-            const job = await assessmentApi.generate(fieldId);
+            const job = await assessmentApi.generate(
+                fieldId,
+                cropKey ? { crop_type: cropKey } : undefined,
+            );
+            if (cropKey) {
+                setBoundCrop(cropKey);
+                onCropBound?.(cropKey);
+            }
             setLatest(job);
             if (job.status === "succeeded") {
                 setGenerating(false);
@@ -102,7 +125,38 @@ export default function LandReportTab({ fieldId }: LandReportTabProps) {
             startPoll(job.id);
         } catch (e: any) {
             setGenerating(false);
-            toast.error(e?.message || t("generateFailed"));
+            if (isCropRequiredError(e)) {
+                toast.error(t("cropRequired"));
+                return;
+            }
+            toast.error(e?.detail?.message || e?.message || t("generateFailed"));
+        }
+    };
+
+    const handleGenerate = async () => {
+        if (!boundCrop) {
+            if (!pickCrop) {
+                toast.error(t("cropRequired"));
+                return;
+            }
+            await runGenerate(pickCrop);
+            return;
+        }
+        await runGenerate();
+    };
+
+    const handleBindOnly = async () => {
+        if (!pickCrop) {
+            toast.error(t("cropRequired"));
+            return;
+        }
+        try {
+            await fieldsApi.update(fieldId, { crop_type: pickCrop });
+            setBoundCrop(pickCrop);
+            onCropBound?.(pickCrop);
+            toast.success(t("cropBound"));
+        } catch (e: any) {
+            toast.error(e?.message || t("cropBindFailed"));
         }
     };
 
@@ -125,6 +179,7 @@ export default function LandReportTab({ fieldId }: LandReportTabProps) {
     const hasPdf = latest?.status === "succeeded" && Boolean(progress.object_key);
     const inFlight =
         generating || latest?.status === "pending" || latest?.status === "running";
+    const needsCrop = !boundCrop;
 
     return (
         <div className="p-4 space-y-4">
@@ -145,18 +200,47 @@ export default function LandReportTab({ fieldId }: LandReportTabProps) {
                 </div>
             ) : (
                 <>
+                    {needsCrop && (
+                        <div className="rounded-lg border border-amber-300/60 bg-amber-50 dark:bg-amber-950/30 p-3 space-y-2">
+                            <p className="text-xs text-amber-900 dark:text-amber-100 leading-relaxed">
+                                {t("cropGateHint")}
+                            </p>
+                            <CropSelect
+                                value={pickCrop}
+                                onChange={setPickCrop}
+                                placeholder={t("selectCrop")}
+                                required
+                            />
+                            <div className="flex flex-wrap gap-2">
+                                <Button size="sm" variant="outline" onClick={handleBindOnly}>
+                                    {t("bindCrop")}
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+
+                    {!needsCrop && (
+                        <p className="text-[11px] text-muted-foreground">
+                            {t("boundCrop")}: <span className="font-medium text-foreground">{boundCrop}</span>
+                        </p>
+                    )}
+
                     <div className="flex flex-wrap gap-2">
                         <Button
                             size="sm"
                             onClick={handleGenerate}
-                            disabled={inFlight}
+                            disabled={inFlight || (needsCrop && !pickCrop)}
                         >
                             {inFlight ? (
                                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
                             ) : (
                                 <RefreshCw className="h-4 w-4 mr-1.5" />
                             )}
-                            {inFlight ? t("generating") : t("generate")}
+                            {inFlight
+                                ? t("generating")
+                                : needsCrop
+                                  ? t("bindAndGenerate")
+                                  : t("generate")}
                         </Button>
                         <Button
                             size="sm"

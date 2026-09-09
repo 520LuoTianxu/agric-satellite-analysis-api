@@ -307,8 +307,9 @@
         "nameRequired": "Field name is required",
         "drawFirst": "Draw a polygon on the map first",
         "placeholderName": "e.g. Block A1",
-        "placeholderCrop": "e.g. Rice, Wheat, Cotton",
-        "placeholderSeason": "e.g. Kharif 2025, Rabi 2026"
+        "placeholderCrop": "Select a crop from the catalog",
+        "placeholderSeason": "e.g. Kharif 2025, Rabi 2026",
+        "cropRequired": "Please select a crop"
     },
     "fieldDetail": {
         "backToFarm": "Back to farm",
@@ -882,7 +883,7 @@
     },
     "landReportTab": {
         "title": "Land assessment report",
-        "description": "One-click plain-language PDF: big score, traffic lights, dimension cards, and FAQ. Area in mu; vigor by maize season (Jun–Sep), not annual NDVI average.",
+        "description": "Generate a plain-language land assessment PDF. Area in mu; vigor uses the bound crop season, not annual NDVI.",
         "generate": "Generate PDF",
         "generating": "Generating…",
         "download": "Download PDF",
@@ -897,8 +898,16 @@
         "status_failed": "Failed",
         "empty": "No land report yet. Click the button above to generate one.",
         "generatedAt": "Generated at {time}",
-        "noteVigor": "Vigor uses summer maize season (Jun–Sep, peak Jul–Aug), not annual NDVI average.",
+        "noteVigor": "Vigor uses the bound crop season / peak months, not annual NDVI averages.",
         "noteFlood": "Flood/drought: no red light without hard evidence; relative wetness is a reminder only.",
-        "noteArea": "Area unit: mu (1 ha = 15 mu)."
+        "noteArea": "Area unit: mu (1 ha = 15 mu).",
+        "cropRequired": "Select and bind a crop first",
+        "cropGateHint": "This field has no crop yet. The report needs a crop for season-aware scoring.",
+        "selectCrop": "Select crop",
+        "bindCrop": "Bind crop only",
+        "bindAndGenerate": "Bind & generate PDF",
+        "cropBound": "Crop bound",
+        "cropBindFailed": "Failed to bind crop",
+        "boundCrop": "Crop"
     }
 }
