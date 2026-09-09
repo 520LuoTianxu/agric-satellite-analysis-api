@@ -25,7 +25,11 @@ from app.reports.land_assessment.data_loader import (
     load_oss_media_for_dates,
 )
 from app.reports.land_assessment.pdf_render import render_pdf
-from app.reports.land_assessment.scoring import compute_assessment
+from app.reports.land_assessment.scoring import (
+    build_narrative_bridge,
+    compute_assessment,
+    compute_phenology_stage_summary,
+)
 
 
 def _load_stage_pixels(
@@ -128,6 +132,7 @@ def generate_assessment_pdf(
             "land_id": field.get("land_id"),
             "crop_type": field.get("crop_type"),
         },
+        weather_history=bundle.get("weather_history") or {},
     )
 
     land_id = field.get("land_id")
@@ -179,6 +184,34 @@ def generate_assessment_pdf(
     )
     stage_rgb, stage_hm = _stage_media_maps(cached)
 
+    # Enrich analysis with phenology stage summary + narrative bridge
+    analysis = computed.setdefault("analysis", {})
+    year = pick_phenology_year(computed["by_date"])
+    stages_for_summary: dict = {}
+    if year is not None:
+        stages_for_summary = pick_phenology_stages(
+            computed["by_date"],
+            year,
+            pixel_dates=set(pixels_by_date.keys()) or None,
+        )
+    peak_months = set((computed.get("meta") or {}).get("peak_months") or [7, 8])
+    pheno = compute_phenology_stage_summary(
+        stages_for_summary,
+        computed["by_date"],
+        peak_months=peak_months,
+    )
+    analysis["phenology_stage_summary"] = pheno
+    analysis["phenology_year"] = year
+    analysis["narrative_bridge"] = build_narrative_bridge(
+        soil_plain=analysis.get("soil_analysis_plain") or "",
+        weather_plain=analysis.get("weather_history_plain") or "",
+        grade_shares=analysis.get("ndvi_grade_shares"),
+        phenology=pheno,
+        crop_label=(computed.get("meta") or {}).get("crop_label") or "作物",
+        peak_mean=float((computed.get("rs") or {}).get("peak_ndvi_mean") or 0),
+        uncropped_years=(computed.get("rs") or {}).get("possible_uncropped_years"),
+    )
+
     chart_paths = render_charts(
         computed["by_date"],
         computed["meta"],
@@ -188,6 +221,7 @@ def generate_assessment_pdf(
         stage_heatmap_paths=stage_hm or None,
         flood_evidence=flood_evidence,
         write_individual_stage_maps=False,
+        analysis=analysis,
     )
 
     if out_path is None:
@@ -209,6 +243,7 @@ def generate_assessment_pdf(
         chart_paths=chart_paths,
         title_suffix="OpenFarm",
         flood_evidence=flood_evidence,
+        analysis=analysis,
     )
 
     ov = computed["scorecard"]["overall"]
@@ -265,6 +300,7 @@ def generate_assessment_pdf(
         "rs": computed["rs"],
         "risk": computed["risk"],
         "flood_evidence": flood_evidence,
+        "analysis": analysis,
         "charts_dir": str(charts_dir),
         "charts": chart_names,
     }

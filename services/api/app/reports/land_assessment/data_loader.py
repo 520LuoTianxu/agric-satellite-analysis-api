@@ -417,6 +417,140 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     return summary, stress
 
 
+
+def load_weather_history(
+    session: Session,
+    field_id: uuid.UUID,
+    season_months: set[int] | list[int] | None = None,
+    *,
+    lookback_days: int = 400,
+) -> dict[str, Any]:
+    """Multi-month / crop-season precip+temp aggregates from WeatherDaily.
+
+    Used for PDF narrative (not just ~30d summary). Returns empty dict if no rows.
+    """
+    season_months = set(season_months or {6, 7, 8, 9})
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=lookback_days)
+    rows = (
+        session.execute(
+            select(WeatherDaily)
+            .where(
+                WeatherDaily.field_id == field_id,
+                WeatherDaily.date >= start,
+            )
+            .order_by(WeatherDaily.date)
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        rows = (
+            session.execute(
+                select(WeatherDaily)
+                .where(WeatherDaily.field_id == field_id)
+                .order_by(WeatherDaily.date.desc())
+                .limit(lookback_days)
+            )
+            .scalars()
+            .all()
+        )
+        rows = list(reversed(rows))
+    if not rows:
+        return {}
+
+    months: dict[str, dict[str, Any]] = {}
+    season_precip = 0.0
+    season_et0 = 0.0
+    season_heat = 0
+    years: set[int] = set()
+    dry_run = 0
+    longest_dry = 0
+    season_days = 0
+
+    for r in rows:
+        d = r.date
+        y, m = d.year, d.month
+        key = f"{y:04d}-{m:02d}"
+        precip = float(r.precipitation_sum or 0)
+        et0 = float(r.et0_fao_mm or 0)
+        tmean = float(r.temperature_2m_mean) if r.temperature_2m_mean is not None else None
+        tmax = float(r.temperature_2m_max) if r.temperature_2m_max is not None else None
+        bucket = months.setdefault(
+            key,
+            {
+                "year": y,
+                "month": m,
+                "precip_mm": 0.0,
+                "et0_mm": 0.0,
+                "heat_days": 0,
+                "tmean_sum": 0.0,
+                "tmean_n": 0,
+                "in_season": m in season_months,
+            },
+        )
+        bucket["precip_mm"] += precip
+        bucket["et0_mm"] += et0
+        if tmax is not None and tmax >= 33:
+            bucket["heat_days"] += 1
+        if tmean is not None:
+            bucket["tmean_sum"] += tmean
+            bucket["tmean_n"] += 1
+
+        if m in season_months:
+            years.add(y)
+            season_days += 1
+            season_precip += precip
+            season_et0 += et0
+            if tmax is not None and tmax >= 33:
+                season_heat += 1
+            if precip < 1.0:
+                dry_run += 1
+                longest_dry = max(longest_dry, dry_run)
+            else:
+                dry_run = 0
+        else:
+            dry_run = 0
+
+    month_list = []
+    for key in sorted(months):
+        b = months[key]
+        month_list.append(
+            {
+                "ym": key,
+                "year": b["year"],
+                "month": b["month"],
+                "precip_mm": round(b["precip_mm"], 1),
+                "et0_mm": round(b["et0_mm"], 1),
+                "heat_days": int(b["heat_days"]),
+                "avg_temp": (
+                    round(b["tmean_sum"] / b["tmean_n"], 1) if b["tmean_n"] else None
+                ),
+                "in_season": bool(b["in_season"]),
+            }
+        )
+
+    season_totals = [m for m in month_list if m["in_season"]]
+    sm_sorted = sorted(season_months)
+    period_label = f"{sm_sorted[0]}–{sm_sorted[-1]}月生育期" if sm_sorted else ""
+
+    return {
+        "period_start": rows[0].date.isoformat(),
+        "period_end": rows[-1].date.isoformat(),
+        "period_label": period_label,
+        "season_months": sm_sorted,
+        "years_covered": sorted(years),
+        "season_days": season_days,
+        "season_precip_mm": round(season_precip, 1),
+        "season_et0_mm": round(season_et0, 1),
+        "season_heat_days": int(season_heat),
+        "longest_dry_spell_days": int(longest_dry),
+        "months": month_list,
+        "season_totals": season_totals,
+        "n_daily_rows": len(rows),
+    }
+
+
 def load_suitability_sync(
     session: Session,
     field_id: uuid.UUID,
@@ -562,6 +696,9 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     crop_key = normalize_crop_key(field.crop_type) or "corn"
     season = get_crop_season(crop_key)
     crop_label = f"{crop_name_zh(crop_key)}（{season.label_zh}）"
+    weather_history = load_weather_history(
+        session, field_id, season.season_months, lookback_days=450
+    )
 
     suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
 
@@ -593,6 +730,7 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         "soil": soil,
         "weather_summary": wsum,
         "weather_stress": wstress,
+        "weather_history": weather_history,
         "suitability": suit,
     }
 
@@ -619,6 +757,11 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     wstress = (
         json.loads((data_dir / "weather_stress.json").read_text(encoding="utf-8"))
         if (data_dir / "weather_stress.json").exists()
+        else {}
+    )
+    whist = (
+        json.loads((data_dir / "weather_history.json").read_text(encoding="utf-8"))
+        if (data_dir / "weather_history.json").exists()
         else {}
     )
     indices: list[dict] = []
@@ -659,6 +802,7 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
         "soil": soil,
         "weather_summary": wsum,
         "weather_stress": wstress,
+        "weather_history": whist,
         "suitability": suit,
     }
 

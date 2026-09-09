@@ -658,6 +658,122 @@ def render_flood_evidence_charts(
     return written
 
 
+
+def render_ndvi_grade_pie(shares: dict[str, Any], out_path: Path) -> Path | None:
+    """Pie chart for 优/良/中/差 shares."""
+    if not shares or not shares.get("n"):
+        return None
+    _setup_font()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    labels = ["优", "良", "中", "差"]
+    colors = ["#2d6a4f", "#52b788", "#f4a261", "#e76f51"]
+    counts = [int((shares.get("counts") or {}).get(g, 0)) for g in labels]
+    nz = [(g, c, col) for g, c, col in zip(labels, counts, colors) if c > 0]
+    if not nz:
+        return None
+    fig, ax = plt.subplots(figsize=(5.2, 3.4), dpi=120)
+    ax.pie(
+        [c for _, c, _ in nz],
+        labels=[f"{g}" for g, _, _ in nz],
+        colors=[col for _, _, col in nz],
+        autopct=lambda p: f"{p:.0f}%" if p >= 3 else "",
+        startangle=90,
+        textprops={"fontsize": 9},
+    )
+    rule = shares.get("rule_zh") or "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3"
+    ax.set_title(f"生育期绿度等级占比（n={shares.get('n')}）\n{rule}", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
+
+
+def render_stage_trend_bar(
+    phenology: list[dict[str, Any]], out_path: Path
+) -> Path | None:
+    """Bar chart of mean NDVI across phenology stages."""
+    if not phenology:
+        return None
+    rows = [r for r in phenology if r.get("mean_ndvi") is not None]
+    if not rows:
+        return None
+    _setup_font()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [r.get("label") or r.get("key") for r in rows]
+    means = [float(r["mean_ndvi"]) for r in rows]
+    colors = []
+    for r in rows:
+        if r.get("likely_bare"):
+            colors.append("#adb5bd")
+        else:
+            g = r.get("grade")
+            colors.append(
+                {"优": "#2d6a4f", "良": "#52b788", "中": "#f4a261", "差": "#e76f51"}.get(
+                    g, "#40916c"
+                )
+            )
+    fig, ax = plt.subplots(figsize=(6.5, 3.2), dpi=120)
+    xs = range(len(labels))
+    ax.bar(xs, means, color=colors, width=0.62)
+    ax.plot(xs, means, "-o", color="#1b4332", lw=1.2, ms=5)
+    for i, r in enumerate(rows):
+        note = r.get("trend_vs_prev") or ""
+        bare = "裸地?" if r.get("likely_bare") else ""
+        ax.text(
+            i,
+            means[i] + 0.02,
+            f"{means[i]:.2f}{(' ·' + note) if note else ''}{(' ' + bare) if bare else ''}",
+            ha="center",
+            fontsize=8,
+        )
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylim(0, max(0.9, max(means) + 0.15))
+    ax.set_ylabel("NDVI")
+    ax.set_title("生育阶段绿度走势（苗期→成熟）")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
+def render_weather_history_bars(
+    weather_history: dict[str, Any], out_path: Path
+) -> Path | None:
+    """Season-month precip bars from weather history."""
+    months = (weather_history or {}).get("season_totals") or (
+        weather_history or {}
+    ).get("months")
+    if not months:
+        return None
+    # prefer in-season months only for clarity
+    rows = [m for m in months if m.get("in_season")] or list(months)
+    if not rows:
+        return None
+    _setup_font()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [m.get("ym") for m in rows]
+    precip = [float(m.get("precip_mm") or 0) for m in rows]
+    fig, ax = plt.subplots(figsize=(7.2, 3.0), dpi=120)
+    ax.bar(range(len(labels)), precip, color="#4ea8de", width=0.7)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("降水 mm")
+    title = weather_history.get("period_label") or "生育期"
+    ax.set_title(f"历史天气·{title}月降水")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
 def render_charts(
     by_date: dict[str, dict[str, float]],
     meta: dict[str, Any],
@@ -668,6 +784,7 @@ def render_charts(
     stage_heatmap_paths: dict[str, Path] | None = None,
     flood_evidence: dict[str, Any] | None = None,
     write_individual_stage_maps: bool = False,
+    analysis: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Write ndvi/evi/ndwi/monthly + phenology/stage + flood charts; return name->path map."""
     _setup_font()
@@ -781,6 +898,23 @@ def render_charts(
             # Individual stage maps are optional — PDF prefers compact 2×2 panel only
             if write_individual_stage_maps:
                 written.update(render_stage_maps(stages, pixels_by_date, out_dir))
+
+    analysis = analysis or {}
+    shares = analysis.get("ndvi_grade_shares")
+    if shares:
+        p = render_ndvi_grade_pie(shares, out_dir / "ndvi_grade_shares.png")
+        if p:
+            written["ndvi_grade_shares.png"] = p
+    pheno = analysis.get("phenology_stage_summary") or []
+    if pheno:
+        p = render_stage_trend_bar(pheno, out_dir / "ndvi_stage_trend.png")
+        if p:
+            written["ndvi_stage_trend.png"] = p
+    whist = analysis.get("weather_history") or {}
+    if whist:
+        p = render_weather_history_bars(whist, out_dir / "weather_history.png")
+        if p:
+            written["weather_history.png"] = p
 
     if flood_evidence and flood_evidence.get("scenes"):
         written.update(render_flood_evidence_charts(flood_evidence, out_dir))

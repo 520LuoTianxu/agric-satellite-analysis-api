@@ -336,11 +336,13 @@ def render_pdf(
     chart_paths: dict[str, Path] | None = None,
     title_suffix: str = "OpenFarm",
     flood_evidence: dict[str, Any] | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> Path:
     _register_fonts()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     chart_paths = chart_paths or {}
+    analysis = analysis or {}
 
     ov = scorecard["overall"]
     dims = {d["key"]: d for d in scorecard["dimensions"]}
@@ -653,6 +655,105 @@ def render_pdf(
         # Short per-scene notes (top 3 to avoid bloat)
         for sc in (flood_evidence.get("scenes") or [])[:3]:
             story.append(p(sc.get("analysis") or "", "small"))
+
+
+    # ===== 土壤·天气·生育期长势（连贯叙事）=====
+    story.append(Spacer(1, 3 * mm))
+    story.append(p("土壤·天气·生育期长势", "h1"))
+    story.append(hr())
+    story.append(
+        p(
+            "下面把土壤本底、生育期历史天气、绿度等级占比和生育阶段走势串成一条线来读，"
+            "避免只看单张卡片。",
+            "body",
+        )
+    )
+    story.append(Spacer(1, 1.5 * mm))
+    soil_plain = analysis.get("soil_analysis_plain") or ""
+    if soil_plain:
+        story.append(p("<b>土壤本底：</b>" + soil_plain, "body"))
+    else:
+        story.append(
+            p(
+                f"<b>土壤本底：</b>质地 {soil.get('dominant_texture') or '—'}，"
+                f"pH {soil.get('avg_ph') if soil.get('avg_ph') is not None else '—'}，"
+                f"排水 {soil.get('drainage_class') or '—'}，"
+                f"持水 {soil.get('rootzone_awc_mm') if soil.get('rootzone_awc_mm') is not None else '—'} mm。",
+                "body",
+            )
+        )
+    story.append(Spacer(1, 1.2 * mm))
+    wh_plain = analysis.get("weather_history_plain") or ""
+    if wh_plain:
+        story.append(p("<b>历史天气（生育期口径）：</b>" + wh_plain, "body"))
+    if chart_paths.get("weather_history.png"):
+        story += img(
+            "weather_history.png",
+            w=150 * mm,
+            ratio=0.38,
+            caption="生育期各月降水（Open-Meteo 日汇总）",
+        )
+    story.append(Spacer(1, 1.2 * mm))
+    shares = analysis.get("ndvi_grade_shares") or {}
+    rule = analysis.get("ndvi_grade_rule_zh") or shares.get("rule_zh") or (
+        "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3"
+    )
+    if shares.get("n"):
+        pct = shares.get("pct") or {}
+        story.append(
+            p(
+                f"<b>生育期绿度等级占比：</b>共 {shares.get('n')} 景清晰生育期场景——"
+                f"优 {pct.get('优', 0)}%，良 {pct.get('良', 0)}%，"
+                f"中 {pct.get('中', 0)}%，差 {pct.get('差', 0)}%。"
+                f"分档规则：{rule}。峰值期极低绿度（可能未种植）已从占比中剔除。",
+                "body",
+            )
+        )
+    if chart_paths.get("ndvi_grade_shares.png"):
+        story += img(
+            "ndvi_grade_shares.png",
+            w=110 * mm,
+            ratio=0.62,
+            caption=f"优/良/中/差占比（{rule}）",
+        )
+    pheno = analysis.get("phenology_stage_summary") or []
+    if pheno:
+        story.append(p("<b>生育阶段绿度走势：</b>", "body"))
+        prow = [
+            [
+                cell("阶段", "tbl_h"),
+                cell("代表日", "tbl_h"),
+                cell("均NDVI", "tbl_h"),
+                cell("相对上阶段", "tbl_h"),
+                cell("等级", "tbl_h"),
+            ]
+        ]
+        for st in pheno:
+            mean = st.get("mean_ndvi")
+            grade = "疑似裸地" if st.get("likely_bare") else (st.get("grade") or "—")
+            prow.append(
+                [
+                    cell(st.get("label") or st.get("key") or "—", "tbl_c"),
+                    cell(str(st.get("date") or "—"), "tbl_c"),
+                    cell(f"{mean:.3f}" if mean is not None else "—", "tbl_c"),
+                    cell(st.get("trend_vs_prev") or "—", "tbl_c"),
+                    cell(grade, "tbl_c"),
+                ]
+            )
+        story.append(make_table(prow, [32 * mm, 30 * mm, 28 * mm, 30 * mm, 40 * mm]))
+        story.append(Spacer(1, 1.5 * mm))
+    if chart_paths.get("ndvi_stage_trend.png"):
+        story += img(
+            "ndvi_stage_trend.png",
+            w=145 * mm,
+            ratio=0.42,
+            caption="苗期→拔节抽雄→旺长→成熟：绿度先升后降才正常；灰色柱为疑似未种植",
+        )
+    bridge = analysis.get("narrative_bridge") or ""
+    if bridge:
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(p("<b>串起来看：</b>" + bridge, "body"))
+
 
     story.append(PageBreak())
     story.append(p("最该盯的几件事", "h1"))

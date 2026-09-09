@@ -4,11 +4,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic";
 import {
     agriApi,
+    cropsApi,
     fieldsApi,
     parseAgriLandId,
     type AgriLandScenesSummary,
     type AgriSceneProduct,
     type BackfillStatusResponse,
+    type CropOption,
     type FieldStat,
     type IndexType,
 } from "@/lib/api";
@@ -247,9 +249,29 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
     return cloudy || lowVeg;
 }
 
+const UNCROPPED_NDVI = 0.25;
+const NDVI_GRADE_RULE_ZH = "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3";
+
+function classifyNdviGrade(v: number): "优" | "良" | "中" | "差" {
+    if (v >= 0.7) return "优";
+    if (v >= 0.5) return "良";
+    if (v >= 0.3) return "中";
+    return "差";
+}
+
+/** Default maize-like stage bands (month ranges) — overridden by crop season when available */
+const DEFAULT_STAGE_BANDS = [
+    { name: "苗期", startMonth: 6, startDay: 1, endMonth: 6, endDay: 30, color: "rgba(216,243,220,0.35)" },
+    { name: "拔节抽穗", startMonth: 7, startDay: 1, endMonth: 7, endDay: 20, color: "rgba(149,213,178,0.28)" },
+    { name: "旺长", startMonth: 7, startDay: 21, endMonth: 8, endDay: 25, color: "rgba(82,183,136,0.22)" },
+    { name: "成熟", startMonth: 8, startDay: 26, endMonth: 9, endDay: 30, color: "rgba(244,162,97,0.18)" },
+];
+
 export interface AgriTimeseriesPanelProps {
     fieldId: string;
     fieldTags: string[] | null | undefined;
+    /** Bound crop key / label for season calendar */
+    cropType?: string | null;
     /** When true, parent already has monitoring layers */
     hasMonitoringData?: boolean;
     /** Push 色斑图 overlay to the field map */
@@ -264,6 +286,7 @@ export interface AgriTimeseriesPanelProps {
 export default function AgriTimeseriesPanel({
     fieldId,
     fieldTags,
+    cropType,
     hasMonitoringData = false,
     onHeatmapChange,
     mode: modeProp,
@@ -279,6 +302,7 @@ export default function AgriTimeseriesPanel({
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [summary, setSummary] = useState<AgriLandScenesSummary | null>(null);
     const [scenes, setScenes] = useState<AgriSceneProduct[]>([]);
+    const [cropOption, setCropOption] = useState<CropOption | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [seriesInternal, setSeriesInternal] = useState<SeriesKey>("ndvi");
@@ -318,6 +342,29 @@ export default function AgriTimeseriesPanel({
             setSeriesInternal(modeProp);
         }
     }, [modeProp, seriesInternal]);
+
+    useEffect(() => {
+        let cancelled = false;
+        cropsApi
+            .list()
+            .then((list) => {
+                if (cancelled) return;
+                const key = (cropType || "").toLowerCase();
+                const hit =
+                    list.find((c) => c.key === key) ||
+                    list.find((c) => c.name_zh === cropType) ||
+                    list.find((c) => c.key === "corn") ||
+                    list[0] ||
+                    null;
+                setCropOption(hit);
+            })
+            .catch(() => {
+                if (!cancelled) setCropOption(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [cropType]);
 
     useEffect(() => {
         if (!landId) return;
@@ -616,6 +663,72 @@ export default function AgriTimeseriesPanel({
     }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
+    const seasonMonths = useMemo(
+        () => cropOption?.season_months ?? [6, 7, 8, 9],
+        [cropOption?.season_months],
+    );
+    const peakMonths = useMemo(
+        () => cropOption?.peak_months ?? [7, 8],
+        [cropOption?.peak_months],
+    );
+    const stageBands = useMemo(() => {
+        // For non-maize seasons, fall back to coarse season/peak shading only
+        const sm = seasonMonths;
+        if (sm.length && (Math.min(...sm) !== 6 || Math.max(...sm) !== 9)) {
+            return undefined;
+        }
+        return DEFAULT_STAGE_BANDS;
+    }, [seasonMonths]);
+
+    const gradeShares = useMemo(() => {
+        if (series !== "ndvi" && series !== "drought") return null;
+        const counts = { 优: 0, 良: 0, 中: 0, 差: 0 };
+        let n = 0;
+        for (const s of scenes) {
+            if (s.sensor !== "S2") continue;
+            const v = typeof s.ndvi_avg === "number" ? s.ndvi_avg : null;
+            if (v == null) continue;
+            const m = Number(String(s.date).slice(5, 7));
+            if (!seasonMonths.includes(m)) continue;
+            if (peakMonths.includes(m) && v < UNCROPPED_NDVI) continue; // bare peak
+            if (typeof s.cloud_cover === "number" && s.cloud_cover > 40) continue;
+            counts[classifyNdviGrade(v)] += 1;
+            n += 1;
+        }
+        if (!n) return null;
+        const pct = Object.fromEntries(
+            (Object.keys(counts) as (keyof typeof counts)[]).map((k) => [
+                k,
+                Math.round((counts[k] * 1000) / n) / 10,
+            ]),
+        ) as Record<"优" | "良" | "中" | "差", number>;
+        return { n, counts, pct };
+    }, [scenes, series, seasonMonths, peakMonths]);
+
+    const selectedBare = useMemo(() => {
+        if (!selectedDate || (series !== "ndvi" && series !== "drought")) return false;
+        const st = stats.find((s) => s.date === selectedDate);
+        if (!st || st.mean == null) return false;
+        const m = Number(selectedDate.slice(5, 7));
+        return peakMonths.includes(m) && st.mean < UNCROPPED_NDVI;
+    }, [selectedDate, stats, series, peakMonths]);
+
+    const selectedStageLabel = useMemo(() => {
+        if (!selectedDate) return null;
+        const m = Number(selectedDate.slice(5, 7));
+        const d = Number(selectedDate.slice(8, 10));
+        if (!seasonMonths.includes(m)) return "非生育期";
+        if (stageBands) {
+            for (const b of stageBands) {
+                const afterStart = m > b.startMonth || (m === b.startMonth && d >= (b.startDay ?? 1));
+                const beforeEnd = m < b.endMonth || (m === b.endMonth && d <= (b.endDay ?? 28));
+                if (afterStart && beforeEnd) return b.name;
+            }
+        }
+        if (peakMonths.includes(m)) return "旺长期";
+        return "生育期";
+    }, [selectedDate, seasonMonths, peakMonths, stageBands]);
+
     const total = summary?.total ?? 0;
 
     if (!landId) return null;
@@ -795,13 +908,60 @@ export default function AgriTimeseriesPanel({
                                 {SERIES_META[series].hint}
                             </p>
                         )}
+                        {(series === "ndvi" || series === "evi" || series === "drought") && (
+                            <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="text-[11px] font-medium text-foreground">生育周期概览</span>
+                                    <Badge variant="secondary" className="text-[10px]">
+                                        {cropOption?.season_label_zh || "夏玉米季（6–9月）"}
+                                    </Badge>
+                                    {selectedStageLabel && (
+                                        <Badge variant="outline" className="text-[10px]">
+                                            当前：{selectedStageLabel}
+                                        </Badge>
+                                    )}
+                                    {selectedBare && (
+                                        <Badge variant="destructive" className="text-[10px]">
+                                            疑似未种植/裸地（旺季 NDVI 低于 {UNCROPPED_NDVI}）
+                                        </Badge>
+                                    )}
+                                </div>
+                                <p className="text-[10px] text-muted-foreground leading-snug">
+                                    图中色带≈苗期/拔节抽穗/旺长/成熟；淡色点为非生育期，灰色点为旺季极低绿度（不宜当「差长势」）。
+                                    分档：{NDVI_GRADE_RULE_ZH}
+                                </p>
+                                {gradeShares && (
+                                    <div className="flex flex-wrap gap-1.5 text-[10px] tabular-nums">
+                                        {(["优", "良", "中", "差"] as const).map((g) => (
+                                            <span
+                                                key={g}
+                                                className={cn(
+                                                    "rounded px-1.5 py-0.5 border",
+                                                    g === "优" && "bg-emerald-50 border-emerald-200 text-emerald-800",
+                                                    g === "良" && "bg-lime-50 border-lime-200 text-lime-800",
+                                                    g === "中" && "bg-amber-50 border-amber-200 text-amber-800",
+                                                    g === "差" && "bg-orange-50 border-orange-200 text-orange-800",
+                                                )}
+                                            >
+                                                {g} {gradeShares.pct[g]}%（{gradeShares.counts[g]}）
+                                            </span>
+                                        ))}
+                                        <span className="text-muted-foreground self-center">n={gradeShares.n} 景</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         {stats.length > 0 ? (
                             <NdviChart
                                 stats={stats}
                                 selectedDate={selectedDate}
                                 onDateSelect={(d) => selectDateExplicit(d)}
-                                height={200}
+                                height={220}
                                 indexType={chartIndexType}
+                                seasonMonths={seasonMonths}
+                                peakMonths={peakMonths}
+                                stageBands={series === "ndvi" || series === "evi" || series === "drought" ? stageBands : undefined}
+                                bareThreshold={UNCROPPED_NDVI}
                             />
                         ) : (
                             <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
