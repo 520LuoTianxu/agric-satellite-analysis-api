@@ -6,7 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { useTranslations } from "next-intl";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { agriApi, type OverviewChild, type OverviewLevel, type OverviewStats } from "@/lib/api";
-import { getBasemapStyle, registerPMTilesProtocol } from "@/lib/pmtiles";
+import { registerPMTilesProtocol } from "@/lib/pmtiles";
 import { createTransformRequest, refreshMapToken } from "@/lib/map-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -38,10 +38,10 @@ function padAdcode(level: OverviewLevel, code: string | null | undefined): strin
 }
 
 function geoJsonUrl(level: OverviewLevel, adcode: string | null): string {
-    if (level === "country" || !adcode) {
-        return "https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json";
-    }
-    return `https://geo.datav.aliyun.com/areas_v3/bound/${adcode}_full.json`;
+    // Prefer static China provinces; deeper levels go through same-origin proxy → DataV.
+    const code = level === "country" || !adcode ? "100000" : adcode;
+    if (code === "100000") return "/geo/100000_full.json";
+    return `/api/geo/${code}`;
 }
 
 function pct(n: number, total: number): number {
@@ -85,6 +85,8 @@ export default function OverviewPage() {
     const [stats, setStats] = useState<OverviewStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [mapReady, setMapReady] = useState(false);
+    const [mapError, setMapError] = useState<string | null>(null);
 
     const mapContainerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<maplibregl.Map | null>(null);
@@ -131,9 +133,36 @@ export default function OverviewPage() {
     useEffect(() => {
         if (!mapContainerRef.current || mapRef.current) return;
         registerPMTilesProtocol();
+
+        // Dark basemap matches app chrome; OSM-style raster is more reliable than Esri in some networks.
+        const dark = {
+            version: 8 as const,
+            glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+            sources: {
+                carto: {
+                    type: "raster" as const,
+                    tiles: [
+                        "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+                        "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+                        "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+                    ],
+                    tileSize: 256,
+                    attribution: '&copy; <a href="https://carto.com">CARTO</a>',
+                },
+            },
+            layers: [
+                {
+                    id: "background",
+                    type: "background" as const,
+                    paint: { "background-color": "#0b1220" },
+                },
+                { id: "carto-layer", type: "raster" as const, source: "carto", minzoom: 0, maxzoom: 19 },
+            ],
+        };
+
         const map = new maplibregl.Map({
             container: mapContainerRef.current,
-            style: getBasemapStyle(),
+            style: dark,
             center: CHINA_CENTER,
             zoom: 3.4,
             maxBounds: [
@@ -146,6 +175,28 @@ export default function OverviewPage() {
         map.addControl(new maplibregl.NavigationControl(), "top-left");
         const tokenRefresh = setInterval(() => refreshMapToken(), 10 * 60_000);
         mapRef.current = map;
+
+        const resize = () => {
+            try {
+                map.resize();
+            } catch {
+                /* ignore */
+            }
+        };
+        const ro = new ResizeObserver(() => resize());
+        ro.observe(mapContainerRef.current);
+        // Layout often settles after first paint
+        requestAnimationFrame(resize);
+        setTimeout(resize, 50);
+        setTimeout(resize, 300);
+
+        map.on("load", () => {
+            resize();
+            setMapReady(true);
+        });
+        map.on("error", (e) => {
+            console.warn("overview map error", e);
+        });
 
         map.on("click", "overview-fill", (e) => {
             const f = e.features?.[0];
@@ -170,18 +221,19 @@ export default function OverviewPage() {
 
         return () => {
             clearInterval(tokenRefresh);
+            ro.disconnect();
+            setMapReady(false);
             map.remove();
             mapRef.current = null;
         };
     }, []);
 
-    // Load / update choropleth when stats or drill change
+    // Load / update choropleth when stats or map ready
     useEffect(() => {
         const map = mapRef.current;
-        if (!map || !stats) return;
+        if (!map || !mapReady || !stats) return;
 
         let cancelled = false;
-        // At county leaf, keep showing the parent city's county polygons.
         const fetchLevel: OverviewLevel =
             stats.region.level === "county" ? "city" : stats.region.level;
         const fetchAdcode =
@@ -198,12 +250,12 @@ export default function OverviewPage() {
 
         (async () => {
             try {
+                setMapError(null);
                 const res = await fetch(fetchUrl);
                 if (!res.ok) throw new Error(`geojson ${res.status}`);
                 const gj = await res.json();
                 if (cancelled || !mapRef.current) return;
 
-                // Attach metrics from children by name / adcode
                 const childByName = new Map(stats.children.map((c) => [c.name, c]));
                 const childByCode = new Map(
                     stats.children
@@ -239,7 +291,12 @@ export default function OverviewPage() {
 
                 const apply = () => {
                     const m = mapRef.current;
-                    if (!m) return;
+                    if (!m || cancelled) return;
+                    try {
+                        m.resize();
+                    } catch {
+                        /* ignore */
+                    }
                     if (m.getSource("overview")) {
                         (m.getSource("overview") as maplibregl.GeoJSONSource).setData(fc);
                     } else {
@@ -258,10 +315,10 @@ export default function OverviewPage() {
                                     [">", ["get", "weak_growth"], 0],
                                     "#ca8a04",
                                     [">", ["get", "parcel_count"], 0],
-                                    "#86efac",
-                                    "#e5e7eb",
+                                    "#22c55e",
+                                    "#64748b",
                                 ],
-                                "fill-opacity": 0.55,
+                                "fill-opacity": 0.65,
                             },
                         });
                         m.addLayer({
@@ -269,13 +326,12 @@ export default function OverviewPage() {
                             type: "line",
                             source: "overview",
                             paint: {
-                                "line-color": "#374151",
-                                "line-width": 0.8,
+                                "line-color": "#e2e8f0",
+                                "line-width": 0.9,
                             },
                         });
                     }
 
-                    // Fit bounds to features
                     try {
                         const bounds = new maplibregl.LngLatBounds();
                         for (const f of features) {
@@ -306,13 +362,14 @@ export default function OverviewPage() {
                 else map.once("load", apply);
             } catch (err) {
                 console.warn("overview geojson load failed", err);
+                if (!cancelled) setMapError(t("mapLoadFailed"));
             }
         })();
 
         return () => {
             cancelled = true;
         };
-    }, [stats]);
+    }, [stats, mapReady, t]);
 
     const path = stats?.region.path ?? [{ level: "country" as const, code: null, name: t("breadcrumbCountry") }];
     const total = stats?.totals.parcel_count ?? 0;
@@ -374,14 +431,19 @@ export default function OverviewPage() {
             <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[1fr_340px]">
                 {/* Map + children list */}
                 <div className="flex min-h-0 flex-col gap-3">
-                    <div className="relative min-h-[320px] flex-1 overflow-hidden rounded-lg border bg-muted/30">
-                        <div ref={mapContainerRef} className="absolute inset-0" />
+                    <div className="relative h-[min(52vh,560px)] min-h-[360px] w-full overflow-hidden rounded-lg border bg-[#0b1220]">
+                        <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
                         {loading && (
                             <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/40">
                                 <Loader2 className="h-6 w-6 animate-spin text-primary" />
                             </div>
                         )}
-                        <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
+                        {mapError && (
+                            <div className="absolute inset-x-0 top-0 z-10 bg-destructive/90 px-3 py-2 text-center text-xs text-destructive-foreground">
+                                {mapError}
+                            </div>
+                        )}
+                        <div className="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
                             {t("clickMapHint")}
                         </div>
                     </div>
