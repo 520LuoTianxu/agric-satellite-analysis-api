@@ -1,7 +1,8 @@
 /**
  * Agri 色斑图 helpers — prefer OSS lon/lat pixels (pixels_lonlat) rasterized at
  * ~10 m in Web Mercator into a continuous canvas color film (MapLibre image
- * source). Legacy DB grid pixel_data ([row,col,...]) is fallback only.
+ * source) via fractional fx/fy + median-NN square size (not sparse int bins).
+ * Legacy DB grid pixel_data ([row,col,...]) is fallback only.
  * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
  * Map overlay uses image film only (no GeoJSON fill — white seams between cells).
  * geojson/points on AgriHeatmapImage remain for metadata / rebuilds, not map layers.
@@ -907,9 +908,11 @@ function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
 }
 
 /**
- * Rebuild continuous color-film dataUrl from geojson cells.
- * Field mask is best-effort (WebMercator/lonlat grids); empty alpha → no dataUrl
- * so callers can detect empty film (no GeoJSON fill fallback — seams).
+ * Rebuild / soft-clip continuous color-film dataUrl to field.geom.
+ * Prefer reusing an existing opaque dataUrl (draw + mask) so we never reintroduce
+ * sparse integer-bin seams. Only fall back to painting from geojson when the
+ * film is missing/empty — then use continuous mercator centroids, not 1×1 bins.
+ * Empty alpha → no dataUrl (image-only map path; no GeoJSON fill overlay).
  */
 export function clipHeatmapImageToField(
     hm: AgriHeatmapImage,
@@ -926,31 +929,74 @@ export function clipHeatmapImageToField(
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return hm;
 
-        // Full-cell film (expand slightly) — same style as rasterizeAgriLonLatPixels.
         ctx.imageSmoothingEnabled = false;
-        const expand = 1.35;
-        const inset = (expand - 1) / 2;
         let paintedCells = 0;
-        for (const feat of hm.geojson?.features ?? []) {
-            const row = Number(feat.properties?.row);
-            const col = Number(feat.properties?.col);
-            if (!Number.isFinite(row) || !Number.isFinite(col)) continue;
-            if (row < 0 || row >= hm.height || col < 0 || col >= hm.width) continue;
-            const rgbaProp = feat.properties?.rgba;
-            const [r, g, b, a] =
-                Array.isArray(rgbaProp) && rgbaProp.length >= 4
-                    ? [
-                          Number(rgbaProp[0]),
-                          Number(rgbaProp[1]),
-                          Number(rgbaProp[2]),
-                          Number(rgbaProp[3]),
-                      ]
-                    : hexToRgba(feat.properties?.color ?? "#000000", 230);
-            if (![r, g, b, a].every(Number.isFinite) || a === 0) continue;
-            ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
-            ctx.fillRect(col - inset, row - inset, expand, expand);
-            paintedCells++;
+        let drewExisting = false;
+
+        // Prefer the already-built continuous film — do not rebuild from row/col.
+        if (heatmapImageHasContent(hm) && hm.dataUrl) {
+            try {
+                const img = new Image();
+                img.src = hm.dataUrl;
+                if (img.complete && img.naturalWidth > 0) {
+                    ctx.drawImage(img, 0, 0, hm.width, hm.height);
+                    paintedCells = Math.max(1, hm.pixelCount || 0);
+                    drewExisting = true;
+                }
+            } catch {
+                drewExisting = false;
+            }
         }
+
+        if (!drewExisting) {
+            const resM = grid.resolution > 0 ? grid.resolution : 10;
+            const feats = hm.geojson?.features ?? [];
+            const samples: { x: number; y: number; rgba: [number, number, number, number] }[] = [];
+            for (const feat of feats) {
+                const rgbaProp = feat.properties?.rgba;
+                const [r, g, b, a] =
+                    Array.isArray(rgbaProp) && rgbaProp.length >= 4
+                        ? [
+                              Number(rgbaProp[0]),
+                              Number(rgbaProp[1]),
+                              Number(rgbaProp[2]),
+                              Number(rgbaProp[3]),
+                          ]
+                        : hexToRgba(feat.properties?.color ?? "#000000", 230);
+                if (![r, g, b, a].every(Number.isFinite) || a === 0) continue;
+                const centroid = polygonRingCentroid(feat.geometry);
+                if (!centroid) continue;
+                const [x, y] = lonLatToWebMercator(centroid[0], centroid[1]);
+                samples.push({ x, y, rgba: [r, g, b, a] });
+            }
+            const cellM = estimateMedianNnMeters(
+                samples.map((s) => ({ x: s.x, y: s.y })),
+                resM,
+            );
+            const s = (cellM / resM) * 1.08;
+            for (const sample of samples) {
+                const fx = (sample.x - grid.origin_x) / resM;
+                const fy = (grid.origin_y - sample.y) / resM;
+                const [r, g, b, a] = sample.rgba;
+                ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
+                ctx.fillRect(fx - s / 2, fy - s / 2, s, s);
+                paintedCells++;
+            }
+            if (samples.length > 0) {
+                fillNearestNeighborHoles(
+                    ctx,
+                    hm.width,
+                    hm.height,
+                    samples.map((sample) => ({
+                        fx: (sample.x - grid.origin_x) / resM,
+                        fy: (grid.origin_y - sample.y) / resM,
+                        rgba: sample.rgba,
+                    })),
+                    (cellM * 0.75) / resM,
+                );
+            }
+        }
+
         const painted = applyFieldMaskIfHealthy(
             ctx,
             grid,
@@ -959,7 +1005,6 @@ export function clipHeatmapImageToField(
             hm.height,
             paintedCells || hm.pixelCount || 0,
         );
-        // Transparent PNG is still a truthy dataUrl — omit it so GeoJSON fallback runs.
         if (painted === 0) {
             return { ...hm, dataUrl: undefined };
         }
@@ -1169,6 +1214,9 @@ export function rasterizeAgriPixels(
 interface LonLatPainted {
     lon: number;
     lat: number;
+    /** Web Mercator meters (EPSG:3857) — used for continuous film paint. */
+    x?: number;
+    y?: number;
     color: string;
     rgba: [number, number, number, number];
     value: number;
@@ -1285,9 +1333,154 @@ function lonLatCellPolygon(lon: number, lat: number, halfDegLon: number, halfDeg
     return { type: "Polygon", coordinates: [[tl, tr, br, bl, tl]] };
 }
 
+/** Median nearest-neighbor spacing in meters (sample ≤200 pts). Clamped to [8, 20]. */
+function estimateMedianNnMeters(
+    pts: { x: number; y: number }[],
+    fallback: number,
+): number {
+    if (pts.length < 2) return fallback;
+    const n = pts.length;
+    const stride = Math.max(1, Math.floor(n / 200));
+    const sample: { x: number; y: number }[] = [];
+    for (let i = 0; i < n && sample.length < 200; i += stride) {
+        sample.push(pts[i]);
+    }
+    const dists: number[] = [];
+    for (let i = 0; i < sample.length; i++) {
+        let best = Infinity;
+        const a = sample[i];
+        for (let j = 0; j < sample.length; j++) {
+            if (i === j) continue;
+            const b = sample[j];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d > 1e-6 && d < best) best = d;
+        }
+        if (Number.isFinite(best) && best < Infinity) dists.push(best);
+    }
+    if (!dists.length) return fallback;
+    dists.sort((a, b) => a - b);
+    const median = dists[Math.floor(dists.length / 2)];
+    if (!Number.isFinite(median) || median < 1) return fallback;
+    return Math.min(20, Math.max(8, median));
+}
+
+/** Centroid of a Polygon / MultiPolygon exterior (lon/lat). */
+function polygonRingCentroid(
+    geom: GeoJSON.Geometry | null | undefined,
+): [number, number] | null {
+    if (!geom) return null;
+    let ring: number[][] | null = null;
+    if (geom.type === "Polygon" && geom.coordinates?.[0]?.length) {
+        ring = geom.coordinates[0];
+    } else if (geom.type === "MultiPolygon" && geom.coordinates?.[0]?.[0]?.length) {
+        ring = geom.coordinates[0][0];
+    } else if (geom.type === "Point" && geom.coordinates?.length >= 2) {
+        const lon = Number(geom.coordinates[0]);
+        const lat = Number(geom.coordinates[1]);
+        return Number.isFinite(lon) && Number.isFinite(lat) ? [lon, lat] : null;
+    }
+    if (!ring || ring.length < 2) return null;
+    let lon = 0;
+    let lat = 0;
+    let n = 0;
+    const limit = ring.length > 1 ? ring.length - 1 : ring.length;
+    for (let i = 0; i < limit; i++) {
+        const pt = ring[i];
+        if (!pt || pt.length < 2) continue;
+        const x = Number(pt[0]);
+        const y = Number(pt[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        lon += x;
+        lat += y;
+        n++;
+    }
+    if (!n) return null;
+    return [lon / n, lat / n];
+}
+
+/**
+ * Fill remaining transparent pixels inside the sample bbox with nearest-neighbor
+ * sample color when within maxDistPx of a sample (closes sub-pixel gaps cheaply).
+ */
+function fillNearestNeighborHoles(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    samples: { fx: number; fy: number; rgba: [number, number, number, number] }[],
+    maxDistPx: number,
+): void {
+    if (!samples.length || maxDistPx <= 0 || width <= 0 || height <= 0) return;
+    const img = ctx.getImageData(0, 0, width, height);
+    const data = img.data;
+    const maxDist2 = maxDistPx * maxDistPx;
+    const bucket = new Map<string, number[]>();
+    let minFx = Infinity;
+    let maxFx = -Infinity;
+    let minFy = Infinity;
+    let maxFy = -Infinity;
+    for (let i = 0; i < samples.length; i++) {
+        const s = samples[i];
+        minFx = Math.min(minFx, s.fx);
+        maxFx = Math.max(maxFx, s.fx);
+        minFy = Math.min(minFy, s.fy);
+        maxFy = Math.max(maxFy, s.fy);
+        const key = `${Math.floor(s.fx)},${Math.floor(s.fy)}`;
+        let list = bucket.get(key);
+        if (!list) {
+            list = [];
+            bucket.set(key, list);
+        }
+        list.push(i);
+    }
+    const r0 = Math.max(0, Math.floor(minFy - maxDistPx));
+    const r1 = Math.min(height - 1, Math.ceil(maxFy + maxDistPx));
+    const c0 = Math.max(0, Math.floor(minFx - maxDistPx));
+    const c1 = Math.min(width - 1, Math.ceil(maxFx + maxDistPx));
+    const rad = Math.max(1, Math.ceil(maxDistPx) + 1);
+    for (let row = r0; row <= r1; row++) {
+        for (let col = c0; col <= c1; col++) {
+            const pi = (row * width + col) * 4;
+            if (data[pi + 3] !== 0) continue;
+            const cx = col + 0.5;
+            const cy = row + 0.5;
+            let best = maxDist2;
+            let bestRgba: [number, number, number, number] | null = null;
+            const bc = Math.floor(cx);
+            const br = Math.floor(cy);
+            for (let dy = -rad; dy <= rad; dy++) {
+                for (let dx = -rad; dx <= rad; dx++) {
+                    const list = bucket.get(`${bc + dx},${br + dy}`);
+                    if (!list) continue;
+                    for (const si of list) {
+                        const s = samples[si];
+                        const ddx = cx - s.fx;
+                        const ddy = cy - s.fy;
+                        const d2 = ddx * ddx + ddy * ddy;
+                        if (d2 < best) {
+                            best = d2;
+                            bestRgba = s.rgba;
+                        }
+                    }
+                }
+            }
+            if (bestRgba) {
+                data[pi] = bestRgba[0];
+                data[pi + 1] = bestRgba[1];
+                data[pi + 2] = bestRgba[2];
+                data[pi + 3] = bestRgba[3];
+            }
+        }
+    }
+    ctx.putImageData(img, 0, 0);
+}
+
 /**
  * Rasterize OSS lon/lat point list into a ~10 m WebMercator color film + GeoJSON cells.
- * Primary path for 色膜 — avoids lossy DB grid row/col collisions/holes.
+ * Continuous canvas paint (fractional fx/fy + overlapping squares sized by median NN
+ * spacing) — not sparse integer-bin occupancy — so MapLibre nearest raster has no
+ * dark seam lattice between ~10 m samples.
  */
 export function rasterizeAgriLonLatPixels(
     pixels: AgriLonLatPixel[],
@@ -1305,6 +1498,11 @@ export function rasterizeAgriLonLatPixels(
         return { ...c, x, y };
     });
 
+    const cellM = estimateMedianNnMeters(
+        merc.map((c) => ({ x: c.x, y: c.y })),
+        resM,
+    );
+
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
@@ -1315,8 +1513,8 @@ export function rasterizeAgriLonLatPixels(
         minY = Math.min(minY, c.y);
         maxY = Math.max(maxY, c.y);
     }
-    // Pad half a cell so edge points are fully inside the canvas.
-    const pad = resM * 0.5;
+    // Pad by half sample spacing so edge squares stay fully inside the canvas.
+    const pad = cellM * 0.5;
     minX -= pad;
     maxX += pad;
     minY -= pad;
@@ -1340,9 +1538,8 @@ export function rasterizeAgriLonLatPixels(
         painted.cells.reduce((s, c) => s + c.lat, 0) / Math.max(1, painted.cells.length);
     const metersPerDegLat = 111320;
     const metersPerDegLon = Math.max(1e-6, 111320 * Math.cos((meanLat * Math.PI) / 180));
-    // Slight expand so adjacent ~10 m cells abut without hairline gaps (no turf clip).
-    const halfDegLat = ((resM / 2) * 1.02) / metersPerDegLat;
-    const halfDegLon = ((resM / 2) * 1.02) / metersPerDegLon;
+    const halfDegLat = ((cellM / 2) * 1.02) / metersPerDegLat;
+    const halfDegLon = ((cellM / 2) * 1.02) / metersPerDegLon;
 
     const cellsWithRc: LonLatPainted[] = merc.map((c) => {
         const col = Math.min(width - 1, Math.max(0, Math.floor((c.x - minX) / resM)));
@@ -1398,17 +1595,26 @@ export function rasterizeAgriLonLatPixels(
             canvas.height = height;
             const ctx = canvas.getContext("2d", { willReadFrequently: true });
             if (ctx) {
-                // Continuous solid film: each sample paints its full ~10 m cell.
-                // Slightly expand (≥1.35) to kill hairline gaps between adjacent cells.
-                // No arcs/circles — those leave satellite basemap showing through.
+                // Continuous film: paint at fractional canvas coords with overlapping
+                // squares sized by median NN spacing (not integer floor bins alone).
                 ctx.imageSmoothingEnabled = false;
-                const expand = 1.35;
-                const inset = (expand - 1) / 2;
+                const s = (cellM / resM) * 1.08;
+                const paintSamples: {
+                    fx: number;
+                    fy: number;
+                    rgba: [number, number, number, number];
+                }[] = [];
                 for (const cell of cellsWithRc) {
+                    const mx = cell.x ?? lonLatToWebMercator(cell.lon, cell.lat)[0];
+                    const my = cell.y ?? lonLatToWebMercator(cell.lon, cell.lat)[1];
+                    const fx = (mx - minX) / resM;
+                    const fy = (maxY - my) / resM;
                     const [r, g, b, a] = cell.rgba;
                     ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
-                    ctx.fillRect(cell.col - inset, cell.row - inset, expand, expand);
+                    ctx.fillRect(fx - s / 2, fy - s / 2, s, s);
+                    paintSamples.push({ fx, fy, rgba: cell.rgba });
                 }
+                fillNearestNeighborHoles(ctx, width, height, paintSamples, (cellM * 0.75) / resM);
                 const alphaCount = applyFieldMaskIfHealthy(
                     ctx,
                     grid,
@@ -1451,6 +1657,7 @@ export function rasterizeAgriLonLatPixels(
         legend,
     };
 }
+
 
 /** Mode labels for UI chips (Chinese). */
 export const AGRI_MODE_LABELS: Record<AgriHeatIndex, string> = {
