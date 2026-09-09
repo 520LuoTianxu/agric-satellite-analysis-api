@@ -500,10 +500,23 @@ async def backfill_field_indices(
             land_id=str(land_id) if land_id is not None else None,
             bridge_job_id=str(bridge_job.id),
         )
+        # Re-run RS alerts from existing agri lonlat immediately; bridge will
+        # dispatch again after upsert so new scenes are covered.
+        try:
+            from app.tasks.agri_alerts import evaluate_agri_alerts_for_field
+
+            evaluate_agri_alerts_for_field.delay(
+                str(field_id),
+                land_id=str(land_id) if land_id is not None else None,
+                replace_open=True,
+            )
+        except Exception:
+            pass
         message = (
             f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
             "将通过 STAC 拉取 Sentinel-2 指数与 Sentinel-1 VV/VH 到 OSS，"
             "再桥接/写入 agri lonlat_v1；完成后请刷新指数面板查看色斑。"
+            "预警将按 agri 指数重跑。"
         )
     else:
         message = (
