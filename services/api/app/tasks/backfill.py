@@ -215,6 +215,17 @@ def backfill_indices_for_field(
 
         session.commit()
 
+        # Sentinel-1 GRD (光学+雷达): same months, writes OSS COGs + agri lonlat
+        s1_result = None
+        try:
+            from app.tasks.sentinel1 import backfill_s1_for_field
+
+            async_result = backfill_s1_for_field.delay(field_id, months=months, force=force)
+            s1_result = {"task_id": async_result.id, "status": "queued"}
+            logger.info("s1_backfill_dispatched", field_id=field_id, result=s1_result)
+        except Exception as e:
+            logger.warning("s1_backfill_dispatch_failed", field_id=field_id, error=str(e))
+
         logger.info(
             "backfill_orchestration_complete",
             field_id=field_id,
@@ -224,6 +235,7 @@ def backfill_indices_for_field(
             jobs_dispatched=jobs_dispatched,
             allow_agri=allow_agri,
             force=force,
+            s1=s1_result,
         )
         return {
             "field_id": field_id,
@@ -234,6 +246,7 @@ def backfill_indices_for_field(
             "indices": index_keys,
             "allow_agri": allow_agri,
             "force": force,
+            "s1": s1_result,
         }
 
     except Exception as e:

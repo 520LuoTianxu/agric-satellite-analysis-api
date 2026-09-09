@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""Bridge STAC/Celery COGs in MinIO → agri.parcel_scene_products lonlat_v1.
+"""Bridge STAC/Celery COGs in object storage → agri.parcel_scene_products lonlat_v1.
 
-For a public.fields row (and agri land_id), list date folders under
-``cogs/{org_id}/{field_id}/`` in the openfarm MinIO bucket, sample the six agri
+Lists date folders under ``cogs/{org_id}/{field_id}/`` on the **configured**
+backend (``STORAGE_BACKEND=oss|minio``, default OSS), samples the six agri
 optical indices (NDVI/EVI/NDMI/NDRE/CIre/MNDWI; NDWI COG only as MNDWI fallback)
-inside the field polygon at native COG resolution, and upsert one S2 row per
+inside the field polygon at native COG resolution, and upserts one S2 row per
 date with ``pixel_data.format = lonlat_v1``.
 
-Usage (repo root, compose up; api image has rasterio/minio):
+COGs are opened via GDAL ``/vsis3/`` using ``app.core.storage.configure_gdal_vsis3``
+(same path as index pipeline uploads). Happy path does **not** require MinIO.
 
-    docker compose exec -T api python /tmp/bridge_stac_cogs_to_agri_lonlat.py \\
-      --field-id 0fa5ecc0-944b-4202-a0f8-1ba78ae3746c --land-id 18979
+Usage (api / processor container)::
 
-    # or copy then run; land_id can be omitted if tags_json has agri:<id>
-    docker compose exec -T api python /tmp/bridge_stac_cogs_to_agri_lonlat.py \\
-      --field-id 0fa5ecc0-944b-4202-a0f8-1ba78ae3746c
-
-Env (api compose defaults):
-    MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY / MINIO_BUCKET
-    DATABASE_URL_SYNC (or DATABASE_URL)
+    python -c "from app.tasks.bridge_stac_cogs_to_agri_lonlat import main; \
+      raise SystemExit(main(['--field-id','0fa5ecc0-944b-4202-a0f8-1ba78ae3746c']))"
 """
 
 from __future__ import annotations
@@ -36,7 +31,6 @@ import numpy as np
 import psycopg2
 import psycopg2.extras
 import rasterio
-from minio import Minio
 from rasterio.features import geometry_mask
 from rasterio.transform import xy
 from rasterio.warp import transform_geom
@@ -116,40 +110,14 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
 """
 
 
-def _configure_gdal_s3() -> None:
-    """Point rasterio/GDAL /vsis3/ at MinIO (path-style, HTTP)."""
-    endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-    access = os.environ.get("MINIO_ACCESS_KEY", "openfarm")
-    secret = os.environ.get("MINIO_SECRET_KEY", "openfarm_dev_secret")
-    os.environ.setdefault("AWS_S3_ENDPOINT", endpoint)
-    os.environ.setdefault("AWS_ACCESS_KEY_ID", access)
-    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", secret)
-    os.environ.setdefault("AWS_VIRTUAL_HOSTING", "FALSE")
-    os.environ.setdefault("AWS_HTTPS", "NO")
-    # Avoid credential provider chain noise
-    os.environ.setdefault("AWS_NO_SIGN_REQUEST", "NO")
-
-
 def _dsn() -> str:
     url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL")
     if not url:
         raise SystemExit("DATABASE_URL_SYNC or DATABASE_URL required")
-    # strip +asyncpg / +psycopg2 driver suffix for psycopg2
     if url.startswith("postgresql+"):
-        # postgresql+asyncpg://… → postgresql://…
-        scheme, rest = url.split("://", 1)
+        _scheme, rest = url.split("://", 1)
         url = "postgresql://" + rest
     return url
-
-
-def _minio() -> Minio:
-    endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
-    return Minio(
-        endpoint,
-        access_key=os.environ.get("MINIO_ACCESS_KEY", "openfarm"),
-        secret_key=os.environ.get("MINIO_SECRET_KEY", "openfarm_dev_secret"),
-        secure=False,
-    )
 
 
 def _round6(v: float) -> float:
@@ -246,16 +214,40 @@ def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, flo
     return out
 
 
-def _list_dates(client: Minio, bucket: str, prefix: str) -> list[str]:
+def _list_dates_from_storage(storage, prefix: str) -> list[str]:
+    """List YYYY-MM-DD folders under prefix via storage.list_keys.
+
+    Some OSS bucket policies deny ListObjects; callers should merge DB dates.
+    """
     dates: set[str] = set()
-    for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
-        # cogs/{org}/{field}/{date}/ndvi.tif
-        parts = obj.object_name.split("/")
-        if len(parts) < 5:
-            continue
-        d = parts[3]
-        if DATE_RE.match(d):
-            dates.add(d)
+    try:
+        for key in storage.list_keys(prefix, suffix=".tif"):
+            parts = key.split("/")
+            # cogs/{org}/{field}/{date}/ndvi.tif
+            if len(parts) < 5:
+                continue
+            d = parts[3]
+            if DATE_RE.match(d):
+                dates.add(d)
+    except Exception as e:  # noqa: BLE001
+        print(f"  storage.list_keys failed ({type(e).__name__}: {e}); using DB dates", file=sys.stderr)
+    return sorted(dates)
+
+
+def _list_dates_from_db(conn, field_id: str) -> list[str]:
+    dates: set[str] = set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT date::text
+            FROM raster_layers
+            WHERE field_id = %s::uuid AND date IS NOT NULL
+            """,
+            (field_id,),
+        )
+        for (d,) in cur.fetchall():
+            if d and DATE_RE.match(d):
+                dates.add(d)
     return sorted(dates)
 
 
@@ -292,7 +284,6 @@ def _sample_lonlat(
     if crs and str(crs) not in ("EPSG:4326", "OGC:CRS84"):
         geom = transform_geom("EPSG:4326", crs, geom4326)
 
-    # geometry_mask: True = outside; invert so True = inside
     inside = ~geometry_mask(
         [geom],
         out_shape=(h, w),
@@ -303,17 +294,14 @@ def _sample_lonlat(
     finite = np.isfinite(ndvi) & inside
     rows, cols = np.where(finite)
     if rows.size == 0:
-        # Fallback: COGs are often already field-masked; use finite NDVI
         rows, cols = np.where(np.isfinite(ndvi))
     if rows.size == 0:
         return []
 
     xs, ys = xy(transform, rows, cols, offset="center")
-    # xy may return lists
     xs = np.asarray(xs, dtype=np.float64)
     ys = np.asarray(ys, dtype=np.float64)
 
-    # If CRS is projected, transform centers back to WGS84
     if crs and str(crs) not in ("EPSG:4326", "OGC:CRS84"):
         from rasterio.warp import transform as warp_xy
 
@@ -365,6 +353,7 @@ def process_date(
     meta: dict[str, Any],
     fs_map: dict[tuple[str, str], dict[str, float]],
     dry_run: bool,
+    storage=None,
 ) -> dict[str, Any] | None:
     band_arrays: dict[str, np.ndarray] = {}
     transform = None
@@ -374,11 +363,20 @@ def process_date(
     def _load_one(file_stem: str, pix_key: str, *, required: bool) -> bool:
         nonlocal transform, crs
         key = f"{prefix}{date_str}/{file_stem}.tif"
+        # Prefer existence check on configured backend when available
+        if storage is not None:
+            try:
+                if not storage.exists(key):
+                    if required:
+                        print(f"  skip {date_str}: no {file_stem}.tif on {storage.backend}", file=sys.stderr)
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
         path = _vsis3(bucket, key)
         opened = _open_band(path)
         if opened is None:
             if required:
-                print(f"  skip {date_str}: no readable NDVI", file=sys.stderr)
+                print(f"  skip {date_str}: no readable NDVI on active store", file=sys.stderr)
             return False
         data, t, c = opened
         if required:
@@ -392,7 +390,6 @@ def process_date(
                 file=sys.stderr,
             )
             return False
-        # Do not overwrite an already-loaded primary (e.g. mndwi) with fallback
         if pix_key in band_arrays:
             return False
         band_arrays[pix_key] = data
@@ -407,7 +404,6 @@ def process_date(
             continue
         _load_one(file_stem, pix_key, required=False)
 
-    # NDWI → MNDWI fallback only when true mndwi COG missing
     if "MNDWI" not in band_arrays:
         _load_one(MNDWI_FALLBACK[0], MNDWI_FALLBACK[1], required=False)
 
@@ -430,7 +426,6 @@ def process_date(
     ndmi_avg, ndmi_min, ndmi_max = _avg_triple("NDMI", "NDMI")
     ndre_avg, ndre_min, ndre_max = _avg_triple("NDRE", "NDRE")
     cire_avg, cire_min, cire_max = _avg_triple("CIre", "CIRE")
-    # Prefer MNDWI field_stats; fall back to legacy NDWI stats
     mndwi_s = (
         _stats(band_arrays["MNDWI"]) if "MNDWI" in band_arrays else (None, None, None)
     )
@@ -442,14 +437,13 @@ def process_date(
         if (date_str, layer) in fs_map:
             q = fs_map[(date_str, layer)].get("quality_score")
             break
-    # quality ok → cloud_cover_over_30 false; soft pct from 1-quality if present
     cloud_over_30 = False
     parcel_cloud = None
     if q is not None:
         try:
             qf = float(q)
             parcel_cloud = _round6(max(0.0, min(100.0, (1.0 - qf) * 100.0)))
-            cloud_over_30 = qf < 0.05  # almost no clear pixels
+            cloud_over_30 = qf < 0.05
         except (TypeError, ValueError):
             pass
 
@@ -508,13 +502,15 @@ def bridge_field_stac_to_agri(
     dates: list[str] | None = None,
     quiet: bool = False,
 ) -> dict[str, Any]:
-    """Sample MinIO STAC COGs for *field_id* and upsert agri lonlat_v1 rows.
+    """Sample active-store STAC COGs for *field_id* and upsert agri lonlat_v1 rows.
 
-    Returns a summary dict with upserted/skipped counts. Raises on hard errors.
+    Uses ``get_storage()`` (OSS by default). Raises on hard errors.
     """
-    _configure_gdal_s3()
-    bucket = os.environ.get("MINIO_BUCKET", "openfarm")
-    client = _minio()
+    from app.core.storage import configure_gdal_vsis3, get_storage
+
+    storage = get_storage()
+    configure_gdal_vsis3(storage)
+    bucket = storage.bucket
     conn = psycopg2.connect(_dsn())
     conn.autocommit = False
 
@@ -526,18 +522,22 @@ def bridge_field_stac_to_agri(
         meta = _load_field(conn, field_id, land_id)
         fs_map = _field_stats_map(conn, meta["field_id"])
         prefix = f"cogs/{meta['org_id']}/{meta['field_id']}/"
+        uri_scheme = "oss" if storage.backend == "oss" else "s3"
         _log(
             f"field={meta['field_id']} land={meta['land_id']} "
-            f"tile={meta['tile_id']} prefix=s3://{bucket}/{prefix}"
+            f"tile={meta['tile_id']} backend={storage.backend} "
+            f"prefix={uri_scheme}://{bucket}/{prefix}"
         )
 
-        date_list = _list_dates(client, bucket, prefix)
+        date_set = set(_list_dates_from_storage(storage, prefix))
+        date_set.update(_list_dates_from_db(conn, meta["field_id"]))
+        date_list = sorted(date_set)
         if dates:
             want = {d.strip() for d in dates if d and d.strip()}
             date_list = [d for d in date_list if d in want]
         if limit and limit > 0:
             date_list = date_list[:limit]
-        _log(f"dates_found={len(date_list)}")
+        _log(f"dates_found={len(date_list)} backend={storage.backend}")
 
         upserted = 0
         skipped = 0
@@ -550,6 +550,7 @@ def bridge_field_stac_to_agri(
                     meta=meta,
                     fs_map=fs_map,
                     dry_run=dry_run,
+                    storage=storage,
                 )
                 if row is None:
                     skipped += 1
@@ -567,6 +568,8 @@ def bridge_field_stac_to_agri(
             "ok": True,
             "land_id": meta["land_id"],
             "field_id": meta["field_id"],
+            "backend": storage.backend,
+            "bucket": bucket,
             "dates_seen": len(date_list),
             "upserted": upserted,
             "skipped": skipped,
