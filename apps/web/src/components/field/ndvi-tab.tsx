@@ -144,8 +144,18 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     const loadGenRef = useRef(0); // prevents stale fetch results
 
     // ── Load layers + stats for active index ─────────
+    // Agri fields: RS comes only from agri.parcel_scene_products — skip
+    // classic monitoring/COG path so AgriTimeseriesPanel mounts immediately.
     const loadData = useCallback(async () => {
         const gen = ++loadGenRef.current;
+        if (isAgriField) {
+            setLayers([]);
+            setStats([]);
+            setSelectedDate(null);
+            setLoading(false);
+            onDataLoaded?.();
+            return;
+        }
         setLoading(true);
         try {
             const [layersRes, statsRes] = await Promise.all([
@@ -176,7 +186,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
         } finally {
             if (gen === loadGenRef.current) setLoading(false);
         }
-    }, [fieldId, activeIndex]);
+    }, [fieldId, activeIndex, isAgriField]);
 
     useEffect(() => {
         loadData();
@@ -607,8 +617,8 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 />
             )}
 
-            {/* ── Section: Chart ────────────────────────── */}
-            {(layers.length > 0 || stats.length > 0) && (
+            {/* ── Section: Chart (classic monitoring only) ────────────────────────── */}
+            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
             <Card>
                 <CardHeader className="pb-2 pt-3 px-3">
                     <div className="flex items-center justify-between">
@@ -639,8 +649,8 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             </Card>
             )}
 
-            {/* ── Section: Layer Selector ───────────────── */}
-            {layers.length > 0 && (
+            {/* ── Section: Layer Selector (classic COG only) ───────────────── */}
+            {!isAgriField && layers.length > 0 && (
                 <Card>
                     <CardHeader className="pb-2 pt-3 px-3">
                         <div className="flex items-center justify-between">
@@ -713,8 +723,8 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 </Card>
             )}
 
-            {/* ── No data message ──────────────────────── */}
-            {layers.length === 0 && !activeJob && (
+            {/* ── No data message (classic OpenFarm only; agri uses AgriTimeseriesPanel) ── */}
+            {!isAgriField && layers.length === 0 && !activeJob && (
                 <Card>
                     <CardContent className="flex flex-col items-center justify-center py-6 text-center">
                         <p className="text-sm text-muted-foreground mb-2">No {config.label} data yet.</p>

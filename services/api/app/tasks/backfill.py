@@ -67,6 +67,32 @@ def backfill_indices_for_field(
                 "detail": "Field not found",
             }
 
+        from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+
+        if is_agri_tagged(field.tags_json):
+            land_id = parse_agri_land_id(field.tags_json)
+            logger.info(
+                "backfill_indices_skipped_agri_field",
+                field_id=field_id,
+                land_id=land_id,
+                reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill",
+            )
+            if sentinel_job_id:
+                sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
+                if sentinel:
+                    sentinel.status = "completed"
+                    params = dict(sentinel.params_json or {})
+                    params["skipped"] = True
+                    params["reason"] = "agri_tagged"
+                    sentinel.params_json = params
+                    session.commit()
+            return {
+                "field_id": field_id,
+                "status": "skipped",
+                "reason": "agri_tagged",
+                "land_id": land_id,
+            }
+
         org_id = field.org_id
 
         end_date = date.today()
@@ -330,27 +356,39 @@ def backfill_all_existing_fields(self, months: int | None = None) -> dict:
 
     session = get_db_session()
     try:
-        field_ids = (
-            session.execute(select(Field.id).where(Field.deleted_at.is_(None)))
+        from app.core.agri_tags import is_agri_tagged
+
+        fields = (
+            session.execute(select(Field).where(Field.deleted_at.is_(None)))
             .scalars()
             .all()
         )
 
-        for i, fid in enumerate(field_ids):
+        dispatched = 0
+        skipped_agri = 0
+        for field in fields:
+            if is_agri_tagged(field.tags_json):
+                skipped_agri += 1
+                continue
             backfill_indices_for_field.apply_async(
-                args=[str(fid)],
+                args=[str(field.id)],
                 kwargs={"months": months},
-                countdown=i * stagger_seconds,
+                countdown=dispatched * stagger_seconds,
             )
+            dispatched += 1
 
         logger.info(
             "bulk_backfill_dispatched",
-            total_fields=len(field_ids),
+            total_fields=len(fields),
+            dispatched=dispatched,
+            skipped_agri=skipped_agri,
             months=months,
         )
         return {
             "status": "dispatched",
-            "total_fields": len(field_ids),
+            "total_fields": len(fields),
+            "dispatched": dispatched,
+            "skipped_agri": skipped_agri,
             "months": months,
         }
 

@@ -130,36 +130,58 @@ async def create_field(
             },
         )
     )
-    # Sentinel job for backfill progress tracking
-    sentinel = Job(
-        org_id=ctx.org_id,
-        field_id=field.id,
-        type="backfill",
-        status="pending",
-        params_json={"is_backfill": True, "sentinel": True},
-        created_by=ctx.user.id,
-    )
-    db.add(sentinel)
-    await db.flush()
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+
+    agri_field = is_agri_tagged(body.tags)
+    agri_land_id = parse_agri_land_id(body.tags) if agri_field else None
+
+    # Sentinel job only for classic COG index backfill progress tracking.
+    # Agri fields skip RS backfill (truth = agri.parcel_scene_products).
+    sentinel = None
+    if not agri_field:
+        sentinel = Job(
+            org_id=ctx.org_id,
+            field_id=field.id,
+            type="backfill",
+            status="pending",
+            params_json={"is_backfill": True, "sentinel": True},
+            created_by=ctx.user.id,
+        )
+        db.add(sentinel)
+        await db.flush()
+
     logger.info(
         "field_created",
         field_id=str(field.id),
         farm_id=str(body.farm_id),
         name=body.name,
+        agri_land_id=agri_land_id,
     )
 
     # Commit before dispatching Celery tasks so workers can find the
     # field row in the DB (prevents race condition).
     await db.commit()
 
-    # Trigger background tasks for the new field
+    # Soil + weather always bind via fields.id (including agri-tagged parcels).
     from app.tasks.weather import backfill_weather_for_field
-    from app.tasks.backfill import backfill_indices_for_field
     from app.tasks.soil import fetch_soil_for_field
 
     backfill_weather_for_field.delay(str(field.id))
-    backfill_indices_for_field.delay(str(field.id), sentinel_job_id=str(sentinel.id))
     fetch_soil_for_field.delay(str(field.id))
+
+    if agri_field:
+        logger.info(
+            "skip_index_backfill_agri_field",
+            field_id=str(field.id),
+            land_id=agri_land_id,
+            reason="agri-first RS via parcel_scene_products; soil/weather still enqueued",
+        )
+    else:
+        from app.tasks.backfill import backfill_indices_for_field
+
+        backfill_indices_for_field.delay(
+            str(field.id), sentinel_job_id=str(sentinel.id)
+        )
 
     return _field_to_out(field)
 
@@ -317,6 +339,20 @@ async def backfill_field_indices(
     if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+
+    if is_agri_tagged(field.tags_json):
+        land_id = parse_agri_land_id(field.tags_json)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This field is agri-tagged (agri:"
+                f"{land_id}). Remote sensing comes from agri ingest "
+                "(parcel_scene_products / lonlat_v1), not COG index backfill. "
+                "Use GET /v1/agri/lands/{land_id}/scenes instead."
+            ),
+        )
+
     # Check for existing pending/running backfill jobs
     active_count = (
         (
@@ -423,3 +459,95 @@ async def backfill_all_fields(
         "status": "dispatched",
         "message": f"Bulk backfill of {months} months dispatched for all active fields.",
     }
+
+
+@router.post(
+    "/admin/ensure-agri-soil-weather",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ensure_agri_soil_weather(
+    ctx: OrgContext = Depends(require_roles("owner")),
+    db: AsyncSession = Depends(get_db),
+    farm_id: uuid.UUID | None = Query(None, description="Optional farm filter"),
+):
+    """Enqueue soil + weather backfill for agri-tagged fields in this org.
+
+    Does not touch RS / COG backfill. Geom sync (if missing) is handled by
+    scripts/agri_seed/ensure_agri_field_soil_weather.py.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+    from app.models.tables import SoilFieldSummary
+    from app.tasks.soil import fetch_soil_for_field
+    from app.tasks.weather import backfill_weather_for_field
+
+    q = sa_select(Field).where(
+        Field.org_id == ctx.org_id,
+        Field.deleted_at.is_(None),
+    )
+    if farm_id is not None:
+        q = q.where(Field.farm_id == farm_id)
+
+    fields = (await db.execute(q)).scalars().all()
+    soil_enqueued = 0
+    weather_enqueued = 0
+    scanned = 0
+    items: list[dict[str, Any]] = []
+
+    for field in fields:
+        if not is_agri_tagged(field.tags_json):
+            continue
+        scanned += 1
+        land_id = parse_agri_land_id(field.tags_json)
+        summary = (
+            await db.execute(
+                sa_select(SoilFieldSummary.id).where(
+                    SoilFieldSummary.field_id == field.id
+                )
+            )
+        ).scalar_one_or_none()
+        need_soil = summary is None
+        # Always refresh weather if caller hits this admin path for agri fields
+        # with zero weather rows — cheap check via exists on weather_daily.
+        from app.models.tables import WeatherDaily
+
+        weather_exists = (
+            await db.execute(
+                sa_select(WeatherDaily.id).where(WeatherDaily.field_id == field.id).limit(1)
+            )
+        ).scalar_one_or_none()
+        need_weather = weather_exists is None
+
+        if need_soil:
+            fetch_soil_for_field.delay(str(field.id))
+            soil_enqueued += 1
+        if need_weather:
+            backfill_weather_for_field.delay(str(field.id))
+            weather_enqueued += 1
+
+        items.append(
+            {
+                "field_id": str(field.id),
+                "name": field.name,
+                "land_id": land_id,
+                "soil_enqueued": need_soil,
+                "weather_enqueued": need_weather,
+            }
+        )
+
+    logger.info(
+        "ensure_agri_soil_weather",
+        org_id=str(ctx.org_id),
+        scanned=scanned,
+        soil_enqueued=soil_enqueued,
+        weather_enqueued=weather_enqueued,
+    )
+    return {
+        "status": "dispatched",
+        "scanned": scanned,
+        "soil_enqueued": soil_enqueued,
+        "weather_enqueued": weather_enqueued,
+        "items": items,
+    }
+

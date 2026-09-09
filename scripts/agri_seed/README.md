@@ -139,3 +139,12 @@ Idempotent (`ON CONFLICT` on `uq_raster_field_date_type`). Placeholder
 `parcel_scene_products.pixel_data` directly via
 `GET /v1/agri/lands/{id}/scenes?include_pixels=1` and rasterizes a MapLibre
 image overlay client-side.
+
+## Agri-first data plane
+
+See **[docs/agri-first-data.md](../../docs/agri-first-data.md)** for the binding rules:
+
+- **RS** → `agri.parcel_scene_products` only (`lonlat_v1`); do not COG-backfill agri-tagged fields.
+- **Soil / weather** → public OpenFarm tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
+- Ops: `python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply`
+
