@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS } from "@/lib/agri-heatmap";
 import { MAP_CHROME } from "@/lib/design-tokens";
@@ -11,6 +11,67 @@ interface AgriHeatmapLegendProps {
     compact?: boolean;
 }
 
+function OssPreviewStack({
+    rgbUrl,
+    heatmapUrl,
+    compact,
+}: {
+    rgbUrl: string | null;
+    heatmapUrl: string | null;
+    compact: boolean;
+}) {
+    const [rgbFailed, setRgbFailed] = useState(false);
+    const [hmFailed, setHmFailed] = useState(false);
+
+    useEffect(() => {
+        setRgbFailed(false);
+        setHmFailed(false);
+    }, [rgbUrl, heatmapUrl]);
+
+    const showRgb = Boolean(rgbUrl) && !rgbFailed;
+    const showHm = Boolean(heatmapUrl) && !hmFailed;
+    if (!showRgb && !showHm) return null;
+
+    const caption =
+        showRgb && showHm ? "真彩+色斑" : showRgb ? "真彩" : "色斑";
+
+    return (
+        <div className={cn(compact ? "mt-1" : "mt-1.5")}>
+            <div
+                className={cn(
+                    "relative w-full overflow-hidden rounded-md border border-border bg-muted/60",
+                    compact ? "h-[72px]" : "h-[110px]",
+                )}
+            >
+                {showRgb && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                        src={rgbUrl!}
+                        alt="真彩预览"
+                        loading="lazy"
+                        className="absolute inset-0 h-full w-full object-contain"
+                        onError={() => setRgbFailed(true)}
+                    />
+                )}
+                {showHm && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                        src={heatmapUrl!}
+                        alt="色斑预览"
+                        loading="lazy"
+                        className={cn(
+                            "absolute inset-0 h-full w-full object-contain",
+                            showRgb ? "opacity-60" : "opacity-100",
+                        )}
+                        onError={() => setHmFailed(true)}
+                    />
+                )}
+            </div>
+            <p className="mt-0.5 text-[9px] leading-none text-muted-foreground">{caption}</p>
+        </div>
+    );
+}
+
 /** Map overlay legend + mean badge for agri pixel_data 色斑图 (figure-3 style). */
 export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeatmapLegendProps) {
     const legend = heatmap.legend;
@@ -18,6 +79,25 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
         heatmap.mean != null && Number.isFinite(heatmap.mean)
             ? heatmap.mean.toFixed(2)
             : null;
+
+    const { rgbUrl, heatmapUrl } = useMemo(() => {
+        const rgb =
+            (heatmap.previewRgbUrl && heatmap.previewRgbUrl.trim()) ||
+            (heatmap.previewLargeRgbUrl && heatmap.previewLargeRgbUrl.trim()) ||
+            null;
+        const hm =
+            (heatmap.previewHeatmapUrl && heatmap.previewHeatmapUrl.trim()) ||
+            (heatmap.previewS2HeatmapUrl && heatmap.previewS2HeatmapUrl.trim()) ||
+            null;
+        return { rgbUrl: rgb, heatmapUrl: hm };
+    }, [
+        heatmap.previewRgbUrl,
+        heatmap.previewLargeRgbUrl,
+        heatmap.previewHeatmapUrl,
+        heatmap.previewS2HeatmapUrl,
+    ]);
+
+    const hasPreview = Boolean(rgbUrl || heatmapUrl);
 
     return (
         <div
@@ -39,7 +119,10 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
             {legend.kind === "continuous" ? (
                 <>
                     <div
-                        className={cn("w-full rounded-sm border border-border overflow-hidden", compact ? "h-2" : "h-3")}
+                        className={cn(
+                            "w-full rounded-sm border border-border overflow-hidden",
+                            compact ? "h-2" : "h-3",
+                        )}
                         style={{ background: legend.gradient }}
                     />
                     <div className="flex justify-between mt-1">
@@ -76,6 +159,10 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
                         <p className="mt-1.5 text-[10px] leading-snug text-muted-foreground">{legend.hint}</p>
                     )}
                 </>
+            )}
+
+            {hasPreview && (
+                <OssPreviewStack rgbUrl={rgbUrl} heatmapUrl={heatmapUrl} compact={compact} />
             )}
 
             <p className="mt-1.5 text-[10px] text-muted-foreground tabular-nums">
