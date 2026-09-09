@@ -43,6 +43,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AgriIndexGlossary } from "@/components/field/agri-index-glossary";
 import { toast } from "sonner";
 import { haToMu } from "@/lib/area";
 import type { DayGradeShare } from "@/components/charts/ndvi-grade-shares-chart";
@@ -1068,11 +1069,15 @@ export default function AgriTimeseriesPanel({
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             )}
+                            <AgriIndexGlossary
+                                initialKey={series}
+                                triggerClassName="ml-auto"
+                            />
                             <Button
                                 type="button"
                                 size="sm"
                                 variant="ghost"
-                                className="h-7 w-7 p-0 ml-auto shrink-0"
+                                className="h-7 w-7 p-0 shrink-0"
                                 title={heatmapVisible ? t("hideHeatmap") : t("showHeatmap")}
                                 onClick={() => {
                                     setHeatmapVisible((v) => {
