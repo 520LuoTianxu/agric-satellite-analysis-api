@@ -219,3 +219,87 @@ class AgriStatsOut(BaseModel):
     schema_name: str = "agri"
     tables: list[AgriTableCount]
     note: str | None = None
+
+
+# ── China overview (全国态势) ───────────────────────────────────────
+
+OverviewLevel = Literal["country", "province", "city", "county"]
+
+
+class OverviewRegionNode(BaseModel):
+    level: OverviewLevel
+    code: str | None = None
+    name: str
+
+
+class OverviewFilters(BaseModel):
+    from_date: date = Field(alias="from")
+    to_date: date = Field(alias="to")
+    cloud_max_pct: float = 30
+    phenology_months: list[int] = Field(default_factory=lambda: [6, 7, 8, 9])
+    weak_ndvi_lt: float = 0.25
+
+    model_config = {"populate_by_name": True}
+
+
+class OverviewTotals(BaseModel):
+    parcel_count: int
+    area_mu: float
+
+
+class OverviewDroughtCounts(BaseModel):
+    severe: int = 0
+    moderate: int = 0
+    mild: int = 0
+    normal: int = 0
+    unknown: int = 0
+    area_mu: dict[str, float] = Field(default_factory=dict)
+
+
+class OverviewFloodCounts(BaseModel):
+    flood: int = 0
+    wet: int = 0
+    dry: int = 0
+    unknown: int = 0
+    area_mu: dict[str, float] = Field(default_factory=dict)
+
+
+class OverviewWeakGrowth(BaseModel):
+    parcel_count: int = 0
+    area_mu: float = 0.0
+
+
+class OverviewChildOut(BaseModel):
+    level: OverviewLevel
+    code: str | None = None
+    name: str
+    parcel_count: int = 0
+    drought_severe: int = 0
+    flood: int = 0
+    weak_growth: int = 0
+    area_mu: float = 0.0
+
+
+class OverviewStatsOut(BaseModel):
+    region: dict[str, Any]
+    filters: dict[str, Any]
+    totals: OverviewTotals
+    drought: OverviewDroughtCounts
+    flood: OverviewFloodCounts
+    weak_growth: OverviewWeakGrowth
+    children: list[OverviewChildOut]
+
+
+class OverviewRegionOut(BaseModel):
+    level: OverviewLevel
+    code: str | None = None
+    name: str
+    parcel_count: int = 0
+    area_mu: float = 0.0
+
+
+class OverviewRegionsOut(BaseModel):
+    parent_level: OverviewLevel | None = None
+    parent_code: str | None = None
+    parent_name: str | None = None
+    children: list[OverviewRegionOut]

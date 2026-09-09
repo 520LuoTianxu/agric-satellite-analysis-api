@@ -1078,6 +1078,32 @@ export function parseAgriLandId(tags: string[] | null | undefined): string | nul
 }
 
 export const agriApi = {
+    overviewStats: (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        return apiFetch<OverviewStats>(`/agri/overview/stats?${params}`);
+    },
+    overviewRegions: (opts: {
+        parentLevel?: OverviewLevel;
+        parentCode?: string;
+        parentName?: string;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.parentLevel) params.set("parent_level", opts.parentLevel);
+        if (opts.parentCode) params.set("parent_code", opts.parentCode);
+        if (opts.parentName) params.set("parent_name", opts.parentName);
+        return apiFetch<OverviewRegions>(`/agri/overview/regions?${params}`);
+    },
     scenes: (
         landId: string,
         opts: {
@@ -1106,6 +1132,76 @@ export const agriApi = {
             `/agri/lands/${encodeURIComponent(landId)}/scenes/summary`,
         ),
 };
+
+
+// ── China overview (全国态势) ──────────────────────────────────────
+
+export type OverviewLevel = "country" | "province" | "city" | "county";
+
+export interface OverviewRegionPathNode {
+    level: OverviewLevel;
+    code: string | null;
+    name: string;
+}
+
+export interface OverviewChild {
+    level: OverviewLevel;
+    code: string | null;
+    name: string;
+    parcel_count: number;
+    drought_severe: number;
+    flood: number;
+    weak_growth: number;
+    area_mu: number;
+}
+
+export interface OverviewStats {
+    region: {
+        level: OverviewLevel;
+        code: string | null;
+        name: string;
+        path: OverviewRegionPathNode[];
+        adcode?: string | null;
+    };
+    filters: {
+        from: string;
+        to: string;
+        cloud_max_pct: number;
+        phenology_months: number[];
+        weak_ndvi_lt: number;
+    };
+    totals: { parcel_count: number; area_mu: number };
+    drought: {
+        severe: number;
+        moderate: number;
+        mild: number;
+        normal: number;
+        unknown: number;
+        area_mu: Record<string, number>;
+    };
+    flood: {
+        flood: number;
+        wet: number;
+        dry: number;
+        unknown: number;
+        area_mu: Record<string, number>;
+    };
+    weak_growth: { parcel_count: number; area_mu: number };
+    children: OverviewChild[];
+}
+
+export interface OverviewRegions {
+    parent_level: OverviewLevel | null;
+    parent_code: string | null;
+    parent_name: string | null;
+    children: {
+        level: OverviewLevel;
+        code: string | null;
+        name: string;
+        parcel_count: number;
+        area_mu: number;
+    }[];
+}
 
 // ── Share Links ──────────────────────────────────────────────────
 

@@ -22,7 +22,8 @@
         "farms": "农场",
         "alerts": "预警",
         "settings": "设置",
-        "changelog": "更新日志"
+        "changelog": "更新日志",
+        "overview": "全国态势"
     },
     "sidebar": {
         "workspaces": "工作区",
@@ -910,5 +911,31 @@
         "cropBound": "作物已绑定",
         "cropBindFailed": "绑定作物失败",
         "boundCrop": "当前作物"
+    },
+    "overviewPage": {
+        "title": "全国态势",
+        "subtitle": "干旱 / 洪涝 / 弱长势 · 全国→省→市→县",
+        "breadcrumbCountry": "全国",
+        "parcels": "地块数",
+        "areaMu": "面积（亩）",
+        "drought": "干旱",
+        "flood": "洪涝",
+        "weakGrowth": "弱长势",
+        "severe": "重度",
+        "moderate": "中度",
+        "mild": "轻度",
+        "normal": "正常",
+        "unknown": "未知",
+        "floodClass": "积水/洪涝",
+        "wet": "偏湿",
+        "dry": "干燥",
+        "none": "无",
+        "children": "下级行政区",
+        "loading": "加载中…",
+        "loadFailed": "态势数据加载失败",
+        "noChildren": "无下级区划",
+        "dateWindow": "时间窗口",
+        "clickMapHint": "点击地图下钻",
+        "pctOfParcels": "占地块比例"
     }
 }

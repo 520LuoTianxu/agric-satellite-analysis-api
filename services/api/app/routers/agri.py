@@ -623,3 +623,9 @@ async def land_scenes_summary(
         )
 
     return LandScenesSummaryOut(land_id=land_id, total=total, sensors=sensors)
+
+
+# China overview (全国态势) — country/province/city/county stats
+from app.routers.agri_overview import router as overview_router  # noqa: E402
+
+router.include_router(overview_router)

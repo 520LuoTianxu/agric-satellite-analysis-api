@@ -22,7 +22,8 @@
         "farms": "Fincas",
         "alerts": "Alertas",
         "settings": "Configuración",
-        "changelog": "Cambios"
+        "changelog": "Cambios",
+        "overview": "Panorama China"
     },
     "sidebar": {
         "workspaces": "Espacios de trabajo",
@@ -910,5 +911,31 @@
         "cropBound": "Cultivo vinculado",
         "cropBindFailed": "Error al vincular cultivo",
         "boundCrop": "Cultivo"
+    },
+    "overviewPage": {
+        "title": "Panorama China",
+        "subtitle": "Sequía / inundación / crecimiento débil",
+        "breadcrumbCountry": "China",
+        "parcels": "Parcelas",
+        "areaMu": "Área (mu)",
+        "drought": "Sequía",
+        "flood": "Inundación",
+        "weakGrowth": "Crecimiento débil",
+        "severe": "Severa",
+        "moderate": "Moderada",
+        "mild": "Leve",
+        "normal": "Normal",
+        "unknown": "Desconocido",
+        "floodClass": "Inundación",
+        "wet": "Húmedo",
+        "dry": "Seco",
+        "none": "Ninguno",
+        "children": "Subregiones",
+        "loading": "Cargando…",
+        "loadFailed": "Error al cargar",
+        "noChildren": "Sin subregiones",
+        "dateWindow": "Ventana",
+        "clickMapHint": "Clic en el mapa",
+        "pctOfParcels": "% de parcelas"
     }
 }

@@ -22,7 +22,8 @@
         "farms": "Farms",
         "alerts": "Alerts",
         "settings": "Settings",
-        "changelog": "Changelog"
+        "changelog": "Changelog",
+        "overview": "China overview"
     },
     "sidebar": {
         "workspaces": "Workspaces",
@@ -910,5 +911,31 @@
         "cropBound": "Crop bound",
         "cropBindFailed": "Failed to bind crop",
         "boundCrop": "Crop"
+    },
+    "overviewPage": {
+        "title": "China overview",
+        "subtitle": "Drought / flood / weak growth · country→province→city→county",
+        "breadcrumbCountry": "China",
+        "parcels": "Parcels",
+        "areaMu": "Area (mu)",
+        "drought": "Drought",
+        "flood": "Flood",
+        "weakGrowth": "Weak growth",
+        "severe": "Severe",
+        "moderate": "Moderate",
+        "mild": "Mild",
+        "normal": "Normal",
+        "unknown": "Unknown",
+        "floodClass": "Flood / standing water",
+        "wet": "Wet",
+        "dry": "Dry",
+        "none": "None",
+        "children": "Sub-regions",
+        "loading": "Loading…",
+        "loadFailed": "Failed to load overview",
+        "noChildren": "No sub-regions",
+        "dateWindow": "Date window",
+        "clickMapHint": "Click the map to drill down",
+        "pctOfParcels": "% of parcels"
     }
 }
