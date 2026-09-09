@@ -343,7 +343,8 @@
         "alertsPlaceholder": "Alerts will be available in Milestone 3.",
         "scoutingPlaceholder": "Scouting notes will be available in Milestone 3.",
         "sharePlaceholder": "Share links will be available in Milestone 3.",
-        "cloudCover": "{percent}% cloud"
+        "cloudCover": "{percent}% cloud",
+        "tabLandReport": "Land report"
     },
     "alertsTab": {
         "noAlerts": "No alerts",
@@ -878,5 +879,26 @@
         "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
         "progressBridge": "Writing agri lonlat…",
         "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})"
+    },
+    "landReportTab": {
+        "title": "Land assessment report",
+        "description": "One-click plain-language PDF: big score, traffic lights, dimension cards, and FAQ. Area in mu; vigor by maize season (Jun–Sep), not annual NDVI average.",
+        "generate": "Generate PDF",
+        "generating": "Generating…",
+        "download": "Download PDF",
+        "generateStarted": "Land report generation started",
+        "generateDone": "Land report ready",
+        "generateFailed": "Generation failed",
+        "downloadFailed": "Download failed",
+        "status": "Status",
+        "status_pending": "Queued",
+        "status_running": "Running",
+        "status_succeeded": "Ready",
+        "status_failed": "Failed",
+        "empty": "No land report yet. Click the button above to generate one.",
+        "generatedAt": "Generated at {time}",
+        "noteVigor": "Vigor uses summer maize season (Jun–Sep, peak Jul–Aug), not annual NDVI average.",
+        "noteFlood": "Flood/drought: no red light without hard evidence; relative wetness is a reminder only.",
+        "noteArea": "Area unit: mu (1 ha = 15 mu)."
     }
 }

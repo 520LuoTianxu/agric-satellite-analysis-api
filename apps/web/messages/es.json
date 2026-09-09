@@ -343,7 +343,8 @@
         "alertsPlaceholder": "Las alertas estarán disponibles en el Hito 3.",
         "scoutingPlaceholder": "Las notas de campo estarán disponibles en el Hito 3.",
         "sharePlaceholder": "Los enlaces compartidos estarán disponibles en el Hito 3.",
-        "cloudCover": "{percent}% nubes"
+        "cloudCover": "{percent}% nubes",
+        "tabLandReport": "Informe de tierra"
     },
     "alertsTab": {
         "noAlerts": "Sin alertas",
@@ -878,5 +879,26 @@
         "refreshComplete": "Actualización de teledetección completa; escenas recargadas",
         "progressBridge": "Escribiendo agri lonlat…",
         "progressCounts": "Completado {done}/{total} (en curso {running}, en cola {pending})"
+    },
+    "landReportTab": {
+        "title": "Informe de evaluación de tierra",
+        "description": "PDF en lenguaje sencillo: puntuación grande, semáforos, tarjetas por dimensión y FAQ. Área en mu; vigor por temporada de maíz (jun–sep), no el promedio anual de NDVI.",
+        "generate": "Generar PDF",
+        "generating": "Generando…",
+        "download": "Descargar PDF",
+        "generateStarted": "Generación del informe iniciada",
+        "generateDone": "Informe listo",
+        "generateFailed": "Error al generar",
+        "downloadFailed": "Error al descargar",
+        "status": "Estado",
+        "status_pending": "En cola",
+        "status_running": "En curso",
+        "status_succeeded": "Listo",
+        "status_failed": "Falló",
+        "empty": "Aún no hay informe. Pulse el botón para generar uno.",
+        "generatedAt": "Generado el {time}",
+        "noteVigor": "El vigor usa la temporada de maíz de verano (jun–sep, pico jul–ago), no el NDVI anual.",
+        "noteFlood": "Inundación/sequía: sin evidencia dura no hay luz roja; la humedad relativa es solo un aviso.",
+        "noteArea": "Unidad de área: mu (1 ha = 15 mu)."
     }
 }

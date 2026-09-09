@@ -599,6 +599,46 @@ export const jobsApi = {
 
 // ── Alerts ───────────────────────────────────────────────────────────
 
+
+export const assessmentApi = {
+    generate: (fieldId: string) =>
+        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, { method: "POST" }),
+    latestMeta: (fieldId: string) =>
+        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
+    downloadLatest: async (fieldId: string) => {
+        const token = await getToken();
+        const orgId = getOrgId();
+        const headers: Record<string, string> = {
+            Authorization: `Bearer ${token}`,
+        };
+        if (orgId) headers["X-Org-Id"] = orgId;
+        const res = await fetch(
+            `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
+            { headers },
+        );
+        if (!res.ok) {
+            const detail = await res.text();
+            throw new Error(detail || `Download failed (${res.status})`);
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        let filename = "选地分析报告.pdf";
+        const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(cd);
+        if (m) {
+            filename = decodeURIComponent(m[1] || m[2]);
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    },
+};
+
+
 export const alertsApi = {
     list: (opts: { status?: string; severity?: string; limit?: number; offset?: number } = {}) => {
         const params = new URLSearchParams();

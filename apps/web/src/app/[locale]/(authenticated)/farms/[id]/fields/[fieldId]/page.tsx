@@ -90,6 +90,16 @@ const AlertsTab = dynamic(() => import("@/components/field/alerts-tab"), {
     ),
 });
 
+const LandReportTab = dynamic(() => import("@/components/field/land-report-tab"), {
+    ssr: false,
+    loading: () => (
+        <div className="p-4 space-y-3">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-24 w-full" />
+        </div>
+    ),
+});
+
 const ScoutingTab = dynamic(() => import("@/components/field/scouting-tab"), {
     ssr: false,
     loading: () => (
@@ -201,6 +211,18 @@ function computeGeomBounds(geom: GeoJSON.Geometry): [number, number, number, num
     return [minLng, minLat, maxLng, maxLat];
 }
 
+const PANEL_WIDTH_STORAGE_KEY = "openfarm.fieldPanelWidthPx";
+const PANEL_WIDTH_DEFAULT_PX = 352; // 22rem
+const PANEL_WIDTH_MIN_PX = 288; // 18rem
+const PANEL_WIDTH_MAX_PX = 640; // 40rem
+
+function clampPanelWidthPx(px: number): number {
+    const vwCap =
+        typeof window !== "undefined" ? Math.floor(window.innerWidth * 0.5) : PANEL_WIDTH_MAX_PX;
+    const max = Math.max(PANEL_WIDTH_MIN_PX, Math.min(PANEL_WIDTH_MAX_PX, vwCap));
+    return Math.round(Math.min(max, Math.max(PANEL_WIDTH_MIN_PX, px)));
+}
+
 /* ── Page ──────────────────────────────────────────────────── */
 
 export default function FieldDetailPage() {
@@ -228,6 +250,9 @@ export default function FieldDetailPage() {
     const [mapStyle, setMapStyle] = useState<MapStyleId>("satellite");
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [activeTab, setActiveTab] = useState("info");
+    const [panelWidthPx, setPanelWidthPx] = useState(PANEL_WIDTH_DEFAULT_PX);
+    const [isResizingPanel, setIsResizingPanel] = useState(false);
+    const panelWidthRef = useRef(PANEL_WIDTH_DEFAULT_PX);
 
     // Index overlay
     const [indexLayer, setIndexLayer] = useState<RasterLayer | null>(null);
@@ -257,6 +282,70 @@ export default function FieldDetailPage() {
         window.addEventListener("keydown", handleKey);
         return () => window.removeEventListener("keydown", handleKey);
     }, []);
+
+    // Restore persisted field panel width (px). Invalid/missing → 22rem default.
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem(PANEL_WIDTH_STORAGE_KEY);
+            if (raw == null || raw === "") return;
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n <= 0) return;
+            const clamped = clampPanelWidthPx(n);
+            panelWidthRef.current = clamped;
+            setPanelWidthPx(clamped);
+        } catch {
+            /* ignore quota / private mode */
+        }
+    }, []);
+
+    useEffect(() => {
+        panelWidthRef.current = panelWidthPx;
+    }, [panelWidthPx]);
+
+    const persistPanelWidth = useCallback((px: number) => {
+        try {
+            localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(px));
+        } catch {
+            /* ignore */
+        }
+    }, []);
+
+    const handlePanelResizeStart = useCallback(
+        (e: React.MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsResizingPanel(true);
+            const startX = e.clientX;
+            const startW = panelWidthRef.current;
+
+            const onMove = (ev: MouseEvent) => {
+                // Dragging the left edge: move left → wider panel
+                const next = clampPanelWidthPx(startW + (startX - ev.clientX));
+                panelWidthRef.current = next;
+                setPanelWidthPx(next);
+            };
+            const onUp = () => {
+                setIsResizingPanel(false);
+                persistPanelWidth(panelWidthRef.current);
+                document.body.style.removeProperty("cursor");
+                document.body.style.removeProperty("user-select");
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+            };
+
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+        },
+        [persistPanelWidth],
+    );
+
+    const handlePanelResizeReset = useCallback(() => {
+        panelWidthRef.current = PANEL_WIDTH_DEFAULT_PX;
+        setPanelWidthPx(PANEL_WIDTH_DEFAULT_PX);
+        persistPanelWidth(PANEL_WIDTH_DEFAULT_PX);
+    }, [persistPanelWidth]);
 
     // Alerts
     const [openAlertCount, setOpenAlertCount] = useState(0);
@@ -711,7 +800,10 @@ export default function FieldDetailPage() {
     if (!field) return null;
 
     return (
-        <div className="relative h-full w-full overflow-hidden">
+        <div
+            className="relative h-full w-full overflow-hidden"
+            style={{ "--panel-w": `${panelWidthPx}px` } as React.CSSProperties}
+        >
             {/* Full-screen map */}
             <div className="absolute inset-0">
                 {editing ? (
@@ -859,11 +951,33 @@ export default function FieldDetailPage() {
 
             {/* Floating tabbed sidebar - right */}
             <div
-                className={`absolute top-4 right-4 bottom-4 z-10 w-[var(--panel-w)] transition-transform duration-300 ease-in-out ${sidebarOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]"}`}
+                className={cn(
+                    "absolute top-4 right-4 bottom-4 z-10 w-[var(--panel-w)]",
+                    !isResizingPanel && "transition-transform duration-300 ease-in-out",
+                    sidebarOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
+                )}
             >
+                {/* Left-edge drag handle — always-visible short gray grip (centered) */}
+                <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize panel"
+                    title="Drag to resize · double-click resets to default"
+                    onMouseDown={handlePanelResizeStart}
+                    onDoubleClick={handlePanelResizeReset}
+                    className="group/resize absolute left-0 top-0 bottom-0 z-20 flex w-3 -translate-x-1/2 cursor-col-resize touch-none items-center justify-center"
+                >
+                    <div
+                        className={cn(
+                            "pointer-events-none h-14 w-1 rounded-full bg-muted-foreground/50 shadow-sm",
+                            "transition-colors group-hover/resize:bg-muted-foreground/75",
+                            isResizingPanel && "bg-muted-foreground/85",
+                        )}
+                    />
+                </div>
                 <div className={cn("flex h-full flex-col overflow-hidden rounded-xl", MAP_CHROME)}>
                     <Tabs defaultValue="info" value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
-                        {/* Seven tabs do not fit 22rem on one line. The
+                        {/* Eight tabs do not fit 22rem on one line. The
                             reference wraps rather than scrolls, so no tab
                             is hidden behind an invisible scroll affordance. */}
                         <TabsList variant="underline" className="shrink-0 flex-wrap gap-x-4 px-4">
@@ -906,6 +1020,13 @@ export default function FieldDetailPage() {
                                         <span className="absolute -top-1 -right-2 h-2 w-2 rounded-full bg-destructive" />
                                     )}
                                 </span>
+                            </TabsTrigger>
+                            <TabsTrigger
+                                value="land-report"
+                                variant="underline"
+                                className="text-[13px]"
+                            >
+                                {t("tabLandReport")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="scouting"
@@ -1071,7 +1192,11 @@ export default function FieldDetailPage() {
                                         </div>
                                     </TabsContent>
 
-                                    <TabsContent value="ndvi" className="mt-0 p-4" forceMount>
+                                    <TabsContent
+                                        value="ndvi"
+                                        forceMount
+                                        className="mt-0 p-4 data-[state=inactive]:hidden data-[state=inactive]:!hidden"
+                                    >
                                         <NdviTab
                                             fieldId={fieldId}
                                             fieldTags={field?.tags ?? null}
@@ -1088,6 +1213,10 @@ export default function FieldDetailPage() {
 
                                     <TabsContent value="alerts" className="mt-0 p-4">
                                         <AlertsTab fieldId={fieldId} onOpenCountChange={setOpenAlertCount} />
+                                    </TabsContent>
+
+                                    <TabsContent value="land-report" className="mt-0">
+                                        <LandReportTab fieldId={fieldId} />
                                     </TabsContent>
 
                                     <TabsContent value="scouting" className="mt-0">

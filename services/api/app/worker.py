@@ -34,6 +34,7 @@ celery_app.conf.update(
         "app.tasks.backfill",
         "app.tasks.soil",
         "app.tasks.agri_bridge",
+        "app.tasks.assessment_report",
     ],
     # Celery Beat schedule
     beat_schedule={

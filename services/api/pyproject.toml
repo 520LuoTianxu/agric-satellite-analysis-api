@@ -31,6 +31,8 @@ dependencies = [
     "slowapi>=0.1.9",
     "owslib>=0.31.0",
     "rosetta-soil>=0.3.0",
+    "reportlab>=4.0.0",
+    "matplotlib>=3.8.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +51,9 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.reports.land_assessment" = ["fonts/*.ttf"]
 
 [build-system]
 requires = ["setuptools>=68.0"]
