@@ -17,7 +17,13 @@ from app.reports.land_assessment.service import generate_assessment_pdf
 from app.worker import celery_app
 
 
-def _update_job(session, job: Job, status: str, progress: dict | None = None, error: str | None = None):
+def _update_job(
+    session,
+    job: Job,
+    status: str,
+    progress: dict | None = None,
+    error: str | None = None,
+):
     job.status = status
     if progress is not None:
         job.progress_json = progress
@@ -73,9 +79,7 @@ def generate_assessment_report(self, job_id: str) -> dict:
 
         storage = get_storage()
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        object_key = (
-            f"reports/{job.org_id}/{job.field_id}/assessment-{ts}.pdf"
-        )
+        object_key = f"reports/{job.org_id}/{job.field_id}/assessment-{ts}.pdf"
         storage.upload_file(
             object_key,
             str(pdf_path),

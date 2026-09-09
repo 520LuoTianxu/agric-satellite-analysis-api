@@ -130,12 +130,16 @@ async def get_latest_assessment_report(
 
     storage = get_storage()
     if not storage.exists(object_key):
-        raise HTTPException(status_code=404, detail="Report object not found in storage")
+        raise HTTPException(
+            status_code=404, detail="Report object not found in storage"
+        )
 
     data = storage.get_bytes(object_key)
     filename = progress.get("filename") or "选地分析报告.pdf"
     # RFC 5987 for Chinese filenames
-    disp = f"attachment; filename=\"assessment.pdf\"; filename*=UTF-8''{quote(filename)}"
+    disp = (
+        f"attachment; filename=\"assessment.pdf\"; filename*=UTF-8''{quote(filename)}"
+    )
     return Response(
         content=data,
         media_type="application/pdf",
