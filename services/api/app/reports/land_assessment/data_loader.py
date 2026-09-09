@@ -1084,7 +1084,7 @@ def build_flood_evidence(
     if shown_n < total_n:
         parts.append(f"本报告按湿指数挑出最湿的 {shown_n} 景展示影像与雨前降水")
     else:
-        parts.append(f"以下逐景对照前15日降水")
+        parts.append("以下逐景对照前15日降水")
     if rainish >= max(1, shown_n // 2):
         parts.append("多数场景前有较明显降雨，更像雨后积水/短时涝渍")
     elif persist >= max(1, shown_n // 2):
