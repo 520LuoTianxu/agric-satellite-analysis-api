@@ -3,13 +3,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useTranslations } from "next-intl";
-import { ChevronRight, Loader2 } from "lucide-react";
-import { agriApi, type OverviewChild, type OverviewLevel, type OverviewStats } from "@/lib/api";
+import { useLocale, useTranslations } from "next-intl";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import {
+    agriApi,
+    cropsApi,
+    type CropOption,
+    type OverviewChild,
+    type OverviewLevel,
+    type OverviewStats,
+    type OverviewWeakParcel,
+} from "@/lib/api";
 import { registerPMTilesProtocol } from "@/lib/pmtiles";
 import { createTransformRequest, refreshMapToken } from "@/lib/map-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { DROUGHT_CLASS_STYLE, FLOOD_CLASS_STYLE } from "@/lib/agri-heatmap";
 
@@ -21,11 +31,18 @@ const CHINA_BOUNDS: [[number, number], [number, number]] = [
 
 const CHINA_CENTER: [number, number] = [104.5, 35.5];
 
+const DEFAULT_PHENOLOGY_MONTHS = [6, 7, 8, 9];
+const WEAK_PAGE_SIZE = 20;
+
 type DrillState = {
     level: OverviewLevel;
     code?: string;
     name?: string;
 };
+
+type MapMetric = "drought" | "flood" | "weak_growth" | "parcel_count";
+
+type DatePreset = "30d" | "60d" | "season" | "custom";
 
 function padAdcode(level: OverviewLevel, code: string | null | undefined): string | null {
     if (!code) return null;
@@ -47,6 +64,74 @@ function geoJsonUrl(level: OverviewLevel, adcode: string | null): string {
 function pct(n: number, total: number): number {
     if (!total) return 0;
     return Math.round((n / total) * 1000) / 10;
+}
+
+function isoDate(d: Date): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}
+
+function daysAgo(n: number): { from: string; to: string } {
+    const to = new Date();
+    const from = new Date(to);
+    from.setDate(from.getDate() - n);
+    return { from: isoDate(from), to: isoDate(to) };
+}
+
+function seasonWindow(months: number[]): { from: string; to: string } {
+    const ms = months.length ? months : DEFAULT_PHENOLOGY_MONTHS;
+    const year = new Date().getFullYear();
+    const minM = Math.min(...ms);
+    const maxM = Math.max(...ms);
+    const from = new Date(year, minM - 1, 1);
+    const to = new Date(year, maxM, 0); // last day of max month
+    const today = new Date();
+    if (to > today) {
+        return { from: isoDate(from), to: isoDate(today) };
+    }
+    return { from: isoDate(from), to: isoDate(to) };
+}
+
+function metricProp(metric: MapMetric): string {
+    if (metric === "drought") return "drought_alert";
+    return metric;
+}
+
+/** Step interpolate fill for a numeric property (0 → muted, high → accent). */
+function fillColorExpr(prop: string, highColor: string): unknown {
+    return [
+        "case",
+        ["==", ["get", "has_data"], 0],
+        "#64748b",
+        [
+            "interpolate",
+            ["linear"],
+            ["get", prop],
+            0,
+            "#1e293b",
+            1,
+            "#334155",
+            5,
+            highColor,
+            20,
+            highColor,
+        ],
+    ];
+}
+
+function metricHighColor(metric: MapMetric): string {
+    switch (metric) {
+        case "drought":
+            return DROUGHT_CLASS_STYLE.severe.color;
+        case "flood":
+            return FLOOD_CLASS_STYLE.flood.color;
+        case "weak_growth":
+            return "#ca8a04";
+        case "parcel_count":
+            return "#22c55e";
+    }
 }
 
 function StatBar({
@@ -81,49 +166,154 @@ function StatBar({
 
 export default function OverviewPage() {
     const t = useTranslations("overviewPage");
+    const locale = useLocale();
+    const defaultWindow = useMemo(() => daysAgo(60), []);
+
     const [drill, setDrill] = useState<DrillState>({ level: "country" });
+    const [fromDate, setFromDate] = useState(defaultWindow.from);
+    const [toDate, setToDate] = useState(defaultWindow.to);
+    const [preset, setPreset] = useState<DatePreset>("60d");
+    const [crop, setCrop] = useState("");
+    const [crops, setCrops] = useState<CropOption[]>([]);
+    const [metric, setMetric] = useState<MapMetric>("drought");
+
     const [stats, setStats] = useState<OverviewStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [mapReady, setMapReady] = useState(false);
     const [mapError, setMapError] = useState<string | null>(null);
 
+    const [weakItems, setWeakItems] = useState<OverviewWeakParcel[]>([]);
+    const [weakTotal, setWeakTotal] = useState(0);
+    const [weakOffset, setWeakOffset] = useState(0);
+    const [weakLoading, setWeakLoading] = useState(false);
+
     const mapContainerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<maplibregl.Map | null>(null);
     const statsRef = useRef<OverviewStats | null>(null);
+    const metricRef = useRef<MapMetric>(metric);
     const onFeatureClickRef = useRef<(child: OverviewChild) => void>(() => {});
 
     statsRef.current = stats;
-
-    const loadStats = useCallback(async (d: DrillState) => {
-        setLoading(true);
-        setError(null);
-        try {
-            const res = await agriApi.overviewStats({
-                level: d.level,
-                code: d.code,
-                name: d.name,
-            });
-            setStats(res);
-        } catch (e: unknown) {
-            const msg = e && typeof e === "object" && "detail" in e ? String((e as { detail: unknown }).detail) : t("loadFailed");
-            setError(msg || t("loadFailed"));
-            setStats(null);
-        } finally {
-            setLoading(false);
-        }
-    }, [t]);
+    metricRef.current = metric;
 
     useEffect(() => {
-        void loadStats(drill);
-    }, [drill, loadStats]);
+        let cancelled = false;
+        cropsApi
+            .list()
+            .then((rows) => {
+                if (!cancelled) setCrops(rows);
+            })
+            .catch(() => {
+                if (!cancelled) setCrops([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const seasonMonths = useMemo(() => {
+        if (!crop) return DEFAULT_PHENOLOGY_MONTHS;
+        const found = crops.find((c) => c.key === crop);
+        return found?.season_months?.length ? found.season_months : DEFAULT_PHENOLOGY_MONTHS;
+    }, [crop, crops]);
+
+    const applyPreset = useCallback(
+        (p: DatePreset) => {
+            setPreset(p);
+            if (p === "30d") {
+                const w = daysAgo(30);
+                setFromDate(w.from);
+                setToDate(w.to);
+            } else if (p === "60d") {
+                const w = daysAgo(60);
+                setFromDate(w.from);
+                setToDate(w.to);
+            } else if (p === "season") {
+                const w = seasonWindow(seasonMonths);
+                setFromDate(w.from);
+                setToDate(w.to);
+            }
+        },
+        [seasonMonths],
+    );
+
+    // When crop changes under 本季 preset, refresh season window
+    useEffect(() => {
+        if (preset !== "season") return;
+        const w = seasonWindow(seasonMonths);
+        setFromDate(w.from);
+        setToDate(w.to);
+    }, [seasonMonths, preset]);
+
+    const loadStats = useCallback(
+        async (d: DrillState, from: string, to: string, cropKey: string) => {
+            setLoading(true);
+            setError(null);
+            try {
+                const res = await agriApi.overviewStats({
+                    level: d.level,
+                    code: d.code,
+                    name: d.name,
+                    from,
+                    to,
+                    crop: cropKey || undefined,
+                });
+                setStats(res);
+            } catch (e: unknown) {
+                const msg =
+                    e && typeof e === "object" && "detail" in e
+                        ? String((e as { detail: unknown }).detail)
+                        : t("loadFailed");
+                setError(msg || t("loadFailed"));
+                setStats(null);
+            } finally {
+                setLoading(false);
+            }
+        },
+        [t],
+    );
+
+    useEffect(() => {
+        void loadStats(drill, fromDate, toDate, crop);
+    }, [drill, fromDate, toDate, crop, loadStats]);
+
+    // Reset weak pagination when filters / drill change
+    useEffect(() => {
+        setWeakOffset(0);
+    }, [drill, fromDate, toDate, crop]);
+
+    const loadWeak = useCallback(
+        async (d: DrillState, from: string, to: string, cropKey: string, offset: number) => {
+            setWeakLoading(true);
+            try {
+                const res = await agriApi.overviewWeakParcels({
+                    level: d.level,
+                    code: d.code,
+                    name: d.name,
+                    from,
+                    to,
+                    crop: cropKey || undefined,
+                    limit: WEAK_PAGE_SIZE,
+                    offset,
+                });
+                setWeakItems(res.items);
+                setWeakTotal(res.total);
+            } catch {
+                setWeakItems([]);
+                setWeakTotal(0);
+            } finally {
+                setWeakLoading(false);
+            }
+        },
+        [],
+    );
+
+    useEffect(() => {
+        void loadWeak(drill, fromDate, toDate, crop, weakOffset);
+    }, [drill, fromDate, toDate, crop, weakOffset, loadWeak]);
 
     const drillToChild = useCallback((child: OverviewChild) => {
-        if (child.level === "county") {
-            // County is leaf for P0 — still set so breadcrumb/stats update
-            setDrill({ level: child.level, code: child.code ?? undefined, name: child.name });
-            return;
-        }
         setDrill({ level: child.level, code: child.code ?? undefined, name: child.name });
     }, []);
 
@@ -280,6 +470,7 @@ export default function OverviewPage() {
                             name,
                             parcel_count: child?.parcel_count ?? 0,
                             drought_severe: child?.drought_severe ?? 0,
+                            drought_alert: child?.drought_alert ?? 0,
                             flood: child?.flood ?? 0,
                             weak_growth: child?.weak_growth ?? 0,
                             has_data: child ? 1 : 0,
@@ -288,6 +479,8 @@ export default function OverviewPage() {
                 });
 
                 const fc: GeoJSON.FeatureCollection = { type: "FeatureCollection", features };
+                const mProp = metricProp(metricRef.current);
+                const high = metricHighColor(metricRef.current);
 
                 const apply = () => {
                     const m = mapRef.current;
@@ -299,6 +492,9 @@ export default function OverviewPage() {
                     }
                     if (m.getSource("overview")) {
                         (m.getSource("overview") as maplibregl.GeoJSONSource).setData(fc);
+                        if (m.getLayer("overview-fill")) {
+                            m.setPaintProperty("overview-fill", "fill-color", fillColorExpr(mProp, high) as never);
+                        }
                     } else {
                         m.addSource("overview", { type: "geojson", data: fc });
                         m.addLayer({
@@ -306,18 +502,7 @@ export default function OverviewPage() {
                             type: "fill",
                             source: "overview",
                             paint: {
-                                "fill-color": [
-                                    "case",
-                                    [">", ["get", "drought_severe"], 0],
-                                    DROUGHT_CLASS_STYLE.severe.color,
-                                    [">", ["get", "flood"], 0],
-                                    FLOOD_CLASS_STYLE.flood.color,
-                                    [">", ["get", "weak_growth"], 0],
-                                    "#ca8a04",
-                                    [">", ["get", "parcel_count"], 0],
-                                    "#22c55e",
-                                    "#64748b",
-                                ],
+                                "fill-color": fillColorExpr(mProp, high) as never,
                                 "fill-opacity": 0.65,
                             },
                         });
@@ -371,26 +556,121 @@ export default function OverviewPage() {
         };
     }, [stats, mapReady, t]);
 
+    // Metric toggle: recolor without reloading geojson
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !mapReady || !map.getLayer("overview-fill")) return;
+        const prop = metricProp(metric);
+        const high = metricHighColor(metric);
+        try {
+            map.setPaintProperty("overview-fill", "fill-color", fillColorExpr(prop, high) as never);
+        } catch {
+            /* ignore */
+        }
+    }, [metric, mapReady, stats]);
+
     const path = stats?.region.path ?? [{ level: "country" as const, code: null, name: t("breadcrumbCountry") }];
     const total = stats?.totals.parcel_count ?? 0;
 
-    const dateLabel = useMemo(() => {
-        if (!stats) return "";
-        return `${stats.filters.from} → ${stats.filters.to}`;
-    }, [stats]);
+    const cropLabel = (c: CropOption) =>
+        locale.startsWith("zh") ? `${c.name_zh}（${c.name}）` : `${c.name} (${c.name_zh})`;
+
+    const metricButtons: { key: MapMetric; label: string }[] = [
+        { key: "drought", label: t("drought") },
+        { key: "flood", label: t("flood") },
+        { key: "weak_growth", label: t("weakGrowth") },
+        { key: "parcel_count", label: t("parcels") },
+    ];
+
+    const legendColor = metricHighColor(metric);
+    const weakPage = Math.floor(weakOffset / WEAK_PAGE_SIZE) + 1;
+    const weakPages = Math.max(1, Math.ceil(weakTotal / WEAK_PAGE_SIZE));
 
     return (
         <div className="flex h-[calc(100vh-0px)] min-h-0 flex-1 flex-col gap-3 p-4 lg:p-6">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                     <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground">{t("subtitle")}</p>
                 </div>
-                {dateLabel && (
-                    <div className="text-xs text-muted-foreground">
-                        {t("dateWindow")}: <span className="font-medium text-foreground">{dateLabel}</span>
+            </div>
+
+            {/* Toolbar: date + crop */}
+            <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card/40 p-3">
+                <div className="flex flex-wrap items-end gap-2">
+                    <div className="space-y-1">
+                        <Label htmlFor="overview-from" className="text-xs text-muted-foreground">
+                            {t("dateFrom")}
+                        </Label>
+                        <Input
+                            id="overview-from"
+                            type="date"
+                            className="h-9 w-[140px]"
+                            value={fromDate}
+                            onChange={(e) => {
+                                setPreset("custom");
+                                setFromDate(e.target.value);
+                            }}
+                        />
                     </div>
-                )}
+                    <div className="space-y-1">
+                        <Label htmlFor="overview-to" className="text-xs text-muted-foreground">
+                            {t("dateTo")}
+                        </Label>
+                        <Input
+                            id="overview-to"
+                            type="date"
+                            className="h-9 w-[140px]"
+                            value={toDate}
+                            onChange={(e) => {
+                                setPreset("custom");
+                                setToDate(e.target.value);
+                            }}
+                        />
+                    </div>
+                    <div className="flex flex-wrap gap-1 pb-0.5">
+                        {(
+                            [
+                                ["30d", t("preset30d")],
+                                ["60d", t("preset60d")],
+                                ["season", t("presetSeason")],
+                            ] as const
+                        ).map(([key, label]) => (
+                            <Button
+                                key={key}
+                                type="button"
+                                size="sm"
+                                variant={preset === key ? "default" : "outline"}
+                                className="h-8"
+                                onClick={() => applyPreset(key)}
+                            >
+                                {label}
+                            </Button>
+                        ))}
+                    </div>
+                </div>
+                <div className="space-y-1 min-w-[200px]">
+                    <Label htmlFor="overview-crop" className="text-xs text-muted-foreground">
+                        {t("cropPhenology")}
+                    </Label>
+                    <select
+                        id="overview-crop"
+                        className={cn(
+                            "flex h-9 w-full min-w-[200px] rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm",
+                            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        )}
+                        value={crop}
+                        onChange={(e) => setCrop(e.target.value)}
+                    >
+                        <option value="">{t("cropDefault")}</option>
+                        {crops.map((c) => (
+                            <option key={c.key} value={c.key}>
+                                {cropLabel(c)}
+                            </option>
+                        ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground">{t("cropHint")}</p>
+                </div>
             </div>
 
             {/* Breadcrumb */}
@@ -429,8 +709,37 @@ export default function OverviewPage() {
             </nav>
 
             <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[1fr_340px]">
-                {/* Map + children list */}
-                <div className="flex min-h-0 flex-col gap-3">
+                {/* Map + children list + weak table */}
+                <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+                    {/* Metric toggle */}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-muted-foreground">{t("mapMetric")}:</span>
+                        <div className="flex flex-wrap gap-1">
+                            {metricButtons.map((b) => (
+                                <Button
+                                    key={b.key}
+                                    type="button"
+                                    size="sm"
+                                    variant={metric === b.key ? "default" : "outline"}
+                                    className="h-8"
+                                    onClick={() => setMetric(b.key)}
+                                >
+                                    {b.label}
+                                </Button>
+                            ))}
+                        </div>
+                        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
+                            <span>{t("legendLow")}</span>
+                            <span
+                                className="inline-block h-2.5 w-24 rounded-sm"
+                                style={{
+                                    background: `linear-gradient(90deg, #1e293b, ${legendColor})`,
+                                }}
+                            />
+                            <span>{t("legendHigh")}</span>
+                        </div>
+                    </div>
+
                     <div className="relative h-[min(52vh,560px)] min-h-[360px] w-full overflow-hidden rounded-lg border bg-[#0b1220]">
                         <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
                         {loading && (
@@ -466,12 +775,104 @@ export default function OverviewPage() {
                                             >
                                                 <span className="truncate font-medium">{c.name}</span>
                                                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                                                    {c.parcel_count} · 旱{c.drought_severe} · 涝{c.flood} · 弱{c.weak_growth}
+                                                    {c.parcel_count} · 旱{c.drought_alert ?? c.drought_severe} · 涝
+                                                    {c.flood} · 弱{c.weak_growth}
                                                 </span>
                                             </Button>
                                         </li>
                                     ))}
                                 </ul>
+                            )}
+                        </CardContent>
+                    </Card>
+
+                    {/* Weak-growth parcels table */}
+                    <Card>
+                        <CardHeader className="flex flex-row items-center justify-between space-y-0 py-3 px-4">
+                            <CardTitle className="text-sm font-medium">{t("weakParcelsTitle")}</CardTitle>
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                                {t("weakParcelsTotal", { total: weakTotal })}
+                            </span>
+                        </CardHeader>
+                        <CardContent className="px-2 pb-3 pt-0">
+                            {weakLoading ? (
+                                <div className="flex items-center justify-center py-6">
+                                    <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                                </div>
+                            ) : !weakItems.length ? (
+                                <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+                                    {t("weakParcelsEmpty")}
+                                </p>
+                            ) : (
+                                <>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="border-b text-left text-muted-foreground">
+                                                    <th className="px-2 py-1.5 font-medium">{t("colName")}</th>
+                                                    <th className="px-2 py-1.5 font-medium">{t("colArea")}</th>
+                                                    <th className="px-2 py-1.5 font-medium">{t("colNdvi")}</th>
+                                                    <th className="px-2 py-1.5 font-medium">{t("colDate")}</th>
+                                                    <th className="px-2 py-1.5 font-medium">{t("colAdmin")}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {weakItems.map((row) => (
+                                                    <tr key={row.land_id} className="border-b border-border/40">
+                                                        <td className="max-w-[140px] truncate px-2 py-1.5 font-medium">
+                                                            {row.land_name || row.land_id}
+                                                        </td>
+                                                        <td className="px-2 py-1.5 tabular-nums">
+                                                            {Math.round(row.land_area_mu).toLocaleString()}
+                                                        </td>
+                                                        <td className="px-2 py-1.5 tabular-nums">
+                                                            {row.ndvi_avg.toFixed(3)}
+                                                        </td>
+                                                        <td className="px-2 py-1.5 tabular-nums">
+                                                            {row.scene_date ?? "—"}
+                                                        </td>
+                                                        <td className="max-w-[160px] truncate px-2 py-1.5 text-muted-foreground">
+                                                            {[row.province_name, row.city_name, row.county_name]
+                                                                .filter(Boolean)
+                                                                .join(" / ") || "—"}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {weakTotal > WEAK_PAGE_SIZE && (
+                                        <div className="mt-2 flex items-center justify-between px-2">
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                className="h-7"
+                                                disabled={weakOffset <= 0 || weakLoading}
+                                                onClick={() =>
+                                                    setWeakOffset((o) => Math.max(0, o - WEAK_PAGE_SIZE))
+                                                }
+                                            >
+                                                <ChevronLeft className="h-3.5 w-3.5" />
+                                                {t("prevPage")}
+                                            </Button>
+                                            <span className="text-[11px] text-muted-foreground tabular-nums">
+                                                {weakPage} / {weakPages}
+                                            </span>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                className="h-7"
+                                                disabled={weakOffset + WEAK_PAGE_SIZE >= weakTotal || weakLoading}
+                                                onClick={() => setWeakOffset((o) => o + WEAK_PAGE_SIZE)}
+                                            >
+                                                {t("nextPage")}
+                                                <ChevronRight className="h-3.5 w-3.5" />
+                                            </Button>
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </CardContent>
                     </Card>
@@ -500,6 +901,12 @@ export default function OverviewPage() {
                                     {stats ? Math.round(stats.totals.area_mu).toLocaleString() : "—"}
                                 </span>
                             </div>
+                            {stats?.filters && (
+                                <div className="pt-1 text-[11px] text-muted-foreground">
+                                    {t("dateWindow")}: {stats.filters.from} → {stats.filters.to}
+                                    {stats.filters.crop ? ` · ${stats.filters.crop}` : ""}
+                                </div>
+                            )}
                         </CardContent>
                     </Card>
 

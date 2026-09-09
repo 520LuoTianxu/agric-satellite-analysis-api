@@ -937,6 +937,27 @@
     "dateWindow": "Date window",
     "clickMapHint": "Click the map to drill down",
     "pctOfParcels": "% of parcels",
-    "mapLoadFailed": "Failed to load map boundaries"
+    "mapLoadFailed": "Failed to load map boundaries",
+    "dateFrom": "From",
+    "dateTo": "To",
+    "preset30d": "30d",
+    "preset60d": "60d",
+    "presetSeason": "Season",
+    "cropPhenology": "Phenology crop",
+    "cropDefault": "Default (Jun–Sep)",
+    "cropHint": "Sets weak-growth phenology months only; does not filter parcels by planted crop",
+    "mapMetric": "Map metric",
+    "legendLow": "Low",
+    "legendHigh": "High",
+    "weakParcelsTitle": "Weak-growth parcels",
+    "weakParcelsTotal": "{total} parcels",
+    "weakParcelsEmpty": "No weak-growth parcels for this region/filters",
+    "colName": "Name",
+    "colArea": "Area (mu)",
+    "colNdvi": "NDVI",
+    "colDate": "Date",
+    "colAdmin": "Admin",
+    "prevPage": "Prev",
+    "nextPage": "Next"
   }
 }

@@ -937,6 +937,27 @@
     "dateWindow": "时间窗口",
     "clickMapHint": "点击地图下钻",
     "pctOfParcels": "占地块比例",
-    "mapLoadFailed": "地图边界加载失败"
+    "mapLoadFailed": "地图边界加载失败",
+    "dateFrom": "开始日期",
+    "dateTo": "结束日期",
+    "preset30d": "近30天",
+    "preset60d": "近60天",
+    "presetSeason": "本季",
+    "cropPhenology": "生育季口径",
+    "cropDefault": "默认（6–9月）",
+    "cropHint": "仅影响弱长势物候月，不按种植作物筛地块",
+    "mapMetric": "地图指标",
+    "legendLow": "低",
+    "legendHigh": "高",
+    "weakParcelsTitle": "弱长势地块",
+    "weakParcelsTotal": "共 {total} 块",
+    "weakParcelsEmpty": "当前区划/筛选下暂无弱长势地块",
+    "colName": "名称",
+    "colArea": "面积(亩)",
+    "colNdvi": "NDVI",
+    "colDate": "日期",
+    "colAdmin": "行政区",
+    "prevPage": "上一页",
+    "nextPage": "下一页"
   }
 }

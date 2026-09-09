@@ -1084,6 +1084,8 @@ export const agriApi = {
         name?: string;
         from?: string;
         to?: string;
+        /** Crop key — phenology months for weak-growth only (does not filter parcels). */
+        crop?: string;
     } = {}) => {
         const params = new URLSearchParams();
         if (opts.level) params.set("level", opts.level);
@@ -1091,7 +1093,29 @@ export const agriApi = {
         if (opts.name) params.set("name", opts.name);
         if (opts.from) params.set("from", opts.from);
         if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
         return apiFetch<OverviewStats>(`/agri/overview/stats?${params}`);
+    },
+    overviewWeakParcels: (opts: {
+        level?: OverviewLevel;
+        code?: string;
+        name?: string;
+        from?: string;
+        to?: string;
+        crop?: string;
+        limit?: number;
+        offset?: number;
+    } = {}) => {
+        const params = new URLSearchParams();
+        if (opts.level) params.set("level", opts.level);
+        if (opts.code) params.set("code", opts.code);
+        if (opts.name) params.set("name", opts.name);
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.crop) params.set("crop", opts.crop);
+        params.set("limit", String(opts.limit ?? 50));
+        params.set("offset", String(opts.offset ?? 0));
+        return apiFetch<OverviewWeakParcels>(`/agri/overview/weak-parcels?${params}`);
     },
     overviewRegions: (opts: {
         parentLevel?: OverviewLevel;
@@ -1150,6 +1174,8 @@ export interface OverviewChild {
     name: string;
     parcel_count: number;
     drought_severe: number;
+    /** severe + moderate + mild */
+    drought_alert: number;
     flood: number;
     weak_growth: number;
     area_mu: number;
@@ -1166,6 +1192,8 @@ export interface OverviewStats {
     filters: {
         from: string;
         to: string;
+        /** Crop key used for phenology months; null when default Jun–Sep. */
+        crop: string | null;
         cloud_max_pct: number;
         phenology_months: number[];
         weak_ndvi_lt: number;
@@ -1201,6 +1229,23 @@ export interface OverviewRegions {
         parcel_count: number;
         area_mu: number;
     }[];
+}
+
+export interface OverviewWeakParcel {
+    land_id: string;
+    land_name: string | null;
+    province_name: string | null;
+    city_name: string | null;
+    county_name: string | null;
+    land_area_mu: number;
+    ndvi_avg: number;
+    scene_date: string | null;
+    cloud_pct: number | null;
+}
+
+export interface OverviewWeakParcels {
+    total: number;
+    items: OverviewWeakParcel[];
 }
 
 // ── Share Links ──────────────────────────────────────────────────
