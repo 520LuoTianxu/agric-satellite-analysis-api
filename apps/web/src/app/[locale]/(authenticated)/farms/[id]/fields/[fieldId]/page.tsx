@@ -957,7 +957,7 @@ export default function FieldDetailPage() {
                     sidebarOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
                 )}
             >
-                {/* Left-edge drag handle — resize field analysis panel */}
+                {/* Left-edge drag handle — always-visible short gray grip (centered) */}
                 <div
                     role="separator"
                     aria-orientation="vertical"
@@ -965,12 +965,16 @@ export default function FieldDetailPage() {
                     title="Drag to resize · double-click resets to default"
                     onMouseDown={handlePanelResizeStart}
                     onDoubleClick={handlePanelResizeReset}
-                    className={cn(
-                        "absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize touch-none",
-                        "rounded-full bg-transparent hover:bg-primary/35",
-                        isResizingPanel && "bg-primary/40",
-                    )}
-                />
+                    className="group/resize absolute left-0 top-0 bottom-0 z-20 flex w-3 -translate-x-1/2 cursor-col-resize touch-none items-center justify-center"
+                >
+                    <div
+                        className={cn(
+                            "pointer-events-none h-14 w-1 rounded-full bg-muted-foreground/50 shadow-sm",
+                            "transition-colors group-hover/resize:bg-muted-foreground/75",
+                            isResizingPanel && "bg-muted-foreground/85",
+                        )}
+                    />
+                </div>
                 <div className={cn("flex h-full flex-col overflow-hidden rounded-xl", MAP_CHROME)}>
                     <Tabs defaultValue="info" value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
                         {/* Eight tabs do not fit 22rem on one line. The
