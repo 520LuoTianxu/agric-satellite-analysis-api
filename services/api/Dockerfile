@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev gcc g++ curl && \
     rm -rf /var/lib/apt/lists/*
 
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e ".[all]" 2>/dev/null || pip install --no-cache-dir .
 

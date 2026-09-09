@@ -343,7 +343,8 @@
         "alertsPlaceholder": "预警将在 Milestone 3 提供。",
         "scoutingPlaceholder": "田间调查记录将在 Milestone 3 提供。",
         "sharePlaceholder": "分享链接将在 Milestone 3 提供。",
-        "cloudCover": "云量 {percent}%"
+        "cloudCover": "云量 {percent}%",
+        "tabLandReport": "选地报告"
     },
     "alertsTab": {
         "noAlerts": "暂无预警",
@@ -878,5 +879,26 @@
         "refreshComplete": "遥感数据拉取完成，已刷新场景",
         "progressBridge": "正在写入 agri lonlat…",
         "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）"
+    },
+    "landReportTab": {
+        "title": "选地体检报告",
+        "description": "一键生成白话版选地体检 PDF：大分数、红绿灯、分项卡片与常见问题。面积按亩统计；长势按玉米季（6–9 月）而非全年平均。",
+        "generate": "一键生成 PDF",
+        "generating": "正在生成…",
+        "download": "下载 PDF",
+        "generateStarted": "已开始生成选地报告",
+        "generateDone": "选地报告已生成",
+        "generateFailed": "生成失败",
+        "downloadFailed": "下载失败",
+        "status": "状态",
+        "status_pending": "排队中",
+        "status_running": "生成中",
+        "status_succeeded": "已完成",
+        "status_failed": "失败",
+        "empty": "还没有选地报告，点击上方按钮生成。",
+        "generatedAt": "生成时间：{time}",
+        "noteVigor": "长势口径：夏玉米 6–9 月生育期、7–8 月旺长期，不看全年 NDVI 平均。",
+        "noteFlood": "涝/旱：没有硬证据不打红灯；相对偏湿或绿度偏低只作提醒。",
+        "noteArea": "面积单位：亩（1 公顷 = 15 亩）。"
     }
 }

@@ -90,6 +90,16 @@ const AlertsTab = dynamic(() => import("@/components/field/alerts-tab"), {
     ),
 });
 
+const LandReportTab = dynamic(() => import("@/components/field/land-report-tab"), {
+    ssr: false,
+    loading: () => (
+        <div className="p-4 space-y-3">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-24 w-full" />
+        </div>
+    ),
+});
+
 const ScoutingTab = dynamic(() => import("@/components/field/scouting-tab"), {
     ssr: false,
     loading: () => (
@@ -863,7 +873,7 @@ export default function FieldDetailPage() {
             >
                 <div className={cn("flex h-full flex-col overflow-hidden rounded-xl", MAP_CHROME)}>
                     <Tabs defaultValue="info" value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
-                        {/* Seven tabs do not fit 22rem on one line. The
+                        {/* Eight tabs do not fit 22rem on one line. The
                             reference wraps rather than scrolls, so no tab
                             is hidden behind an invisible scroll affordance. */}
                         <TabsList variant="underline" className="shrink-0 flex-wrap gap-x-4 px-4">
@@ -906,6 +916,13 @@ export default function FieldDetailPage() {
                                         <span className="absolute -top-1 -right-2 h-2 w-2 rounded-full bg-destructive" />
                                     )}
                                 </span>
+                            </TabsTrigger>
+                            <TabsTrigger
+                                value="land-report"
+                                variant="underline"
+                                className="text-[13px]"
+                            >
+                                {t("tabLandReport")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="scouting"
@@ -1088,6 +1105,10 @@ export default function FieldDetailPage() {
 
                                     <TabsContent value="alerts" className="mt-0 p-4">
                                         <AlertsTab fieldId={fieldId} onOpenCountChange={setOpenAlertCount} />
+                                    </TabsContent>
+
+                                    <TabsContent value="land-report" className="mt-0">
+                                        <LandReportTab fieldId={fieldId} />
                                     </TabsContent>
 
                                     <TabsContent value="scouting" className="mt-0">
