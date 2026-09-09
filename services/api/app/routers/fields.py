@@ -341,17 +341,8 @@ async def backfill_field_indices(
 
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
 
-    if is_agri_tagged(field.tags_json):
-        land_id = parse_agri_land_id(field.tags_json)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This field is agri-tagged (agri:"
-                f"{land_id}). Remote sensing comes from agri ingest "
-                "(parcel_scene_products / lonlat_v1), not COG index backfill. "
-                "Use GET /v1/agri/lands/{land_id}/scenes instead."
-            ),
-        )
+    is_agri = is_agri_tagged(field.tags_json)
+    land_id = parse_agri_land_id(field.tags_json) if is_agri else None
 
     # Check for existing pending/running backfill jobs
     active_count = (
@@ -374,6 +365,7 @@ async def backfill_field_indices(
         )
 
     months = body.months if body else 24
+    force = body.force if body else True
 
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
@@ -381,7 +373,12 @@ async def backfill_field_indices(
         field_id=field_id,
         type="backfill",
         status="pending",
-        params_json={"is_backfill": True, "sentinel": True},
+        params_json={
+            "is_backfill": True,
+            "sentinel": True,
+            "allow_agri": is_agri,
+            "force": force,
+        },
         created_by=ctx.user.id,
     )
     db.add(sentinel)
@@ -390,13 +387,35 @@ async def backfill_field_indices(
     from app.tasks.backfill import backfill_indices_for_field
 
     backfill_indices_for_field.delay(
-        str(field_id), months=months, sentinel_job_id=str(sentinel.id)
+        str(field_id),
+        months=months,
+        sentinel_job_id=str(sentinel.id),
+        allow_agri=is_agri,
+        force=force,
     )
+
+    if is_agri:
+        from app.tasks.agri_bridge import bridge_after_backfill
+
+        bridge_after_backfill.delay(
+            str(field_id),
+            land_id=str(land_id) if land_id is not None else None,
+        )
+        message = (
+            f"已启动 {months} 个月遥感回填（agri 地块）。"
+            "将先通过 STAC 刷新 COG，再桥接到 agri lonlat_v1（parcel_scene_products）；"
+            "完成后请刷新指数面板查看新数据。"
+        )
+    else:
+        message = (
+            f"Backfill of {months} months started. "
+            "Data will appear over the next few hours."
+        )
 
     return BackfillIndicesResponse(
         field_id=field_id,
         status="dispatched",
-        message=f"Backfill of {months} months started. Data will appear over the next few hours.",
+        message=message,
     )
 
 

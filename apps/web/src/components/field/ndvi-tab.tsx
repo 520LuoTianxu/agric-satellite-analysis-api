@@ -192,9 +192,9 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
         loadData();
     }, [loadData]);
 
-    // ── Check backfill status on mount (skip for agri — RS from parcel_scene_products) ──
+    // ── Check backfill status on mount ──
     useEffect(() => {
-        if (isAgriField) return;
+        if (isAgriField) return; // agri panel polls its own backfill status
         fieldsApi.backfillStatus(fieldId)
             .then((res) => {
                 setBackfillActive(res.has_active_backfill);
@@ -298,7 +298,11 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 setJobIndices(indices);
                 setShowJobForm(false);
                 const names = indices.map((i) => INDEX_CONFIG[i].label).join(", ");
-                toast.success(`${names} job${indices.length > 1 ? "s" : ""} started`);
+                toast.success(
+                    indices.length > 1
+                        ? tMon("jobsStarted", { names, count: indices.length })
+                        : tMon("jobStarted", { names }),
+                );
 
                 // Poll the last submitted job
                 if (pollRef.current) clearInterval(pollRef.current);
@@ -408,7 +412,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 >
                     <span className="flex items-center gap-1.5">
                         <PlayCircle className="h-4 w-4 text-primary" />
-                        Run Analysis
+                        {tMon("runAnalysis")}
                     </span>
                     {showJobForm ? (
                         <ChevronUp className="h-4 w-4" />
@@ -439,7 +443,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         {/* Index checkboxes */}
                         <div>
                             <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                                Indices to compute
+                                {tMon("indicesToCompute")}
                             </label>
                             <div className="flex flex-wrap gap-1.5">
                                 {ALL_INDEX_TYPES.map((idx) => (
@@ -464,7 +468,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         {selectedIndices.has("SAVI") && (
                             <div>
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
-                                    SAVI L factor
+                                    {tMon("saviLFactor")}
                                 </label>
                                 <input
                                     type="number"
@@ -476,7 +480,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                                     className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
                                 />
                                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                                    Soil brightness correction (0–1, default 0.5)
+                                    {tMon("saviLHint")}
                                 </p>
                             </div>
                         )}
@@ -486,7 +490,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                                     <Calendar className="inline h-3 w-3 mr-0.5" />
-                                    From
+                                    {tMon("dateFrom")}
                                 </label>
                                 <input
                                     type="date"
@@ -499,7 +503,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                                     <Calendar className="inline h-3 w-3 mr-0.5" />
-                                    To
+                                    {tMon("dateTo")}
                                 </label>
                                 <input
                                     type="date"
@@ -535,10 +539,10 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
                         <div>
                             <p className="text-sm font-medium text-info">
-                                Historical data is being processed
+                                {tMon("backfill.processing")}
                             </p>
                             <p className="text-xs text-info/80">
-                                Satellite imagery for the past 24 months is being analyzed. Data will appear automatically as it&apos;s ready.
+                                {tMon("backfill.processingDesc")}
                             </p>
                         </div>
                     </CardContent>
@@ -551,7 +555,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                     <CardHeader className="pb-2 pt-3 px-3">
                         <CardTitle className="flex items-center gap-2 text-sm font-medium text-primary">
                             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                            Processing {jobIndices.map((i) => INDEX_CONFIG[i].label).join(", ")}…
+                            {tMon("processingIndices", { names: jobIndices.map((i) => INDEX_CONFIG[i].label).join(", ") })}
                         </CardTitle>
                     </CardHeader>
                     {getJobProgress() && (
@@ -590,14 +594,14 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         <AlertTriangle className="h-4 w-4 text-danger mt-0.5" />
                         <div>
                             <p className="text-sm font-medium text-danger">{tMon("jobFailed")}</p>
-                            <p className="text-xs text-danger/80">{activeJob.error || "Unknown error"}</p>
+                            <p className="text-xs text-danger/80">{activeJob.error || tMon("unknownError")}</p>
                             <Button
                                 variant="link"
                                 size="sm"
                                 onClick={() => setActiveJob(null)}
                                 className="mt-1 h-auto p-0 text-xs text-danger hover:text-danger/80"
                             >
-                                Dismiss
+                                {tMon("dismiss")}
                             </Button>
                         </div>
                     </CardContent>
@@ -608,6 +612,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             {/* Mount immediately (don't wait for monitoring load) so 指数 tab can fetch include_pixels=1 */}
             {parseAgriLandId(fieldTags) && (
                 <AgriTimeseriesPanel
+                    fieldId={fieldId}
                     fieldTags={fieldTags}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
                     onHeatmapChange={onAgriHeatmapChange}
@@ -622,7 +627,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             <Card>
                 <CardHeader className="pb-2 pt-3 px-3">
                     <div className="flex items-center justify-between">
-                        <CardTitle className="text-xs font-semibold">{config.label} Time Series</CardTitle>
+                        <CardTitle className="text-xs font-semibold">{tMon("timeSeries", { index: config.label })}</CardTitle>
                         <Button
                             variant={showWeatherOverlay ? "secondary" : "ghost"}
                             size="sm"
@@ -631,7 +636,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             title={showWeatherOverlay ? tMon("hideWeatherOverlay") : tMon("showWeatherOverlay")}
                         >
                             <CloudRain className="h-3 w-3" />
-                            Weather
+                            {tMon("weatherOverlay")}
                         </Button>
                     </div>
                 </CardHeader>
@@ -727,9 +732,9 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             {!isAgriField && layers.length === 0 && !activeJob && (
                 <Card>
                     <CardContent className="flex flex-col items-center justify-center py-6 text-center">
-                        <p className="text-sm text-muted-foreground mb-2">No {config.label} data yet.</p>
+                        <p className="text-sm text-muted-foreground mb-2">{tMon("noDataTitle")}</p>
                         <p className="text-xs text-muted-foreground">
-                            Click &quot;Run Analysis&quot; to process satellite imagery.
+                            {tMon("noDataDesc")}
                         </p>
                     </CardContent>
                 </Card>

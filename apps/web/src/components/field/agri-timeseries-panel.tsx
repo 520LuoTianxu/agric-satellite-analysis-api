@@ -4,12 +4,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic";
 import {
     agriApi,
+    fieldsApi,
     parseAgriLandId,
     type AgriLandScenesSummary,
     type AgriSceneProduct,
     type FieldStat,
     type IndexType,
 } from "@/lib/api";
+import { useTranslations } from "next-intl";
 import {
     rasterizeAgriPixels,
     rasterizeAgriLonLatPixels,
@@ -23,7 +25,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, Satellite, Eye, EyeOff } from "lucide-react";
+import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -245,6 +247,7 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
 }
 
 export interface AgriTimeseriesPanelProps {
+    fieldId: string;
     fieldTags: string[] | null | undefined;
     /** When true, parent already has monitoring layers */
     hasMonitoringData?: boolean;
@@ -258,6 +261,7 @@ export interface AgriTimeseriesPanelProps {
 }
 
 export default function AgriTimeseriesPanel({
+    fieldId,
     fieldTags,
     hasMonitoringData = false,
     onHeatmapChange,
@@ -265,7 +269,11 @@ export default function AgriTimeseriesPanel({
     onModeChange,
     enabled = true,
 }: AgriTimeseriesPanelProps) {
+    const t = useTranslations("agriPanel");
     const landId = useMemo(() => parseAgriLandId(fieldTags), [fieldTags]);
+    const [backfilling, setBackfilling] = useState(false);
+    const [backfillActive, setBackfillActive] = useState(false);
+    const [reloadKey, setReloadKey] = useState(0);
     const [summary, setSummary] = useState<AgriLandScenesSummary | null>(null);
     const [scenes, setScenes] = useState<AgriSceneProduct[]>([]);
     const [loading, setLoading] = useState(false);
@@ -336,7 +344,7 @@ export default function AgriTimeseriesPanel({
                     await loadHeatmapRef.current(bestDate, nextSeries);
                 }
             } catch (e: any) {
-                if (!cancelled) setError(e?.detail || e?.message || "加载 agri 时序失败");
+                if (!cancelled) setError(e?.detail || e?.message || t("loadFailed"));
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -347,7 +355,51 @@ export default function AgriTimeseriesPanel({
             // and can wipe a just-loaded overlay. Clear only when enabled flips false or unmount via land change handled by next effect.
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [landId]);
+    }, [landId, reloadKey]);
+
+    // Poll backfill status; when it finishes, reload agri scenes
+    useEffect(() => {
+        if (!fieldId) return;
+        let cancelled = false;
+        let wasActive = false;
+        const tick = async () => {
+            try {
+                const res = await fieldsApi.backfillStatus(fieldId);
+                if (cancelled) return;
+                setBackfillActive(res.has_active_backfill);
+                if (res.has_active_backfill) {
+                    wasActive = true;
+                } else if (wasActive) {
+                    wasActive = false;
+                    setReloadKey((k) => k + 1);
+                }
+            } catch {
+                /* ignore */
+            }
+        };
+        tick();
+        const id = setInterval(tick, 8000);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
+    }, [fieldId]);
+
+    const handleRefreshRs = async () => {
+        setBackfilling(true);
+        try {
+            await fieldsApi.backfillIndices(fieldId);
+            setBackfillActive(true);
+            toast.success(t("refreshStarted"));
+        } catch (e: any) {
+            if (e?.status === 409) {
+                setBackfillActive(true);
+            }
+            toast.error(e?.detail || t("refreshFailed"));
+        } finally {
+            setBackfilling(false);
+        }
+    };
 
     // When switching series, keep date if still valid; else prefer usable optical scene
     useEffect(() => {
@@ -525,37 +577,61 @@ export default function AgriTimeseriesPanel({
                     <div>
                         <CardTitle className="flex items-center gap-1.5 text-xs font-semibold">
                             <Satellite className="h-3.5 w-3.5 text-primary" />
-                            Agri 遥感时序 · 色斑图
+                            {t("title")}
                         </CardTitle>
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
-                            地块 land_id={landId}
-                            {summary ? ` · 共 ${summary.total} 景` : ""}
-                            {" · 优先 DB lonlat_v1 色膜，无需 COG/Celery"}
+                            {t("subtitle", {
+                                landId: landId ?? "—",
+                                scenes: summary ? t("scenesCount", { total: summary.total }) : "",
+                            })}
                         </p>
                     </div>
-                    {summary && (
-                        <div className="flex flex-wrap gap-1 justify-end">
-                            {summary.sensors.map((s) => (
-                                <Badge key={s.sensor} variant="secondary" className="text-[10px] tabular-nums">
-                                    {s.sensor} {s.count}
-                                </Badge>
-                            ))}
-                        </div>
-                    )}
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        <Button
+                            type="button"
+                            size="sm"
+                            variant="default"
+                            className="h-7 text-xs gap-1.5"
+                            onClick={handleRefreshRs}
+                            disabled={backfilling || backfillActive}
+                            title={backfillActive ? t("refreshInProgress") : t("refreshRsTitle")}
+                        >
+                            {backfilling || backfillActive ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                                <RefreshCw className="h-3.5 w-3.5" />
+                            )}
+                            {t("refreshRs")}
+                        </Button>
+                        {summary && (
+                            <div className="flex flex-wrap gap-1 justify-end">
+                                {summary.sensors.map((s) => (
+                                    <Badge key={s.sensor} variant="secondary" className="text-[10px] tabular-nums">
+                                        {s.sensor} {s.count}
+                                    </Badge>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </CardHeader>
             <CardContent className="px-3 pb-3 pt-0 space-y-2">
+                {backfillActive && (
+                    <p className="text-[11px] text-info flex items-center gap-1.5">
+                        <History className="h-3 w-3" />
+                        {t("refreshInProgress")}
+                    </p>
+                )}
                 {loading && (
                     <div className="flex items-center justify-center py-8 gap-2 text-muted-foreground text-xs">
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        加载 agri 场景…
+                        {t("loading")}
                     </div>
                 )}
                 {error && <p className="text-xs text-destructive py-2">{error}</p>}
                 {!loading && !error && total === 0 && (
                     <p className="text-xs text-muted-foreground py-3">
-                        本地样例库中该地块暂无 S1/S2 场景（如后广惠屯）。边界已导入；天气/土壤可按地块几何拉取。
-                        色斑图与长势曲线需从 OSS 补齐 parcel_scene_products。
+                        {t("empty")}
                     </p>
                 )}
                 {!loading && total > 0 && (
@@ -602,7 +678,7 @@ export default function AgriTimeseriesPanel({
                                 size="sm"
                                 variant="ghost"
                                 className="h-7 w-7 p-0 ml-auto"
-                                title={heatmapVisible ? "隐藏色斑图" : "显示色斑图"}
+                                title={heatmapVisible ? t("hideHeatmap") : t("showHeatmap")}
                                 onClick={() => {
                                     setHeatmapVisible((v) => {
                                         const next = !v;
@@ -632,18 +708,18 @@ export default function AgriTimeseriesPanel({
                                 indexType={chartIndexType}
                             />
                         ) : (
-                            <p className="text-xs text-muted-foreground py-2">当前指数无有效均值点。</p>
+                            <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
                         )}
                         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>
                                 {selectedDate
-                                    ? `色斑图日期：${selectedDate} · ${AGRI_MODE_LABELS[series]}`
-                                    : "选择曲线上的日期以加载色斑图"}
-                                {heatmapLoading ? " · 渲染中…" : ""}
+                                    ? t("heatmapDate", { date: selectedDate, mode: AGRI_MODE_LABELS[series] })
+                                    : t("pickDate")}
+                                {heatmapLoading ? t("rendering") : ""}
                                 {heatmapMeta
-                                    ? ` · ${heatmapMeta.pixels} 像素${
+                                    ? `${t("pixelsMeta", { pixels: heatmapMeta.pixels })}${
                                           heatmapMeta.mean != null
-                                              ? ` · 均≈${heatmapMeta.mean.toFixed(2)}`
+                                              ? t("meanMeta", { mean: heatmapMeta.mean.toFixed(2) })
                                               : ""
                                       }`
                                     : ""}

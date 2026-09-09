@@ -111,6 +111,7 @@ class FieldImportResponse(BaseModel):
 
 class BackfillIndicesRequest(BaseModel):
     months: int = 24
+    force: bool = True
 
 
 class BackfillIndicesResponse(BaseModel):
