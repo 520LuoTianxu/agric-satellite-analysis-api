@@ -12,9 +12,10 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 from jose import jwt
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
@@ -30,7 +31,13 @@ from app.models.tables import (
     SoilFieldSummary,
     WeatherDaily,
 )
-from app.schemas.monitoring import ScoutingOut, ShareCreate, ShareOut, ShareReportOut
+from app.schemas.monitoring import (
+    ScoutingOut,
+    ShareCreate,
+    ShareOut,
+    ShareReportOut,
+    ShareStatPoint,
+)
 
 router = APIRouter()
 
@@ -78,6 +85,159 @@ def _mint_service_jwt() -> str:
     return jwt.encode(
         payload, settings.openfarm_jwt_secret, algorithm=settings.jwt_algorithm
     )
+
+
+
+# ── Agri RS helpers for share reports ─────────────────────────────────
+
+_AGRI_INDEX_COLS: list[tuple[str, str, str]] = [
+    # (index_type, column, sensor)
+    ("NDVI", "ndvi_avg", "S2"),
+    ("EVI", "evi_avg", "S2"),
+    ("NDMI", "ndmi_avg", "S2"),
+    ("NDRE", "ndre_avg", "S2"),
+    ("MNDWI", "mndwi_avg", "S2"),
+    ("CIRE", "cire_avg", "S2"),
+    ("NDWI", "mndwi_avg", "S2"),  # MNDWI proxy when NDWI absent
+    ("VV", "vv_avg", "S1"),
+    ("VH", "vh_avg", "S1"),
+]
+
+
+def _quality_from_cloud(cloud: Any) -> float:
+    if cloud is None:
+        return 0.5
+    try:
+        return max(0.15, min(0.95, 1.0 - float(cloud) / 100.0))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _stat_point(
+    *,
+    field_id: uuid.UUID,
+    d: Any,
+    mean: float,
+    quality: float,
+    idx: str,
+) -> ShareStatPoint:
+    from datetime import date as date_cls
+
+    if isinstance(d, date_cls):
+        date_obj = d
+    elif hasattr(d, "date") and callable(d.date):
+        date_obj = d.date()
+    else:
+        date_obj = date_cls.fromisoformat(str(d)[:10])
+    date_val = date_obj.isoformat()
+    # Stable synthetic id so charts/keys stay consistent across refreshes
+    sid = uuid.uuid5(uuid.NAMESPACE_URL, f"agri-share:{field_id}:{idx}:{date_val}")
+    return ShareStatPoint(
+        id=sid,
+        field_id=field_id,
+        date=date_obj,
+        mean=mean,
+        median=mean,
+        min=mean,
+        max=mean,
+        p10=mean,
+        p90=mean,
+        stddev=None,
+        quality_score=quality,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+async def _load_agri_share_series(
+    db: AsyncSession,
+    field_id: uuid.UUID,
+    land_id: str,
+) -> tuple[list[str], dict[str, list[ShareStatPoint]], list[ShareStatPoint], bool]:
+    """Load S1/S2 means from agri.parcel_scene_products into share chart series.
+
+    Returns (available_index_types, stats_by_type, all_stats, heatmap_available).
+    """
+    try:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT date, sensor,
+                           ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
+                           mndwi_avg, cire_avg, vv_avg, vh_avg,
+                           parcel_cloud_cover_pct, cloud_cover,
+                           CASE
+                             WHEN pixel_data->>'format' = 'lonlat_v1'
+                              AND jsonb_typeof(pixel_data->'pixels') = 'array'
+                             THEN jsonb_array_length(pixel_data->'pixels')
+                             ELSE 0
+                           END AS lonlat_pixels
+                    FROM agri.parcel_scene_products
+                    WHERE land_id = :land_id
+                    ORDER BY date DESC
+                    LIMIT 500
+                    """
+                ),
+                {"land_id": land_id},
+            )
+        ).mappings().all()
+    except Exception as exc:  # noqa: BLE001 — agri schema may be absent
+        logger.warning("agri share series load failed land_id=%s: %s", land_id, exc)
+        return [], {}, [], False
+
+    stats_by_type: dict[str, list[ShareStatPoint]] = {}
+    heatmap_available = False
+    for r in rows:
+        if int(r.get("lonlat_pixels") or 0) > 0:
+            heatmap_available = True
+        cloud = r.get("parcel_cloud_cover_pct")
+        if cloud is None:
+            cloud = r.get("cloud_cover")
+        q = _quality_from_cloud(cloud)
+        sensor = r.get("sensor")
+        for idx, col, want_sensor in _AGRI_INDEX_COLS:
+            if sensor != want_sensor:
+                continue
+            raw = r.get(col)
+            if raw is None:
+                continue
+            try:
+                mean = float(raw)
+            except (TypeError, ValueError):
+                continue
+            pt = _stat_point(
+                field_id=field_id, d=r["date"], mean=mean, quality=q, idx=idx
+            )
+            stats_by_type.setdefault(idx, []).append(pt)
+
+    # Cap each series (newest first already); keep enough for seasonal charts
+    for idx, pts in list(stats_by_type.items()):
+        stats_by_type[idx] = pts[:120]
+
+    available = sorted(stats_by_type.keys())
+    all_stats: list[ShareStatPoint] = []
+    for pts in stats_by_type.values():
+        all_stats.extend(pts)
+    all_stats.sort(key=lambda s: s.date, reverse=True)
+    return available, stats_by_type, all_stats, heatmap_available
+
+
+async def _resolve_share_link(
+    db: AsyncSession, token: str
+) -> tuple[ShareLink, Field]:
+    result = await db.execute(select(ShareLink).where(ShareLink.token == token))
+    link = result.scalar_one_or_none()
+    if not link:
+        raise HTTPException(status_code=404, detail="Share link not found")
+    now = datetime.now(timezone.utc)
+    if link.revoked_at is not None:
+        raise HTTPException(status_code=410, detail="Share link has been revoked")
+    if link.expires_at is not None and link.expires_at < now:
+        raise HTTPException(status_code=410, detail="Share link has expired")
+    field = await db.get(Field, link.field_id)
+    if not field:
+        raise HTTPException(status_code=404, detail="Field not found")
+    return link, field
 
 
 @router.get("/fields/{field_id}/share", response_model=list[ShareOut])
@@ -208,7 +368,12 @@ async def get_shared_report(
         "geom": mapping(to_shape(field.geom)) if field.geom else None,
     }
 
-    # Available index types (distinct layer_type values)
+    land_id = parse_agri_land_id(field.tags_json)
+    agri_land_id: str | None = land_id
+    agri_heatmap_available = False
+    rs_source: str | None = None
+
+    # Available index types (distinct layer_type values) — classic OpenFarm COG path
     types_result = await db.execute(
         select(RasterLayer.layer_type)
         .where(RasterLayer.field_id == field.id)
@@ -236,8 +401,8 @@ async def get_shared_report(
     latest_layer = layers_by_type.get("NDVI")
 
     # Stats (last 12 for each available index, merged & grouped)
-    all_stats: list[FieldStat] = []
-    stats_by_type: dict[str, list[FieldStat]] = {}
+    all_stats: list[Any] = []
+    stats_by_type: dict[str, list[Any]] = {}
     for idx_type in available_index_types:
         stats_result = await db.execute(
             select(FieldStat)
@@ -254,6 +419,28 @@ async def get_shared_report(
         all_stats.extend(idx_stats)
     # Sort descending by date
     all_stats.sort(key=lambda s: s.date, reverse=True)
+
+    # Agri-tagged fields: RS truth lives in parcel_scene_products (lonlat_v1).
+    # Prefer agri series for charts so outsiders see the same curves as the
+    # authenticated Agri 遥感时序 panel (classic FieldStat may be thin/empty).
+    if land_id:
+        (
+            agri_types,
+            agri_stats_by_type,
+            agri_all_stats,
+            agri_heatmap_available,
+        ) = await _load_agri_share_series(db, field.id, land_id)
+        if agri_types:
+            available_index_types = agri_types
+            stats_by_type = agri_stats_by_type
+            all_stats = agri_all_stats
+            rs_source = "agri" if not layers_by_type else "mixed"
+        elif layers_by_type:
+            rs_source = "classic"
+        else:
+            rs_source = "agri"
+    elif layers_by_type:
+        rs_source = "classic"
 
     # Recent alerts (last 10)
     alerts_result = await db.execute(
@@ -407,7 +594,11 @@ async def get_shared_report(
         weather_summary=weather_summary,
         weather_data=weather_data_out,
         soil_summary=soil_summary_out,
+        rs_source=rs_source,
+        agri_land_id=agri_land_id,
+        agri_heatmap_available=agri_heatmap_available,
     )
+
 
 
 @router.get("/share/{token}/tiles/{z}/{x}/{y}.png")
@@ -497,3 +688,98 @@ async def proxy_share_tile(
         )
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Tile server unavailable")
+
+
+@router.get("/share/{token}/agri-pixels")
+async def get_share_agri_pixels(
+    token: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    index_type: str = "NDVI",
+    scene_date: str | None = None,
+):
+    """Public agri lonlat pixels for share map overlay (no auth; gated by token)."""
+    from app.routers.agri import _pixels_from_db_lonlat
+
+    _link, field = await _resolve_share_link(db, token)
+    land_id = parse_agri_land_id(field.tags_json)
+    if not land_id:
+        raise HTTPException(status_code=404, detail="Field is not agri-tagged")
+
+    idx_upper = (index_type or "NDVI").upper()
+    sensor = "S1" if idx_upper in ("VV", "VH") else "S2"
+
+    params: dict[str, Any] = {"land_id": land_id, "sensor": sensor}
+    date_clause = ""
+    if scene_date:
+        date_clause = "AND date = CAST(:scene_date AS date)"
+        params["scene_date"] = scene_date
+
+    row = (
+        await db.execute(
+            text(
+                f"""
+                SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
+                       mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
+                FROM agri.parcel_scene_products
+                WHERE land_id = :land_id AND sensor = :sensor
+                  {date_clause}
+                  AND pixel_data->>'format' = 'lonlat_v1'
+                  AND jsonb_typeof(pixel_data->'pixels') = 'array'
+                  AND jsonb_array_length(pixel_data->'pixels') > 0
+                ORDER BY date DESC
+                LIMIT 1
+                """
+            ),
+            params,
+        )
+    ).mappings().first()
+
+    if not row:
+        # Fallback: latest scene even without requiring pixels (means only)
+        row = (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
+                           mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
+                    FROM agri.parcel_scene_products
+                    WHERE land_id = :land_id AND sensor = :sensor
+                      {date_clause}
+                    ORDER BY date DESC
+                    LIMIT 1
+                    """
+                ),
+                params,
+            )
+        ).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No agri scene available")
+
+    pixels = _pixels_from_db_lonlat(row.get("pixel_data")) or []
+    mean_map = {
+        "NDVI": row.get("ndvi_avg"),
+        "EVI": row.get("evi_avg"),
+        "NDMI": row.get("ndmi_avg"),
+        "NDRE": row.get("ndre_avg"),
+        "MNDWI": row.get("mndwi_avg"),
+        "CIRE": row.get("cire_avg"),
+        "NDWI": row.get("mndwi_avg"),
+        "VV": row.get("vv_avg"),
+        "VH": row.get("vh_avg"),
+    }
+    mean_raw = mean_map.get(idx_upper)
+    mean_val = float(mean_raw) if mean_raw is not None else None
+    d = row["date"]
+    date_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+
+    return {
+        "land_id": land_id,
+        "date": date_str,
+        "sensor": row["sensor"],
+        "index_type": idx_upper,
+        "mean": mean_val,
+        "pixel_count": len(pixels),
+        "pixels_lonlat": pixels,
+        "pixels_source": "db_lonlat" if pixels else None,
+    }

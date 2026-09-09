@@ -11,7 +11,7 @@
  * NEXT_PUBLIC_API_URL points at localhost:8000 — avoids ERR_CONNECTION_REFUSED
  * when the API port is not published on the host.
  */
-function getApiBase(): string {
+export function getApiBase(): string {
     const raw = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/v1";
     if (typeof window !== "undefined") {
         if (raw.startsWith("/")) return raw.replace(/\/$/, "") || "/v1";
@@ -710,6 +710,21 @@ export interface ShareLink {
     created_at: string;
 }
 
+export interface ShareStatPoint {
+    date: string;
+    mean: number | null;
+    median?: number | null;
+    min?: number | null;
+    max?: number | null;
+    p10?: number | null;
+    p90?: number | null;
+    stddev?: number | null;
+    quality_score?: number | null;
+    id?: string | null;
+    field_id?: string | null;
+    created_at?: string | null;
+}
+
 export interface ShareReport {
     field: {
         id: string;
@@ -721,13 +736,41 @@ export interface ShareReport {
     latest_layer: RasterLayer | null;
     layers_by_type: Record<string, RasterLayer>;
     available_index_types: string[];
-    stats: FieldStat[];
-    stats_by_type: Record<string, FieldStat[]>;
+    stats: ShareStatPoint[];
+    stats_by_type: Record<string, ShareStatPoint[]>;
     alerts: Alert[];
     scouting: ScoutingObservation[];
     weather_summary: Record<string, any> | null;
     weather_data: WeatherDaily[];
     soil_summary: Record<string, any> | null;
+    /** classic FieldStat/RasterLayer, agri parcel_scene_products, or both */
+    rs_source?: "classic" | "agri" | "mixed" | null;
+    agri_land_id?: string | null;
+    agri_heatmap_available?: boolean;
+}
+
+export interface ShareAgriPixels {
+    land_id: string;
+    date: string;
+    sensor: "S1" | "S2" | string;
+    index_type: string;
+    mean: number | null;
+    pixel_count: number;
+    pixels_lonlat: Array<{
+        lon: number;
+        lat: number;
+        clear?: number;
+        NDVI?: number;
+        EVI?: number;
+        NDMI?: number;
+        NDRE?: number;
+        CIre?: number;
+        MNDWI?: number;
+        VV_db?: number;
+        VH_db?: number;
+        [key: string]: number | undefined;
+    }>;
+    pixels_source: "db_lonlat" | null;
 }
 
 // ── Uploads ──────────────────────────────────────────────────────
@@ -1044,6 +1087,23 @@ export const shareApi = {
         if (res.status === 410) throw new Error("expired");
         if (res.status === 404) throw new Error("not_found");
         if (!res.ok) throw new Error(`Report fetch failed: ${res.status}`);
+        return res.json();
+    },
+    /** Public agri lonlat pixels for share map 色斑 (gated by share token). */
+    async getAgriPixels(
+        token: string,
+        opts: { indexType?: string; sceneDate?: string } = {},
+    ): Promise<ShareAgriPixels> {
+        const params = new URLSearchParams();
+        if (opts.indexType) params.set("index_type", opts.indexType);
+        if (opts.sceneDate) params.set("scene_date", opts.sceneDate);
+        const qs = params.toString();
+        const res = await fetch(
+            `${getApiBase()}/share/${token}/agri-pixels${qs ? `?${qs}` : ""}`,
+        );
+        if (res.status === 410) throw new Error("expired");
+        if (res.status === 404) throw new Error("not_found");
+        if (!res.ok) throw new Error(`Agri pixels fetch failed: ${res.status}`);
         return res.json();
     },
 };

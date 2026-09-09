@@ -192,6 +192,25 @@ class ShareOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ShareStatPoint(BaseModel):
+    """Time-series point for share charts (classic FieldStat or agri averages)."""
+
+    date: date
+    mean: float | None = None
+    median: float | None = None
+    min: float | None = None
+    max: float | None = None
+    p10: float | None = None
+    p90: float | None = None
+    stddev: float | None = None
+    quality_score: float | None = None
+    id: uuid.UUID | None = None
+    field_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class ShareReportOut(BaseModel):
     """Public share link data - no auth required."""
 
@@ -199,13 +218,17 @@ class ShareReportOut(BaseModel):
     latest_layer: RasterLayerOut | None = None
     layers_by_type: dict[str, RasterLayerOut] = {}
     available_index_types: list[str] = []
-    stats: list[FieldStatOut] = []
-    stats_by_type: dict[str, list[FieldStatOut]] = {}
+    stats: list[ShareStatPoint] = []
+    stats_by_type: dict[str, list[ShareStatPoint]] = {}
     alerts: list[AlertOut] = []
     scouting: list[ScoutingOut] = []
     weather_summary: dict[str, Any] | None = None
     weather_data: list[dict[str, Any]] = []
     soil_summary: dict[str, Any] | None = None
+    # agri-tagged fields: RS truth from parcel_scene_products
+    rs_source: Literal["classic", "agri", "mixed"] | None = None
+    agri_land_id: str | None = None
+    agri_heatmap_available: bool = False
 
 
 # ── Presigned Upload ─────────────────────────────────────────────────

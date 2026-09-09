@@ -3,8 +3,15 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
-import { shareApi, getPhotoUrl, INDEX_CONFIG, ALL_INDEX_TYPES } from "@/lib/api";
-import type { ShareReport, FieldStat, Alert, ScoutingObservation, IndexType, RasterLayer } from "@/lib/api";
+import { shareApi, getApiBase, getPhotoUrl, INDEX_CONFIG, ALL_INDEX_TYPES } from "@/lib/api";
+import type { ShareReport, ShareStatPoint, Alert, ScoutingObservation, IndexType, RasterLayer } from "@/lib/api";
+import {
+    rasterizeAgriLonLatPixels,
+    clipHeatmapImageToField,
+    heatmapImageHasContent,
+    revokeHeatmapObjectUrl,
+    type AgriHeatIndex,
+} from "@/lib/agri-heatmap";
 import { Badge } from "@/components/ui/badge";
 import {
     AlertTriangle,
@@ -58,6 +65,38 @@ const SEVERITY_CONFIG: Record<string, { dotClass: string; textClass: string; ico
     },
 };
 
+
+/** Share charts accept classic optical indices plus agri SAR VV/VH. */
+const SHARE_INDEX_EXTRA: Record<"VV" | "VH", { label: string; colormap: string; rescaleMin: number; rescaleMax: number; gradient: string; threshold: number }> = {
+    VV: {
+        label: "VV",
+        colormap: "viridis",
+        rescaleMin: -25,
+        rescaleMax: -5,
+        gradient: "linear-gradient(90deg, rgb(13,8,135), rgb(120,80,200), rgb(255,255,255))",
+        threshold: -18,
+    },
+    VH: {
+        label: "VH",
+        colormap: "viridis",
+        rescaleMin: -30,
+        rescaleMax: -10,
+        gradient: "linear-gradient(90deg, rgb(13,8,135), rgb(120,80,200), rgb(255,255,255))",
+        threshold: -22,
+    },
+};
+
+type ShareIndexType = IndexType | "VV" | "VH";
+
+function shareIndexConfig(idx: ShareIndexType) {
+    if (idx === "VV" || idx === "VH") return SHARE_INDEX_EXTRA[idx];
+    return INDEX_CONFIG[idx];
+}
+
+function toAgriHeatIndex(idx: ShareIndexType): AgriHeatIndex {
+    return idx.toLowerCase() as AgriHeatIndex;
+}
+
 /* ── Page Component ────────────────────────────────────────── */
 
 export default function ShareReportPage() {
@@ -69,7 +108,7 @@ export default function ShareReportPage() {
     const [report, setReport] = useState<ShareReport | null>(null);
     const [error, setError] = useState<"expired" | "not_found" | null>(null);
     const [loading, setLoading] = useState(true);
-    const [activeIndex, setActiveIndex] = useState<IndexType>("NDVI");
+    const [activeIndex, setActiveIndex] = useState<ShareIndexType>("NDVI");
 
     useEffect(() => {
         if (!token) return;
@@ -77,12 +116,10 @@ export default function ShareReportPage() {
             .getReport(token)
             .then((r) => {
                 setReport(r);
+                const types = (r.available_index_types ?? []).map((t) => t.toUpperCase());
                 // Default to first available index if NDVI isn't available
-                if (r.available_index_types.length > 0) {
-                    const upper = r.available_index_types.map((t) => t.toUpperCase());
-                    if (!upper.includes("NDVI") && upper.length > 0) {
-                        setActiveIndex(upper[0] as IndexType);
-                    }
+                if (types.length > 0 && !types.includes("NDVI")) {
+                    setActiveIndex(types[0] as ShareIndexType);
                 }
             })
             .catch((err: Error) => {
@@ -126,12 +163,21 @@ export default function ShareReportPage() {
         );
     }
 
-    const availableIndices = report.available_index_types
-        .map((t) => t.toUpperCase() as IndexType)
-        .filter((t) => ALL_INDEX_TYPES.includes(t));
-    const config = INDEX_CONFIG[activeIndex];
-    const activeLayer = report.layers_by_type[activeIndex] ?? report.layers_by_type[activeIndex.toLowerCase()] ?? null;
-    const activeStats = report.stats_by_type[activeIndex] ?? report.stats_by_type[activeIndex.toLowerCase()] ?? [];
+    const layersByType = report.layers_by_type ?? {};
+    const statsByType = report.stats_by_type ?? {};
+    const availableIndices = (report.available_index_types ?? [])
+        .map((t) => t.toUpperCase() as ShareIndexType)
+        .filter((t) => ALL_INDEX_TYPES.includes(t as IndexType) || t === "VV" || t === "VH");
+    const config = shareIndexConfig(activeIndex);
+    const activeLayer = layersByType[activeIndex] ?? layersByType[activeIndex.toLowerCase()] ?? null;
+    const activeStats: ShareStatPoint[] =
+        statsByType[activeIndex] ?? statsByType[activeIndex.toLowerCase()] ?? [];
+    const weatherData = report.weather_data ?? [];
+    const alerts = report.alerts ?? [];
+    const scouting = report.scouting ?? [];
+    const preferAgriHeatmap = Boolean(
+        report.agri_heatmap_available || report.rs_source === "agri" || report.rs_source === "mixed",
+    );
 
     return (
         <div className="min-h-screen bg-surface-2">
@@ -194,10 +240,16 @@ export default function ShareReportPage() {
                         <div className="text-xs font-medium px-3 py-2 border-b text-muted-foreground">
                             {t("fieldBoundary")}
                         </div>
-                        <FieldMap geom={report.field.geom} token={token} hasLayer={!!activeLayer} activeIndex={activeIndex} />
-                        {activeLayer && (
+                        <FieldMap
+                            geom={report.field.geom}
+                            token={token}
+                            hasLayer={!!activeLayer}
+                            preferAgriHeatmap={preferAgriHeatmap}
+                            activeIndex={activeIndex}
+                        />
+                        {activeLayer && !preferAgriHeatmap && (
                             <div className="absolute bottom-2 left-2 z-10">
-                                <NdviLegend layer={activeLayer} indexType={activeIndex} compact />
+                                <NdviLegend layer={activeLayer} indexType={activeIndex as IndexType} compact />
                             </div>
                         )}
                     </div>
@@ -284,7 +336,7 @@ export default function ShareReportPage() {
                 {availableIndices.length > 1 && (
                     <div className="flex items-center gap-1 flex-wrap">
                         {availableIndices.map((idx) => {
-                            const c = INDEX_CONFIG[idx];
+                            const c = shareIndexConfig(idx);
                             return (
                                 <button
                                     key={idx}
@@ -306,11 +358,11 @@ export default function ShareReportPage() {
                     <h2 className="text-sm font-semibold">{config.label} {t("timeSeries")}</h2>
                     {activeStats.length > 0 ? (
                         <NdviChart
-                            stats={[...activeStats].reverse()}
+                            stats={[...activeStats].reverse() as any}
                             height={250}
-                            indexType={activeIndex}
-                            weatherData={report.weather_data}
-                            showWeatherOverlay={report.weather_data.length > 0}
+                            indexType={(ALL_INDEX_TYPES.includes(activeIndex as IndexType) ? activeIndex : "NDVI") as IndexType}
+                            weatherData={weatherData}
+                            showWeatherOverlay={weatherData.length > 0}
                         />
                     ) : (
                         <p className="text-sm text-muted-foreground text-center py-6">
@@ -322,9 +374,9 @@ export default function ShareReportPage() {
                 {/* Alerts */}
                 <div className="rounded-lg border bg-card shadow-sm p-4 space-y-3">
                     <h2 className="text-sm font-semibold">{t("recentAlerts")}</h2>
-                    {report.alerts.length > 0 ? (
+                    {alerts.length > 0 ? (
                         <div className="space-y-2">
-                            {report.alerts.map((alert) => (
+                            {alerts.map((alert) => (
                                 <ReportAlertRow key={alert.id} alert={alert} />
                             ))}
                         </div>
@@ -338,9 +390,9 @@ export default function ShareReportPage() {
                 {/* Scouting */}
                 <div className="rounded-lg border bg-card shadow-sm p-4 space-y-3">
                     <h2 className="text-sm font-semibold">{t("recentScouting")}</h2>
-                    {report.scouting.length > 0 ? (
+                    {scouting.length > 0 ? (
                         <div className="space-y-2">
-                            {report.scouting.map((obs) => (
+                            {scouting.map((obs) => (
                                 <ReportScoutingRow key={obs.id} obs={obs} />
                             ))}
                         </div>
@@ -360,7 +412,7 @@ export default function ShareReportPage() {
                     </p>
                     <ul className="flex flex-col gap-1">
                         {[
-                            report.available_index_types.length > 0 && t("sourceSatellite"),
+                            (report.available_index_types ?? []).length > 0 && t("sourceSatellite"),
                             report.weather_summary && t("sourceWeather"),
                             report.soil_summary && t("sourceSoil"),
                             report.field.geom && t("sourceBasemap"),
@@ -385,13 +437,128 @@ export default function ShareReportPage() {
 
 /* ── Sub-components ────────────────────────────────────────── */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/v1";
-
-function FieldMap({ geom, token, hasLayer, activeIndex }: { geom: GeoJSON.Geometry | null; token: string; hasLayer: boolean; activeIndex: IndexType }) {
+function FieldMap({
+    geom,
+    token,
+    hasLayer,
+    preferAgriHeatmap,
+    activeIndex,
+}: {
+    geom: GeoJSON.Geometry | null;
+    token: string;
+    hasLayer: boolean;
+    preferAgriHeatmap: boolean;
+    activeIndex: ShareIndexType;
+}) {
     const containerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<maplibregl.Map | null>(null);
     const activeIndexRef = useRef(activeIndex);
     activeIndexRef.current = activeIndex;
+    const agriBlobRef = useRef<string | null>(null);
+
+    const clearAgriOverlay = useCallback((map: maplibregl.Map) => {
+        try {
+            if (map.getLayer("agri-heatmap-raster")) map.removeLayer("agri-heatmap-raster");
+        } catch { /* ignore */ }
+        try {
+            if (map.getSource("agri-heatmap")) map.removeSource("agri-heatmap");
+        } catch { /* ignore */ }
+        revokeHeatmapObjectUrl(agriBlobRef.current);
+        agriBlobRef.current = null;
+    }, []);
+
+    const clearTileOverlay = useCallback((map: maplibregl.Map) => {
+        try {
+            if (map.getLayer("index-raster")) map.removeLayer("index-raster");
+        } catch { /* ignore */ }
+        try {
+            if (map.getSource("index-tiles")) map.removeSource("index-tiles");
+        } catch { /* ignore */ }
+    }, []);
+
+    const applyAgriHeatmap = useCallback(
+        async (map: maplibregl.Map, idx: ShareIndexType) => {
+            try {
+                const payload = await shareApi.getAgriPixels(token, {
+                    indexType: idx,
+                });
+                if (!payload.pixels_lonlat?.length) {
+                    clearAgriOverlay(map);
+                    return;
+                }
+                const sensor = (payload.sensor === "S1" ? "S1" : "S2") as "S1" | "S2";
+                const hm = rasterizeAgriLonLatPixels(
+                    payload.pixels_lonlat,
+                    toAgriHeatIndex(idx),
+                    sensor,
+                );
+                if (!hm || !heatmapImageHasContent(hm) || !hm.dataUrl) {
+                    clearAgriOverlay(map);
+                    return;
+                }
+                const fieldGeom =
+                    geom && (geom.type === "Polygon" || geom.type === "MultiPolygon")
+                        ? (geom as GeoJSON.Polygon | GeoJSON.MultiPolygon)
+                        : null;
+                const clipped = clipHeatmapImageToField(hm, fieldGeom);
+                if (!clipped.dataUrl) {
+                    clearAgriOverlay(map);
+                    return;
+                }
+                clearAgriOverlay(map);
+                clearTileOverlay(map);
+                const url = clipped.dataUrl;
+                agriBlobRef.current = null;
+                map.addSource("agri-heatmap", {
+                    type: "image",
+                    url,
+                    coordinates: clipped.coordinates,
+                });
+                map.addLayer(
+                    {
+                        id: "agri-heatmap-raster",
+                        type: "raster",
+                        source: "agri-heatmap",
+                        paint: {
+                            "raster-opacity": 0.85,
+                            "raster-resampling": "nearest",
+                        },
+                    },
+                    "field-outline",
+                );
+            } catch (e) {
+                console.warn("[share] agri heatmap failed", e);
+                clearAgriOverlay(map);
+            }
+        },
+        [token, geom, clearAgriOverlay, clearTileOverlay],
+    );
+
+    const applyTileOverlay = useCallback(
+        (map: maplibregl.Map, idx: ShareIndexType) => {
+            const apiBase = getApiBase();
+            clearTileOverlay(map);
+            map.addSource("index-tiles", {
+                type: "raster",
+                tiles: [
+                    `${apiBase}/share/${token}/tiles/{z}/{x}/{y}.png?index_type=${idx}`,
+                ],
+                tileSize: 256,
+            });
+            map.addLayer(
+                {
+                    id: "index-raster",
+                    type: "raster",
+                    source: "index-tiles",
+                    paint: { "raster-opacity": 0.75 },
+                    minzoom: 10,
+                    maxzoom: 18,
+                },
+                "field-outline",
+            );
+        },
+        [token, clearTileOverlay],
+    );
 
     const initMap = useCallback(() => {
         if (!containerRef.current || mapRef.current) return;
@@ -438,7 +605,7 @@ function FieldMap({ geom, token, hasLayer, activeIndex }: { geom: GeoJSON.Geomet
                 source: "field",
                 paint: {
                     "fill-color": tokenColor("--map-field-stroke"),
-                    "fill-opacity": 0.2,
+                    "fill-opacity": 0.15,
                 },
             });
 
@@ -452,28 +619,13 @@ function FieldMap({ geom, token, hasLayer, activeIndex }: { geom: GeoJSON.Geomet
                 },
             });
 
-            // Index tile overlay (proxied through API - no JWT needed)
-            if (hasLayer) {
-                const idx = activeIndexRef.current;
-                map.addSource("index-tiles", {
-                    type: "raster",
-                    tiles: [`${API_BASE}/share/${token}/tiles/{z}/{x}/{y}.png?index_type=${idx}`],
-                    tileSize: 256,
-                });
-                map.addLayer(
-                    {
-                        id: "index-raster",
-                        type: "raster",
-                        source: "index-tiles",
-                        paint: { "raster-opacity": 0.75 },
-                        minzoom: 10,
-                        maxzoom: 18,
-                    },
-                    "field-outline",
-                );
+            const idx = activeIndexRef.current;
+            if (preferAgriHeatmap) {
+                void applyAgriHeatmap(map, idx);
+            } else if (hasLayer) {
+                applyTileOverlay(map, idx);
             }
 
-            // Fit to bounds
             const coords = getAllCoords(geom);
             if (coords.length > 0) {
                 const bounds = new maplibregl.LngLatBounds();
@@ -483,44 +635,32 @@ function FieldMap({ geom, token, hasLayer, activeIndex }: { geom: GeoJSON.Geomet
         });
 
         mapRef.current = map;
-    }, [geom, token, hasLayer]);
+    }, [geom, token, hasLayer, preferAgriHeatmap, applyAgriHeatmap, applyTileOverlay]);
 
-    // Swap tile source when activeIndex changes
+    // Swap overlay when activeIndex changes
     useEffect(() => {
         const map = mapRef.current;
-        if (!map || !hasLayer) return;
+        if (!map) return;
         if (!map.isStyleLoaded()) return;
 
-        // Remove old overlay
-        if (map.getLayer("index-raster")) map.removeLayer("index-raster");
-        if (map.getSource("index-tiles")) map.removeSource("index-tiles");
-
-        // Add new overlay
-        map.addSource("index-tiles", {
-            type: "raster",
-            tiles: [`${API_BASE}/share/${token}/tiles/{z}/{x}/{y}.png?index_type=${activeIndex}`],
-            tileSize: 256,
-        });
-        map.addLayer(
-            {
-                id: "index-raster",
-                type: "raster",
-                source: "index-tiles",
-                paint: { "raster-opacity": 0.75 },
-                minzoom: 10,
-                maxzoom: 18,
-            },
-            "field-outline",
-        );
-    }, [activeIndex, token, hasLayer]);
+        if (preferAgriHeatmap) {
+            void applyAgriHeatmap(map, activeIndex);
+        } else if (hasLayer) {
+            clearAgriOverlay(map);
+            applyTileOverlay(map, activeIndex);
+        }
+    }, [activeIndex, token, hasLayer, preferAgriHeatmap, applyAgriHeatmap, applyTileOverlay, clearAgriOverlay]);
 
     useEffect(() => {
         initMap();
         return () => {
+            if (mapRef.current) {
+                clearAgriOverlay(mapRef.current);
+            }
             mapRef.current?.remove();
             mapRef.current = null;
         };
-    }, [initMap]);
+    }, [initMap, clearAgriOverlay]);
 
     if (!geom) {
         return (

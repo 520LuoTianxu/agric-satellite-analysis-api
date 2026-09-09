@@ -26,7 +26,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useConfirm } from "@/components/confirm-dialog";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
+import { routing } from "@/i18n/routing";
 
 interface ShareTabProps {
     fieldId: string;
@@ -34,6 +35,7 @@ interface ShareTabProps {
 
 export default function ShareTab({ fieldId }: ShareTabProps) {
     const t = useTranslations("shareTab");
+    const locale = useLocale();
     const confirm = useConfirm();
 
     const [links, setLinks] = useState<ShareLink[]>([]);
@@ -90,7 +92,9 @@ export default function ShareTab({ fieldId }: ShareTabProps) {
 
     const getShareUrl = (token: string) => {
         if (typeof window === "undefined") return "";
-        return `${window.location.origin}/share/${token}`;
+        const prefix =
+            locale === routing.defaultLocale ? "" : `/${locale}`;
+        return `${window.location.origin}${prefix}/share/${token}`;
     };
 
     const handleCopy = async (token: string) => {
