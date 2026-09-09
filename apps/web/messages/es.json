@@ -307,8 +307,9 @@
         "nameRequired": "El nombre del campo es obligatorio",
         "drawFirst": "Primero dibuja un polígono en el mapa",
         "placeholderName": "ej. Bloque A1",
-        "placeholderCrop": "ej. Arroz, Trigo, Algodón",
-        "placeholderSeason": "ej. Kharif 2025, Rabi 2026"
+        "placeholderCrop": "Elija un cultivo del catálogo",
+        "placeholderSeason": "ej. Kharif 2025, Rabi 2026",
+        "cropRequired": "Seleccione un cultivo"
     },
     "fieldDetail": {
         "backToFarm": "Volver a finca",
@@ -882,7 +883,7 @@
     },
     "landReportTab": {
         "title": "Informe de evaluación de tierra",
-        "description": "PDF en lenguaje sencillo: puntuación grande, semáforos, tarjetas por dimensión y FAQ. Área en mu; vigor por temporada de maíz (jun–sep), no el promedio anual de NDVI.",
+        "description": "Genere un PDF de evaluación. El vigor usa la estación del cultivo vinculado.",
         "generate": "Generar PDF",
         "generating": "Generando…",
         "download": "Descargar PDF",
@@ -897,8 +898,16 @@
         "status_failed": "Falló",
         "empty": "Aún no hay informe. Pulse el botón para generar uno.",
         "generatedAt": "Generado el {time}",
-        "noteVigor": "El vigor usa la temporada de maíz de verano (jun–sep, pico jul–ago), no el NDVI anual.",
+        "noteVigor": "El vigor usa la estación del cultivo vinculado, no el NDVI anual.",
         "noteFlood": "Inundación/sequía: sin evidencia dura no hay luz roja; la humedad relativa es solo un aviso.",
-        "noteArea": "Unidad de área: mu (1 ha = 15 mu)."
+        "noteArea": "Unidad de área: mu (1 ha = 15 mu).",
+        "cropRequired": "Seleccione y vincule un cultivo primero",
+        "cropGateHint": "Este campo no tiene cultivo. El informe necesita un cultivo para puntuar por fenología.",
+        "selectCrop": "Seleccionar cultivo",
+        "bindCrop": "Solo vincular cultivo",
+        "bindAndGenerate": "Vincular y generar PDF",
+        "cropBound": "Cultivo vinculado",
+        "cropBindFailed": "Error al vincular cultivo",
+        "boundCrop": "Cultivo"
     }
 }

@@ -183,10 +183,11 @@ def load_agri_lonlat_pixels(
     prefer_clear: bool = True,
     cloud_max: float | None = None,
     maize_season_only: bool = False,
+    season_months: set[int] | list[int] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Load lonlat_v1 pixels keyed by ISO date for selected S2 scenes.
 
-    When ``dates`` is omitted, loads maize-season (Jun–Sep) S2 rows.
+    When ``dates`` is omitted, loads crop-season months (default Jun–Sep).
     Prefers pixels with clear=1 when available. Cloud filter is optional
     (many seeds only have scene-level cloud_cover and would be over-filtered).
     """
@@ -206,6 +207,11 @@ def load_agri_lonlat_pixels(
             params[key] = d
             placeholders.append(f"CAST(:{key} AS date)")
         where.append(f"date IN ({', '.join(placeholders)})")
+    elif season_months:
+        months = sorted({int(m) for m in season_months})
+        where.append(
+            "EXTRACT(MONTH FROM date) IN (" + ",".join(str(m) for m in months) + ")"
+        )
     elif maize_season_only:
         where.append("EXTRACT(MONTH FROM date) BETWEEN 6 AND 9")
     if cloud_max is not None:
@@ -412,9 +418,12 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
 
 
 def load_suitability_sync(
-    session: Session, field_id: uuid.UUID, weather_summary: dict
+    session: Session,
+    field_id: uuid.UUID,
+    weather_summary: dict,
+    preferred_crop: str | None = None,
 ) -> dict:
-    """Best-effort corn suitability via soil_intelligence (may be partial)."""
+    """Best-effort crop suitability via soil_intelligence (may be partial)."""
     try:
         from app.core.soil_intelligence import assess_crop_suitability
     except Exception:
@@ -467,9 +476,12 @@ def load_suitability_sync(
     try:
         result = assess_crop_suitability(summary, layer_dicts, wx)
     except Exception:
+        from app.core.crops import normalize_crop_key
+
+        key = normalize_crop_key(preferred_crop) or "corn"
         return {
             "field_crop_suitability": {
-                "crop": "corn",
+                "crop": key,
                 "score": 72.0,
                 "rating": "fair",
                 "limiting_factors": [],
@@ -496,16 +508,27 @@ def load_suitability_sync(
     elif isinstance(result, dict):
         return result
 
+    from app.core.crops import normalize_crop_key
+
+    want = normalize_crop_key(preferred_crop)
     out: dict = {"crops": crops}
-    for c in crops:
-        name = (c.get("crop") or c.get("name") or "").lower()
-        if "corn" in name or "maize" in name:
-            out["field_crop_suitability"] = c
-            break
+    if want:
+        for c in crops:
+            name = (c.get("crop") or c.get("name") or "").lower()
+            if name == want or want in name:
+                out["field_crop_suitability"] = c
+                break
+    if "field_crop_suitability" not in out:
+        for c in crops:
+            name = (c.get("crop") or c.get("name") or "").lower()
+            if name in ("corn", "maize") or "corn" in name:
+                out["field_crop_suitability"] = c
+                break
     if "field_crop_suitability" not in out and crops:
-        # keep default maize-ish score from first result if corn missing
+        out["field_crop_suitability"] = crops[0]
+    elif "field_crop_suitability" not in out:
         out["field_crop_suitability"] = {
-            "crop": "corn",
+            "crop": want or "corn",
             "score": 72.0,
             "rating": "fair",
             "limiting_factors": [],
@@ -530,16 +553,17 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
 
     soil = load_soil(session, field_id)
     wsum, wstress = load_weather(session, field_id)
-    suit = load_suitability_sync(session, field_id, wsum)
+    from app.core.crops import (
+        crop_name_zh,
+        get_crop_season,
+        normalize_crop_key,
+    )
 
-    # Prefer corn item as field_crop_suitability if list form
-    if suit and not suit.get("field_crop_suitability"):
-        crops = suit.get("crops") or suit.get("results") or []
-        for c in crops:
-            name = (c.get("crop") or c.get("name") or "").lower()
-            if "corn" in name or "maize" in name:
-                suit["field_crop_suitability"] = c
-                break
+    crop_key = normalize_crop_key(field.crop_type) or "corn"
+    season = get_crop_season(crop_key)
+    crop_label = f"{crop_name_zh(crop_key)}（{season.label_zh}）"
+
+    suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
 
     tags = field.tags_json or []
     boundary = (
@@ -547,13 +571,6 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         if land_id
         else "地块边界（平台绘制/导入）"
     )
-    crop = (field.crop_type or "").lower()
-    if crop in ("maize", "corn", "夏玉米", "玉米") or not crop:
-        crop_label = "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）"
-        crop_key = "maize"
-    else:
-        crop_label = field.crop_type or "—"
-        crop_key = crop or "unknown"
 
     area_ha = float(field.area_ha) if field.area_ha is not None else 0.0
     return {

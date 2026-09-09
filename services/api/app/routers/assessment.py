@@ -19,6 +19,17 @@ from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import Field, Job
 from app.schemas.monitoring import JobOut
+from pydantic import BaseModel, Field as PydanticField
+
+
+class AssessmentGenerateRequest(BaseModel):
+    """Optional crop bind when legacy fields lack crop_type."""
+
+    crop_type: str | None = PydanticField(
+        default=None,
+        description="Catalog key from GET /v1/crops; binds to field if missing",
+    )
+
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
@@ -42,9 +53,31 @@ async def create_assessment_report(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: AssessmentGenerateRequest | None = None,
 ):
     """Enqueue a 选地体检（白话版）PDF generation job."""
-    await _get_field(field_id, ctx.org_id, db)
+    field = await _get_field(field_id, ctx.org_id, db)
+
+    from app.core.crops import crop_name_zh, normalize_crop_key, require_crop_key
+
+    crop_key = normalize_crop_key(field.crop_type)
+    requested = (body.crop_type if body else None) or None
+    if not crop_key and requested:
+        try:
+            crop_key = require_crop_key(requested)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        field.crop_type = crop_key
+        await db.flush()
+    if not crop_key:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "crop_required",
+                "message": "请先选择作物后再生成选地报告",
+                "crops_path": "/v1/crops",
+            },
+        )
 
     # Reuse in-flight job if one is pending/running
     existing = (
@@ -68,7 +101,11 @@ async def create_assessment_report(
         field_id=field_id,
         type="assessment_report",
         status="pending",
-        params_json={"kind": "land_assessment_plain"},
+        params_json={
+            "kind": "land_assessment_plain",
+            "crop_type": crop_key,
+            "crop_name_zh": crop_name_zh(crop_key),
+        },
         created_by=ctx.user.id,
     )
     db.add(job)

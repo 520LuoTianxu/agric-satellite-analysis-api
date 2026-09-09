@@ -46,7 +46,7 @@ class FieldCreate(BaseModel):
     farm_id: uuid.UUID
     name: str
     geom: dict[str, Any]  # GeoJSON geometry
-    crop_type: str | None = None
+    crop_type: str  # catalog key from GET /v1/crops (required)
     season: str | None = None
     tags: list[str] | None = None
 

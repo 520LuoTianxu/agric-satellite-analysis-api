@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
 import { fieldsApi } from "@/lib/api";
+import CropSelect from "@/components/field/crop-select";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2, Plus, ChevronDown, ChevronUp, Check, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -76,6 +77,10 @@ export default function NewFieldPage() {
             toast.error(t("drawFirst"));
             return;
         }
+        if (!cropType.trim()) {
+            toast.error(t("cropRequired"));
+            return;
+        }
 
         setSaving(true);
         try {
@@ -83,7 +88,7 @@ export default function NewFieldPage() {
                 farm_id: farmId,
                 name: name.trim(),
                 geom: geometry,
-                crop_type: cropType.trim() || undefined,
+                crop_type: cropType.trim(),
                 season: season.trim() || undefined,
             });
             toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
@@ -152,14 +157,15 @@ export default function NewFieldPage() {
                                 </div>
 
                                 <div className="space-y-1.5">
-                                    <Label htmlFor="crop-type" className="text-xs">{t("cropType")}</Label>
-                                    <Input
+                                    <Label htmlFor="crop-type" className="text-xs">
+                                        {t("cropType")} <span className="text-destructive">*</span>
+                                    </Label>
+                                    <CropSelect
                                         id="crop-type"
-                                        type="text"
                                         value={cropType}
-                                        onChange={(e) => setCropType(e.target.value)}
+                                        onChange={setCropType}
+                                        required
                                         placeholder={t("placeholderCrop")}
-                                        className="h-9"
                                     />
                                 </div>
 
