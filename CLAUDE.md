@@ -70,9 +70,8 @@ Health checks: `curl :8000/healthz` (API), `curl :3000/api/health` (web).
 - **API conventions:** all routes under `/v1`; pagination envelope `{items, total, limit, offset}` (`PaginatedResponse[T]` in schemas/common.py); soft delete via `deleted_at` - always filter with `.where(Model.deleted_at.is_(None))`; geometry stored as `MultiPolygon(4326)` with auto-wrap of Polygons (`_geojson_to_multi` in routers/fields.py); audit events on key actions.
 - **Models:** all ORM tables live in services/api/app/models/tables.py, UUID PKs with `server_default=uuid_generate_v4()`. Pydantic schemas in schemas/ use `model_config = {"from_attributes": True}`.
 - **Satellite pipeline:** shared helpers in services/api/app/tasks/pipeline.py (STAC search on Element84 earth-search → windowed band reads → index compute → COG write to MinIO → zonal stats → alert evaluation). Index definitions in tasks/indices.py (NDVI, EVI, SAVI, NDWI). Backfill = 24 months in 90-day chunks (tasks/backfill.py). MAX_CLOUD_COVER=20 module constant.
-- **Celery:** worker config in app/worker.py - acks_late, visibility_timeout 7200, task_time_limit 1800. ML detection tasks route to the `ml` queue and only register when torchgeo imports (the ml-processor container). Beat: weekly index compute (Mon 06:00), daily weather fetch (08:00). Long-running jobs report per-step progress via the `jobs.progress_json` JSONB column.
+- **Celery:** worker config in app/worker.py - acks_late, visibility_timeout 7200, task_time_limit 1800. Beat: weekly index compute (Mon 06:00), daily weather fetch (08:00). Long-running jobs report per-step progress via the `jobs.progress_json` JSONB column.
 - **Weather pipeline:** tasks/weather.py - Open-Meteo API, 18 daily variables plus 5 derived agronomic indices (GDD, ET₀, water balance, drought index), upserted into weather_daily.
-- **Boundary detection:** tasks/detection.py, FTW model via ftw-tools. Note the torchgeo monkey-patch at the top (AugmentationSequential from kornia) - required for ftw-tools 1.4.3 with torchgeo ≥0.7; remove when upstream fixes.
 - **Soil intelligence:** core/soil_intelligence.py (~2,300 lines, pure functions + frozen dataclasses): 68 crop profiles, 4-pillar suitability scoring (Soil 40 / Water 25 / Climate 20 / Stress 15), sampling zones, carbon sequestration, nutrient risk, soil×weather stress. Data ingestion in tasks/soil.py (SoilGrids WCS global 250m, POLARIS US 30m).
 - **Share links:** routers/share.py - `secrets.token_urlsafe(32)` tokens; public tile proxy validates the share token then mints a 5-minute service JWT (`sub: "service:share-proxy"`) for internal TiTiler calls.
 - **Rate limiting:** slowapi, 120/min default, keyed by JWT sub falling back to IP (core/rate_limit.py), Redis-backed.
@@ -111,6 +110,6 @@ Target: Oracle Cloud Always Free (Ampere A1 ARM, 2 OCPU / 12 GB). Automated via 
 
 - Bypass the get_org_context/require_roles chain on any org-scoped endpoint.
 - Commit secrets or weaken the JWT verification shared across api/tiler/web.
-- Add heavyweight deps to the base API image - ML-only deps belong in requirements-ml.txt / Dockerfile.ml.
+- Add heavyweight unused deps to the base API image.
 - Break the pagination envelope or `/v1` prefix conventions.
 - Use em-dashes, emojis, or AI-filler phrasing anywhere in the project. UI icons are lucide-react only.

@@ -42,6 +42,7 @@ Thumbs.db
 docs/*
 !docs/design/
 !docs/TaskList.md
+!docs/agri-first-data.md
 
 # ── Logs / Temp ──────────────────────────────────────────────────────
 *.log

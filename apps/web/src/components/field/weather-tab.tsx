@@ -44,6 +44,7 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
     const [range, setRange] = useState<RangeOption>("30d");
     const [loading, setLoading] = useState(true);
     const [backfilling, setBackfilling] = useState(false);
+    const [fetchProgress, setFetchProgress] = useState(false);
     const [data, setData] = useState<WeatherDaily[]>([]);
     const [forecast, setForecast] = useState<WeatherForecastDay[]>([]);
     const [summary, setSummary] = useState<WeatherSummary | null>(null);
@@ -78,11 +79,34 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
 
     const handleBackfill = async () => {
         setBackfilling(true);
+        setFetchProgress(true);
         try {
             await weatherApi.backfill(fieldId, 90);
             toast.success(t("backfillStarted"));
+            // Lightweight progress: silently reload a few times, then stop spinner
+            let attempts = 0;
+            const maxAttempts = 12;
+            const { start, end } = getDateRange(range);
+            const poll = async () => {
+                attempts += 1;
+                try {
+                    const res = await weatherApi.get(fieldId, start, end, true);
+                    setData(res.data);
+                    setForecast(res.forecast);
+                    setSummary(res.summary);
+                } catch {
+                    /* ignore */
+                }
+                if (attempts >= maxAttempts) {
+                    setFetchProgress(false);
+                    return;
+                }
+                setTimeout(poll, 4000);
+            };
+            setTimeout(poll, 3000);
         } catch {
             toast.error(t("backfillFailed"));
+            setFetchProgress(false);
         } finally {
             setBackfilling(false);
         }
@@ -108,9 +132,9 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
                     size="sm"
                     variant="outline"
                     onClick={handleBackfill}
-                    disabled={backfilling}
+                    disabled={backfilling || fetchProgress}
                 >
-                    {backfilling ? (
+                    {backfilling || fetchProgress ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                     ) : (
                         <RefreshCw className="h-4 w-4 mr-2" />
@@ -123,6 +147,15 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
 
     return (
         <div className="space-y-4">
+            {fetchProgress && (
+                <div className="rounded-md border border-info/30 bg-info-subtle/60 px-2.5 py-2 flex items-center gap-2 text-[11px] text-info">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    <span>{t("fetchingProgress")}</span>
+                    <div className="ml-auto h-1.5 w-24 rounded-full bg-info/15 overflow-hidden">
+                        <div className="h-full w-1/2 rounded-full bg-info animate-pulse" />
+                    </div>
+                </div>
+            )}
             {/* Range selector */}
             <div className="flex items-center justify-between">
                 <div className="flex gap-1 rounded-lg border bg-surface-2 p-0.5">
@@ -141,18 +174,19 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
                     ))}
                 </div>
                 <Button
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
-                    className="h-9 w-9 p-0"
-                    onClick={data.length === 0 ? async () => { await handleBackfill(); setTimeout(loadWeather, 5000); } : loadWeather}
-                    disabled={backfilling}
-                    title={data.length === 0 ? t("fetchWeather") : t("refresh")}
+                    className="h-8 gap-1.5 text-xs"
+                    onClick={() => { void handleBackfill(); }}
+                    disabled={backfilling || fetchProgress}
+                    title={t("refresh")}
                 >
-                    {backfilling ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
+                    {backfilling || fetchProgress ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                        <RefreshCw className="h-4 w-4" />
+                        <RefreshCw className="h-3.5 w-3.5" />
                     )}
+                    {t("refresh")}
                 </Button>
             </div>
 

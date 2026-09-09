@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_ttl_seconds: int = 3600  # 1 hour
 
-    # Object storage backend: minio | oss
-    storage_backend: str = "minio"
+    # Object storage backend: oss | minio (default Aliyun OSS)
+    storage_backend: str = "oss"
 
     # MinIO
     minio_endpoint: str = "minio:9000"
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     minio_bucket: str = "openfarm"
     minio_secure: bool = False
 
-    # Aliyun OSS (used when storage_backend=oss)
+    # Aliyun OSS (default primary backend)
     oss_region: str = "oss-cn-beijing"
     oss_endpoint: str = "https://oss-cn-beijing.aliyuncs.com"
     oss_access_key_id: str = ""
@@ -45,11 +45,6 @@ class Settings(BaseSettings):
     # TiTiler
     titiler_internal_url: str = "http://tiler:80"
     titiler_public_url: str = "http://localhost:8080"
-
-    # Boundary Detection (ML)
-    ftw_model_path: str = "models/ftw/prue_efnetb5_ccby_checkpoint.ckpt"
-    ftw_model_cache_dir: str = "/tmp/models"
-    detection_max_area_km2: float = 50.0
 
     # Weather (Open-Meteo)
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"

@@ -34,7 +34,6 @@ projects. The canonical source is ${REPO_URL}.
 - Explains anomalies by reading satellite, weather and soil for the same window,
   so an alert distinguishes water stress from disease rather than only reporting
   that a number changed.
-- Detects field boundaries from imagery using the Fields of The World model.
 
 ## Licence and hosting
 

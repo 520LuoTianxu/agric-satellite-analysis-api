@@ -909,7 +909,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
                                                         variant={isClosed ? "outline" : "secondary"}
                                                         className={`text-[10px] px-1.5 py-0 uppercase tracking-wider font-semibold ${isClosed ? "text-muted-foreground" : "bg-warning-subtle text-warning"}`}
                                                     >
-                                                        {isClosed ? "Closed" : "Open"}
+                                                        {isClosed ? t("statusClosed") : t("statusOpen")}
                                                     </Badge>
                                                 )}
                                             </div>

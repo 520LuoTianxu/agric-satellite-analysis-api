@@ -76,7 +76,7 @@ export function Sidebar() {
     // Map screens drop the sidebar to the 64px rail: 192px more imagery.
     // Only on entry, so the user can still expand it back and stay expanded
     // while moving between fields.
-    const isMapScreen = /^\/farms\/[^/]+\/(fields\/|detect)/.test(pathname);
+    const isMapScreen = /^\/farms\/[^/]+\/fields\//.test(pathname);
     const wasMapScreen = useRef(false);
     useEffect(() => {
         if (isMapScreen && !wasMapScreen.current) setExpanded(false);

@@ -1,3 +1,10 @@
+# Local overrides (demo login, lower Celery concurrency, port publishes).
+# Default object store is Aliyun OSS (STORAGE_BACKEND=oss). MinIO is NOT started
+# unless you add --profile minio. Compose with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.local.yml up -d
+# Optional MinIO:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.local.yml --profile minio up -d
+
 services:
   processor:
     command: >
@@ -5,8 +12,6 @@ services:
       -Q default,celery
       --loglevel=info
       --concurrency=1
-  ml-processor:
-    profiles: ["ml"]
   db:
     ports:
       - "5432:5432"

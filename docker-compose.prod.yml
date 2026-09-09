@@ -28,6 +28,7 @@ services:
           cpus: "0.25"
           memory: 256M
 
+  # MinIO only when started with --profile minio (see base compose)
   minio:
     restart: unless-stopped
     deploy:
@@ -58,14 +59,6 @@ services:
         limits:
           cpus: "1.0"
           memory: 2G
-
-  ml-processor:
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 3G
 
   tiler:
     restart: unless-stopped

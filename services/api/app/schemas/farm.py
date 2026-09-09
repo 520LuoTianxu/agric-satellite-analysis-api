@@ -111,6 +111,7 @@ class FieldImportResponse(BaseModel):
 
 class BackfillIndicesRequest(BaseModel):
     months: int = 24
+    force: bool = True
 
 
 class BackfillIndicesResponse(BaseModel):
@@ -125,3 +126,8 @@ class BackfillStatusResponse(BaseModel):
     pending_jobs: int
     running_jobs: int
     completed_jobs: int
+    failed_jobs: int = 0
+    total_jobs: int = 0
+    percent: float = 0.0
+    phase: str = "idle"  # idle | stac | bridge | done
+    message: str = ""

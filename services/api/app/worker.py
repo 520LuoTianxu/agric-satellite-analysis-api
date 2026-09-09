@@ -33,11 +33,8 @@ celery_app.conf.update(
         "app.tasks.weather",
         "app.tasks.backfill",
         "app.tasks.soil",
+        "app.tasks.agri_bridge",
     ],
-    # Route ML tasks to the dedicated "ml" queue
-    task_routes={
-        "app.tasks.detection.*": {"queue": "ml"},
-    },
     # Celery Beat schedule
     beat_schedule={
         "compute-indices-weekly": {
@@ -50,11 +47,3 @@ celery_app.conf.update(
         },
     },
 )
-
-# Conditionally register ML detection tasks (requires torchgeo, only on ml-processor)
-try:
-    import torchgeo  # noqa: F401
-
-    celery_app.conf.include.append("app.tasks.detection")
-except ImportError:
-    pass

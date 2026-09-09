@@ -13,6 +13,7 @@ import {
     type NdviJob,
     type IndexType,
     type WeatherDaily,
+    type BackfillStatusResponse,
     INDEX_CONFIG,
     ALL_INDEX_TYPES,
 } from "@/lib/api";
@@ -136,16 +137,28 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     const [backfilling, setBackfilling] = useState(false);
     const [backfillTriggered, setBackfillTriggered] = useState(false);
     const [backfillActive, setBackfillActive] = useState(false);
+    const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
 
     // ── Active job tracking ──────────────────────────
     const [activeJob, setActiveJob] = useState<NdviJob | null>(null);
     const [jobIndices, setJobIndices] = useState<IndexType[]>([]);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const loadGenRef = useRef(0); // prevents stale fetch results
 
     // ── Load layers + stats for active index ─────────
+    // Agri fields: RS comes only from agri.parcel_scene_products — skip
+    // classic monitoring/COG path so AgriTimeseriesPanel mounts immediately.
     const loadData = useCallback(async () => {
         const gen = ++loadGenRef.current;
+        if (isAgriField) {
+            setLayers([]);
+            setStats([]);
+            setSelectedDate(null);
+            setLoading(false);
+            onDataLoaded?.();
+            return;
+        }
         setLoading(true);
         try {
             const [layersRes, statsRes] = await Promise.all([
@@ -176,22 +189,68 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
         } finally {
             if (gen === loadGenRef.current) setLoading(false);
         }
-    }, [fieldId, activeIndex]);
+    }, [fieldId, activeIndex, isAgriField]);
 
     useEffect(() => {
         loadData();
     }, [loadData]);
 
-    // ── Check backfill status on mount (skip for agri — RS from parcel_scene_products) ──
-    useEffect(() => {
+    const stopBackfillPoll = useCallback(() => {
+        if (backfillPollRef.current) {
+            clearInterval(backfillPollRef.current);
+            backfillPollRef.current = null;
+        }
+    }, []);
+
+    const startBackfillPoll = useCallback(() => {
         if (isAgriField) return;
+        stopBackfillPoll();
+        let wasActive = true;
+        const tick = async () => {
+            try {
+                const res = await fieldsApi.backfillStatus(fieldId);
+                setBackfillProgress(res);
+                setBackfillActive(res.has_active_backfill);
+                if (res.has_active_backfill) {
+                    setBackfillTriggered(true);
+                    wasActive = true;
+                } else {
+                    if (wasActive) {
+                        setBackfillTriggered(false);
+                        loadData();
+                        onDataLoaded?.();
+                    }
+                    wasActive = false;
+                    stopBackfillPoll();
+                }
+            } catch {
+                /* ignore */
+            }
+        };
+        void tick();
+        backfillPollRef.current = setInterval(tick, 5000);
+    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
+
+    // One-shot on mount — resume interval only if current wave is active
+    useEffect(() => {
+        if (isAgriField) return; // agri panel polls its own backfill status
+        let cancelled = false;
         fieldsApi.backfillStatus(fieldId)
             .then((res) => {
+                if (cancelled) return;
+                setBackfillProgress(res);
                 setBackfillActive(res.has_active_backfill);
-                if (res.has_active_backfill) setBackfillTriggered(true);
+                if (res.has_active_backfill) {
+                    setBackfillTriggered(true);
+                    startBackfillPoll();
+                }
             })
-            .catch(() => { }); // silent - endpoint may not exist in older deployments
-    }, [fieldId, isAgriField]);
+            .catch(() => { });
+        return () => {
+            cancelled = true;
+            stopBackfillPoll();
+        };
+    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Fetch weather data when overlay is toggled on ──
     useEffect(() => {
@@ -254,6 +313,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     useEffect(() => {
         return () => {
             if (pollRef.current) clearInterval(pollRef.current);
+            if (backfillPollRef.current) clearInterval(backfillPollRef.current);
         };
     }, []);
 
@@ -288,7 +348,11 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 setJobIndices(indices);
                 setShowJobForm(false);
                 const names = indices.map((i) => INDEX_CONFIG[i].label).join(", ");
-                toast.success(`${names} job${indices.length > 1 ? "s" : ""} started`);
+                toast.success(
+                    indices.length > 1
+                        ? tMon("jobsStarted", { names, count: indices.length })
+                        : tMon("jobStarted", { names }),
+                );
 
                 // Poll the last submitted job
                 if (pollRef.current) clearInterval(pollRef.current);
@@ -315,11 +379,13 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             setBackfillTriggered(true);
             setBackfillActive(true);
             toast.success(tMon("backfill.started"));
+            startBackfillPoll();
         } catch (err: any) {
             const msg = err.detail || tMon("backfill.failed");
             if (err.status === 409) {
                 setBackfillActive(true);
                 setBackfillTriggered(true);
+                startBackfillPoll();
             }
             toast.error(msg);
         } finally {
@@ -398,7 +464,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 >
                     <span className="flex items-center gap-1.5">
                         <PlayCircle className="h-4 w-4 text-primary" />
-                        Run Analysis
+                        {tMon("runAnalysis")}
                     </span>
                     {showJobForm ? (
                         <ChevronUp className="h-4 w-4" />
@@ -429,7 +495,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         {/* Index checkboxes */}
                         <div>
                             <label className="block text-xs font-medium text-muted-foreground mb-1.5">
-                                Indices to compute
+                                {tMon("indicesToCompute")}
                             </label>
                             <div className="flex flex-wrap gap-1.5">
                                 {ALL_INDEX_TYPES.map((idx) => (
@@ -454,7 +520,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         {selectedIndices.has("SAVI") && (
                             <div>
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
-                                    SAVI L factor
+                                    {tMon("saviLFactor")}
                                 </label>
                                 <input
                                     type="number"
@@ -466,7 +532,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                                     className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
                                 />
                                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                                    Soil brightness correction (0–1, default 0.5)
+                                    {tMon("saviLHint")}
                                 </p>
                             </div>
                         )}
@@ -476,7 +542,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                                     <Calendar className="inline h-3 w-3 mr-0.5" />
-                                    From
+                                    {tMon("dateFrom")}
                                 </label>
                                 <input
                                     type="date"
@@ -489,7 +555,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                                     <Calendar className="inline h-3 w-3 mr-0.5" />
-                                    To
+                                    {tMon("dateTo")}
                                 </label>
                                 <input
                                     type="date"
@@ -519,17 +585,45 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             )}
 
             {/* ── Backfill in-progress banner ──────────── */}
-            {!isAgriField && stats.length < 10 && (backfillActive || backfillTriggered || stats.length === 0) && !loading && !activeJob && (
+            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
                 <Card className="bg-info-subtle">
-                    <CardContent className="flex items-start gap-2 p-3">
-                        <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
-                        <div>
-                            <p className="text-sm font-medium text-info">
-                                Historical data is being processed
-                            </p>
-                            <p className="text-xs text-info/80">
-                                Satellite imagery for the past 24 months is being analyzed. Data will appear automatically as it&apos;s ready.
-                            </p>
+                    <CardContent className="p-3 space-y-2">
+                        <div className="flex items-start gap-2">
+                            <Info className="h-4 w-4 text-info mt-0.5 shrink-0" />
+                            <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-info">
+                                    {backfillProgress?.phase === "bridge"
+                                        ? tMon("backfill.progressBridge")
+                                        : backfillProgress?.message || tMon("backfill.processing")}
+                                </p>
+                                <p className="text-xs text-info/80">
+                                    {backfillProgress
+                                        ? tMon("backfill.progressCounts", {
+                                              done: backfillProgress.completed_jobs,
+                                              total: Math.max(
+                                                  backfillProgress.total_jobs,
+                                                  backfillProgress.completed_jobs
+                                                      + backfillProgress.pending_jobs
+                                                      + backfillProgress.running_jobs,
+                                              ),
+                                              running: backfillProgress.running_jobs,
+                                              pending: backfillProgress.pending_jobs,
+                                          })
+                                        : tMon("backfill.processingDesc")}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="h-1.5 w-full rounded-full bg-info/15 overflow-hidden">
+                            <div
+                                className="h-full rounded-full bg-info transition-all duration-500"
+                                style={{
+                                    width: `${
+                                        backfillProgress?.phase === "bridge"
+                                            ? 100
+                                            : Math.min(100, Math.max(2, backfillProgress?.percent ?? 0))
+                                    }%`,
+                                }}
+                            />
                         </div>
                     </CardContent>
                 </Card>
@@ -541,7 +635,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                     <CardHeader className="pb-2 pt-3 px-3">
                         <CardTitle className="flex items-center gap-2 text-sm font-medium text-primary">
                             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                            Processing {jobIndices.map((i) => INDEX_CONFIG[i].label).join(", ")}…
+                            {tMon("processingIndices", { names: jobIndices.map((i) => INDEX_CONFIG[i].label).join(", ") })}
                         </CardTitle>
                     </CardHeader>
                     {getJobProgress() && (
@@ -580,14 +674,14 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                         <AlertTriangle className="h-4 w-4 text-danger mt-0.5" />
                         <div>
                             <p className="text-sm font-medium text-danger">{tMon("jobFailed")}</p>
-                            <p className="text-xs text-danger/80">{activeJob.error || "Unknown error"}</p>
+                            <p className="text-xs text-danger/80">{activeJob.error || tMon("unknownError")}</p>
                             <Button
                                 variant="link"
                                 size="sm"
                                 onClick={() => setActiveJob(null)}
                                 className="mt-1 h-auto p-0 text-xs text-danger hover:text-danger/80"
                             >
-                                Dismiss
+                                {tMon("dismiss")}
                             </Button>
                         </div>
                     </CardContent>
@@ -598,6 +692,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             {/* Mount immediately (don't wait for monitoring load) so 指数 tab can fetch include_pixels=1 */}
             {parseAgriLandId(fieldTags) && (
                 <AgriTimeseriesPanel
+                    fieldId={fieldId}
                     fieldTags={fieldTags}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
                     onHeatmapChange={onAgriHeatmapChange}
@@ -607,12 +702,12 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 />
             )}
 
-            {/* ── Section: Chart ────────────────────────── */}
-            {(layers.length > 0 || stats.length > 0) && (
+            {/* ── Section: Chart (classic monitoring only) ────────────────────────── */}
+            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
             <Card>
                 <CardHeader className="pb-2 pt-3 px-3">
                     <div className="flex items-center justify-between">
-                        <CardTitle className="text-xs font-semibold">{config.label} Time Series</CardTitle>
+                        <CardTitle className="text-xs font-semibold">{tMon("timeSeries", { index: config.label })}</CardTitle>
                         <Button
                             variant={showWeatherOverlay ? "secondary" : "ghost"}
                             size="sm"
@@ -621,7 +716,7 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                             title={showWeatherOverlay ? tMon("hideWeatherOverlay") : tMon("showWeatherOverlay")}
                         >
                             <CloudRain className="h-3 w-3" />
-                            Weather
+                            {tMon("weatherOverlay")}
                         </Button>
                     </div>
                 </CardHeader>
@@ -639,8 +734,8 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             </Card>
             )}
 
-            {/* ── Section: Layer Selector ───────────────── */}
-            {layers.length > 0 && (
+            {/* ── Section: Layer Selector (classic COG only) ───────────────── */}
+            {!isAgriField && layers.length > 0 && (
                 <Card>
                     <CardHeader className="pb-2 pt-3 px-3">
                         <div className="flex items-center justify-between">
@@ -713,13 +808,13 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 </Card>
             )}
 
-            {/* ── No data message ──────────────────────── */}
-            {layers.length === 0 && !activeJob && (
+            {/* ── No data message (classic OpenFarm only; agri uses AgriTimeseriesPanel) ── */}
+            {!isAgriField && layers.length === 0 && !activeJob && (
                 <Card>
                     <CardContent className="flex flex-col items-center justify-center py-6 text-center">
-                        <p className="text-sm text-muted-foreground mb-2">No {config.label} data yet.</p>
+                        <p className="text-sm text-muted-foreground mb-2">{tMon("noDataTitle")}</p>
                         <p className="text-xs text-muted-foreground">
-                            Click &quot;Run Analysis&quot; to process satellite imagery.
+                            {tMon("noDataDesc")}
                         </p>
                     </CardContent>
                 </Card>

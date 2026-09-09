@@ -11,6 +11,7 @@ import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
+import { formatAreaMu } from "@/lib/area";
 import { toast } from "sonner";
 import {
     ArrowLeft,
@@ -993,9 +994,7 @@ export default function FieldDetailPage() {
                                         <div className="rounded-lg border bg-card shadow-sm p-3">
                                             <h2 className="text-base font-bold">{field.name}</h2>
                                             <p className="text-xs text-muted-foreground mt-0.5">
-                                                {field.area_ha
-                                                    ? `${field.area_ha.toFixed(2)} ha`
-                                                    : ""}
+                                                {field.area_ha != null ? formatAreaMu(field.area_ha) : ""}
                                                 {field.crop_type && ` · ${field.crop_type}`}
                                                 {field.season && ` · ${field.season}`}
                                             </p>
@@ -1008,9 +1007,7 @@ export default function FieldDetailPage() {
                                                 <InfoRow
                                                     label={t("area")}
                                                     value={
-                                                        field.area_ha
-                                                            ? `${field.area_ha.toFixed(2)} ha`
-                                                            : "-"
+                                                        formatAreaMu(field.area_ha)
                                                     }
                                                 />
                                                 <InfoRow

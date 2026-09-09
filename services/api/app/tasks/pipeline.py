@@ -1,7 +1,7 @@
 """Shared vegetation-index pipeline helpers.
 
 Extracted from the original ``ndvi.py`` so that every index task
-(NDVI, EVI, SAVI, NDWI) reuses the same STAC search, band download,
+(NDVI, EVI, SAVI, NDWI, NDMI, NDRE, CIRE, MNDWI) reuses the same STAC search, band download,
 COG write, zonal-stats, and alert-evaluation logic.
 """
 

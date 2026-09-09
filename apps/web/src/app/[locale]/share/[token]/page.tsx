@@ -23,6 +23,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { tokenColor } from "@/lib/design-tokens";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ruleLabel } from "@/lib/alert-rules";
+import { formatAreaMu } from "@/lib/area";
 
 const NdviChart = dynamic(() => import("@/components/charts/ndvi-chart"), {
     ssr: false,
@@ -175,9 +176,7 @@ export default function ShareReportPage() {
                             <div>
                                 <dt className="text-xs font-medium text-muted-foreground">{t("area")}</dt>
                                 <dd className="mt-0.5">
-                                    {report.field.area_ha != null
-                                        ? `${report.field.area_ha.toFixed(2)} ha`
-                                        : t("na")}
+                                    {report.field.area_ha != null ? formatAreaMu(report.field.area_ha) : t("na")}
                                 </dd>
                             </div>
                             <div>

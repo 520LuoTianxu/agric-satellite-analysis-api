@@ -15,6 +15,7 @@ import type maplibregl from "maplibre-gl";
 import { MAP_STYLES, type MapStyleId } from "@/lib/pmtiles";
 import { MAP_CHROME } from "@/lib/design-tokens";
 import { cn } from "@/lib/utils";
+import { formatAreaMu } from "@/lib/area";
 import { Skeleton } from "@/components/ui/skeleton";
 
 // Dynamic imports - these need browser APIs
@@ -85,7 +86,7 @@ export default function NewFieldPage() {
                 crop_type: cropType.trim() || undefined,
                 season: season.trim() || undefined,
             });
-            toast.success(`Field "${field.name}" created (${field.area_ha?.toFixed(2) ?? "?"} ha)`);
+            toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
             router.push(`/farms/${farmId}/fields/${field.id}`);
         } catch (err: any) {
             toast.error(err.detail || t("createField"));

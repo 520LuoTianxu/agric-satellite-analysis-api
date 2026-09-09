@@ -207,7 +207,7 @@ export interface FieldImportResult {
 
 // ── Index Configuration ──────────────────────────────────────────────
 
-export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI";
+export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI" | "NDMI" | "NDRE" | "CIRE" | "MNDWI";
 
 export interface IndexConfig {
     label: string;
@@ -232,8 +232,9 @@ export const INDEX_CONFIG: Record<IndexType, IndexConfig> = {
     EVI: {
         label: "EVI",
         colormap: "rdylgn",
+        // Wider than historical 0.8 — EVI often exceeds 1.0; avoid chart maxing
         rescaleMin: -0.2,
-        rescaleMax: 0.8,
+        rescaleMax: 1.2,
         gradient: "var(--ramp-vegetation)",
         threshold: 0.2,
     },
@@ -253,9 +254,50 @@ export const INDEX_CONFIG: Record<IndexType, IndexConfig> = {
         gradient: "var(--ramp-water)",
         threshold: 0.0,
     },
+    NDMI: {
+        label: "NDMI",
+        colormap: "rdylgn",
+        rescaleMin: -0.5,
+        rescaleMax: 0.5,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.0,
+    },
+    NDRE: {
+        label: "NDRE",
+        colormap: "rdylgn",
+        rescaleMin: -0.2,
+        rescaleMax: 0.8,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.2,
+    },
+    CIRE: {
+        label: "CIRE",
+        colormap: "rdylgn",
+        rescaleMin: 0,
+        rescaleMax: 1.5,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.2,
+    },
+    MNDWI: {
+        label: "MNDWI",
+        colormap: "rdbu",
+        rescaleMin: -0.5,
+        rescaleMax: 0.5,
+        gradient: "var(--ramp-water)",
+        threshold: 0.0,
+    },
 };
 
-export const ALL_INDEX_TYPES: IndexType[] = ["NDVI", "EVI", "SAVI", "NDWI"];
+export const ALL_INDEX_TYPES: IndexType[] = [
+    "NDVI",
+    "EVI",
+    "SAVI",
+    "NDWI",
+    "NDMI",
+    "NDRE",
+    "CIRE",
+    "MNDWI",
+];
 
 // ── Monitoring Types ─────────────────────────────────────────────────
 
@@ -427,24 +469,6 @@ export interface WeatherResponse {
     summary: WeatherSummary;
 }
 
-// ── Detection Types ──────────────────────────────────────────────
-
-export interface DetectedBoundary {
-    id: string;
-    org_id: string;
-    job_id: string;
-    geom: GeoJSON.Geometry | null;
-    area_ha: number | null;
-    confidence: number | null;
-    status: string;
-    detection_date: string | null;
-    created_at: string;
-}
-
-export interface DetectionJob {
-    job_id: string;
-    status: string;
-}
 
 // ── Upload Types ─────────────────────────────────────────────────
 
@@ -507,6 +531,21 @@ export const farmsApi = {
 
 // ── Fields ───────────────────────────────────────────────────────────
 
+export type BackfillPhase = "idle" | "stac" | "bridge" | "done";
+
+export interface BackfillStatusResponse {
+    field_id: string;
+    has_active_backfill: boolean;
+    pending_jobs: number;
+    running_jobs: number;
+    completed_jobs: number;
+    failed_jobs: number;
+    total_jobs: number;
+    percent: number;
+    phase: BackfillPhase | string;
+    message: string;
+}
+
 export const fieldsApi = {
     get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
     create: (data: { farm_id: string; name: string; geom: any; crop_type?: string; season?: string; tags?: string[] }) =>
@@ -520,13 +559,13 @@ export const fieldsApi = {
         formData.append("file", file);
         return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
     },
-    backfillIndices: (fieldId: string, months = 24) =>
+    backfillIndices: (fieldId: string, months = 24, force = true) =>
         apiFetch<{ field_id: string; status: string; message: string }>(
             `/fields/${fieldId}/backfill-indices`,
-            { method: "POST", body: JSON.stringify({ months }) },
+            { method: "POST", body: JSON.stringify({ months, force }) },
         ),
     backfillStatus: (fieldId: string) =>
-        apiFetch<{ field_id: string; has_active_backfill: boolean; pending_jobs: number; running_jobs: number; completed_jobs: number }>(
+        apiFetch<BackfillStatusResponse>(
             `/fields/${fieldId}/backfill-status`,
         ),
 };
@@ -603,47 +642,6 @@ export const scoutingApi = {
         apiFetch(`/fields/${fieldId}/scouting/${obsId}`, { method: "DELETE" }),
 };
 
-// ── Detection ────────────────────────────────────────────────────
-
-export const detectionApi = {
-    trigger: (orgId: string, bbox: number[], farmId: string, windowA?: string, windowB?: string) =>
-        apiFetch<DetectionJob>(`/orgs/${orgId}/detect-boundaries`, {
-            method: "POST",
-            body: JSON.stringify({
-                bbox,
-                farm_id: farmId,
-                ...(windowA && { window_a: windowA }),
-                ...(windowB && { window_b: windowB }),
-            }),
-        }),
-    list: (orgId: string, params?: { job_id?: string; status?: string; limit?: number; offset?: number }) => {
-        const q = new URLSearchParams();
-        if (params?.job_id) q.set("job_id", params.job_id);
-        if (params?.status) q.set("status", params.status);
-        if (params?.limit) q.set("limit", String(params.limit));
-        if (params?.offset) q.set("offset", String(params.offset));
-        const qs = q.toString();
-        return apiFetch<Paginated<DetectedBoundary>>(
-            `/orgs/${orgId}/detected-boundaries${qs ? `?${qs}` : ""}`,
-        );
-    },
-    accept: (orgId: string, boundaryId: string, name: string, farmId: string, geom?: GeoJSON.Geometry) =>
-        apiFetch<{ field_id: string; area_ha: number }>(
-            `/orgs/${orgId}/detected-boundaries/${boundaryId}/accept`,
-            {
-                method: "POST",
-                body: JSON.stringify({
-                    name,
-                    farm_id: farmId,
-                    ...(geom && { geom }),
-                }),
-            },
-        ),
-    discard: (orgId: string, boundaryId: string) =>
-        apiFetch(`/orgs/${orgId}/detected-boundaries/${boundaryId}/discard`, {
-            method: "POST",
-        }),
-};
 
 // ── Weather ──────────────────────────────────────────────────────
 
@@ -879,6 +877,7 @@ export interface AgriSceneProduct {
     scene_id: string;
     land_name: string | null;
     cloud_cover: number | null;
+    cloud_cover_over_30: boolean | null;
     parcel_cloud_cover_pct: number | null;
     ndvi_avg: number | null;
     ndvi_min: number | null;
@@ -908,7 +907,7 @@ export interface AgriSceneProduct {
         };
         pixels: number[][];
     } | null;
-    /** Preferred OSS lon/lat pixels when include_pixels=1 */
+    /** Preferred DB lonlat_v1 (or OSS) lon/lat pixels when include_pixels=1 */
     pixels_lonlat?: Array<{
         lon: number;
         lat: number;
@@ -924,7 +923,7 @@ export interface AgriSceneProduct {
         [key: string]: number | undefined;
     }> | null;
     heatmap_url?: string | null;
-    pixels_source?: "oss" | "db_grid" | null;
+    pixels_source?: "db_lonlat" | "oss" | "db_grid" | null;
 }
 
 export interface AgriSensorSceneSummary {
@@ -966,7 +965,7 @@ export const agriApi = {
             to?: string;
             limit?: number;
             offset?: number;
-            /** If 1, prefer OSS lon/lat pixels (pixels_lonlat); grid pixel_data is fallback. */
+            /** If 1, prefer DB lonlat_v1 pixels (pixels_lonlat); grid pixel_data is fallback. */
             includePixels?: 0 | 1;
         } = {},
     ) => {

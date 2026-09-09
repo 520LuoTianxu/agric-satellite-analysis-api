@@ -46,7 +46,6 @@ Collects, standardizes, and stores raw signals about every field. Source-agnosti
 - Uncertainty retained as first-class signal
 
 ### Field & Spatial Context
-- Field boundary detection (FTW deep learning model)
 - Manual & imported boundaries (GeoJSON/KML)
 - Terrain layers: elevation, slope, aspect
 - Spatial indexing (PostGIS)

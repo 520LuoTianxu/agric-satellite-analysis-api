@@ -152,13 +152,13 @@ Internet
     ├── /healthz       → api:8000      (Health check)
     ├── /tiles/*       → tiler:80      (TiTiler COG tiles)
     ├── /cog/*         → tiler:80      (TiTiler COG endpoints)
-    ├── /storage/*     → minio:9000    (Public basemap tiles)
+    ├── /storage/*     → object storage (Aliyun OSS by default; MinIO with --profile minio)
     └── /*             → web:3000      (Next.js frontend)
 
 Internal network (not exposed):
     ├── db:5432        (PostgreSQL + PostGIS)
     ├── redis:6379     (Celery broker + cache)
-    ├── minio:9000     (Object storage)
+    ├── object storage (OSS default; optional MinIO profile)
     └── processor      (Celery worker - NDVI pipeline)
 ```
 

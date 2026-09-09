@@ -102,7 +102,7 @@ export function sensorForIndex(index: AgriHeatIndex): "S1" | "S2" {
  */
 export const HEAT_RESCALE: Record<Exclude<AgriHeatIndex, "drought" | "flood">, [number, number]> = {
     ndvi: [0, 0.9],
-    evi: [0, 0.8],
+    evi: [0, 1.2],
     ndmi: [-0.5, 0.5],
     ndre: [-0.2, 0.8],
     mndwi: [-0.5, 0.5],
@@ -1240,10 +1240,24 @@ function collectLonLatPainted(
     let vmin = Infinity;
     let vmax = -Infinity;
 
+    // Continuous optical/SAR indices: if any clear=true pixels exist, skip clear=false
+    // so cloudy zeros do not paint over valid vegetation signal. If ALL clear=false,
+    // keep painting (caller may show a cloudy/low-veg hint).
+    const continuous =
+        index !== "drought" && index !== "flood";
+    const anyClear = continuous
+        ? pixels.some((p) => Number(p.clear) === 1)
+        : false;
+
     for (const p of pixels) {
         const lon = Number(p.lon);
         const lat = Number(p.lat);
         if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+
+        // clear===0 → cloudy; skip only when the scene also has clear pixels
+        if (continuous && anyClear && Number(p.clear) === 0) {
+            continue;
+        }
 
         if (index === "drought") {
             const ndvi = numProp(p, "NDVI");

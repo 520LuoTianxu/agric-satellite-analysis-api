@@ -459,7 +459,9 @@ async def proxy_share_tile(
     # Build TiTiler URL (internal)
     cog_uri = layer.cog_uri
     if cog_uri.startswith("s3://"):
-        cog_uri = cog_uri.replace("s3://", "/vsis3/")
+        cog_uri = cog_uri.replace("s3://", "/vsis3/", 1)
+    elif cog_uri.startswith("oss://"):
+        cog_uri = cog_uri.replace("oss://", "/vsis3/", 1)
     encoded_url = quote(cog_uri, safe="")
     tiler_url = (
         f"{settings.titiler_internal_url}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png"

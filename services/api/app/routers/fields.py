@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import (
@@ -130,36 +130,58 @@ async def create_field(
             },
         )
     )
-    # Sentinel job for backfill progress tracking
-    sentinel = Job(
-        org_id=ctx.org_id,
-        field_id=field.id,
-        type="backfill",
-        status="pending",
-        params_json={"is_backfill": True, "sentinel": True},
-        created_by=ctx.user.id,
-    )
-    db.add(sentinel)
-    await db.flush()
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+
+    agri_field = is_agri_tagged(body.tags)
+    agri_land_id = parse_agri_land_id(body.tags) if agri_field else None
+
+    # Sentinel job only for classic COG index backfill progress tracking.
+    # Agri fields skip RS backfill (truth = agri.parcel_scene_products).
+    sentinel = None
+    if not agri_field:
+        sentinel = Job(
+            org_id=ctx.org_id,
+            field_id=field.id,
+            type="backfill",
+            status="pending",
+            params_json={"is_backfill": True, "sentinel": True},
+            created_by=ctx.user.id,
+        )
+        db.add(sentinel)
+        await db.flush()
+
     logger.info(
         "field_created",
         field_id=str(field.id),
         farm_id=str(body.farm_id),
         name=body.name,
+        agri_land_id=agri_land_id,
     )
 
     # Commit before dispatching Celery tasks so workers can find the
     # field row in the DB (prevents race condition).
     await db.commit()
 
-    # Trigger background tasks for the new field
+    # Soil + weather always bind via fields.id (including agri-tagged parcels).
     from app.tasks.weather import backfill_weather_for_field
-    from app.tasks.backfill import backfill_indices_for_field
     from app.tasks.soil import fetch_soil_for_field
 
     backfill_weather_for_field.delay(str(field.id))
-    backfill_indices_for_field.delay(str(field.id), sentinel_job_id=str(sentinel.id))
     fetch_soil_for_field.delay(str(field.id))
+
+    if agri_field:
+        logger.info(
+            "skip_index_backfill_agri_field",
+            field_id=str(field.id),
+            land_id=agri_land_id,
+            reason="agri-first RS via parcel_scene_products; soil/weather still enqueued",
+        )
+    else:
+        from app.tasks.backfill import backfill_indices_for_field
+
+        backfill_indices_for_field.delay(
+            str(field.id), sentinel_job_id=str(sentinel.id)
+        )
 
     return _field_to_out(field)
 
@@ -292,6 +314,85 @@ async def import_fields(
     return FieldImportResponse(imported=imported, errors=errors)
 
 
+# ── Backfill wave helpers ────────────────────────────────────────────
+
+_BACKFILL_STALE_HOURS = 6
+_BACKFILL_WAVE_FALLBACK_HOURS = 48
+
+
+def _backfill_wave_message(
+    *,
+    phase: str,
+    pending: int,
+    running: int,
+    completed: int,
+    failed: int,
+    total: int,
+    percent: float,
+) -> str:
+    """Short Chinese status string for the current backfill wave."""
+    if phase == "idle":
+        return "当前无进行中的遥感回填"
+    if phase == "bridge":
+        return "正在写入 agri lonlat…"
+    if phase == "done":
+        return f"遥感回填已完成（{completed}/{total}）"
+    # stac
+    done = completed
+    return (
+        f"正在拉取遥感数据… 已完成 {done}/{max(total, done + pending + running)}"
+        f"（进行中 {running}，排队 {pending}"
+        + (f"，失败 {failed}" if failed else "")
+        + f"，约 {percent:.0f}%）"
+    )
+
+
+async def _fail_stale_backfill_jobs(db: AsyncSession, field_id: uuid.UUID) -> int:
+    """Mark ancient pending/running backfill jobs as failed so UI can idle."""
+    from sqlalchemy import update as sa_update
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_BACKFILL_STALE_HOURS)
+    result = await db.execute(
+        sa_update(Job)
+        .where(
+            Job.field_id == field_id,
+            Job.status.in_(["pending", "running"]),
+            Job.params_json["is_backfill"].as_boolean().is_(True),
+            Job.created_at < cutoff,
+        )
+        .values(
+            status="failed",
+            error=f"Stale backfill auto-cancelled after {_BACKFILL_STALE_HOURS}h",
+            finished_at=datetime.now(timezone.utc),
+        )
+    )
+    return result.rowcount or 0
+
+
+async def _wave_start_for_field(db: AsyncSession, field_id: uuid.UUID):
+    """Prefer latest sentinel created_at; else last N hours."""
+    from sqlalchemy import select as sa_select
+
+    sentinel = (
+        await db.execute(
+            sa_select(Job)
+            .where(
+                Job.field_id == field_id,
+                Job.type == "backfill",
+                Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.params_json["sentinel"].as_boolean().is_(True),
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if sentinel is not None:
+        return sentinel.created_at, sentinel
+    return datetime.now(timezone.utc) - timedelta(
+        hours=_BACKFILL_WAVE_FALLBACK_HOURS
+    ), None
+
+
 # ── Manual index backfill ────────────────────────────────────────────
 
 _admin = require_roles("owner", "admin")
@@ -317,7 +418,14 @@ async def backfill_field_indices(
     if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
-    # Check for existing pending/running backfill jobs
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+
+    is_agri = is_agri_tagged(field.tags_json)
+    land_id = parse_agri_land_id(field.tags_json) if is_agri else None
+
+    # Fail stale stuck jobs, then check current wave only
+    await _fail_stale_backfill_jobs(db, field_id)
+    wave_start, _ = await _wave_start_for_field(db, field_id)
     active_count = (
         (
             await db.execute(
@@ -325,6 +433,7 @@ async def backfill_field_indices(
                     Job.field_id == field_id,
                     Job.status.in_(["pending", "running"]),
                     Job.params_json["is_backfill"].as_boolean().is_(True),
+                    Job.created_at >= wave_start,
                 )
             )
         )
@@ -338,6 +447,7 @@ async def backfill_field_indices(
         )
 
     months = body.months if body else 24
+    force = body.force if body else True
 
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
@@ -345,7 +455,12 @@ async def backfill_field_indices(
         field_id=field_id,
         type="backfill",
         status="pending",
-        params_json={"is_backfill": True, "sentinel": True},
+        params_json={
+            "is_backfill": True,
+            "sentinel": True,
+            "allow_agri": is_agri,
+            "force": force,
+        },
         created_by=ctx.user.id,
     )
     db.add(sentinel)
@@ -354,13 +469,52 @@ async def backfill_field_indices(
     from app.tasks.backfill import backfill_indices_for_field
 
     backfill_indices_for_field.delay(
-        str(field_id), months=months, sentinel_job_id=str(sentinel.id)
+        str(field_id),
+        months=months,
+        sentinel_job_id=str(sentinel.id),
+        allow_agri=is_agri,
+        force=force,
     )
+
+    if is_agri:
+        from app.tasks.agri_bridge import bridge_after_backfill
+
+        bridge_job = Job(
+            org_id=ctx.org_id,
+            field_id=field_id,
+            type="agri_bridge",
+            status="pending",
+            params_json={
+                "is_backfill": True,
+                "phase": "bridge",
+                "sentinel_job_id": str(sentinel.id),
+                "land_id": str(land_id) if land_id is not None else None,
+            },
+            created_by=ctx.user.id,
+        )
+        db.add(bridge_job)
+        await db.flush()
+
+        bridge_after_backfill.delay(
+            str(field_id),
+            land_id=str(land_id) if land_id is not None else None,
+            bridge_job_id=str(bridge_job.id),
+        )
+        message = (
+            f"已启动 {months} 个月遥感回填（agri 地块）。"
+            "将先通过 STAC 刷新 COG，再桥接到 agri lonlat_v1（parcel_scene_products）；"
+            "完成后请刷新指数面板查看新数据。"
+        )
+    else:
+        message = (
+            f"Backfill of {months} months started. "
+            "Data will appear over the next few hours."
+        )
 
     return BackfillIndicesResponse(
         field_id=field_id,
         status="dispatched",
-        message=f"Backfill of {months} months started. Data will appear over the next few hours.",
+        message=message,
     )
 
 
@@ -373,32 +527,125 @@ async def get_backfill_status(
     ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db),
 ):
-    """Check whether a backfill is active for this field."""
+    """Check current-wave backfill progress for this field.
+
+    Counts are scoped to the latest sentinel wave (or last 48h). Stale
+    pending/running jobs older than 6h are auto-failed so the UI can idle.
+    """
     from sqlalchemy import func, select as sa_select
 
     field = await db.get(Field, field_id)
     if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
+    stale_n = await _fail_stale_backfill_jobs(db, field_id)
+    if stale_n:
+        await db.commit()
+
+    wave_start, sentinel = await _wave_start_for_field(db, field_id)
+
+    # Index / chunk jobs in this wave (exclude sentinel + bridge trackers)
     rows = (
         await db.execute(
             sa_select(
                 func.count().filter(Job.status == "pending").label("pending"),
                 func.count().filter(Job.status == "running").label("running"),
                 func.count().filter(Job.status == "completed").label("completed"),
+                func.count().filter(Job.status == "failed").label("failed"),
             ).where(
                 Job.field_id == field_id,
                 Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.created_at >= wave_start,
+                Job.type.notin_(["backfill", "agri_bridge"]),
             )
         )
     ).one()
 
+    pending = int(rows.pending or 0)
+    running = int(rows.running or 0)
+    completed = int(rows.completed or 0)
+    failed = int(rows.failed or 0)
+
+    # Bridge tracker for agri fields
+    bridge = (
+        await db.execute(
+            sa_select(Job)
+            .where(
+                Job.field_id == field_id,
+                Job.type == "agri_bridge",
+                Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.created_at >= wave_start,
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    sentinel_active = bool(
+        sentinel is not None and sentinel.status in ("pending", "running")
+    )
+    bridge_active = bool(bridge is not None and bridge.status in ("pending", "running"))
+    stac_active = (pending + running) > 0 or sentinel_active
+
+    denom = pending + running + completed
+    percent = (
+        (100.0 * completed / denom)
+        if denom > 0
+        else (100.0 if not stac_active and not bridge_active else 0.0)
+    )
+    total_jobs = denom + failed
+
+    if stac_active:
+        phase = "stac"
+    elif bridge_active:
+        phase = "bridge"
+        # Treat STAC as done while bridging
+        if denom > 0:
+            percent = 100.0
+    elif (
+        sentinel is not None
+        or denom > 0
+        or (bridge is not None and bridge.status == "completed")
+    ):
+        # Wave existed; now idle/done
+        phase = (
+            "done"
+            if (bridge is None or bridge.status == "completed") and denom > 0
+            else "idle"
+        )
+        if phase == "done" and denom > 0:
+            percent = 100.0 * completed / denom
+    else:
+        phase = "idle"
+
+    has_active = phase in ("stac", "bridge") or stac_active or bridge_active
+    if phase == "done" and not has_active:
+        # One-shot "done" for clients that just finished; treat as inactive for polling stop
+        has_active_flag = False
+    else:
+        has_active_flag = has_active
+
+    message = _backfill_wave_message(
+        phase=phase if has_active_flag or phase == "done" else "idle",
+        pending=pending,
+        running=running,
+        completed=completed,
+        failed=failed,
+        total=max(total_jobs, denom),
+        percent=percent,
+    )
+
     return BackfillStatusResponse(
         field_id=field_id,
-        has_active_backfill=(rows.pending + rows.running) > 0,
-        pending_jobs=rows.pending,
-        running_jobs=rows.running,
-        completed_jobs=rows.completed,
+        has_active_backfill=has_active_flag,
+        pending_jobs=pending,
+        running_jobs=running,
+        completed_jobs=completed,
+        failed_jobs=failed,
+        total_jobs=max(total_jobs, denom),
+        percent=round(percent, 1),
+        phase=phase if has_active_flag else ("done" if phase == "done" else "idle"),
+        message=message,
     )
 
 
@@ -422,4 +669,97 @@ async def backfill_all_fields(
     return {
         "status": "dispatched",
         "message": f"Bulk backfill of {months} months dispatched for all active fields.",
+    }
+
+
+@router.post(
+    "/admin/ensure-agri-soil-weather",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def ensure_agri_soil_weather(
+    ctx: OrgContext = Depends(require_roles("owner")),
+    db: AsyncSession = Depends(get_db),
+    farm_id: uuid.UUID | None = Query(None, description="Optional farm filter"),
+):
+    """Enqueue soil + weather backfill for agri-tagged fields in this org.
+
+    Does not touch RS / COG backfill. Geom sync (if missing) is handled by
+    scripts/agri_seed/ensure_agri_field_soil_weather.py.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+    from app.models.tables import SoilFieldSummary
+    from app.tasks.soil import fetch_soil_for_field
+    from app.tasks.weather import backfill_weather_for_field
+
+    q = sa_select(Field).where(
+        Field.org_id == ctx.org_id,
+        Field.deleted_at.is_(None),
+    )
+    if farm_id is not None:
+        q = q.where(Field.farm_id == farm_id)
+
+    fields = (await db.execute(q)).scalars().all()
+    soil_enqueued = 0
+    weather_enqueued = 0
+    scanned = 0
+    items: list[dict[str, Any]] = []
+
+    for field in fields:
+        if not is_agri_tagged(field.tags_json):
+            continue
+        scanned += 1
+        land_id = parse_agri_land_id(field.tags_json)
+        summary = (
+            await db.execute(
+                sa_select(SoilFieldSummary.id).where(
+                    SoilFieldSummary.field_id == field.id
+                )
+            )
+        ).scalar_one_or_none()
+        need_soil = summary is None
+        # Always refresh weather if caller hits this admin path for agri fields
+        # with zero weather rows — cheap check via exists on weather_daily.
+        from app.models.tables import WeatherDaily
+
+        weather_exists = (
+            await db.execute(
+                sa_select(WeatherDaily.id)
+                .where(WeatherDaily.field_id == field.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        need_weather = weather_exists is None
+
+        if need_soil:
+            fetch_soil_for_field.delay(str(field.id))
+            soil_enqueued += 1
+        if need_weather:
+            backfill_weather_for_field.delay(str(field.id))
+            weather_enqueued += 1
+
+        items.append(
+            {
+                "field_id": str(field.id),
+                "name": field.name,
+                "land_id": land_id,
+                "soil_enqueued": need_soil,
+                "weather_enqueued": need_weather,
+            }
+        )
+
+    logger.info(
+        "ensure_agri_soil_weather",
+        org_id=str(ctx.org_id),
+        scanned=scanned,
+        soil_enqueued=soil_enqueued,
+        weather_enqueued=weather_enqueued,
+    )
+    return {
+        "status": "dispatched",
+        "scanned": scanned,
+        "soil_enqueued": soil_enqueued,
+        "weather_enqueued": weather_enqueued,
+        "items": items,
     }
