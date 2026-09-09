@@ -266,12 +266,6 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
 const UNCROPPED_NDVI = 0.25;
 
 /** Default maize-like stage bands (month ranges) — overridden by crop season when available */
-const DEFAULT_STAGE_BANDS = [
-    { name: "苗期", startMonth: 6, startDay: 1, endMonth: 6, endDay: 30, color: "rgba(216,243,220,0.35)" },
-    { name: "拔节抽穗", startMonth: 7, startDay: 1, endMonth: 7, endDay: 20, color: "rgba(149,213,178,0.28)" },
-    { name: "旺长", startMonth: 7, startDay: 21, endMonth: 8, endDay: 25, color: "rgba(82,183,136,0.22)" },
-    { name: "成熟", startMonth: 8, startDay: 26, endMonth: 9, endDay: 30, color: "rgba(244,162,97,0.18)" },
-];
 
 export interface AgriTimeseriesPanelProps {
     fieldId: string;
@@ -730,14 +724,6 @@ export default function AgriTimeseriesPanel({
         () => cropOption?.peak_months ?? [7, 8],
         [cropOption?.peak_months],
     );
-    const stageBands = useMemo(() => {
-        // For non-maize seasons, fall back to coarse season/peak shading only
-        const sm = seasonMonths;
-        if (sm.length && (Math.min(...sm) !== 6 || Math.max(...sm) !== 9)) {
-            return undefined;
-        }
-        return DEFAULT_STAGE_BANDS;
-    }, [seasonMonths]);
 
     const selectedBare = useMemo(() => {
         if (!selectedDate || (series !== "ndvi" && series !== "drought" && series !== "evi")) return false;
@@ -981,8 +967,7 @@ export default function AgriTimeseriesPanel({
                                     )}
                                 </div>
                                 <p className="text-[10px] text-muted-foreground leading-snug">
-                                    分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}。圆环中心为地块面积（亩）。
-                                    下方时序图色带≈苗期/拔节抽穗/旺长/成熟；淡色点为非生育期。
+                                    分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}。上图当日圆环，下图多日占比趋势；圆环中心为地块面积（亩）。
                                 </p>
                                 <NdviGradeSharesChart
                                     selectedShare={selectedDayShare}
@@ -1001,10 +986,6 @@ export default function AgriTimeseriesPanel({
                                 onDateSelect={(d) => selectDateExplicit(d)}
                                 height={220}
                                 indexType={chartIndexType}
-                                seasonMonths={seasonMonths}
-                                peakMonths={peakMonths}
-                                stageBands={series === "ndvi" || series === "evi" || series === "drought" ? stageBands : undefined}
-                                bareThreshold={UNCROPPED_NDVI}
                             />
                         ) : (
                             <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>

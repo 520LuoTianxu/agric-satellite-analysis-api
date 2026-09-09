@@ -171,7 +171,8 @@ export default function NdviGradeSharesChart({
             name: g,
             type: "bar" as const,
             stack: "grade",
-            barMaxWidth: 28,
+            barMaxWidth: 36,
+            barCategoryGap: "28%",
             itemStyle: { color: NDVI_DAY_GRADE_COLORS[g] },
             emphasis: { focus: "series" as const },
             data: dates.map((d) => historyByDate[d]?.pct[g] ?? 0),
@@ -184,7 +185,7 @@ export default function NdviGradeSharesChart({
         });
         return {
             animation: false,
-            grid: { top: 36, right: 48, bottom: 36, left: 40 },
+            grid: { top: 40, right: 52, bottom: 40, left: 44 },
             legend: {
                 data: [...NDVI_DAY_GRADE_ORDER, "平均NDVI"],
                 top: 0,
@@ -254,8 +255,10 @@ export default function NdviGradeSharesChart({
         );
     }
 
+    const stackedHeight = Math.max(height, 250);
+
     return (
-        <div className="grid gap-2 md:grid-cols-2">
+        <div className="flex flex-col gap-2">
             <div className="rounded-md border border-border/50 bg-background/60 overflow-hidden">
                 {selectedShare ? (
                     <ReactEChartsCore
@@ -275,18 +278,19 @@ export default function NdviGradeSharesChart({
                 )}
             </div>
             <div className="rounded-md border border-border/50 bg-background/60 overflow-hidden">
+                <p className="px-2.5 pt-2 text-[11px] font-medium text-foreground">多日长势占比趋势</p>
                 {showStacked ? (
                     <ReactEChartsCore
                         echarts={echarts}
                         option={stackedOption}
-                        style={{ height, width: "100%" }}
+                        style={{ height: stackedHeight, width: "100%" }}
                         notMerge
                         lazyUpdate
                     />
                 ) : (
                     <div
                         className="flex items-center justify-center text-[11px] text-muted-foreground px-3 text-center"
-                        style={{ height }}
+                        style={{ height: Math.min(stackedHeight, 120) }}
                     >
                         已有 {historyDates.length} 日分档；再加载 ≥1 日后显示占比趋势
                     </div>
