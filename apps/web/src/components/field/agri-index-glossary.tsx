@@ -62,6 +62,16 @@ const SERIES_TO_GLOSSARY: Record<string, GlossaryKey> = {
     mndwi: "mndwi",
 };
 
+/** Public OSS base for glossary plates (uploaded via scripts/upload_to_oss.py). */
+const GLOSSARY_ASSET_BASE = (
+    process.env.NEXT_PUBLIC_GLOSSARY_ASSET_BASE ||
+    "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary"
+).replace(/\/$/, "");
+
+function glossaryAsset(fileName: string): string {
+    return `${GLOSSARY_ASSET_BASE}/${fileName}`;
+}
+
 export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
     {
         key: "sentinel2",
@@ -69,7 +79,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "光学多光谱 · 10/20/60 m · 约 5 天重访",
         body: "哨兵二号是欧空局 Copernicus 计划的光学多光谱卫星，搭载 MSI 传感器，约 13 个波段覆盖可见光、红边、近红外与短波红外。\n\n双星组网重访约 5 天，空间分辨率 10/20/60 m，适合农田、水体与地表覆盖监测。本面板的 NDVI、EVI、NDMI、NDRE、CIRE、MNDWI 与干旱等光学指数主要来自它。\n\n有云、雾或夜间时光学观测受限，图上可能缺数或质量偏差；晴空日最适合看长势与真彩色。",
         tip: "云多时改看哨兵一号雷达（VV/VH/洪涝）。",
-        imageSrc: "/glossary/sentinel-s2.png",
+        imageSrc: glossaryAsset("sentinel-s2.png"),
         imageAlt: "哨兵二号多光谱说明",
     },
     {
@@ -78,7 +88,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "C 波段 SAR · 全天时全天候 · 可穿云",
         body: "哨兵一号是 Copernicus 的主动微波雷达卫星（C 波段 SAR），主动发射并接收回波，不依赖阳光。\n\n可穿透云层与薄雨雾，昼夜均可观测，对地表粗糙度、水分与几何结构敏感。本面板的 VV、VH 与洪涝主要来自它。\n\n平静水面常呈弱回波（偏暗）；植被、建筑等结构散射更强（偏亮）。",
         tip: "灾后积水排查不必等晴天，优先看洪涝/VV。",
-        imageSrc: "/glossary/sentinel-s1.png",
+        imageSrc: glossaryAsset("sentinel-s1.png"),
         imageAlt: "哨兵一号雷达说明",
     },
     {
@@ -87,7 +97,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "最常用的植被长势指标",
         body: "NDVI = (NIR − Red) / (NIR + Red)，值域通常约 −1～1。健康植被强烈反射近红外、吸收红光，NDVI 偏高。\n\n怎么看：接近 0 或负值多为水体、裸地或建筑；0.2～0.5 多为一般植被；>0.5 通常长势较好、覆盖更密。\n\n可理解为作物的「健康分」，适合生长季监测、覆盖估计与灾损对比；密植时可能饱和，可对照 EVI/NDRE。",
         tip: "看多日趋势比单日绝对值更稳。",
-        imageSrc: "/glossary/ndvi.png",
+        imageSrc: glossaryAsset("ndvi.png"),
         imageAlt: "NDVI 专业说明图",
     },
     {
@@ -96,7 +106,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "高覆盖下更稳，密植不易饱和",
         body: "EVI 在 NDVI 基础上引入蓝光与校正项，减弱大气与土壤背景干扰，在高覆盖植被区仍能更好区分细微差异。\n\n相对 NDVI：密植不易「顶满」、抗大气干扰更强，更适合精细时序与高生物量地块。\n\n通俗理解：若 NDVI 是健康分，EVI 更像升级版评分，干扰更少、结果更稳。",
         tip: "旺季密植地块对比长势差异可优先看 EVI。",
-        imageSrc: "/glossary/evi.png",
+        imageSrc: glossaryAsset("evi.png"),
         imageAlt: "EVI 专业说明图",
     },
     {
@@ -105,7 +115,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "水分长期不足对土壤与作物的胁迫",
         body: "干旱指降水偏少、蒸发偏强或土壤失水导致可用水不足，农业上直接影响出苗、生长与产量。\n\n判读要点：土壤变干开裂、NDVI/EVI 走低、叶温升高/萎蔫，以及持续时长与影响范围。色斑越偏干（本面板多为偏红），胁迫往往越重。\n\n宜结合降水、墒情与多日光学指数综合判断，避免单日定论。",
         tip: "连旱多日再对照田间墒情与气象更可靠。",
-        imageSrc: "/glossary/drought.png",
+        imageSrc: glossaryAsset("drought.png"),
         imageAlt: "干旱监测说明图",
     },
     {
@@ -114,7 +124,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "地表积水与淹没范围识别",
         body: "洪涝由强降雨、河湖水位上涨、排水不畅或低洼积水引起，农业上易造成淹苗、根系缺氧与减产。\n\n雷达（哨兵一号）可穿云、夜间监测积水；光学（哨兵二号）在晴空日可勾画水体边界。本面板洪涝模式主要依据雷达后向散射阈值。\n\n平静积水回波弱、色斑偏暗；需结合地形、沟塘与连续日期排除湿土误判。",
         tip: "暴雨后连续对照 VV/洪涝，比等光学晴空更快。",
-        imageSrc: "/glossary/flood.png",
+        imageSrc: glossaryAsset("flood.png"),
         imageAlt: "洪涝监测说明图",
     },
     {
@@ -123,7 +133,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "垂发垂收 · 对水面与粗糙度敏感",
         body: "VV 表示垂直发射、垂直接收的同极化 SAR 通道，常用后向散射系数 σ⁰（dB）表征。\n\n光滑水面呈镜面反射，VV 回波弱（偏暗）；粗糙地表、植被或建筑散射更强（偏亮）。适合水体/洪涝提取、土壤湿度与地表变化监测。\n\n可理解为「竖着打出去再竖着收回来」的雷达手电筒，反映表面粗糙与含水量信息。",
         tip: "与 VH 对照：开阔水面常 VV、VH 都偏弱。",
-        imageSrc: "/glossary/vv.png",
+        imageSrc: glossaryAsset("vv.png"),
         imageAlt: "VV 雷达同极化说明图",
     },
     {
@@ -132,7 +142,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "垂发横收 · 对植株体散射敏感",
         body: "VH 表示垂直发射、水平接收的交叉极化通道，对植被冠层体散射更敏感，能反映结构、粗糙度与一定水分信息。\n\n特点：穿云全天候；水体 VH 通常很低（暗）；农田中等；森林/密植偏高（亮）。与 VV 互补，利于区分「水 / 土 / 有庄稼」。\n\n生长季 VH 走强常对应冠层发育；洪涝时积水区 VH 也偏弱。",
         tip: "长势与结构变化可重点看 VH 时序。",
-        imageSrc: "/glossary/vh.png",
+        imageSrc: glossaryAsset("vh.png"),
         imageAlt: "VH 雷达交叉极化说明图",
     },
     {
@@ -141,7 +151,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "监测植被与土壤水分状况",
         body: "NDMI = (NIR − SWIR) / (NIR + SWIR)。近红外与短波红外对水分响应不同，用以反映叶片/冠层含水量与湿润程度。\n\n高值：水分较充足、长势相对健康；低值：偏干、干旱胁迫或土壤更干。常用于干旱监测、灌溉管理与作物水分诊断。\n\n通俗理解：像给庄稼和土壤看「有多湿」。",
         tip: "与 NDVI 同降时，更像整体受旱或衰老。",
-        imageSrc: "/glossary/ndmi.png",
+        imageSrc: glossaryAsset("ndmi.png"),
         imageAlt: "NDMI 水分指数说明图",
     },
     {
@@ -150,7 +160,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "中后期长势与叶绿素变化更敏感",
         body: "NDRE = (NIR − RedEdge) / (NIR + RedEdge)，利用红边波段对叶绿素变化敏感，密植时比 NDVI 更不易饱和。\n\n高值：叶绿素较足、长势稳健；低值：可能缺肥、早衰或胁迫。适合玉米等作物中后期监测、氮素诊断与田块精细管理。\n\n若 NDVI 仍高而 NDRE 先掉，往往是早期养分压力信号。",
         tip: "封垄后可用 NDRE 圈出可疑黄化斑块再取样。",
-        imageSrc: "/glossary/ndre.png",
+        imageSrc: glossaryAsset("ndre.png"),
         imageAlt: "NDRE 红边指数说明",
     },
     {
@@ -159,7 +169,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "叶绿素含量与营养诊断",
         body: "CIRE = (NIR / RedEdge) − 1，基于红边波段，对叶绿素浓度变化敏感。\n\n高值：叶绿素更厚实、营养与光合潜力更好；低值：可能缺素、病害或生长受抑。用于叶绿素监测、施肥决策与营养诊断。\n\n与 NDRE 同源红边信息，可互相印证；比 NDVI 更适合高生物量阶段。",
         tip: "追肥前后各看一次，便于评估肥效。",
-        imageSrc: "/glossary/cire.png",
+        imageSrc: glossaryAsset("cire.png"),
         imageAlt: "CIRE 叶绿素红边说明图",
     },
     {
@@ -168,7 +178,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "提取水体、积水与洪涝范围",
         body: "MNDWI = (Green − SWIR) / (Green + SWIR)。用水体对绿光与短波红外的响应差，更好区分水面与建筑物、裸土等。\n\n高值：更可能是河塘、积水或洪涝区；低值：多为植被、土壤或城镇。相对传统 NDWI，城镇区抑制建筑噪声更好。\n\n与雷达洪涝互补：晴空光学日边界更清晰。",
         tip: "有云时改看哨兵一号洪涝。",
-        imageSrc: "/glossary/mndwi.png",
+        imageSrc: glossaryAsset("mndwi.png"),
         imageAlt: "MNDWI 水体指数说明图",
     },
 ];
