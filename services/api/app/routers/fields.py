@@ -314,7 +314,6 @@ async def import_fields(
     return FieldImportResponse(imported=imported, errors=errors)
 
 
-
 # ── Backfill wave helpers ────────────────────────────────────────────
 
 _BACKFILL_STALE_HOURS = 6
@@ -389,7 +388,9 @@ async def _wave_start_for_field(db: AsyncSession, field_id: uuid.UUID):
     ).scalar_one_or_none()
     if sentinel is not None:
         return sentinel.created_at, sentinel
-    return datetime.now(timezone.utc) - timedelta(hours=_BACKFILL_WAVE_FALLBACK_HOURS), None
+    return datetime.now(timezone.utc) - timedelta(
+        hours=_BACKFILL_WAVE_FALLBACK_HOURS
+    ), None
 
 
 # ── Manual index backfill ────────────────────────────────────────────
@@ -587,7 +588,11 @@ async def get_backfill_status(
     stac_active = (pending + running) > 0 or sentinel_active
 
     denom = pending + running + completed
-    percent = (100.0 * completed / denom) if denom > 0 else (100.0 if not stac_active and not bridge_active else 0.0)
+    percent = (
+        (100.0 * completed / denom)
+        if denom > 0
+        else (100.0 if not stac_active and not bridge_active else 0.0)
+    )
     total_jobs = denom + failed
 
     if stac_active:
@@ -597,9 +602,17 @@ async def get_backfill_status(
         # Treat STAC as done while bridging
         if denom > 0:
             percent = 100.0
-    elif sentinel is not None or denom > 0 or (bridge is not None and bridge.status == "completed"):
+    elif (
+        sentinel is not None
+        or denom > 0
+        or (bridge is not None and bridge.status == "completed")
+    ):
         # Wave existed; now idle/done
-        phase = "done" if (bridge is None or bridge.status == "completed") and denom > 0 else "idle"
+        phase = (
+            "done"
+            if (bridge is None or bridge.status == "completed") and denom > 0
+            else "idle"
+        )
         if phase == "done" and denom > 0:
             percent = 100.0 * completed / denom
     else:
@@ -712,7 +725,9 @@ async def ensure_agri_soil_weather(
 
         weather_exists = (
             await db.execute(
-                sa_select(WeatherDaily.id).where(WeatherDaily.field_id == field.id).limit(1)
+                sa_select(WeatherDaily.id)
+                .where(WeatherDaily.field_id == field.id)
+                .limit(1)
             )
         ).scalar_one_or_none()
         need_weather = weather_exists is None
@@ -748,4 +763,3 @@ async def ensure_agri_soil_weather(
         "weather_enqueued": weather_enqueued,
         "items": items,
     }
-

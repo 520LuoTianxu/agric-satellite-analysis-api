@@ -36,7 +36,6 @@ class PullParcelProductsBody(BaseModel):
     limit: int | None = Field(default=None, ge=1, le=5000)
 
 
-
 @router.get("/storage/backend")
 async def storage_backend_info(
     ctx: Annotated[OrgContext, Depends(_reader)],
@@ -260,7 +259,9 @@ async def put_parcel_product(
     if not object_key or not isinstance(object_key, str):
         raise HTTPException(status_code=400, detail="key is required")
     if raw is None:
-        raise HTTPException(status_code=400, detail="file or content_base64 is required")
+        raise HTTPException(
+            status_code=400, detail="file or content_base64 is required"
+        )
 
     prefix = parcel_product_prefix()
     if not prefix or not object_key.startswith(prefix):

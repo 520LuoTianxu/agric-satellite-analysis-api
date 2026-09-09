@@ -60,9 +60,11 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     for k, v in list(d.items()):
         if isinstance(v, Decimal):
             d[k] = float(v)
-        elif k in ("boundary_geojson", "source_properties", "pixel_data") and isinstance(
-            v, str
-        ):
+        elif k in (
+            "boundary_geojson",
+            "source_properties",
+            "pixel_data",
+        ) and isinstance(v, str):
             try:
                 d[k] = json.loads(v)
             except json.JSONDecodeError:
@@ -224,7 +226,9 @@ async def list_project_areas(
         )
     ).scalar() or 0
 
-    boundary_expr = "boundary_geojson" if include_boundary else "NULL::jsonb AS boundary_geojson"
+    boundary_expr = (
+        "boundary_geojson" if include_boundary else "NULL::jsonb AS boundary_geojson"
+    )
     rows = (
         await db.execute(
             text(
@@ -455,13 +459,20 @@ async def list_land_scenes(
                     else:
                         d["pixels_source"] = None
         items.append(SceneProductOut.model_validate(d))
-    payload = PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
+    payload = PaginatedResponse(
+        items=items, total=int(total), limit=limit, offset=offset
+    )
     if not include_pixels:
         return {
             "items": [
                 i.model_dump(
                     exclude_none=False,
-                    exclude={"pixel_data", "pixels_lonlat", "heatmap_url", "pixels_source"},
+                    exclude={
+                        "pixel_data",
+                        "pixels_lonlat",
+                        "heatmap_url",
+                        "pixels_source",
+                    },
                 )
                 for i in items
             ],

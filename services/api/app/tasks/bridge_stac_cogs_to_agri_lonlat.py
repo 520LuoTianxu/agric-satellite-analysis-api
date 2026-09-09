@@ -558,8 +558,7 @@ def bridge_field_stac_to_agri(
                     cur.execute(UPSERT_SQL, row)
                 upserted += 1
                 _log(
-                    f"  upserted {d} pixels={row['pixel_count']} "
-                    f"ndvi={row['ndvi_avg']}"
+                    f"  upserted {d} pixels={row['pixel_count']} ndvi={row['ndvi_avg']}"
                 )
             if not dry_run:
                 conn.commit()

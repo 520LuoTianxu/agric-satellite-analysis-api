@@ -75,15 +75,9 @@ def downgrade() -> None:
         "ALTER TABLE detected_boundaries "
         "ADD COLUMN geom geometry(MULTIPOLYGON, 4326) NOT NULL"
     )
-    op.create_index(
-        "ix_detected_boundaries_org_id", "detected_boundaries", ["org_id"]
-    )
-    op.create_index(
-        "ix_detected_boundaries_job_id", "detected_boundaries", ["job_id"]
-    )
-    op.create_index(
-        "ix_detected_boundaries_status", "detected_boundaries", ["status"]
-    )
+    op.create_index("ix_detected_boundaries_org_id", "detected_boundaries", ["org_id"])
+    op.create_index("ix_detected_boundaries_job_id", "detected_boundaries", ["job_id"])
+    op.create_index("ix_detected_boundaries_status", "detected_boundaries", ["status"])
     op.create_index(
         "ix_detected_boundaries_geom",
         "detected_boundaries",

@@ -314,8 +314,6 @@ def get_storage() -> ObjectStorage:
     )
 
 
-
-
 @lru_cache(maxsize=1)
 def get_parcel_product_storage() -> ObjectStorage:
     """Storage used to read S1/S2 parcel product JSON (`json_oss_key`).
