@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
     agriApi,
@@ -11,6 +11,10 @@ import {
 } from "@/lib/api";
 import {
     rasterizeAgriPixels,
+    rasterizeAgriLonLatPixels,
+    sensorForIndex,
+    AGRI_MODE_LABELS,
+    AGRI_PRIMARY_MODES,
     type AgriHeatIndex,
     type AgriHeatmapImage,
 } from "@/lib/agri-heatmap";
@@ -20,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Loader2, Satellite, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 const NdviChart = dynamic(() => import("@/components/charts/ndvi-chart"), {
     ssr: false,
@@ -30,23 +35,105 @@ type SeriesKey = AgriHeatIndex;
 
 const SERIES_META: Record<
     SeriesKey,
-    { label: string; sensor: "S1" | "S2"; avgKey: keyof AgriSceneProduct; hint: string }
+    {
+        label: string;
+        sensor: "S1" | "S2";
+        avgKey: keyof AgriSceneProduct | null;
+        hint: string;
+        /** Chart / date list derived from this sensor avg column */
+        chartKey: keyof AgriSceneProduct | null;
+    }
 > = {
-    ndvi: { label: "NDVI（光学）", sensor: "S2", avgKey: "ndvi_avg", hint: "植被长势 · 色斑图" },
-    evi: { label: "EVI（光学）", sensor: "S2", avgKey: "evi_avg", hint: "增强植被指数" },
-    ndmi: { label: "NDMI", sensor: "S2", avgKey: "ndmi_avg", hint: "水分指数" },
-    ndre: { label: "NDRE", sensor: "S2", avgKey: "ndre_avg", hint: "红边指数" },
-    mndwi: { label: "MNDWI", sensor: "S2", avgKey: "mndwi_avg", hint: "水体指数" },
-    cire: { label: "CIRE", sensor: "S2", avgKey: "cire_avg", hint: "叶绿素红边" },
-    vv: { label: "VV（雷达）", sensor: "S1", avgKey: "vv_avg", hint: "Sentinel-1 同极化 · 色斑图" },
-    vh: { label: "VH（雷达）", sensor: "S1", avgKey: "vh_avg", hint: "Sentinel-1 交叉极化 · 色斑图" },
+    ndvi: {
+        label: "NDVI（光学）",
+        sensor: "S2",
+        avgKey: "ndvi_avg",
+        chartKey: "ndvi_avg",
+        hint: "植被长势 · 色斑图",
+    },
+    evi: {
+        label: "EVI（光学）",
+        sensor: "S2",
+        avgKey: "evi_avg",
+        chartKey: "evi_avg",
+        hint: "增强植被指数",
+    },
+    ndmi: {
+        label: "NDMI",
+        sensor: "S2",
+        avgKey: "ndmi_avg",
+        chartKey: "ndmi_avg",
+        hint: "水分指数",
+    },
+    ndre: {
+        label: "NDRE",
+        sensor: "S2",
+        avgKey: "ndre_avg",
+        chartKey: "ndre_avg",
+        hint: "红边指数",
+    },
+    mndwi: {
+        label: "MNDWI",
+        sensor: "S2",
+        avgKey: "mndwi_avg",
+        chartKey: "mndwi_avg",
+        hint: "水体指数",
+    },
+    cire: {
+        label: "CIRE",
+        sensor: "S2",
+        avgKey: "cire_avg",
+        chartKey: "cire_avg",
+        hint: "叶绿素红边",
+    },
+    vv: {
+        label: "VV（雷达）",
+        sensor: "S1",
+        avgKey: "vv_avg",
+        chartKey: "vv_avg",
+        hint: "Sentinel-1 同极化 · 色斑图",
+    },
+    vh: {
+        label: "VH（雷达）",
+        sensor: "S1",
+        avgKey: "vh_avg",
+        chartKey: "vh_avg",
+        hint: "Sentinel-1 交叉极化 · 色斑图",
+    },
+    drought: {
+        label: "干旱",
+        sensor: "S2",
+        avgKey: null,
+        chartKey: "ndvi_avg",
+        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007；低 NDMI 为补",
+    },
+    flood: {
+        label: "洪涝",
+        sensor: "S1",
+        avgKey: null,
+        chartKey: "vv_avg",
+        hint: "S1 VV/VH 后向散射阈值 · 积水≈VV≲−18 dB（Martinis 类阈值法）",
+    },
 };
 
+/** Preferred button order: primary modes first, then other indices. */
+const BUTTON_ORDER: SeriesKey[] = [
+    ...AGRI_PRIMARY_MODES,
+    "ndmi",
+    "ndre",
+    "mndwi",
+    "cire",
+    "vv",
+    "vh",
+];
+
 function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] {
-    const avgKey = SERIES_META[key].avgKey;
+    const meta = SERIES_META[key];
+    const avgKey = meta.chartKey;
+    if (!avgKey) return [];
     const byDate = new Map<string, number[]>();
     for (const s of scenes) {
-        if (s.sensor !== SERIES_META[key].sensor) continue;
+        if (s.sensor !== meta.sensor) continue;
         const v = s[avgKey];
         if (typeof v !== "number" || Number.isNaN(v)) continue;
         const arr = byDate.get(s.date) ?? [];
@@ -82,23 +169,63 @@ export interface AgriTimeseriesPanelProps {
     hasMonitoringData?: boolean;
     /** Push 色斑图 overlay to the field map */
     onHeatmapChange?: (heatmap: AgriHeatmapImage | null) => void;
+    /** Controlled heat mode (from map-bottom chips) */
+    mode?: AgriHeatIndex;
+    onModeChange?: (mode: AgriHeatIndex) => void;
+    /** Parent 指数 tab active — clear overlay when false, reload when true */
+    enabled?: boolean;
 }
 
 export default function AgriTimeseriesPanel({
     fieldTags,
     hasMonitoringData = false,
     onHeatmapChange,
+    mode: modeProp,
+    onModeChange,
+    enabled = true,
 }: AgriTimeseriesPanelProps) {
     const landId = useMemo(() => parseAgriLandId(fieldTags), [fieldTags]);
     const [summary, setSummary] = useState<AgriLandScenesSummary | null>(null);
     const [scenes, setScenes] = useState<AgriSceneProduct[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [series, setSeries] = useState<SeriesKey>("ndvi");
+    const [seriesInternal, setSeriesInternal] = useState<SeriesKey>("ndvi");
+    const series = modeProp ?? seriesInternal;
+    const setSeries = useCallback(
+        (next: SeriesKey) => {
+            setSeriesInternal(next);
+            onModeChange?.(next);
+        },
+        [onModeChange],
+    );
     const [selectedDate, setSelectedDate] = useState<string | null>(null);
     const [heatmapVisible, setHeatmapVisible] = useState(true);
     const [heatmapLoading, setHeatmapLoading] = useState(false);
-    const [heatmapMeta, setHeatmapMeta] = useState<{ pixels: number; date: string; index: string } | null>(null);
+    const [heatmapMeta, setHeatmapMeta] = useState<{
+        pixels: number;
+        date: string;
+        index: string;
+        mean: number | null;
+    } | null>(null);
+    /** Bumps on every loadHeatmap call; stale async results are ignored. */
+    const heatmapLoadGenRef = useRef(0);
+    /** Prefetched film — kept even when enabled=false (map cleared, cache retained). */
+    const cachedHeatmapRef = useRef<{
+        date: string;
+        index: SeriesKey;
+        img: AgriHeatmapImage | null;
+    } | null>(null);
+    const loadHeatmapRef = useRef<(date: string, index: SeriesKey) => Promise<void>>(async () => {});
+    const enabledRef = useRef(enabled);
+    enabledRef.current = enabled;
+    const heatmapVisibleRef = useRef(heatmapVisible);
+    heatmapVisibleRef.current = heatmapVisible;
+
+    useEffect(() => {
+        if (modeProp && modeProp !== seriesInternal) {
+            setSeriesInternal(modeProp);
+        }
+    }, [modeProp, seriesInternal]);
 
     useEffect(() => {
         if (!landId) return;
@@ -117,13 +244,21 @@ export default function AgriTimeseriesPanel({
                 const all = [...s2.items, ...s1.items];
                 setScenes(all);
                 const hasS2 = sum.sensors.some((s) => s.sensor === "S2" && s.count > 0);
-                const nextSeries: SeriesKey = hasS2 ? "ndvi" : "vv";
-                setSeries(nextSeries);
+                const nextSeries: SeriesKey = modeProp ?? (hasS2 ? "ndvi" : "vv");
+                setSeriesInternal(nextSeries);
+                onModeChange?.(nextSeries);
+                const sensor = sensorForIndex(nextSeries);
                 const dates = all
-                    .filter((s) => s.sensor === (hasS2 ? "S2" : "S1"))
+                    .filter((s) => s.sensor === sensor)
                     .map((s) => s.date)
                     .sort();
-                if (dates.length) setSelectedDate(dates[dates.length - 1]);
+                const latestDate = dates.length ? dates[dates.length - 1] : null;
+                if (latestDate) setSelectedDate(latestDate);
+                // Prefetch include_pixels=1 as soon as land scenes load (even if 指数 tab
+                // inactive). Map overlay is only published when enabled===true.
+                if (!cancelled && latestDate) {
+                    await loadHeatmapRef.current(latestDate, nextSeries);
+                }
             } catch (e: any) {
                 if (!cancelled) setError(e?.detail || e?.message || "加载 agri 时序失败");
             } finally {
@@ -132,19 +267,41 @@ export default function AgriTimeseriesPanel({
         })();
         return () => {
             cancelled = true;
-            onHeatmapChange?.(null);
+            // Do NOT clear heatmap here — React Strict Mode remount races with loadHeatmap
+            // and can wipe a just-loaded overlay. Clear only when enabled flips false or unmount via land change handled by next effect.
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [landId]);
 
+    // When switching series, auto-pick latest date for that sensor
+    useEffect(() => {
+        if (!scenes.length) return; // wait for initial scenes fetch; do not null out date early
+        const sensor = sensorForIndex(series);
+        const dates = scenes
+            .filter((s) => s.sensor === sensor)
+            .map((s) => s.date)
+            .sort();
+        if (!dates.length) {
+            setSelectedDate(null);
+            return;
+        }
+        setSelectedDate((prev) => (prev && dates.includes(prev) ? prev : dates[dates.length - 1]));
+    }, [series, scenes]);
+
+    const publishHeatmap = useCallback(
+        (img: AgriHeatmapImage | null) => {
+            if (!onHeatmapChange) return;
+            if (enabledRef.current && heatmapVisibleRef.current) {
+                onHeatmapChange(img);
+            }
+        },
+        [onHeatmapChange],
+    );
+
     const loadHeatmap = useCallback(
         async (date: string, index: SeriesKey) => {
-            if (!landId || !onHeatmapChange) return;
-            if (!heatmapVisible) {
-                onHeatmapChange(null);
-                setHeatmapMeta(null);
-                return;
-            }
+            if (!landId) return;
+            const gen = ++heatmapLoadGenRef.current;
             const meta = SERIES_META[index];
             setHeatmapLoading(true);
             try {
@@ -155,39 +312,109 @@ export default function AgriTimeseriesPanel({
                     limit: 5,
                     includePixels: 1,
                 });
-                const scene = res.items.find((s) => s.pixel_data?.pixels?.length) ?? res.items[0];
-                if (!scene?.pixel_data) {
-                    onHeatmapChange(null);
+                // Ignore stale overlapping NDVI/EVI (or date) loads
+                if (gen !== heatmapLoadGenRef.current) return;
+                const scene =
+                    res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ??
+                    res.items.find((s) => (s.pixel_data?.pixels?.length ?? 0) > 0) ??
+                    res.items[0];
+                const lonlat = scene?.pixels_lonlat;
+                const grid = scene?.pixel_data;
+                if (!(lonlat?.length || grid?.pixels?.length)) {
+                    cachedHeatmapRef.current = { date, index, img: null };
                     setHeatmapMeta(null);
+                    publishHeatmap(null);
+                    if (enabledRef.current) {
+                        toast.message("该日期无像素数据，无法渲染色斑图", {
+                            description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
+                        });
+                    }
+                    console.warn("[agri-heatmap] missing pixels_lonlat/pixel_data", {
+                        landId,
+                        date,
+                        index,
+                        source: scene?.pixels_source,
+                    });
                     return;
                 }
-                const img = rasterizeAgriPixels(scene.pixel_data, index, meta.sensor);
-                onHeatmapChange(img);
+                const img = lonlat?.length
+                    ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
+                    : rasterizeAgriPixels(grid!, index, meta.sensor);
+                if (gen !== heatmapLoadGenRef.current) return;
+                cachedHeatmapRef.current = { date, index, img };
                 setHeatmapMeta(
                     img
-                        ? { pixels: img.pixelCount, date, index: index.toUpperCase() }
+                        ? {
+                              pixels: img.pixelCount,
+                              date,
+                              index: AGRI_MODE_LABELS[index],
+                              mean: img.mean,
+                          }
                         : null,
                 );
-            } catch {
-                onHeatmapChange(null);
+                publishHeatmap(img);
+                if (!img && enabledRef.current) {
+                    toast.message("色斑图未绘制任何像素", {
+                        description: `${date} · ${AGRI_MODE_LABELS[index]}`,
+                    });
+                }
+            } catch (e) {
+                if (gen !== heatmapLoadGenRef.current) return;
+                cachedHeatmapRef.current = { date, index, img: null };
                 setHeatmapMeta(null);
+                publishHeatmap(null);
+                console.warn("[agri-heatmap] load failed", e);
             } finally {
-                setHeatmapLoading(false);
+                if (gen === heatmapLoadGenRef.current) {
+                    setHeatmapLoading(false);
+                }
             }
         },
-        [landId, onHeatmapChange, heatmapVisible],
+        [landId, publishHeatmap],
     );
+    loadHeatmapRef.current = loadHeatmap;
 
+    // Prefetch/reload film whenever date or series changes (tab may be inactive).
     useEffect(() => {
         if (!selectedDate) return;
+        const cache = cachedHeatmapRef.current;
+        if (cache && cache.date === selectedDate && cache.index === series) {
+            // Already have this film — publish if tab active, else keep cache warm
+            if (enabledRef.current && heatmapVisibleRef.current) {
+                onHeatmapChange?.(cache.img);
+            }
+            return;
+        }
         void loadHeatmap(selectedDate, series);
-    }, [selectedDate, series, loadHeatmap]);
+    }, [selectedDate, series, loadHeatmap, onHeatmapChange]);
+
+    // enabled gate: clear map overlay only (keep cached film). On rise → apply cache or fetch.
+    useEffect(() => {
+        if (!enabled) {
+            // Do NOT bump gen / cancel prefetch — keep in-flight include_pixels result
+            onHeatmapChange?.(null);
+            return;
+        }
+        if (!heatmapVisible) {
+            onHeatmapChange?.(null);
+            return;
+        }
+        if (!selectedDate) return;
+        const cache = cachedHeatmapRef.current;
+        if (cache && cache.date === selectedDate && cache.index === series) {
+            onHeatmapChange?.(cache.img);
+            return;
+        }
+        void loadHeatmap(selectedDate, series);
+    }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
     const total = summary?.total ?? 0;
 
     if (!landId) return null;
     if (!loading && hasMonitoringData && total === 0) return null;
+
+    const chartIndexType = series === "evi" ? "EVI" : "NDVI";
 
     return (
         <Card className="border-primary/20 bg-primary-subtle/30">
@@ -201,7 +428,7 @@ export default function AgriTimeseriesPanel({
                         <p className="mt-0.5 text-[11px] text-muted-foreground">
                             地块 land_id={landId}
                             {summary ? ` · 共 ${summary.total} 景` : ""}
-                            {" · 直接读 pixel_data，无需 COG/Celery"}
+                            {" · 优先 OSS lon/lat 色膜，无需 COG/Celery"}
                         </p>
                     </div>
                     {summary && (
@@ -232,21 +459,35 @@ export default function AgriTimeseriesPanel({
                 {!loading && total > 0 && (
                     <>
                         <div className="flex flex-wrap gap-1 items-center">
-                            {(Object.keys(SERIES_META) as SeriesKey[]).map((key) => {
+                            {BUTTON_ORDER.map((key) => {
                                 const meta = SERIES_META[key];
-                                const has = scenes.some(
-                                    (s) =>
-                                        s.sensor === meta.sensor &&
-                                        typeof s[meta.avgKey] === "number",
-                                );
-                                if (!has) return null;
+                                const hasSensor = scenes.some((s) => s.sensor === meta.sensor);
+                                if (!hasSensor) return null;
+                                // Primary drought/flood always shown when sensor exists
+                                if (
+                                    key !== "drought" &&
+                                    key !== "flood" &&
+                                    meta.avgKey &&
+                                    !scenes.some(
+                                        (s) =>
+                                            s.sensor === meta.sensor &&
+                                            typeof s[meta.avgKey!] === "number",
+                                    )
+                                ) {
+                                    return null;
+                                }
                                 return (
                                     <Button
                                         key={key}
                                         type="button"
                                         size="sm"
                                         variant={series === key ? "default" : "outline"}
-                                        className={cn("h-7 text-xs px-2.5")}
+                                        className={cn(
+                                            "h-7 text-xs px-2.5",
+                                            (key === "drought" || key === "flood") &&
+                                                series !== key &&
+                                                "border-primary/40",
+                                        )}
                                         onClick={() => setSeries(key)}
                                         title={meta.hint}
                                     >
@@ -268,16 +509,25 @@ export default function AgriTimeseriesPanel({
                                     });
                                 }}
                             >
-                                {heatmapVisible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                                {heatmapVisible ? (
+                                    <Eye className="h-3.5 w-3.5" />
+                                ) : (
+                                    <EyeOff className="h-3.5 w-3.5" />
+                                )}
                             </Button>
                         </div>
+                        {(series === "drought" || series === "flood") && (
+                            <p className="text-[11px] text-muted-foreground leading-snug">
+                                {SERIES_META[series].hint}
+                            </p>
+                        )}
                         {stats.length > 0 ? (
                             <NdviChart
                                 stats={stats}
                                 selectedDate={selectedDate}
                                 onDateSelect={(d) => setSelectedDate(d)}
                                 height={200}
-                                indexType={series === "evi" ? "EVI" : "NDVI"}
+                                indexType={chartIndexType}
                             />
                         ) : (
                             <p className="text-xs text-muted-foreground py-2">当前指数无有效均值点。</p>
@@ -285,10 +535,16 @@ export default function AgriTimeseriesPanel({
                         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                             <span>
                                 {selectedDate
-                                    ? `色斑图日期：${selectedDate} · ${series.toUpperCase()}`
+                                    ? `色斑图日期：${selectedDate} · ${AGRI_MODE_LABELS[series]}`
                                     : "选择曲线上的日期以加载色斑图"}
                                 {heatmapLoading ? " · 渲染中…" : ""}
-                                {heatmapMeta ? ` · ${heatmapMeta.pixels} 像素` : ""}
+                                {heatmapMeta
+                                    ? ` · ${heatmapMeta.pixels} 像素${
+                                          heatmapMeta.mean != null
+                                              ? ` · 均≈${heatmapMeta.mean.toFixed(2)}`
+                                              : ""
+                                      }`
+                                    : ""}
                             </span>
                             {selectedDate && (
                                 <div className="flex gap-1 max-w-[50%] overflow-x-auto">

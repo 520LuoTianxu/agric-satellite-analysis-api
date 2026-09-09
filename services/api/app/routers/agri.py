@@ -7,6 +7,7 @@ available but are treated as legacy for agri-satellite-analysis.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import Annotated, Any
 
@@ -15,7 +16,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.core.storage import get_parcel_product_storage
+from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
     AgriStatsOut,
     AgriTableCount,
@@ -29,6 +31,8 @@ from app.schemas.agri import (
 from app.schemas.common import PaginatedResponse
 
 router = APIRouter(prefix="/agri", tags=["agri"])
+
+logger = logging.getLogger(__name__)
 
 _reader = require_roles("owner", "admin", "member", "viewer")
 
@@ -64,6 +68,58 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
     return d
+
+
+
+def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
+    """Keep only dict lon/lat pixel objects from OSS JSON."""
+    if not isinstance(raw_pixels, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for p in raw_pixels:
+        if not isinstance(p, dict):
+            continue
+        lon = p.get("lon")
+        lat = p.get("lat")
+        if lon is None or lat is None:
+            continue
+        try:
+            float(lon)
+            float(lat)
+        except (TypeError, ValueError):
+            continue
+        out.append(p)
+    return out
+
+
+def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
+    """Fetch original OSS parcel JSON; return pixels + heatmap_url or None on failure."""
+    if not json_oss_key or not isinstance(json_oss_key, str):
+        return None
+    key = json_oss_key.strip()
+    if not key:
+        return None
+    try:
+        storage = get_parcel_product_storage()
+        raw = storage.get_bytes(key)
+        obj = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 — fallback to DB grid is intentional
+        logger.warning("OSS pixel fetch failed for %s: %s", key, exc)
+        return None
+    if not isinstance(obj, dict):
+        return None
+    pixels = _normalize_oss_pixels(obj.get("pixels"))
+    if not pixels:
+        logger.warning("OSS JSON %s has no lon/lat pixels", key)
+        return None
+    heatmap_url = obj.get("heatmap_url") or obj.get("s2_heatmap_url")
+    if heatmap_url is not None and not isinstance(heatmap_url, str):
+        heatmap_url = None
+    return {
+        "pixels_lonlat": pixels,
+        "heatmap_url": heatmap_url,
+        "pixel_count": obj.get("pixel_count") or len(pixels),
+    }
 
 
 async def _agri_ready(db: AsyncSession) -> None:
@@ -291,7 +347,10 @@ async def list_land_scenes(
         0,
         ge=0,
         le=1,
-        description="If 1, include pixel_data jsonb (large). Default omits it.",
+        description=(
+            "If 1, prefer OSS lon/lat pixels via json_oss_key (pixels_lonlat); "
+            "fall back to legacy grid pixel_data only if OSS fetch fails."
+        ),
     ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -351,12 +410,37 @@ async def list_land_scenes(
         d = _row_to_dict(r)
         if not include_pixels:
             d.pop("pixel_data", None)
+            d.pop("pixels_lonlat", None)
+            d.pop("heatmap_url", None)
+            d.pop("pixels_source", None)
+        else:
+            oss_payload = _load_oss_scene_pixels(d.get("json_oss_key"))
+            if oss_payload:
+                d["pixels_lonlat"] = oss_payload["pixels_lonlat"]
+                d["heatmap_url"] = oss_payload.get("heatmap_url")
+                d["pixels_source"] = "oss"
+                # Prefer OSS lon/lat; drop lossy grid to avoid frontend using it.
+                d["pixel_data"] = None
+                if oss_payload.get("pixel_count") and not d.get("pixel_count"):
+                    d["pixel_count"] = oss_payload["pixel_count"]
+            else:
+                d["pixels_lonlat"] = None
+                d["heatmap_url"] = None
+                if d.get("pixel_data"):
+                    d["pixels_source"] = "db_grid"
+                else:
+                    d["pixels_source"] = None
         items.append(SceneProductOut.model_validate(d))
-    # Exclude null pixel_data from JSON when not requested
     payload = PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
     if not include_pixels:
         return {
-            "items": [i.model_dump(exclude_none=False, exclude={"pixel_data"}) for i in items],
+            "items": [
+                i.model_dump(
+                    exclude_none=False,
+                    exclude={"pixel_data", "pixels_lonlat", "heatmap_url", "pixels_source"},
+                )
+                for i in items
+            ],
             "total": int(total),
             "limit": limit,
             "offset": offset,

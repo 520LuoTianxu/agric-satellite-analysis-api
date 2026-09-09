@@ -96,9 +96,14 @@ interface NdviTabProps {
     onDataLoaded?: () => void;
     /** Agri pixel_data 色斑图 → parent map overlay */
     onAgriHeatmapChange?: (heatmap: import("@/lib/agri-heatmap").AgriHeatmapImage | null) => void;
+    /** Controlled agri 色斑 mode (NDVI/EVI/干旱/洪涝) from map-bottom chips */
+    agriHeatMode?: import("@/lib/agri-heatmap").AgriHeatIndex;
+    onAgriHeatModeChange?: (mode: import("@/lib/agri-heatmap").AgriHeatIndex) => void;
+    /** When false (left 指数 tab), clear overlay; when true again, reload */
+    agriHeatmapEnabled?: boolean;
 }
 
-export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange }: NdviTabProps) {
+export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
     const tMon = useTranslations("monitoring");
     const agriLandId = parseAgriLandId(fieldTags);
     const isAgriField = !!agriLandId;
@@ -148,12 +153,21 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
                 monitoringApi.stats(fieldId, activeIndex),
             ]);
             if (gen !== loadGenRef.current) return; // stale - discard
-            setLayers(layersRes.items);
+            // Placeholder agri:// COGs from sync_agri_scenes_to_field_stats poison TiTiler —
+            // never expose tile_url for those; agri 色斑 uses pixel_data continuous image film.
+            const sanitized = layersRes.items.map((layer) => {
+                const cog = layer.cog_uri || "";
+                if (cog.startsWith("agri://")) {
+                    return { ...layer, tile_url: null };
+                }
+                return layer;
+            });
+            setLayers(sanitized);
             setStats(statsRes.items);
             onDataLoaded?.();
             // Auto-select latest date
-            if (layersRes.items.length > 0) {
-                setSelectedDate(layersRes.items[layersRes.items.length - 1].date);
+            if (sanitized.length > 0) {
+                setSelectedDate(sanitized[sanitized.length - 1].date);
             } else {
                 setSelectedDate(null);
             }
@@ -192,15 +206,24 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
     }, [showWeatherOverlay, fieldId, stats]);
 
     // ── Show layer on map when selectedDate or visibility changes ──
+    // Agri fields: skip COG/TiTiler overlay entirely — only pixel_data continuous 色斑 film.
     useEffect(() => {
         if (!onShowLayer) return;
+        if (isAgriField) {
+            onShowLayer(null, activeIndex);
+            return;
+        }
         if (!layerVisible || !selectedDate) {
             onShowLayer(null, activeIndex);
             return;
         }
         const layer = layers.find((l) => l.date === selectedDate);
-        onShowLayer(layer ?? null, activeIndex);
-    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex]);
+        if (layer?.cog_uri?.startsWith("agri://") || !layer?.tile_url) {
+            onShowLayer(null, activeIndex);
+            return;
+        }
+        onShowLayer(layer, activeIndex);
+    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
 
     // ── Job polling ─────────────────────────────────
     const pollJob = useCallback(
@@ -572,11 +595,15 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             )}
 
             {/* ── Agri S1/S2 fallback (when field tagged agri:*) ── */}
-            {!loading && parseAgriLandId(fieldTags) && (
+            {/* Mount immediately (don't wait for monitoring load) so 指数 tab can fetch include_pixels=1 */}
+            {parseAgriLandId(fieldTags) && (
                 <AgriTimeseriesPanel
                     fieldTags={fieldTags}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
                     onHeatmapChange={onAgriHeatmapChange}
+                    mode={agriHeatMode}
+                    onModeChange={onAgriHeatModeChange}
+                    enabled={agriHeatmapEnabled}
                 />
             )}
 

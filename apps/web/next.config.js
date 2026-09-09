@@ -25,8 +25,19 @@ const API = toOrigin(API_RAW);
 const PROTOMAPS_ORIGIN = toOrigin(PROTOMAPS);
 const MINIO = toOrigin(MINIO_RAW);
 
+// Browser calls /v1/* on the Next host; rewrite to the API container (or localhost in bare next dev).
+const INTERNAL_API = process.env.INTERNAL_API_URL || "http://localhost:8000";
+
 const nextConfig = {
     output: "standalone",
+    async rewrites() {
+        return [
+            {
+                source: "/v1/:path*",
+                destination: `${INTERNAL_API}/v1/:path*`,
+            },
+        ];
+    },
     async headers() {
         return [
             {
@@ -39,7 +50,7 @@ const nextConfig = {
                             "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
                             "style-src 'self' 'unsafe-inline'",
                             `img-src 'self' blob: data: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com https://*.basemaps.cartocdn.com https://lh3.googleusercontent.com ${API} ${TITILER} ${PROTOMAPS_ORIGIN} ${MINIO}`.trim(),
-                            `connect-src 'self' https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com https://*.basemaps.cartocdn.com https://nominatim.openstreetmap.org https://demotiles.maplibre.org https://accounts.google.com ${API} ${TITILER} ${PROTOMAPS_ORIGIN} ${MINIO}`.trim(),
+                            `connect-src 'self' data: blob: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com https://*.basemaps.cartocdn.com https://nominatim.openstreetmap.org https://demotiles.maplibre.org https://accounts.google.com ${API} ${TITILER} ${PROTOMAPS_ORIGIN} ${MINIO}`.trim(),
                             "worker-src 'self' blob:",
                             "child-src 'self' blob:",
                             "form-action 'self' https://accounts.google.com",

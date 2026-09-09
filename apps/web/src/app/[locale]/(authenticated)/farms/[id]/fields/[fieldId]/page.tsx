@@ -6,9 +6,10 @@ import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
 import maplibregl from "maplibre-gl";
 import { useOrg } from "@/components/org-context";
-import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi } from "@/lib/api";
+import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
-import type { AgriHeatmapImage } from "@/lib/agri-heatmap";
+import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
+import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -72,6 +73,10 @@ const MapStyleSwitcher = dynamic(() => import("@/components/map/map-style-switch
 const SATELLITE_LABELS: Record<string, string> = { S2: "Sentinel-2 L2A" };
 
 const NdviLegend = dynamic(() => import("@/components/field/ndvi-legend"), {
+    ssr: false,
+});
+
+const AgriHeatmapLegend = dynamic(() => import("@/components/field/agri-heatmap-legend"), {
     ssr: false,
 });
 
@@ -142,7 +147,9 @@ function removeAllIndexOverlays(map: maplibregl.Map) {
 }
 
 function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
+    // Fake agri:// placeholder COGs 500 on TiTiler — never add as raster tiles.
     if (!layer.tile_url || !field.geom) return;
+    if ((layer.cog_uri || "").startsWith("agri://") || layer.tile_url.includes("agri://")) return;
     const sourceId = indexSourceId(indexType);
     const layerId = indexLayerId(indexType);
     const bounds = computeGeomBounds(field.geom);
@@ -224,11 +231,16 @@ export default function FieldDetailPage() {
     // Index overlay
     const [indexLayer, setIndexLayer] = useState<RasterLayer | null>(null);
     const [agriHeatmap, setAgriHeatmap] = useState<AgriHeatmapImage | null>(null);
+    const [agriHeatMode, setAgriHeatMode] = useState<AgriHeatIndex>("ndvi");
     const [activeIndexType, setActiveIndexType] = useState<IndexType>("NDVI");
     const indexLayerRef = useRef<RasterLayer | null>(null);
     const activeIndexTypeRef = useRef<IndexType>("NDVI");
     const fieldRef = useRef<Field | null>(null);
     const agriHeatmapRef = useRef<AgriHeatmapImage | null>(null);
+    /** blob: URL currently fed to MapLibre ImageSource — revoke on clear/replace. */
+    const agriHeatmapBlobUrlRef = useRef<string | null>(null);
+    /** Bump to cancel in-flight canvas.toBlob apply. */
+    const agriHeatmapApplyGenRef = useRef(0);
 
     // Available index types (only indices with computed layers)
     const [availableTypes, setAvailableTypes] = useState<IndexType[]>([]);
@@ -288,6 +300,7 @@ export default function FieldDetailPage() {
         agriHeatmapRef.current = agriHeatmap;
     }, [agriHeatmap]);
 
+
     const loadField = useCallback(async () => {
         try {
             const f = await fieldsApi.get(fieldId);
@@ -308,12 +321,174 @@ export default function FieldDetailPage() {
         if (currentOrg) loadField();
     }, [currentOrg, loadField]);
 
-    // Add field polygon (and NDVI if active) to map
+    const clearAgriHeatmapLayers = useCallback((map: maplibregl.Map) => {
+        // Cancel any in-flight canvas.toBlob → ImageSource apply
+        agriHeatmapApplyGenRef.current += 1;
+        revokeHeatmapObjectUrl(agriHeatmapBlobUrlRef.current);
+        agriHeatmapBlobUrlRef.current = null;
+        const ids: [string, string][] = [
+            ["agri-heatmap-raster", "agri-heatmap"],
+            ["agri-heatmap-fill", "agri-heatmap-geojson"],
+            ["agri-heatmap-circles", "agri-heatmap-points"],
+        ];
+        for (const [layerId, srcId] of ids) {
+            try {
+                if (map.getLayer(layerId)) map.removeLayer(layerId);
+            } catch { /* ignore */ }
+            try {
+                if (map.getSource(srcId)) map.removeSource(srcId);
+            } catch { /* ignore */ }
+        }
+    }, []);
+
+    /**
+     * Draw agri 色膜: MapLibre image raster ONLY (canvas-filled cells → blob:/data: film).
+     * Do NOT co-add GeoJSON fill — abutting polygons + outlines create white grid seams.
+     * Image uses canvas.toBlob → createObjectURL when possible (CSP connect-src has blob:/data:).
+     */
+    const applyAgriHeatmapToMap = useCallback(
+        (
+            map: maplibregl.Map,
+            hm: AgriHeatmapImage,
+            fieldGeom: GeoJSON.Polygon | GeoJSON.MultiPolygon | null | undefined,
+            beforeId?: string,
+        ) => {
+            const imgSrcId = "agri-heatmap";
+            const imgLayerId = "agri-heatmap-raster";
+
+            // Strip any leftover GeoJSON fill from older builds (white seams).
+            try {
+                if (map.getLayer("agri-heatmap-fill")) map.removeLayer("agri-heatmap-fill");
+            } catch { /* ignore */ }
+            try {
+                if (map.getSource("agri-heatmap-geojson")) map.removeSource("agri-heatmap-geojson");
+            } catch { /* ignore */ }
+
+            // Continuous canvas color film (nearest). Prefer blob: object URL.
+            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+            const addImageLayer = (url: string) => {
+                try {
+                    if (map.getLayer(imgLayerId)) map.removeLayer(imgLayerId);
+                } catch { /* ignore */ }
+                try {
+                    if (map.getSource(imgSrcId)) map.removeSource(imgSrcId);
+                } catch { /* ignore */ }
+                map.addSource(imgSrcId, {
+                    type: "image",
+                    url,
+                    coordinates: clippedImg.coordinates,
+                });
+                const before =
+                    beforeId && map.getLayer(beforeId) ? beforeId : undefined;
+                map.addLayer(
+                    {
+                        id: imgLayerId,
+                        type: "raster",
+                        source: imgSrcId,
+                        paint: {
+                            "raster-opacity": 0.92,
+                            "raster-resampling": "nearest",
+                        },
+                    },
+                    before,
+                );
+            };
+
+            if (heatmapImageHasContent(clippedImg) && clippedImg.dataUrl) {
+                const dataUrl = clippedImg.dataUrl;
+                const gen = ++agriHeatmapApplyGenRef.current;
+
+                const commitUrl = (url: string) => {
+                    if (gen !== agriHeatmapApplyGenRef.current) {
+                        revokeHeatmapObjectUrl(url !== dataUrl ? url : null);
+                        return;
+                    }
+                    try {
+                        revokeHeatmapObjectUrl(agriHeatmapBlobUrlRef.current);
+                        agriHeatmapBlobUrlRef.current = url.startsWith("blob:") ? url : null;
+                        addImageLayer(url);
+                    } catch (e) {
+                        console.warn("[agri-heatmap] image overlay failed", e);
+                        if (url !== dataUrl) {
+                            try {
+                                addImageLayer(dataUrl);
+                            } catch (e2) {
+                                console.warn("[agri-heatmap] image overlay failed", e2);
+                            }
+                        }
+                    }
+                };
+
+                // Prefer canvas.toBlob → createObjectURL (MapLibre fetches via connect-src).
+                const img = new Image();
+                img.onload = () => {
+                    if (gen !== agriHeatmapApplyGenRef.current) return;
+                    const canvas = document.createElement("canvas");
+                    canvas.width = img.naturalWidth || img.width;
+                    canvas.height = img.naturalHeight || img.height;
+                    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+                    if (!ctx || !canvas.width || !canvas.height) {
+                        try {
+                            commitUrl(dataUrlToObjectUrl(dataUrl));
+                        } catch {
+                            commitUrl(dataUrl);
+                        }
+                        return;
+                    }
+                    ctx.drawImage(img, 0, 0);
+                    void canvasToObjectUrl(canvas)
+                        .then((blobUrl) => commitUrl(blobUrl))
+                        .catch(() => {
+                            try {
+                                commitUrl(dataUrlToObjectUrl(dataUrl));
+                            } catch {
+                                commitUrl(dataUrl);
+                            }
+                        });
+                };
+                img.onerror = () => {
+                    if (gen !== agriHeatmapApplyGenRef.current) return;
+                    try {
+                        commitUrl(dataUrlToObjectUrl(dataUrl));
+                    } catch (e) {
+                        console.warn("[agri-heatmap] image overlay failed", e);
+                        try {
+                            commitUrl(dataUrl);
+                        } catch (e2) {
+                            console.warn("[agri-heatmap] image overlay failed", e2);
+                        }
+                    }
+                };
+                img.src = dataUrl;
+            } else if (hm.pixelCount > 0) {
+                const msg = "色斑有像素但色膜未生成（canvas/clip 失败）";
+                console.warn("[agri-heatmap]", msg, {
+                    index: hm.index,
+                    pixelCount: hm.pixelCount,
+                    fromLonLat: !!hm.fromLonLat,
+                    geojsonN: hm.geojson?.features?.length ?? 0,
+                    hasDataUrl: !!hm.dataUrl,
+                    clippedHasContent: heatmapImageHasContent(clippedImg),
+                });
+                toast.message(msg, {
+                    description: `${AGRI_MODE_LABELS[hm.index]} · ${hm.pixelCount} px`,
+                });
+            }
+        },
+        [],
+    );
+
+    // Add field polygon (and NDVI if active) to map.
+    // When agri 色斑图 is active: field fill opacity 0; continuous image film sits above fill, below outline.
     const setupMapLayers = useCallback((map: maplibregl.Map) => {
         const f = fieldRef.current;
         if (!f?.geom) return;
 
-        // Remove existing layers/source first to avoid stale state
+        const hm = agriHeatmapRef.current;
+        // Remove existing layers/source first to avoid stale state / wrong z-order
+        try {
+            clearAgriHeatmapLayers(map);
+        } catch { /* ignore */ }
         if (map.getLayer("field-outline")) map.removeLayer("field-outline");
         if (map.getLayer("field-fill")) map.removeLayer("field-fill");
         if (map.getSource("field-polygon")) map.removeSource("field-polygon");
@@ -322,11 +497,15 @@ export default function FieldDetailPage() {
             type: "geojson",
             data: { type: "Feature", properties: {}, geometry: f.geom },
         });
+        // Transparent fill while heatmap is on — outline stays for boundary.
         map.addLayer({
             id: "field-fill",
             type: "fill",
             source: "field-polygon",
-            paint: { "fill-color": tokenColor("--map-field-stroke"), "fill-opacity": 0.2 },
+            paint: {
+                "fill-color": tokenColor("--map-field-stroke"),
+                "fill-opacity": hm ? 0 : 0.2,
+            },
         });
         map.addLayer({
             id: "field-outline",
@@ -345,31 +524,11 @@ export default function FieldDetailPage() {
             addIndexOverlay(map, layer, f, activeIndexTypeRef.current);
         }
 
-        // Re-add agri 色斑图 after style reload
-        const hm = agriHeatmapRef.current;
         if (hm) {
-            const srcId = "agri-heatmap";
-            const layerId = "agri-heatmap-raster";
-            try {
-                if (map.getLayer(layerId)) map.removeLayer(layerId);
-                if (map.getSource(srcId)) map.removeSource(srcId);
-            } catch { /* ignore */ }
-            map.addSource(srcId, {
-                type: "image",
-                url: hm.dataUrl,
-                coordinates: hm.coordinates,
-            });
-            map.addLayer(
-                {
-                    id: layerId,
-                    type: "raster",
-                    source: srcId,
-                    paint: { "raster-opacity": 0.78, "raster-resampling": "nearest" },
-                },
-                "field-outline",
-            );
+            const fieldGeom = f.geom as GeoJSON.Polygon | GeoJSON.MultiPolygon;
+            applyAgriHeatmapToMap(map, hm, fieldGeom, "field-outline");
         }
-    }, []);
+    }, [applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
     // Callback from BaseMap when ready
     const handleMapReady = useCallback(
@@ -456,38 +615,39 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri pixel_data 色斑图 (image source) — primary overlay when COG/tiler empty
+    // Agri 色斑图 — canvas image film ONLY (blob:/data:); never GeoJSON fill (white seams)
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
-        const srcId = "agri-heatmap";
-        const layerId = "agri-heatmap-raster";
         try {
-            if (map.getLayer(layerId)) map.removeLayer(layerId);
-            if (map.getSource(srcId)) map.removeSource(srcId);
+            clearAgriHeatmapLayers(map);
         } catch { /* ignore */ }
+
+        // Hide solid green fill whenever 色斑 is active so sparse pixels stay visible
+        try {
+            if (map.getLayer("field-fill")) {
+                map.setPaintProperty("field-fill", "fill-opacity", agriHeatmap ? 0 : 0.2);
+            }
+        } catch { /* ignore */ }
+
         if (!agriHeatmap) return;
-        map.addSource(srcId, {
-            type: "image",
-            url: agriHeatmap.dataUrl,
-            coordinates: agriHeatmap.coordinates,
-        });
-        map.addLayer(
-            {
-                id: layerId,
-                type: "raster",
-                source: srcId,
-                paint: { "raster-opacity": 0.78, "raster-resampling": "nearest" },
-            },
-            map.getLayer("field-outline") ? "field-outline" : undefined,
-        );
+
+        const fieldGeom = fieldRef.current?.geom as
+            | GeoJSON.Polygon
+            | GeoJSON.MultiPolygon
+            | undefined;
+        const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
+        applyAgriHeatmapToMap(map, agriHeatmap, fieldGeom, beforeId);
+
         return () => {
             try {
-                if (map.getLayer(layerId)) map.removeLayer(layerId);
-                if (map.getSource(srcId)) map.removeSource(srcId);
+                clearAgriHeatmapLayers(map);
+                if (map.getLayer("field-fill")) {
+                    map.setPaintProperty("field-fill", "fill-opacity", 0.2);
+                }
             } catch { /* ignore */ }
         };
-    }, [agriHeatmap, mapInstance]);
+    }, [agriHeatmap, mapInstance, field, applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
     const handleShowLayer = useCallback((layer: RasterLayer | null, indexType: IndexType) => {
         setIndexLayer(layer);
@@ -577,10 +737,14 @@ export default function FieldDetailPage() {
                 <LocationSearch onSelect={handleLocationSelect} />
             </div>
 
-            {/* Index Legend - bottom-left, visible when overlay is active */}
-            {indexLayer && (
+            {/* Index / agri 色斑 Legend - bottom-left */}
+            {(agriHeatmap || indexLayer) && (
                 <div className="absolute bottom-6 left-4 z-20 transition-opacity duration-200">
-                    <NdviLegend layer={indexLayer} indexType={activeIndexType} />
+                    {agriHeatmap ? (
+                        <AgriHeatmapLegend heatmap={agriHeatmap} />
+                    ) : indexLayer ? (
+                        <NdviLegend layer={indexLayer} indexType={activeIndexType} />
+                    ) : null}
                 </div>
             )}
 
@@ -594,7 +758,30 @@ export default function FieldDetailPage() {
                     transform: "translateX(-50%)",
                 }}
             >
-                {activeTab === "ndvi" && availableTypes.length > 0 && (
+                {activeTab === "ndvi" && parseAgriLandId(field.tags) && (
+                    <div className={cn("flex gap-1 rounded-lg p-1", MAP_CHROME)}>
+                        {AGRI_PRIMARY_MODES.map((mode) => (
+                            <Button
+                                key={mode}
+                                variant={mode === agriHeatMode ? "default" : "ghost"}
+                                size="sm"
+                                onClick={() => setAgriHeatMode(mode)}
+                                className="px-3 text-xs font-medium"
+                                title={
+                                    mode === "drought"
+                                        ? "干旱 NDDI（Gu et al. 2007）"
+                                        : mode === "flood"
+                                          ? "洪涝 S1 VV/VH 阈值"
+                                          : AGRI_MODE_LABELS[mode]
+                                }
+                            >
+                                {AGRI_MODE_LABELS[mode]}
+                            </Button>
+                        ))}
+                    </div>
+                )}
+
+                {activeTab === "ndvi" && !parseAgriLandId(field.tags) && availableTypes.length > 0 && (
                     <div className={cn("flex gap-1 rounded-lg p-1", MAP_CHROME)}>
                         {availableTypes.map((idx) => (
                             <Button
@@ -613,7 +800,26 @@ export default function FieldDetailPage() {
                 {/* Satellite, date, cloud cover and colormap in one mono
                     line: the reproducibility claim, made visible where the
                     user is actually looking. */}
-                {indexLayer && (
+                {agriHeatmap && (
+                    <div
+                        className="max-w-full rounded-lg border border-border px-3.5 py-2"
+                        style={{ background: "hsl(var(--map-scrim) / 0.82)" }}
+                    >
+                        <p className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+                            <Satellite className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            {[
+                                agriHeatmap.index === "flood" ? "Sentinel-1" : "Sentinel-2",
+                                AGRI_MODE_LABELS[agriHeatmap.index],
+                                agriHeatmap.mean != null ? `均≈${agriHeatmap.mean.toFixed(2)}` : null,
+                                `${agriHeatmap.pixelCount} px`,
+                            ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                        </p>
+                    </div>
+                )}
+
+                {!agriHeatmap && indexLayer && (
                     <div
                         className="max-w-full rounded-lg border border-border px-3.5 py-2"
                         style={{ background: "hsl(var(--map-scrim) / 0.82)" }}
@@ -868,7 +1074,7 @@ export default function FieldDetailPage() {
                                         </div>
                                     </TabsContent>
 
-                                    <TabsContent value="ndvi" className="mt-0 p-4">
+                                    <TabsContent value="ndvi" className="mt-0 p-4" forceMount>
                                         <NdviTab
                                             fieldId={fieldId}
                                             fieldTags={field?.tags ?? null}
@@ -877,6 +1083,9 @@ export default function FieldDetailPage() {
                                             onActiveIndexChange={setActiveIndexType}
                                             onDataLoaded={refreshAvailableTypes}
                                             onAgriHeatmapChange={setAgriHeatmap}
+                                            agriHeatMode={agriHeatMode}
+                                            onAgriHeatModeChange={setAgriHeatMode}
+                                            agriHeatmapEnabled={activeTab === "ndvi"}
                                         />
                                     </TabsContent>
 
