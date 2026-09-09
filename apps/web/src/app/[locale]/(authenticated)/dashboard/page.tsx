@@ -21,6 +21,7 @@ import { useTranslations } from "next-intl";
 import { CreateFarmModal } from "@/components/create-farm-modal";
 import { AlertRow } from "@/components/alert-row";
 import { cn } from "@/lib/utils";
+import { formatAreaMu } from "@/lib/area";
 
 /** How many alert rows the panel shows before deferring to the alerts page. */
 const ALERT_PREVIEW = 4;
@@ -379,7 +380,7 @@ function FarmRow({
                                     <>
                                         {" · "}
                                         <span className="font-mono tabular-nums">
-                                            {stats.areaHa.toFixed(2)} ha
+                                            {formatAreaMu(stats.areaHa)}
                                         </span>
                                     </>
                                 )}

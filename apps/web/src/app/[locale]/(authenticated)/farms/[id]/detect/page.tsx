@@ -33,6 +33,7 @@ import { Separator } from "@/components/ui/separator";
 import { MAP_STYLES, type MapStyleId } from "@/lib/pmtiles";
 import { tokenColor, MAP_CHROME } from "@/lib/design-tokens";
 import { cn } from "@/lib/utils";
+import { formatAreaMu, haToMu } from "@/lib/area";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const BaseMap = dynamic(() => import("@/components/map/base-map"), {
@@ -477,7 +478,7 @@ export default function DetectBoundariesPage() {
                 geom
             );
             toast.success(
-                t("acceptSuccess", { area: result.area_ha.toFixed(2) })
+                t("acceptSuccess", { area: haToMu(result.area_ha).toFixed(2) })
             );
             setBoundaries((prev) =>
                 prev.filter((b) => b.id !== selected.id)
@@ -747,9 +748,9 @@ export default function DetectBoundariesPage() {
                                                 <p>
                                                     {t("areaHa", {
                                                         area:
-                                                            selected.area_ha?.toFixed(
-                                                                2
-                                                            ) || "-",
+                                                            selected.area_ha != null
+                                                                ? haToMu(selected.area_ha).toFixed(2)
+                                                                : "-",
                                                     })}
                                                 </p>
                                                 <p
@@ -946,11 +947,7 @@ export default function DetectBoundariesPage() {
                                                                         </Badge>
                                                                     </div>
                                                                     <p className="text-xs text-muted-foreground mt-0.5">
-                                                                        {b.area_ha?.toFixed(
-                                                                            2
-                                                                        ) ||
-                                                                            "-"}{" "}
-                                                                        ha
+                                                                        {formatAreaMu(b.area_ha)}
                                                                     </p>
                                                                 </button>
                                                             ))}

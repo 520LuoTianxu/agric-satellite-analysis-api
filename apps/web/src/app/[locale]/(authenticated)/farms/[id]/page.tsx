@@ -6,6 +6,7 @@ import { Link, useRouter } from "@/i18n/navigation";
 import { useOrg } from "@/components/org-context";
 import { farmsApi, fieldsApi } from "@/lib/api";
 import type { Farm, Field } from "@/lib/api";
+import { formatAreaMu } from "@/lib/area";
 import { toast } from "sonner";
 import {
     ArrowLeft,
@@ -333,7 +334,7 @@ export default function FarmDetailPage() {
                                             <p className="text-sm font-medium">{field.name}</p>
                                             <div className="flex items-center gap-1.5 mt-0.5">
                                                 <span className="text-xs text-muted-foreground">
-                                                    {field.area_ha ? `${field.area_ha.toFixed(2)} ha` : "-"}
+                                                    {formatAreaMu(field.area_ha)}
                                                 </span>
                                                 {field.crop_type && <Badge variant="secondary">{field.crop_type}</Badge>}
                                                 {field.season && <Badge variant="outline">{field.season}</Badge>}
