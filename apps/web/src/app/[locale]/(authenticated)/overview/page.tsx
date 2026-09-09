@@ -14,8 +14,6 @@ import {
     type OverviewStats,
     type OverviewWeakParcel,
 } from "@/lib/api";
-import { registerPMTilesProtocol } from "@/lib/pmtiles";
-import { createTransformRequest, refreshMapToken } from "@/lib/map-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,7 +53,8 @@ function padAdcode(level: OverviewLevel, code: string | null | undefined): strin
 }
 
 function geoJsonUrl(level: OverviewLevel, adcode: string | null): string {
-    // Prefer static China provinces; deeper levels go through same-origin proxy → DataV.
+    // Aliyun DataV: https://geo.datav.aliyun.com/areas_v3/bound/{adcode}_full.json
+    // country→100000 (provinces), province/city adcode→cities/counties. Served via local cache/proxy.
     const code = level === "country" || !adcode ? "100000" : adcode;
     if (code === "100000") return "/geo/100000_full.json";
     return `/api/geo/${code}`;
@@ -322,48 +321,36 @@ export default function OverviewPage() {
     // Init map once
     useEffect(() => {
         if (!mapContainerRef.current || mapRef.current) return;
-        registerPMTilesProtocol();
-
-        // Dark basemap matches app chrome; OSM-style raster is more reliable than Esri in some networks.
-        const dark = {
+        // No commercial basemap — only Aliyun DataV admin GeoJSON choropleth (no CARTO watermark).
+        const blankStyle = {
             version: 8 as const,
             glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-            sources: {
-                carto: {
-                    type: "raster" as const,
-                    tiles: [
-                        "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-                        "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-                        "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-                    ],
-                    tileSize: 256,
-                    attribution: '&copy; <a href="https://carto.com">CARTO</a>',
-                },
-            },
+            sources: {},
             layers: [
                 {
                     id: "background",
                     type: "background" as const,
                     paint: { "background-color": "#0b1220" },
                 },
-                { id: "carto-layer", type: "raster" as const, source: "carto", minzoom: 0, maxzoom: 19 },
             ],
         };
 
         const map = new maplibregl.Map({
             container: mapContainerRef.current,
-            style: dark,
+            style: blankStyle,
             center: CHINA_CENTER,
             zoom: 3.4,
             maxBounds: [
                 [CHINA_BOUNDS[0][0] - 5, CHINA_BOUNDS[0][1] - 5],
                 [CHINA_BOUNDS[1][0] + 5, CHINA_BOUNDS[1][1] + 5],
             ],
-            transformRequest: createTransformRequest(),
-            attributionControl: { compact: true },
+            attributionControl: {
+                compact: true,
+                customAttribution:
+                    '<a href="https://datav.aliyun.com/portal/school/atlas/area_selector" target="_blank" rel="noreferrer">阿里云 DataV</a>',
+            },
         });
         map.addControl(new maplibregl.NavigationControl(), "top-left");
-        const tokenRefresh = setInterval(() => refreshMapToken(), 10 * 60_000);
         mapRef.current = map;
 
         const resize = () => {
@@ -410,7 +397,6 @@ export default function OverviewPage() {
         });
 
         return () => {
-            clearInterval(tokenRefresh);
             ro.disconnect();
             setMapReady(false);
             map.remove();
@@ -515,6 +501,24 @@ export default function OverviewPage() {
                                 "line-width": 0.9,
                             },
                         });
+                        if (!m.getLayer("overview-label")) {
+                            m.addLayer({
+                                id: "overview-label",
+                                type: "symbol",
+                                source: "overview",
+                                layout: {
+                                    "text-field": ["get", "name"],
+                                    "text-size": 11,
+                                    "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
+                                    "text-max-width": 8,
+                                },
+                                paint: {
+                                    "text-color": "#e2e8f0",
+                                    "text-halo-color": "#0b1220",
+                                    "text-halo-width": 1.2,
+                                },
+                            });
+                        }
                     }
 
                     try {
