@@ -136,6 +136,144 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
     return out
 
 
+
+def _extract_lonlat_pixels(pixel_data: Any, *, prefer_clear: bool = True) -> list[dict[str, Any]]:
+    """Normalize agri lonlat_v1 pixel_data.pixels; optionally keep clear=1 only."""
+    if not isinstance(pixel_data, dict):
+        return []
+    if pixel_data.get("format") != "lonlat_v1":
+        return []
+    raw = pixel_data.get("pixels")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for pix in raw:
+        if not isinstance(pix, dict):
+            continue
+        lon, lat = pix.get("lon"), pix.get("lat")
+        if lon is None or lat is None:
+            continue
+        try:
+            float(lon)
+            float(lat)
+        except (TypeError, ValueError):
+            continue
+        out.append(pix)
+    if prefer_clear:
+        cleared = [p for p in out if int(p.get("clear") or 0) == 1]
+        if cleared:
+            return cleared
+    return out
+
+
+
+def load_agri_lonlat_pixels(
+    session: Session,
+    land_id: str,
+    dates: list[str] | None = None,
+    *,
+    prefer_clear: bool = True,
+    cloud_max: float | None = None,
+    maize_season_only: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load lonlat_v1 pixels keyed by ISO date for selected S2 scenes.
+
+    When ``dates`` is omitted, loads maize-season (Jun–Sep) S2 rows.
+    Prefers pixels with clear=1 when available. Cloud filter is optional
+    (many seeds only have scene-level cloud_cover and would be over-filtered).
+    """
+    if not land_id:
+        return {}
+    params: dict[str, Any] = {"land_id": land_id}
+    where = ["land_id = :land_id", "sensor = 'S2'", "pixel_data->>'format' = 'lonlat_v1'"]
+    if dates:
+        # Expand IN list safely for SQLAlchemy text()
+        placeholders = []
+        for i, d in enumerate(dates):
+            key = f"d{i}"
+            params[key] = d
+            placeholders.append(f"CAST(:{key} AS date)")
+        where.append(f"date IN ({', '.join(placeholders)})")
+    elif maize_season_only:
+        where.append("EXTRACT(MONTH FROM date) BETWEEN 6 AND 9")
+    if cloud_max is not None:
+        params["cloud_max"] = cloud_max
+        where.append(
+            "(COALESCE(parcel_cloud_cover_pct, cloud_cover) IS NULL "
+            "OR COALESCE(parcel_cloud_cover_pct, cloud_cover) <= :cloud_max)"
+        )
+    sql = f"""
+        SELECT date, pixel_data, ndvi_avg,
+               COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud
+        FROM agri.parcel_scene_products
+        WHERE {" AND ".join(where)}
+        ORDER BY date
+    """
+    try:
+        rows = session.execute(text(sql), params).mappings().all()
+    except Exception:
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])
+        pixels = _extract_lonlat_pixels(r["pixel_data"], prefer_clear=prefer_clear)
+        if pixels:
+            out[d] = pixels
+    return out
+
+
+def load_agri_pixel_date_index(
+    session: Session,
+    land_id: str,
+    *,
+    cloud_max: float | None = None,
+) -> list[dict[str, Any]]:
+    """Lightweight maize-season S2 date index (no pixel payload) for stage picking."""
+    if not land_id:
+        return []
+    params: dict[str, Any] = {"land_id": land_id}
+    cloud_clause = ""
+    if cloud_max is not None:
+        params["cloud_max"] = cloud_max
+        cloud_clause = (
+            "AND (COALESCE(parcel_cloud_cover_pct, cloud_cover) IS NULL "
+            "OR COALESCE(parcel_cloud_cover_pct, cloud_cover) <= :cloud_max)"
+        )
+    sql = f"""
+        SELECT date, ndvi_avg,
+               COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud,
+               pixel_count,
+               CASE
+                 WHEN pixel_data->>'format' = 'lonlat_v1'
+                   AND jsonb_typeof(pixel_data->'pixels') = 'array'
+                 THEN jsonb_array_length(pixel_data->'pixels')
+                 ELSE 0
+               END AS npix
+        FROM agri.parcel_scene_products
+        WHERE land_id = :land_id AND sensor = 'S2'
+          AND EXTRACT(MONTH FROM date) BETWEEN 6 AND 9
+          {cloud_clause}
+        ORDER BY date
+    """
+    try:
+        rows = session.execute(text(sql), params).mappings().all()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])
+        out.append(
+            {
+                "date": d,
+                "ndvi_avg": float(r["ndvi_avg"]) if r["ndvi_avg"] is not None else None,
+                "cloud": float(r["cloud"]) if r["cloud"] is not None else None,
+                "pixel_count": int(r["pixel_count"] or r["npix"] or 0),
+                "has_pixels": int(r["npix"] or 0) > 0,
+            }
+        )
+    return out
+
+
 def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     s = session.execute(
         select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)

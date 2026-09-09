@@ -601,5 +601,6 @@ def compute_assessment(
             "ndvi_p30": ndvi_p30,
             "evi_p30": evi_p30,
             "ndwi_p85": ndwi_p85,
+            "month_hits": dict(month_hits),
         },
     }

@@ -627,6 +627,69 @@ def render_pdf(
     story += img("ndwi.png", caption="干湿相关（NDWI/MNDWI）：玉米季里突然偏高且苗又弱，要怀疑积水")
     story += img("monthly.png", caption="哪些月份更容易出现需要留意的信号（灰色月份不在玉米季）")
 
+    # ===== Phenology / stage NDVI =====
+    phenology_name = None
+    for key in chart_paths:
+        if str(key).startswith("ndvi_phenology_") and str(key).endswith(".png"):
+            phenology_name = key
+            break
+    if phenology_name is None and chart_paths.get("ndvi_phenology.png"):
+        phenology_name = "ndvi_phenology.png"
+
+    story.append(PageBreak())
+    story.append(p("玉米季绿度会先升后降", "h1"))
+    story.append(hr())
+    story.append(
+        p(
+            "你的理解是对的：同一块地，苗期绿度通常不高，旺长期最高，靠近成熟又会掉下来。"
+            "所以评估长势要对着生育阶段看，不能拿一个固定 NDVI 门槛套全年。"
+            "下面四张图是同一块地、同一套红黄绿色标，没有地图底图，只看地里的绿度分布。",
+            "body",
+        )
+    )
+    story.append(Spacer(1, 2 * mm))
+    if phenology_name:
+        # Caption year from filename when possible
+        year_bit = ""
+        if phenology_name.startswith("ndvi_phenology_") and phenology_name[15:19].isdigit():
+            year_bit = phenology_name[15:19] + " 年"
+        story += img(
+            phenology_name,
+            w=165 * mm,
+            ratio=0.38,
+            caption=f"{year_bit}地块平均绿度曲线：升→峰→成熟回落".strip(),
+        )
+    has_panel = bool(chart_paths.get("ndvi_stages_panel.png"))
+    if has_panel:
+        story.append(
+            KeepTogether(
+                img(
+                    "ndvi_stages_panel.png",
+                    w=155 * mm,
+                    ratio=0.88,
+                    caption="四阶段对比（苗期→拔节抽雄→旺长→成熟），色标统一，方便看升降",
+                )
+            )
+        )
+        story.append(p("分阶段单图（可对照地里实际苗情）", "h2"))
+        stage_imgs = [
+            ("ndvi_stage_seedling.png", "苗期/早期"),
+            ("ndvi_stage_vegetative.png", "拔节—抽雄前后"),
+            ("ndvi_stage_peak.png", "旺长期"),
+            ("ndvi_stage_maturity.png", "成熟期附近（回落是正常的）"),
+        ]
+        for fname, cap in stage_imgs:
+            if chart_paths.get(fname):
+                story += img(fname, w=120 * mm, ratio=0.85, caption=cap)
+    else:
+        story.append(
+            p(
+                "说明：本块地暂无可用的 lonlat 像元色斑数据，已保留生育阶段绿度曲线；"
+                "空间四阶段对比图待像元回填后自动补上。",
+                "small",
+            )
+        )
+
     story.append(PageBreak())
     story.append(p("看不懂？先看这里", "h1"))
     story.append(hr())
