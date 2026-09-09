@@ -248,9 +248,8 @@ export default function AgriTimeseriesPanel({
                     .sort();
                 const latestDate = dates.length ? dates[dates.length - 1] : null;
                 if (latestDate) setSelectedDate(latestDate);
-                // Explicit first heatmap load (NDVI by default) — avoid relying only on
-                // effect ordering with modeProp / selectedDate / series, which left the
-                // overlay empty until the user switched to EVI.
+                // If 指数 already active when scenes arrive, load NDVI film immediately
+                // (include_pixels=1). If still disabled, the enabled-rising effect loads later.
                 if (
                     !cancelled &&
                     latestDate &&
@@ -366,6 +365,9 @@ export default function AgriTimeseriesPanel({
     );
     loadHeatmapRef.current = loadHeatmap;
 
+    // Rising-edge / dep change: when 指数 enables the panel, immediately fetch
+    // include_pixels=1 for current series (default ndvi) + selectedDate (latest S2).
+    // forceMount keeps us alive while inactive; enabled flip must still trigger one load.
     useEffect(() => {
         if (!enabled) {
             // Invalidate in-flight loads so they cannot repaint after clear
@@ -376,7 +378,7 @@ export default function AgriTimeseriesPanel({
             return;
         }
         if (!selectedDate) return;
-        // enabled true → always (re)load so tab remount / Strict Mode recovery works
+        // enabled true → always (re)load so tab click / Strict Mode recovery works
         void loadHeatmap(selectedDate, series);
     }, [selectedDate, series, loadHeatmap, enabled, onHeatmapChange]);
 

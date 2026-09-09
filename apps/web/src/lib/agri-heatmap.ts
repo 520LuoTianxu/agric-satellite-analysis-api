@@ -3,7 +3,8 @@
  * ~10 m in Web Mercator into a continuous canvas color film (MapLibre image
  * source). Legacy DB grid pixel_data ([row,col,...]) is fallback only.
  * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
- * GeoJSON fill is fallback only when the image is empty — not turf-on-tiny-cells.
+ * Map overlay uses image film only (no GeoJSON fill — white seams between cells).
+ * geojson/points on AgriHeatmapImage remain for metadata / rebuilds, not map layers.
  *
  * OSS S2 pixel: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}
  * OSS S1 pixel: {lon,lat,VV_db,VH_db}
@@ -908,7 +909,7 @@ function hexToRgba(hex: string, alpha = 230): [number, number, number, number] {
 /**
  * Rebuild continuous color-film dataUrl from geojson cells.
  * Field mask is best-effort (WebMercator/lonlat grids); empty alpha → no dataUrl
- * so the map apply path can fall back to turf-clipped GeoJSON.
+ * so callers can detect empty film (no GeoJSON fill fallback — seams).
  */
 export function clipHeatmapImageToField(
     hm: AgriHeatmapImage,
@@ -927,7 +928,7 @@ export function clipHeatmapImageToField(
 
         // Full-cell film (expand slightly) — same style as rasterizeAgriLonLatPixels.
         ctx.imageSmoothingEnabled = false;
-        const expand = 1.12;
+        const expand = 1.15;
         const inset = (expand - 1) / 2;
         let paintedCells = 0;
         for (const feat of hm.geojson?.features ?? []) {
@@ -1075,7 +1076,7 @@ export function filterHeatmapPointsInField(
 
 
 /**
- * Build agri heatmap: continuous canvas color film (primary) + GeoJSON cells (fallback).
+ * Build agri heatmap: continuous canvas color film (map overlay) + GeoJSON cells (metadata only).
  * Empty grid cells stay transparent — basemap shows through; only real pixel_data values.
  * Optional fieldGeom masks the canvas so nothing draws outside the parcel boundary.
  */
@@ -1398,10 +1399,10 @@ export function rasterizeAgriLonLatPixels(
             const ctx = canvas.getContext("2d", { willReadFrequently: true });
             if (ctx) {
                 // Continuous solid film: each sample paints its full ~10 m cell.
-                // Slightly expand (1.12) to kill hairline gaps between adjacent cells.
+                // Slightly expand (≥1.15) to kill hairline gaps between adjacent cells.
                 // No arcs/circles — those leave satellite basemap showing through.
                 ctx.imageSmoothingEnabled = false;
-                const expand = 1.12;
+                const expand = 1.15;
                 const inset = (expand - 1) / 2;
                 for (const cell of cellsWithRc) {
                     const [r, g, b, a] = cell.rgba;

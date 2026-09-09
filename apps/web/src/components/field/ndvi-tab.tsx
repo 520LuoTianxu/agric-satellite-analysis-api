@@ -595,7 +595,8 @@ export default function NdviTab({ fieldId, fieldTags, onShowLayer, onActiveIndex
             )}
 
             {/* ── Agri S1/S2 fallback (when field tagged agri:*) ── */}
-            {!loading && parseAgriLandId(fieldTags) && (
+            {/* Mount immediately (don't wait for monitoring load) so 指数 tab can fetch include_pixels=1 */}
+            {parseAgriLandId(fieldTags) && (
                 <AgriTimeseriesPanel
                     fieldTags={fieldTags}
                     hasMonitoringData={layers.length > 0 || stats.length > 0}
