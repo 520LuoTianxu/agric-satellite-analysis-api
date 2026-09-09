@@ -344,9 +344,7 @@ async def _read_cache(
     filters = dict(out.filters or {})
     filters["drought_source"] = "cache"
     filters["cache_hit"] = True
-    filters["cache_updated_at"] = (
-        row.updated_at.isoformat() if row.updated_at else None
-    )
+    filters["cache_updated_at"] = row.updated_at.isoformat() if row.updated_at else None
     return out.model_copy(update={"filters": filters})
 
 
@@ -609,9 +607,7 @@ async def _compute_live_stats(
         "flood_severe": round(flood_area["flood_severe"], 2),
         "flood_moderate": round(flood_area["flood_moderate"], 2),
         "flood_mild": round(flood_area["flood_mild"], 2),
-        "flood": round(
-            flood_area["flood_severe"] + flood_area["flood_moderate"], 2
-        ),
+        "flood": round(flood_area["flood_severe"] + flood_area["flood_moderate"], 2),
         "wet": round(flood_area["flood_mild"], 2),
         "dry": round(flood_area["dry"], 2),
         "unknown": round(flood_area["unknown"], 2),
@@ -744,10 +740,7 @@ def _csv_response(filename: str, rows: list[dict[str, Any]]) -> Response:
     safe = "".join(ch if ord(ch) < 128 else "_" for ch in filename) or "export.csv"
     if not safe.endswith(".csv"):
         safe = f"{safe}.csv"
-    disp = (
-        f'attachment; filename="{safe}"; '
-        f"filename*=UTF-8''{quote(filename)}"
-    )
+    disp = f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(filename)}"
     return Response(
         content=data,
         media_type="text/csv; charset=utf-8",
