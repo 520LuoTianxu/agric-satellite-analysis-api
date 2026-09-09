@@ -214,9 +214,7 @@ def _read_band_windowed_db(
                 # WarpedVRT forbids boundless reads — clip window to VRT extent
                 window = rasterio.windows.from_bounds(
                     *bounds, transform=vrt.transform
-                ).intersection(
-                    rasterio.windows.Window(0, 0, vrt.width, vrt.height)
-                )
+                ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
                 if window.width <= 0 or window.height <= 0:
                     return dst  # all-nan after dn_to_db of zeros→nan path
                 window = window.round_offsets().round_lengths()
@@ -323,12 +321,16 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
     land_id = parse_agri_land_id(field.tags_json)
     if not land_id:
         return None
-    row = session.execute(
-        text(
-            "SELECT land_id, tile_id, land_name FROM agri.land_parcels WHERE land_id = :lid"
-        ),
-        {"lid": str(land_id)},
-    ).mappings().first()
+    row = (
+        session.execute(
+            text(
+                "SELECT land_id, tile_id, land_name FROM agri.land_parcels WHERE land_id = :lid"
+            ),
+            {"lid": str(land_id)},
+        )
+        .mappings()
+        .first()
+    )
     if not row:
         return None
     return {
@@ -338,7 +340,16 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
     }
 
 
-def _upsert_agri_s1(session, meta: dict, scene_date: date, scene_id: str, field_id: str, pixels: list, vv_stats: dict, vh_stats: dict) -> None:
+def _upsert_agri_s1(
+    session,
+    meta: dict,
+    scene_date: date,
+    scene_id: str,
+    field_id: str,
+    pixels: list,
+    vv_stats: dict,
+    vh_stats: dict,
+) -> None:
     import psycopg2
 
     # Use raw psycopg2 for JSONB upsert consistency with S2 bridge
@@ -453,7 +464,11 @@ def process_s1_backfill(self, job_id: str) -> dict:
                     session,
                     job,
                     "download_bands",
-                    {"scene": idx + 1, "total_scenes": len(scenes), "scene_id": scene["id"]},
+                    {
+                        "scene": idx + 1,
+                        "total_scenes": len(scenes),
+                        "scene_id": scene["id"],
+                    },
                 )
                 vv = _read_band_windowed_db(
                     scene["vv_href"], bounds, target_shape, target_transform
@@ -562,7 +577,10 @@ def process_s1_backfill(self, job_id: str) -> dict:
             if job:
                 retries = self.request.retries
                 if retries < self.max_retries:
-                    raise self.retry(exc=e, countdown=RETRY_DELAYS[min(retries, len(RETRY_DELAYS) - 1)])
+                    raise self.retry(
+                        exc=e,
+                        countdown=RETRY_DELAYS[min(retries, len(RETRY_DELAYS) - 1)],
+                    )
                 job.status = "failed"
                 job.error = str(e)[:500]
                 job.finished_at = datetime.now(timezone.utc)
@@ -597,7 +615,11 @@ def backfill_s1_for_field(
     try:
         field = session.get(Field, uuid.UUID(field_id))
         if not field:
-            return {"field_id": field_id, "status": "error", "detail": "Field not found"}
+            return {
+                "field_id": field_id,
+                "status": "error",
+                "detail": "Field not found",
+            }
 
         end_date = date.today()
         start_date = end_date - timedelta(days=months * 30)

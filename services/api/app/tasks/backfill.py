@@ -220,11 +220,15 @@ def backfill_indices_for_field(
         try:
             from app.tasks.sentinel1 import backfill_s1_for_field
 
-            async_result = backfill_s1_for_field.delay(field_id, months=months, force=force)
+            async_result = backfill_s1_for_field.delay(
+                field_id, months=months, force=force
+            )
             s1_result = {"task_id": async_result.id, "status": "queued"}
             logger.info("s1_backfill_dispatched", field_id=field_id, result=s1_result)
         except Exception as e:
-            logger.warning("s1_backfill_dispatch_failed", field_id=field_id, error=str(e))
+            logger.warning(
+                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+            )
 
         logger.info(
             "backfill_orchestration_complete",

@@ -230,7 +230,10 @@ def _list_dates_from_storage(storage, prefix: str) -> list[str]:
             if DATE_RE.match(d):
                 dates.add(d)
     except Exception as e:  # noqa: BLE001
-        print(f"  storage.list_keys failed ({type(e).__name__}: {e}); using DB dates", file=sys.stderr)
+        print(
+            f"  storage.list_keys failed ({type(e).__name__}: {e}); using DB dates",
+            file=sys.stderr,
+        )
     return sorted(dates)
 
 
@@ -368,7 +371,10 @@ def process_date(
             try:
                 if not storage.exists(key):
                     if required:
-                        print(f"  skip {date_str}: no {file_stem}.tif on {storage.backend}", file=sys.stderr)
+                        print(
+                            f"  skip {date_str}: no {file_stem}.tif on {storage.backend}",
+                            file=sys.stderr,
+                        )
                     return False
             except Exception:  # noqa: BLE001
                 pass
@@ -376,7 +382,10 @@ def process_date(
         opened = _open_band(path)
         if opened is None:
             if required:
-                print(f"  skip {date_str}: no readable NDVI on active store", file=sys.stderr)
+                print(
+                    f"  skip {date_str}: no readable NDVI on active store",
+                    file=sys.stderr,
+                )
             return False
         data, t, c = opened
         if required:

@@ -87,7 +87,6 @@ def _mint_service_jwt() -> str:
     )
 
 
-
 # ── Agri RS helpers for share reports ─────────────────────────────────
 
 _AGRI_INDEX_COLS: list[tuple[str, str, str]] = [
@@ -159,9 +158,10 @@ async def _load_agri_share_series(
     """
     try:
         rows = (
-            await db.execute(
-                text(
-                    """
+            (
+                await db.execute(
+                    text(
+                        """
                     SELECT date, sensor,
                            ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                            mndwi_avg, cire_avg, vv_avg, vh_avg,
@@ -177,10 +177,13 @@ async def _load_agri_share_series(
                     ORDER BY date DESC
                     LIMIT 500
                     """
-                ),
-                {"land_id": land_id},
+                    ),
+                    {"land_id": land_id},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     except Exception as exc:  # noqa: BLE001 — agri schema may be absent
         logger.warning("agri share series load failed land_id=%s: %s", land_id, exc)
         return [], {}, [], False
@@ -222,9 +225,7 @@ async def _load_agri_share_series(
     return available, stats_by_type, all_stats, heatmap_available
 
 
-async def _resolve_share_link(
-    db: AsyncSession, token: str
-) -> tuple[ShareLink, Field]:
+async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, Field]:
     result = await db.execute(select(ShareLink).where(ShareLink.token == token))
     link = result.scalar_one_or_none()
     if not link:
@@ -600,7 +601,6 @@ async def get_shared_report(
     )
 
 
-
 @router.get("/share/{token}/tiles/{z}/{x}/{y}.png")
 async def proxy_share_tile(
     request: Request,
@@ -715,9 +715,10 @@ async def get_share_agri_pixels(
         params["scene_date"] = scene_date
 
     row = (
-        await db.execute(
-            text(
-                f"""
+        (
+            await db.execute(
+                text(
+                    f"""
                 SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                        mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
                 FROM agri.parcel_scene_products
@@ -729,17 +730,21 @@ async def get_share_agri_pixels(
                 ORDER BY date DESC
                 LIMIT 1
                 """
-            ),
-            params,
+                ),
+                params,
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
 
     if not row:
         # Fallback: latest scene even without requiring pixels (means only)
         row = (
-            await db.execute(
-                text(
-                    f"""
+            (
+                await db.execute(
+                    text(
+                        f"""
                     SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                            mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
                     FROM agri.parcel_scene_products
@@ -748,10 +753,13 @@ async def get_share_agri_pixels(
                     ORDER BY date DESC
                     LIMIT 1
                     """
-                ),
-                params,
+                    ),
+                    params,
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
     if not row:
         raise HTTPException(status_code=404, detail="No agri scene available")

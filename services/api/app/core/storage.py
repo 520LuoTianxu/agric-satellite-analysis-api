@@ -300,8 +300,6 @@ def parcel_product_prefix() -> str:
     return prefix
 
 
-
-
 def configure_gdal_vsis3(storage: ObjectStorage | None = None) -> dict[str, str]:
     """Point rasterio/GDAL ``/vsis3/`` at the active object store.
 
@@ -350,7 +348,9 @@ def configure_gdal_vsis3(storage: ObjectStorage | None = None) -> dict[str, str]
     return previous
 
 
-def restore_gdal_env(previous: dict[str, str], touched: tuple[str, ...] | None = None) -> None:
+def restore_gdal_env(
+    previous: dict[str, str], touched: tuple[str, ...] | None = None
+) -> None:
     """Restore env keys after ``configure_gdal_vsis3`` / public S3 reads."""
     import os
 
