@@ -352,7 +352,9 @@ def _draw_stage_axis(
         ax.imshow(rgb, aspect="equal", interpolation="bilinear", zorder=1)
         if hm is not None:
             # translucent NDVI/color film over RGB (frontend-style)
-            ax.imshow(hm, aspect="equal", interpolation="bilinear", alpha=0.55, zorder=2)
+            ax.imshow(
+                hm, aspect="equal", interpolation="bilinear", alpha=0.55, zorder=2
+            )
         elif lons.size:
             # project scatter roughly onto image extent if we lack geo-ref
             h, w = rgb.shape[0], rgb.shape[1]
@@ -535,7 +537,6 @@ def render_stage_maps(
     return written
 
 
-
 def render_precip_bars(
     days: list[dict[str, Any]],
     out_path: Path,
@@ -550,7 +551,9 @@ def render_precip_bars(
     xs = [d["date"][5:] for d in days]  # MM-DD
     ys = [float(d.get("precipitation_sum") or 0) for d in days]
     fig, ax = plt.subplots(figsize=(5.2, 2.0), dpi=120)
-    colors = ["#1d4e89" if v >= 20 else ("#4ea8de" if v >= 5 else "#a9d6e5") for v in ys]
+    colors = [
+        "#1d4e89" if v >= 20 else ("#4ea8de" if v >= 5 else "#a9d6e5") for v in ys
+    ]
     ax.bar(range(len(xs)), ys, color=colors, width=0.8)
     ax.set_xticks(range(len(xs)))
     ax.set_xticklabels(xs, rotation=55, ha="right", fontsize=6.5)
@@ -621,9 +624,7 @@ def render_flood_evidence_charts(
         n = len(thumbs)
         cols = 3 if n >= 3 else n
         rows = int(np.ceil(n / cols))
-        fig, axes = plt.subplots(
-            rows, cols, figsize=(2.6 * cols, 2.4 * rows), dpi=130
-        )
+        fig, axes = plt.subplots(rows, cols, figsize=(2.6 * cols, 2.4 * rows), dpi=130)
         if rows == 1 and cols == 1:
             axes = np.array([[axes]])
         elif rows == 1:
@@ -658,7 +659,6 @@ def render_flood_evidence_charts(
     return written
 
 
-
 def render_ndvi_grade_pie(shares: dict[str, Any], out_path: Path) -> Path | None:
     """Pie chart for 优/良/中/差 shares."""
     if not shares or not shares.get("n"):
@@ -689,8 +689,6 @@ def render_ndvi_grade_pie(shares: dict[str, Any], out_path: Path) -> Path | None
     return out_path
 
 
-
-
 def render_stage_trend_bar(
     phenology: list[dict[str, Any]], out_path: Path
 ) -> Path | None:
@@ -712,9 +710,12 @@ def render_stage_trend_bar(
         else:
             g = r.get("grade")
             colors.append(
-                {"优": "#2d6a4f", "良": "#52b788", "中": "#f4a261", "差": "#e76f51"}.get(
-                    g, "#40916c"
-                )
+                {
+                    "优": "#2d6a4f",
+                    "良": "#52b788",
+                    "中": "#f4a261",
+                    "差": "#e76f51",
+                }.get(g, "#40916c")
             )
     fig, ax = plt.subplots(figsize=(6.5, 3.2), dpi=120)
     xs = range(len(labels))
@@ -882,7 +883,9 @@ def render_charts(
         }
         stage_ok = len(stage_pixels) >= 2 or (
             stage_rgb_paths
-            and sum(1 for st in stages.values() if st["date"] in (stage_rgb_paths or {}))
+            and sum(
+                1 for st in stages.values() if st["date"] in (stage_rgb_paths or {})
+            )
             >= 2
         )
         if stage_ok:

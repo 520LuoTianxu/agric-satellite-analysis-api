@@ -585,7 +585,10 @@ def render_pdf(
     story.append(KeepTogether([p("分数一览", "h2"), st]))
 
     # ===== 明水面 / 涝证据（硬证据时）=====
-    if flood_evidence and int(flood_evidence.get("absolute_open_water_scenes") or 0) > 0:
+    if (
+        flood_evidence
+        and int(flood_evidence.get("absolute_open_water_scenes") or 0) > 0
+    ):
         story.append(Spacer(1, 3 * mm))
         story.append(p("明水面涝证据（卫星 + 雨前降水）", "h1"))
         story.append(hr())
@@ -594,7 +597,11 @@ def render_pdf(
         story.append(
             p(
                 f"生育期内卫星共见明水面 <b>{n_all}</b> 景"
-                + (f"（下图展示湿指数最高的 {n_sel} 景）" if n_sel and n_sel < n_all else "")
+                + (
+                    f"（下图展示湿指数最高的 {n_sel} 景）"
+                    if n_sel and n_sel < n_all
+                    else ""
+                )
                 + "。对照每景前 15 日降水，判断更像雨后积水还是持续水面。",
                 "body",
             )
@@ -636,7 +643,14 @@ def render_pdf(
             fe_rows.append(
                 [
                     cell(str(sc.get("date") or "—"), "tbl_c"),
-                    cell(str(sc.get("wet_mean") if sc.get("wet_mean") is not None else "—"), "tbl_c"),
+                    cell(
+                        str(
+                            sc.get("wet_mean")
+                            if sc.get("wet_mean") is not None
+                            else "—"
+                        ),
+                        "tbl_c",
+                    ),
                     cell(f"{pr.get('cumulative_mm', '—')} mm", "tbl_c"),
                     cell(
                         f"{pr.get('peak_date') or '—'} / {pr.get('peak_mm', '—')} mm",
@@ -645,9 +659,7 @@ def render_pdf(
                     cell(kind_zh.get(sc.get("kind"), sc.get("kind") or "—"), "tbl_c"),
                 ]
             )
-        story.append(
-            make_table(fe_rows, [28 * mm, 24 * mm, 28 * mm, 45 * mm, 40 * mm])
-        )
+        story.append(make_table(fe_rows, [28 * mm, 24 * mm, 28 * mm, 45 * mm, 40 * mm]))
         story.append(Spacer(1, 2 * mm))
         story.append(
             p(f"<b>综合研判：</b>{flood_evidence.get('analysis') or ''}", "body")
@@ -655,7 +667,6 @@ def render_pdf(
         # Short per-scene notes (top 3 to avoid bloat)
         for sc in (flood_evidence.get("scenes") or [])[:3]:
             story.append(p(sc.get("analysis") or "", "small"))
-
 
     # ===== 土壤·天气·生育期长势（连贯叙事）=====
     story.append(Spacer(1, 3 * mm))
@@ -695,8 +706,10 @@ def render_pdf(
         )
     story.append(Spacer(1, 1.2 * mm))
     shares = analysis.get("ndvi_grade_shares") or {}
-    rule = analysis.get("ndvi_grade_rule_zh") or shares.get("rule_zh") or (
-        "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3"
+    rule = (
+        analysis.get("ndvi_grade_rule_zh")
+        or shares.get("rule_zh")
+        or ("优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3")
     )
     if shares.get("n"):
         pct = shares.get("pct") or {}
@@ -753,7 +766,6 @@ def render_pdf(
     if bridge:
         story.append(Spacer(1, 1.5 * mm))
         story.append(p("<b>串起来看：</b>" + bridge, "body"))
-
 
     story.append(PageBreak())
     story.append(p("最该盯的几件事", "h1"))

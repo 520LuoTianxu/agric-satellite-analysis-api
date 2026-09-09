@@ -417,7 +417,6 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     return summary, stress
 
 
-
 def load_weather_history(
     session: Session,
     field_id: uuid.UUID,
@@ -474,7 +473,9 @@ def load_weather_history(
         key = f"{y:04d}-{m:02d}"
         precip = float(r.precipitation_sum or 0)
         et0 = float(r.et0_fao_mm or 0)
-        tmean = float(r.temperature_2m_mean) if r.temperature_2m_mean is not None else None
+        tmean = (
+            float(r.temperature_2m_mean) if r.temperature_2m_mean is not None else None
+        )
         tmax = float(r.temperature_2m_max) if r.temperature_2m_max is not None else None
         bucket = months.setdefault(
             key,
@@ -848,7 +849,11 @@ def load_oss_media_for_dates(
     out: dict[str, dict[str, Any]] = {}
     storage = None
     for r in rows:
-        d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])[:10]
+        d = (
+            r["date"].isoformat()
+            if hasattr(r["date"], "isoformat")
+            else str(r["date"])[:10]
+        )
         oss_key = (r.get("json_oss_key") or "").strip()
         if not oss_key:
             continue
@@ -991,7 +996,9 @@ def _scene_analysis_zh(
     elif kind == "likely_rain":
         bits.append("前面有一定降雨，积水与降水相关的可能性较大")
     elif kind in ("persistent_water", "low_rain_persistent"):
-        bits.append("前面降雨不多，更像持续水面/洼地积水或灌溉泡田，不完全是一场暴雨造成")
+        bits.append(
+            "前面降雨不多，更像持续水面/洼地积水或灌溉泡田，不完全是一场暴雨造成"
+        )
     else:
         bits.append("降雨与明水面关系一般，需结合田间核实")
     return "；".join(bits) + "。"
@@ -1073,9 +1080,7 @@ def build_flood_evidence(
     # Overall analysis
     kinds = [e["kind"] for e in enriched]
     rainish = sum(1 for k in kinds if k in ("rain_driven", "likely_rain"))
-    persist = sum(
-        1 for k in kinds if k in ("persistent_water", "low_rain_persistent")
-    )
+    persist = sum(1 for k in kinds if k in ("persistent_water", "low_rain_persistent"))
     total_n = len(scenes_all)
     shown_n = len(enriched)
     parts = [
@@ -1092,9 +1097,7 @@ def build_flood_evidence(
     else:
         parts.append("有的像雨后积水，有的像持续水面，建议结合低洼地形与田间核实")
     wettest = enriched[0]
-    parts.append(
-        f"最湿一景 {wettest['date']}（湿指数≈{wettest.get('wet_mean')}）"
-    )
+    parts.append(f"最湿一景 {wettest['date']}（湿指数≈{wettest.get('wet_mean')}）")
     analysis = "；".join(parts) + "。"
 
     return {
@@ -1103,7 +1106,11 @@ def build_flood_evidence(
         "scenes": enriched,
         "analysis": analysis,
         "all_dates": [
-            {"date": s["date"], "wet_mean": s.get("wet_mean"), "ndvi_mean": s.get("ndvi_mean")}
+            {
+                "date": s["date"],
+                "wet_mean": s.get("wet_mean"),
+                "ndvi_mean": s.get("ndvi_mean"),
+            }
             for s in scenes_all
         ],
     }
@@ -1158,8 +1165,10 @@ def cache_media_images(
         for i, sc in enumerate(flood_evidence.get("scenes") or []):
             d = str(sc.get("date") or f"s{i}")[:10]
             media = sc.get("media") or {}
-            preview = media.get("preview_url") or media.get("rgb_url") or media.get(
-                "large_rgb_url"
+            preview = (
+                media.get("preview_url")
+                or media.get("rgb_url")
+                or media.get("large_rgb_url")
             )
             p = _save(f"flood_rgb_{d}", preview)
             if p:

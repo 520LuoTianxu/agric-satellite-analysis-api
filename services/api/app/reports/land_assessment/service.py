@@ -34,7 +34,6 @@ from app.reports.land_assessment.scoring import (
 )
 
 
-
 def assessment_pdf_filename(
     field_name: str | None,
     when: datetime | None = None,

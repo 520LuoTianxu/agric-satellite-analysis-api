@@ -124,7 +124,6 @@ def _pick_crop_suit(suit: dict[str, Any] | None, crop_key: str) -> dict[str, Any
     }
 
 
-
 def classify_ndvi_grade(ndvi: float) -> str:
     """Map scene-mean NDVI to 优/良/中/差."""
     if ndvi >= NDVI_GRADE_THRESHOLDS["优"]:
@@ -150,9 +149,7 @@ def compute_ndvi_grade_shares(
     for v in used:
         counts[classify_ndvi_grade(v)] += 1
     n = len(used)
-    pct = {
-        g: (round(counts[g] * 100.0 / n, 1) if n else 0.0) for g in NDVI_GRADE_ORDER
-    }
+    pct = {g: (round(counts[g] * 100.0 / n, 1) if n else 0.0) for g in NDVI_GRADE_ORDER}
     return {
         "n": n,
         "counts": counts,
@@ -214,7 +211,9 @@ def summarize_weather_history(
     period = wh.get("period_label") or ""
     bits: list[str] = []
     if years:
-        bits.append(f"覆盖 {min(years)}–{max(years)} 年" + (f"（{period}）" if period else ""))
+        bits.append(
+            f"覆盖 {min(years)}–{max(years)} 年" + (f"（{period}）" if period else "")
+        )
     if precip is not None:
         bits.append(f"生育期累计降水约 {float(precip):.0f} mm")
     if et0 is not None:
@@ -222,7 +221,9 @@ def summarize_weather_history(
     if precip is not None and et0 is not None:
         bal = float(precip) - float(et0)
         if bal >= 30:
-            bits.append(f"降水整体多于蒸散（盈约 {bal:.0f} mm），偏湿风险要结合土壤排水看")
+            bits.append(
+                f"降水整体多于蒸散（盈约 {bal:.0f} mm），偏湿风险要结合土壤排水看"
+            )
         elif bal <= -40:
             bits.append(f"蒸散明显大于降水（亏约 {-bal:.0f} mm），旺长期更怕卡脖旱")
         else:
