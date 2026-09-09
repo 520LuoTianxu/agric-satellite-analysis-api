@@ -958,6 +958,16 @@
     "colDate": "日期",
     "colAdmin": "行政区",
     "prevPage": "上一页",
-    "nextPage": "下一页"
+    "nextPage": "下一页",
+    "floodSevere": "重度洪涝",
+    "floodModerate": "中度洪涝",
+    "floodMild": "轻度洪涝",
+    "droughtSource": "干旱判定来源",
+    "droughtSourcePixels": "像元级",
+    "droughtSourceAvg": "场景均值",
+    "droughtSourceCache": "预聚合缓存",
+    "exportStats": "导出区划统计",
+    "exportWeak": "导出弱长势",
+    "exportFailed": "导出失败"
   }
 }

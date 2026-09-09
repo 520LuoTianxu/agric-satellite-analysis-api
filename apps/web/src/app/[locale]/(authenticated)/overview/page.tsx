@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useLocale, useTranslations } from "next-intl";
-import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Loader2 } from "lucide-react";
 import {
     agriApi,
     cropsApi,
@@ -17,7 +17,6 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { DROUGHT_CLASS_STYLE, FLOOD_CLASS_STYLE } from "@/lib/agri-heatmap";
 
@@ -95,23 +94,24 @@ function seasonWindow(months: number[]): { from: string; to: string } {
 
 function metricProp(metric: MapMetric): string {
     if (metric === "drought") return "drought_alert";
+    if (metric === "flood") return "flood_alert";
     return metric;
 }
 
-/** Step interpolate fill for a numeric property (0 → muted, high → accent). */
+/** Minimal choropleth: soft neutrals → gentle accent (no heavy dark fills). */
 function fillColorExpr(prop: string, highColor: string): unknown {
     return [
         "case",
         ["==", ["get", "has_data"], 0],
-        "#64748b",
+        "#e8eaed",
         [
             "interpolate",
             ["linear"],
             ["get", prop],
             0,
-            "#1e293b",
+            "#f3f4f6",
             1,
-            "#334155",
+            "#e5e7eb",
             5,
             highColor,
             20,
@@ -123,13 +123,13 @@ function fillColorExpr(prop: string, highColor: string): unknown {
 function metricHighColor(metric: MapMetric): string {
     switch (metric) {
         case "drought":
-            return DROUGHT_CLASS_STYLE.severe.color;
+            return "#fca5a5"; // soft rose
         case "flood":
-            return FLOOD_CLASS_STYLE.flood.color;
+            return "#93c5fd"; // soft blue
         case "weak_growth":
-            return "#ca8a04";
+            return "#fcd34d"; // soft amber
         case "parcel_count":
-            return "#22c55e";
+            return "#a7f3d0"; // soft mint
     }
 }
 
@@ -146,17 +146,17 @@ function StatBar({
 }) {
     const p = pct(count, total);
     return (
-        <div className="space-y-1">
-            <div className="flex justify-between text-xs">
-                <span className="flex items-center gap-1.5">
-                    <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: color }} />
-                    {label}
+        <div className="space-y-0.5">
+            <div className="flex justify-between text-[11px] leading-tight">
+                <span className="flex items-center gap-1 truncate">
+                    <span className="inline-block h-2 w-2 shrink-0 rounded-sm" style={{ background: color }} />
+                    <span className="truncate">{label}</span>
                 </span>
-                <span className="text-muted-foreground tabular-nums">
-                    {count} ({p}%)
+                <span className="shrink-0 pl-1 text-muted-foreground tabular-nums">
+                    {count}
                 </span>
             </div>
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
                 <div className="h-full rounded-full transition-all" style={{ width: `${p}%`, background: color }} />
             </div>
         </div>
@@ -192,9 +192,25 @@ export default function OverviewPage() {
     const statsRef = useRef<OverviewStats | null>(null);
     const metricRef = useRef<MapMetric>(metric);
     const onFeatureClickRef = useRef<(child: OverviewChild) => void>(() => {});
+    const popupLabelsRef = useRef({
+        parcels: "地块数",
+        areaMu: "面积(亩)",
+        drought: "干旱",
+        flood: "洪涝",
+        weakGrowth: "弱长势",
+        noData: "暂无统计",
+    });
 
     statsRef.current = stats;
     metricRef.current = metric;
+    popupLabelsRef.current = {
+        parcels: t("parcels"),
+        areaMu: t("areaMu"),
+        drought: t("drought"),
+        flood: t("flood"),
+        weakGrowth: t("weakGrowth"),
+        noData: t("noChildren"),
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -277,6 +293,34 @@ export default function OverviewPage() {
         void loadStats(drill, fromDate, toDate, crop);
     }, [drill, fromDate, toDate, crop, loadStats]);
 
+    const [exporting, setExporting] = useState(false);
+    const runExport = useCallback(
+        async (kind: "stats" | "weak") => {
+            setExporting(true);
+            try {
+                const opts = {
+                    level: drill.level,
+                    code: drill.code,
+                    name: drill.name,
+                    from: fromDate,
+                    to: toDate,
+                    crop: crop || undefined,
+                };
+                if (kind === "stats") await agriApi.overviewExportStatsCsv(opts);
+                else await agriApi.overviewExportWeakParcelsCsv(opts);
+            } catch (e: unknown) {
+                const msg =
+                    e && typeof e === "object" && "detail" in e
+                        ? String((e as { detail: unknown }).detail)
+                        : t("exportFailed");
+                setError(msg || t("exportFailed"));
+            } finally {
+                setExporting(false);
+            }
+        },
+        [drill, fromDate, toDate, crop, t],
+    );
+
     // Reset weak pagination when filters / drill change
     useEffect(() => {
         setWeakOffset(0);
@@ -330,7 +374,7 @@ export default function OverviewPage() {
                 {
                     id: "background",
                     type: "background" as const,
-                    paint: { "background-color": "#0b1220" },
+                    paint: { "background-color": "rgba(0,0,0,0)" },
                 },
             ],
         };
@@ -389,14 +433,55 @@ export default function OverviewPage() {
             if (match) onFeatureClickRef.current(match);
         });
 
-        map.on("mouseenter", "overview-fill", () => {
+        const popup = new maplibregl.Popup({
+            closeButton: false,
+            closeOnClick: false,
+            offset: 12,
+            className: "overview-hover-popup",
+            maxWidth: "240px",
+        });
+
+        const formatPopupHtml = (props: Record<string, unknown>) => {
+            const L = popupLabelsRef.current;
+            const name = String(props.name ?? props.adname ?? "—");
+            const has = Number(props.has_data) === 1;
+            const row = (label: string, value: string) =>
+                `<div style="display:flex;justify-content:space-between;gap:12px;line-height:1.45">` +
+                `<span style="color:#111827">${label}</span>` +
+                `<span style="color:#2563eb;font-variant-numeric:tabular-nums">${value}</span></div>`;
+            if (!has) {
+                return `<div style="font-weight:600;margin-bottom:4px;color:#111827">${name}</div>` +
+                    `<div style="color:#6b7280;font-size:12px">${L.noData}</div>`;
+            }
+            const parcels = Number(props.parcel_count ?? 0);
+            const area = Math.round(Number(props.area_mu ?? 0)).toLocaleString();
+            const drought = Number(props.drought_alert ?? props.drought_severe ?? 0);
+            const flood = Number(props.flood_alert ?? props.flood ?? 0);
+            const weak = Number(props.weak_growth ?? 0);
+            return (
+                `<div style="font-weight:600;margin-bottom:6px;color:#111827">${name}</div>` +
+                row(L.parcels, String(parcels)) +
+                row(L.areaMu, area) +
+                row(L.drought, String(drought)) +
+                row(L.flood, String(flood)) +
+                row(L.weakGrowth, String(weak))
+            );
+        };
+
+        map.on("mousemove", "overview-fill", (e) => {
             map.getCanvas().style.cursor = "pointer";
+            const f = e.features?.[0];
+            if (!f || !e.lngLat) return;
+            const props = (f.properties || {}) as Record<string, unknown>;
+            popup.setLngLat(e.lngLat).setHTML(formatPopupHtml(props)).addTo(map);
         });
         map.on("mouseleave", "overview-fill", () => {
             map.getCanvas().style.cursor = "";
+            popup.remove();
         });
 
         return () => {
+            popup.remove();
             ro.disconnect();
             setMapReady(false);
             map.remove();
@@ -455,9 +540,11 @@ export default function OverviewPage() {
                             ...props,
                             name,
                             parcel_count: child?.parcel_count ?? 0,
+                            area_mu: child?.area_mu ?? 0,
                             drought_severe: child?.drought_severe ?? 0,
                             drought_alert: child?.drought_alert ?? 0,
                             flood: child?.flood ?? 0,
+                            flood_alert: child?.flood_alert ?? child?.flood ?? 0,
                             weak_growth: child?.weak_growth ?? 0,
                             has_data: child ? 1 : 0,
                         },
@@ -480,6 +567,7 @@ export default function OverviewPage() {
                         (m.getSource("overview") as maplibregl.GeoJSONSource).setData(fc);
                         if (m.getLayer("overview-fill")) {
                             m.setPaintProperty("overview-fill", "fill-color", fillColorExpr(mProp, high) as never);
+                            m.setPaintProperty("overview-fill", "fill-opacity", 0.55);
                         }
                     } else {
                         m.addSource("overview", { type: "geojson", data: fc });
@@ -489,7 +577,7 @@ export default function OverviewPage() {
                             source: "overview",
                             paint: {
                                 "fill-color": fillColorExpr(mProp, high) as never,
-                                "fill-opacity": 0.65,
+                                "fill-opacity": 0.55,
                             },
                         });
                         m.addLayer({
@@ -497,8 +585,9 @@ export default function OverviewPage() {
                             type: "line",
                             source: "overview",
                             paint: {
-                                "line-color": "#e2e8f0",
-                                "line-width": 0.9,
+                                "line-color": "#94a3b8",
+                                "line-width": 0.6,
+                                "line-opacity": 0.85,
                             },
                         });
                         if (!m.getLayer("overview-label")) {
@@ -513,9 +602,9 @@ export default function OverviewPage() {
                                     "text-max-width": 8,
                                 },
                                 paint: {
-                                    "text-color": "#e2e8f0",
-                                    "text-halo-color": "#0b1220",
-                                    "text-halo-width": 1.2,
+                                    "text-color": "#64748b",
+                                    "text-halo-color": "rgba(255,255,255,0.9)",
+                                    "text-halo-width": 1.4,
                                 },
                             });
                         }
@@ -568,6 +657,7 @@ export default function OverviewPage() {
         const high = metricHighColor(metric);
         try {
             map.setPaintProperty("overview-fill", "fill-color", fillColorExpr(prop, high) as never);
+            map.setPaintProperty("overview-fill", "fill-opacity", 0.55);
         } catch {
             /* ignore */
         }
@@ -591,94 +681,76 @@ export default function OverviewPage() {
     const weakPages = Math.max(1, Math.ceil(weakTotal / WEAK_PAGE_SIZE));
 
     return (
-        <div className="flex h-[calc(100vh-0px)] min-h-0 flex-1 flex-col gap-3 p-4 lg:p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                    <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
-                    <p className="text-sm text-muted-foreground">{t("subtitle")}</p>
-                </div>
+        <div className="flex h-[calc(100vh-0px)] min-h-0 flex-1 flex-col gap-1.5 p-2 lg:p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <h1 className="text-base font-semibold tracking-tight lg:text-lg">{t("title")}</h1>
             </div>
 
-            {/* Toolbar: date + crop */}
-            <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card/40 p-3">
-                <div className="flex flex-wrap items-end gap-2">
-                    <div className="space-y-1">
-                        <Label htmlFor="overview-from" className="text-xs text-muted-foreground">
-                            {t("dateFrom")}
-                        </Label>
-                        <Input
-                            id="overview-from"
-                            type="date"
-                            className="h-9 w-[140px]"
-                            value={fromDate}
-                            onChange={(e) => {
-                                setPreset("custom");
-                                setFromDate(e.target.value);
-                            }}
-                        />
-                    </div>
-                    <div className="space-y-1">
-                        <Label htmlFor="overview-to" className="text-xs text-muted-foreground">
-                            {t("dateTo")}
-                        </Label>
-                        <Input
-                            id="overview-to"
-                            type="date"
-                            className="h-9 w-[140px]"
-                            value={toDate}
-                            onChange={(e) => {
-                                setPreset("custom");
-                                setToDate(e.target.value);
-                            }}
-                        />
-                    </div>
-                    <div className="flex flex-wrap gap-1 pb-0.5">
-                        {(
-                            [
-                                ["30d", t("preset30d")],
-                                ["60d", t("preset60d")],
-                                ["season", t("presetSeason")],
-                            ] as const
-                        ).map(([key, label]) => (
-                            <Button
-                                key={key}
-                                type="button"
-                                size="sm"
-                                variant={preset === key ? "default" : "outline"}
-                                className="h-8"
-                                onClick={() => applyPreset(key)}
-                            >
-                                {label}
-                            </Button>
-                        ))}
-                    </div>
-                </div>
-                <div className="space-y-1 min-w-[200px]">
-                    <Label htmlFor="overview-crop" className="text-xs text-muted-foreground">
-                        {t("cropPhenology")}
-                    </Label>
-                    <select
-                        id="overview-crop"
-                        className={cn(
-                            "flex h-9 w-full min-w-[200px] rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm",
-                            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                        )}
-                        value={crop}
-                        onChange={(e) => setCrop(e.target.value)}
+            {/* Toolbar: date + crop (compact) */}
+            <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-card/40 px-2 py-1">
+                <Input
+                    id="overview-from"
+                    type="date"
+                    aria-label={t("dateFrom")}
+                    className="h-7 w-[118px] px-1.5 text-xs"
+                    value={fromDate}
+                    onChange={(e) => {
+                        setPreset("custom");
+                        setFromDate(e.target.value);
+                    }}
+                />
+                <span className="text-[11px] text-muted-foreground">→</span>
+                <Input
+                    id="overview-to"
+                    type="date"
+                    aria-label={t("dateTo")}
+                    className="h-7 w-[118px] px-1.5 text-xs"
+                    value={toDate}
+                    onChange={(e) => {
+                        setPreset("custom");
+                        setToDate(e.target.value);
+                    }}
+                />
+                {(
+                    [
+                        ["30d", t("preset30d")],
+                        ["60d", t("preset60d")],
+                        ["season", t("presetSeason")],
+                    ] as const
+                ).map(([key, label]) => (
+                    <Button
+                        key={key}
+                        type="button"
+                        size="sm"
+                        variant={preset === key ? "default" : "outline"}
+                        className="h-7 px-2 text-xs"
+                        onClick={() => applyPreset(key)}
                     >
-                        <option value="">{t("cropDefault")}</option>
-                        {crops.map((c) => (
-                            <option key={c.key} value={c.key}>
-                                {cropLabel(c)}
-                            </option>
-                        ))}
-                    </select>
-                    <p className="text-[11px] text-muted-foreground">{t("cropHint")}</p>
-                </div>
+                        {label}
+                    </Button>
+                ))}
+                <select
+                    id="overview-crop"
+                    aria-label={t("cropPhenology")}
+                    title={t("cropHint")}
+                    className={cn(
+                        "flex h-7 min-w-[120px] max-w-[160px] rounded-md border border-input bg-background px-1.5 text-xs shadow-sm",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    )}
+                    value={crop}
+                    onChange={(e) => setCrop(e.target.value)}
+                >
+                    <option value="">{t("cropDefault")}</option>
+                    {crops.map((c) => (
+                        <option key={c.key} value={c.key}>
+                            {cropLabel(c)}
+                        </option>
+                    ))}
+                </select>
             </div>
 
             {/* Breadcrumb */}
-            <nav className="flex flex-wrap items-center gap-1 text-sm">
+            <nav className="flex flex-wrap items-center gap-0.5 text-xs">
                 {path.map((node, i) => {
                     const isLast = i === path.length - 1;
                     return (
@@ -712,39 +784,58 @@ export default function OverviewPage() {
                 })}
             </nav>
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[1fr_340px]">
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_200px]">
                 {/* Map + children list + weak table */}
-                <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+                <div className="flex min-h-0 flex-col gap-1.5 overflow-hidden">
                     {/* Metric toggle */}
-                    <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs text-muted-foreground">{t("mapMetric")}:</span>
-                        <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap items-center gap-1">
+                        <div className="flex flex-wrap gap-0.5">
                             {metricButtons.map((b) => (
                                 <Button
                                     key={b.key}
                                     type="button"
                                     size="sm"
                                     variant={metric === b.key ? "default" : "outline"}
-                                    className="h-8"
+                                    className="h-6 px-2 text-[11px]"
                                     onClick={() => setMetric(b.key)}
                                 >
                                     {b.label}
                                 </Button>
                             ))}
                         </div>
-                        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
-                            <span>{t("legendLow")}</span>
+                        <div className="ml-auto flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
                             <span
-                                className="inline-block h-2.5 w-24 rounded-sm"
+                                className="inline-block h-1.5 w-14 rounded-sm"
                                 style={{
-                                    background: `linear-gradient(90deg, #1e293b, ${legendColor})`,
+                                    background: `linear-gradient(90deg, #f3f4f6, ${legendColor})`,
                                 }}
+                                title={`${t("legendLow")} → ${t("legendHigh")}`}
                             />
-                            <span>{t("legendHigh")}</span>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-1.5 text-[11px]"
+                                disabled={exporting || loading}
+                                onClick={() => void runExport("stats")}
+                            >
+                                <Download className="h-3 w-3" />
+                            </Button>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-1.5 text-[11px]"
+                                disabled={exporting || loading}
+                                onClick={() => void runExport("weak")}
+                            >
+                                <Download className="mr-0.5 h-3 w-3" />
+                                <span className="sr-only sm:not-sr-only">{t("exportWeak")}</span>
+                            </Button>
                         </div>
                     </div>
 
-                    <div className="relative h-[min(52vh,560px)] min-h-[360px] w-full overflow-hidden rounded-lg border bg-[#0b1220]">
+                    <div className="relative min-h-0 w-full flex-1 overflow-hidden rounded-md border border-border/50 bg-transparent">
                         <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
                         {loading && (
                             <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/40">
@@ -761,11 +852,11 @@ export default function OverviewPage() {
                         </div>
                     </div>
 
-                    <Card className="max-h-48 overflow-hidden">
-                        <CardHeader className="py-3 px-4">
-                            <CardTitle className="text-sm font-medium">{t("children")}</CardTitle>
+                    <Card className="max-h-28 shrink-0 overflow-hidden">
+                        <CardHeader className="px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{t("children")}</CardTitle>
                         </CardHeader>
-                        <CardContent className="overflow-y-auto px-2 pb-2 pt-0 max-h-32">
+                        <CardContent className="max-h-20 overflow-y-auto px-1 pb-1.5 pt-0">
                             {!stats?.children?.length ? (
                                 <p className="px-2 text-xs text-muted-foreground">{t("noChildren")}</p>
                             ) : (
@@ -780,7 +871,7 @@ export default function OverviewPage() {
                                                 <span className="truncate font-medium">{c.name}</span>
                                                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
                                                     {c.parcel_count} · 旱{c.drought_alert ?? c.drought_severe} · 涝
-                                                    {c.flood} · 弱{c.weak_growth}
+                                                    {c.flood_alert ?? c.flood} · 弱{c.weak_growth}
                                                 </span>
                                             </Button>
                                         </li>
@@ -792,8 +883,8 @@ export default function OverviewPage() {
 
                     {/* Weak-growth parcels table */}
                     <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 py-3 px-4">
-                            <CardTitle className="text-sm font-medium">{t("weakParcelsTitle")}</CardTitle>
+                        <CardHeader className="flex flex-row items-center justify-between space-y-0 px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{t("weakParcelsTitle")}</CardTitle>
                             <span className="text-xs text-muted-foreground tabular-nums">
                                 {t("weakParcelsTotal", { total: weakTotal })}
                             </span>
@@ -883,18 +974,18 @@ export default function OverviewPage() {
                 </div>
 
                 {/* Right panel cards */}
-                <div className="flex flex-col gap-3 overflow-y-auto">
+                <div className="flex flex-col gap-1.5 overflow-y-auto text-xs">
                     {error && (
                         <Card className="border-destructive/40">
-                            <CardContent className="py-3 text-sm text-destructive">{error}</CardContent>
+                            <CardContent className="px-2 py-1.5 text-xs text-destructive">{error}</CardContent>
                         </Card>
                     )}
 
                     <Card>
-                        <CardHeader className="py-3 px-4">
-                            <CardTitle className="text-sm">{stats?.region.name ?? t("title")}</CardTitle>
+                        <CardHeader className="px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{stats?.region.name ?? t("title")}</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-1 px-4 pb-4 text-sm">
+                        <CardContent className="space-y-0.5 px-2 pb-2 text-xs">
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">{t("parcels")}</span>
                                 <span className="font-semibold tabular-nums">{total}</span>
@@ -915,10 +1006,10 @@ export default function OverviewPage() {
                     </Card>
 
                     <Card>
-                        <CardHeader className="py-3 px-4">
-                            <CardTitle className="text-sm">{t("drought")}</CardTitle>
+                        <CardHeader className="px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{t("drought")}</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-2.5 px-4 pb-4">
+                        <CardContent className="space-y-1.5 px-2 pb-2">
                             <StatBar
                                 label={t("severe")}
                                 color={DROUGHT_CLASS_STYLE.severe.color}
@@ -949,35 +1040,51 @@ export default function OverviewPage() {
                                 count={stats?.drought.unknown ?? 0}
                                 total={total}
                             />
+                            {stats?.filters?.drought_source ? (
+                                <p className="pt-1 text-[11px] text-muted-foreground">
+                                    {t("droughtSource")}:{" "}
+                                    {stats.filters.drought_source === "pixels"
+                                        ? t("droughtSourcePixels")
+                                        : stats.filters.drought_source === "cache"
+                                          ? t("droughtSourceCache")
+                                          : t("droughtSourceAvg")}
+                                </p>
+                            ) : null}
                         </CardContent>
                     </Card>
 
                     <Card>
-                        <CardHeader className="py-3 px-4">
-                            <CardTitle className="text-sm">{t("flood")}</CardTitle>
+                        <CardHeader className="px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{t("flood")}</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-2.5 px-4 pb-4">
+                        <CardContent className="space-y-1.5 px-2 pb-2">
                             <StatBar
-                                label={t("floodClass")}
-                                color={FLOOD_CLASS_STYLE.flood.color}
-                                count={stats?.flood.flood ?? 0}
+                                label={t("floodSevere")}
+                                color={FLOOD_CLASS_STYLE.flood_severe.color}
+                                count={stats?.flood.flood_severe ?? 0}
                                 total={total}
                             />
                             <StatBar
-                                label={t("wet")}
-                                color={FLOOD_CLASS_STYLE.wet.color}
-                                count={stats?.flood.wet ?? 0}
+                                label={t("floodModerate")}
+                                color={FLOOD_CLASS_STYLE.flood_moderate.color}
+                                count={stats?.flood.flood_moderate ?? 0}
+                                total={total}
+                            />
+                            <StatBar
+                                label={t("floodMild")}
+                                color={FLOOD_CLASS_STYLE.flood_mild.color}
+                                count={stats?.flood.flood_mild ?? stats?.flood.wet ?? 0}
                                 total={total}
                             />
                             <StatBar
                                 label={t("dry")}
-                                color="#86efac"
+                                color="#bbf7d0"
                                 count={stats?.flood.dry ?? 0}
                                 total={total}
                             />
                             <StatBar
                                 label={t("unknown")}
-                                color="#9ca3af"
+                                color="#d1d5db"
                                 count={stats?.flood.unknown ?? 0}
                                 total={total}
                             />
@@ -985,10 +1092,10 @@ export default function OverviewPage() {
                     </Card>
 
                     <Card>
-                        <CardHeader className="py-3 px-4">
-                            <CardTitle className="text-sm">{t("weakGrowth")}</CardTitle>
+                        <CardHeader className="px-2 py-1.5">
+                            <CardTitle className="text-xs font-medium">{t("weakGrowth")}</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-2 px-4 pb-4 text-sm">
+                        <CardContent className="space-y-1 px-2 pb-2 text-xs">
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">{t("parcels")}</span>
                                 <span className="font-semibold tabular-nums">

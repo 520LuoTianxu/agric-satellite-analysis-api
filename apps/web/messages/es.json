@@ -958,6 +958,16 @@
         "colDate": "Fecha",
         "colAdmin": "Admin",
         "prevPage": "Ant.",
-        "nextPage": "Sig."
+        "nextPage": "Sig.",
+    "floodSevere": "Inundación severa",
+    "floodModerate": "Inundación moderada",
+    "floodMild": "Inundación leve",
+    "droughtSource": "Fuente de sequía",
+    "droughtSourcePixels": "nivel de píxel",
+    "droughtSourceAvg": "promedio de escena",
+    "droughtSourceCache": "caché preagregada",
+    "exportStats": "Exportar estadísticas",
+    "exportWeak": "Exportar parcelas débiles",
+    "exportFailed": "Error al exportar"
     }
 }

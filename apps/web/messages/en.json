@@ -958,6 +958,16 @@
     "colDate": "Date",
     "colAdmin": "Admin",
     "prevPage": "Prev",
-    "nextPage": "Next"
+    "nextPage": "Next",
+    "floodSevere": "Severe flood",
+    "floodModerate": "Moderate flood",
+    "floodMild": "Mild flood",
+    "droughtSource": "Drought source",
+    "droughtSourcePixels": "pixel-level",
+    "droughtSourceAvg": "scene average",
+    "droughtSourceCache": "pre-agg cache",
+    "exportStats": "Export stats CSV",
+    "exportWeak": "Export weak parcels",
+    "exportFailed": "Export failed"
   }
 }
