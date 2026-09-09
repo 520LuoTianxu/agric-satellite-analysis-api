@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             "light": result["light"],
             "one_liner": result["one_liner"],
             "dimensions": result["scorecard"]["dimensions"],
+            "flood_evidence": result.get("flood_evidence"),
+            "open_water_dates": (result.get("rs") or {}).get("open_water_dates"),
             "out_path": result["out_path"],
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))

@@ -417,6 +417,141 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     return summary, stress
 
 
+def load_weather_history(
+    session: Session,
+    field_id: uuid.UUID,
+    season_months: set[int] | list[int] | None = None,
+    *,
+    lookback_days: int = 400,
+) -> dict[str, Any]:
+    """Multi-month / crop-season precip+temp aggregates from WeatherDaily.
+
+    Used for PDF narrative (not just ~30d summary). Returns empty dict if no rows.
+    """
+    season_months = set(season_months or {6, 7, 8, 9})
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=lookback_days)
+    rows = (
+        session.execute(
+            select(WeatherDaily)
+            .where(
+                WeatherDaily.field_id == field_id,
+                WeatherDaily.date >= start,
+            )
+            .order_by(WeatherDaily.date)
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        rows = (
+            session.execute(
+                select(WeatherDaily)
+                .where(WeatherDaily.field_id == field_id)
+                .order_by(WeatherDaily.date.desc())
+                .limit(lookback_days)
+            )
+            .scalars()
+            .all()
+        )
+        rows = list(reversed(rows))
+    if not rows:
+        return {}
+
+    months: dict[str, dict[str, Any]] = {}
+    season_precip = 0.0
+    season_et0 = 0.0
+    season_heat = 0
+    years: set[int] = set()
+    dry_run = 0
+    longest_dry = 0
+    season_days = 0
+
+    for r in rows:
+        d = r.date
+        y, m = d.year, d.month
+        key = f"{y:04d}-{m:02d}"
+        precip = float(r.precipitation_sum or 0)
+        et0 = float(r.et0_fao_mm or 0)
+        tmean = (
+            float(r.temperature_2m_mean) if r.temperature_2m_mean is not None else None
+        )
+        tmax = float(r.temperature_2m_max) if r.temperature_2m_max is not None else None
+        bucket = months.setdefault(
+            key,
+            {
+                "year": y,
+                "month": m,
+                "precip_mm": 0.0,
+                "et0_mm": 0.0,
+                "heat_days": 0,
+                "tmean_sum": 0.0,
+                "tmean_n": 0,
+                "in_season": m in season_months,
+            },
+        )
+        bucket["precip_mm"] += precip
+        bucket["et0_mm"] += et0
+        if tmax is not None and tmax >= 33:
+            bucket["heat_days"] += 1
+        if tmean is not None:
+            bucket["tmean_sum"] += tmean
+            bucket["tmean_n"] += 1
+
+        if m in season_months:
+            years.add(y)
+            season_days += 1
+            season_precip += precip
+            season_et0 += et0
+            if tmax is not None and tmax >= 33:
+                season_heat += 1
+            if precip < 1.0:
+                dry_run += 1
+                longest_dry = max(longest_dry, dry_run)
+            else:
+                dry_run = 0
+        else:
+            dry_run = 0
+
+    month_list = []
+    for key in sorted(months):
+        b = months[key]
+        month_list.append(
+            {
+                "ym": key,
+                "year": b["year"],
+                "month": b["month"],
+                "precip_mm": round(b["precip_mm"], 1),
+                "et0_mm": round(b["et0_mm"], 1),
+                "heat_days": int(b["heat_days"]),
+                "avg_temp": (
+                    round(b["tmean_sum"] / b["tmean_n"], 1) if b["tmean_n"] else None
+                ),
+                "in_season": bool(b["in_season"]),
+            }
+        )
+
+    season_totals = [m for m in month_list if m["in_season"]]
+    sm_sorted = sorted(season_months)
+    period_label = f"{sm_sorted[0]}–{sm_sorted[-1]}月生育期" if sm_sorted else ""
+
+    return {
+        "period_start": rows[0].date.isoformat(),
+        "period_end": rows[-1].date.isoformat(),
+        "period_label": period_label,
+        "season_months": sm_sorted,
+        "years_covered": sorted(years),
+        "season_days": season_days,
+        "season_precip_mm": round(season_precip, 1),
+        "season_et0_mm": round(season_et0, 1),
+        "season_heat_days": int(season_heat),
+        "longest_dry_spell_days": int(longest_dry),
+        "months": month_list,
+        "season_totals": season_totals,
+        "n_daily_rows": len(rows),
+    }
+
+
 def load_suitability_sync(
     session: Session,
     field_id: uuid.UUID,
@@ -562,6 +697,9 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     crop_key = normalize_crop_key(field.crop_type) or "corn"
     season = get_crop_season(crop_key)
     crop_label = f"{crop_name_zh(crop_key)}（{season.label_zh}）"
+    weather_history = load_weather_history(
+        session, field_id, season.season_months, lookback_days=450
+    )
 
     suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
 
@@ -593,6 +731,7 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         "soil": soil,
         "weather_summary": wsum,
         "weather_stress": wstress,
+        "weather_history": weather_history,
         "suitability": suit,
     }
 
@@ -619,6 +758,11 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     wstress = (
         json.loads((data_dir / "weather_stress.json").read_text(encoding="utf-8"))
         if (data_dir / "weather_stress.json").exists()
+        else {}
+    )
+    whist = (
+        json.loads((data_dir / "weather_history.json").read_text(encoding="utf-8"))
+        if (data_dir / "weather_history.json").exists()
         else {}
     )
     indices: list[dict] = []
@@ -659,5 +803,392 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
         "soil": soil,
         "weather_summary": wsum,
         "weather_stress": wstress,
+        "weather_history": whist,
         "suitability": suit,
     }
+
+
+# Cap flood-evidence satellite previews shown in PDF / payload.
+FLOOD_EVIDENCE_MAX_SCENES = 6
+
+
+def load_oss_media_for_dates(
+    session: Session,
+    land_id: str,
+    dates: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Load OSS preview media URLs for land_id + dates via json_oss_key.
+
+    Returns date -> {rgb_url, large_rgb_url, heatmap_url, s2_heatmap_url, json_oss_key}.
+    Prefers rgb_url, then large_rgb_url; heatmap optional.
+    """
+    if not land_id or not dates:
+        return {}
+    uniq = sorted({str(d)[:10] for d in dates if d})
+    if not uniq:
+        return {}
+    params: dict[str, Any] = {"land_id": land_id}
+    placeholders: list[str] = []
+    for i, d in enumerate(uniq):
+        key = f"d{i}"
+        params[key] = d
+        placeholders.append(f"CAST(:{key} AS date)")
+    sql = f"""
+        SELECT date, json_oss_key
+        FROM agri.parcel_scene_products
+        WHERE land_id = :land_id AND sensor = 'S2'
+          AND date IN ({", ".join(placeholders)})
+          AND json_oss_key IS NOT NULL AND json_oss_key <> ''
+        ORDER BY date
+    """
+    try:
+        rows = session.execute(text(sql), params).mappings().all()
+    except Exception:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    storage = None
+    for r in rows:
+        d = (
+            r["date"].isoformat()
+            if hasattr(r["date"], "isoformat")
+            else str(r["date"])[:10]
+        )
+        oss_key = (r.get("json_oss_key") or "").strip()
+        if not oss_key:
+            continue
+        entry: dict[str, Any] = {
+            "json_oss_key": oss_key,
+            "rgb_url": None,
+            "large_rgb_url": None,
+            "heatmap_url": None,
+            "s2_heatmap_url": None,
+        }
+        try:
+            if storage is None:
+                from app.core.storage import get_parcel_product_storage
+
+                storage = get_parcel_product_storage()
+            raw = storage.get_bytes(oss_key)
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                for k in ("rgb_url", "large_rgb_url", "heatmap_url", "s2_heatmap_url"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and v.strip():
+                        entry[k] = v.strip()
+                if not entry["heatmap_url"] and entry["s2_heatmap_url"]:
+                    entry["heatmap_url"] = entry["s2_heatmap_url"]
+        except Exception:
+            # Keep key even if fetch fails — caller may skip image
+            pass
+        out[d] = entry
+    return out
+
+
+def load_daily_precipitation(
+    session: Session,
+    field_id: uuid.UUID,
+    start: Any,
+    end: Any,
+) -> list[dict[str, Any]]:
+    """Load daily precipitation_sum for field between start and end (inclusive)."""
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start[:10]).date()
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end[:10]).date()
+    rows = (
+        session.execute(
+            select(WeatherDaily)
+            .where(
+                WeatherDaily.field_id == field_id,
+                WeatherDaily.date >= start,
+                WeatherDaily.date <= end,
+            )
+            .order_by(WeatherDaily.date)
+        )
+        .scalars()
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = r.date.isoformat() if hasattr(r.date, "isoformat") else str(r.date)[:10]
+        out.append(
+            {
+                "date": d,
+                "precipitation_sum": round(float(r.precipitation_sum or 0), 2),
+            }
+        )
+    return out
+
+
+def _precip_window_summary(
+    series: list[dict[str, Any]],
+    scene_date: str,
+) -> dict[str, Any]:
+    """Summarize precip for [scene-15d, scene-1d] plus optional scene-day."""
+    scene = datetime.fromisoformat(scene_date[:10]).date()
+    prior = [
+        r
+        for r in series
+        if (scene - timedelta(days=15))
+        <= datetime.fromisoformat(r["date"][:10]).date()
+        <= (scene - timedelta(days=1))
+    ]
+    scene_day = next((r for r in series if r["date"][:10] == scene.isoformat()), None)
+    amounts = [float(r["precipitation_sum"] or 0) for r in prior]
+    total = round(sum(amounts), 1) if amounts else 0.0
+    peak_mm = round(max(amounts), 1) if amounts else 0.0
+    peak_date = None
+    if amounts:
+        peak_date = prior[int(max(range(len(amounts)), key=lambda i: amounts[i]))][
+            "date"
+        ]
+    rainy_days = sum(1 for a in amounts if a >= 1.0)
+    heavy_days = sum(1 for a in amounts if a >= 20.0)
+    return {
+        "window_start": (scene - timedelta(days=15)).isoformat(),
+        "window_end": (scene - timedelta(days=1)).isoformat(),
+        "days": prior,
+        "cumulative_mm": total,
+        "peak_mm": peak_mm,
+        "peak_date": peak_date,
+        "rainy_days_ge1mm": rainy_days,
+        "heavy_days_ge20mm": heavy_days,
+        "scene_day_mm": (
+            round(float(scene_day["precipitation_sum"] or 0), 2) if scene_day else None
+        ),
+        "n_days_with_data": len(prior),
+    }
+
+
+def _classify_flood_scene(wet_mean: float, precip: dict[str, Any]) -> str:
+    cum = float(precip.get("cumulative_mm") or 0)
+    peak = float(precip.get("peak_mm") or 0)
+    heavy = int(precip.get("heavy_days_ge20mm") or 0)
+    if cum >= 60 or peak >= 30 or heavy >= 1:
+        return "rain_driven"
+    if cum >= 25 or peak >= 15:
+        return "likely_rain"
+    if wet_mean >= 0.25 and cum < 15:
+        return "persistent_water"
+    if cum < 10:
+        return "low_rain_persistent"
+    return "mixed"
+
+
+def _scene_analysis_zh(
+    scene_date: str,
+    wet_mean: float,
+    precip: dict[str, Any],
+    kind: str,
+) -> str:
+    cum = precip.get("cumulative_mm") or 0
+    peak = precip.get("peak_mm") or 0
+    peak_d = precip.get("peak_date") or "—"
+    n = precip.get("n_days_with_data") or 0
+    bits = [
+        f"{scene_date} 见明水面（湿指数均≈{wet_mean:.3f}）",
+        f"前15日累计降雨约 {cum} mm（有数据 {n} 天）",
+        f"峰值日 {peak_d} 约 {peak} mm",
+    ]
+    if kind == "rain_driven":
+        bits.append("前面有明显大雨，更像雨后积水/短时涝渍")
+    elif kind == "likely_rain":
+        bits.append("前面有一定降雨，积水与降水相关的可能性较大")
+    elif kind in ("persistent_water", "low_rain_persistent"):
+        bits.append(
+            "前面降雨不多，更像持续水面/洼地积水或灌溉泡田，不完全是一场暴雨造成"
+        )
+    else:
+        bits.append("降雨与明水面关系一般，需结合田间核实")
+    return "；".join(bits) + "。"
+
+
+def build_flood_evidence(
+    session: Session | None,
+    *,
+    field_id: uuid.UUID | str | None,
+    land_id: str | None,
+    open_water_dates: list[dict[str, Any]] | None,
+    max_scenes: int = FLOOD_EVIDENCE_MAX_SCENES,
+) -> dict[str, Any] | None:
+    """Build structured flood-evidence payload (dates, media, precip, analysis).
+
+    Returns None when there is no hard open-water evidence.
+    """
+    scenes_all = list(open_water_dates or [])
+    if not scenes_all:
+        return None
+
+    selected = scenes_all[: max(1, int(max_scenes))]
+    media_by_date: dict[str, dict[str, Any]] = {}
+    if session is not None and land_id:
+        media_by_date = load_oss_media_for_dates(
+            session, land_id, [s["date"] for s in selected]
+        )
+
+    # Load precip spanning earliest window through latest scene day
+    precip_by_scene: dict[str, dict[str, Any]] = {}
+    if session is not None and field_id is not None:
+        fid = uuid.UUID(str(field_id))
+        dates = [datetime.fromisoformat(s["date"][:10]).date() for s in selected]
+        lo = min(dates) - timedelta(days=15)
+        hi = max(dates)
+        series = load_daily_precipitation(session, fid, lo, hi)
+        for s in selected:
+            precip_by_scene[s["date"]] = _precip_window_summary(series, s["date"])
+
+    enriched: list[dict[str, Any]] = []
+    for s in selected:
+        d = s["date"]
+        wet = float(s.get("wet_mean") or 0)
+        precip = precip_by_scene.get(d) or {
+            "cumulative_mm": 0,
+            "peak_mm": 0,
+            "peak_date": None,
+            "n_days_with_data": 0,
+            "days": [],
+            "heavy_days_ge20mm": 0,
+            "rainy_days_ge1mm": 0,
+            "scene_day_mm": None,
+            "window_start": None,
+            "window_end": None,
+        }
+        kind = _classify_flood_scene(wet, precip)
+        media = media_by_date.get(d) or {}
+        preview = media.get("rgb_url") or media.get("large_rgb_url")
+        enriched.append(
+            {
+                "date": d,
+                "wet_mean": s.get("wet_mean"),
+                "ndvi_mean": s.get("ndvi_mean"),
+                "kind": kind,
+                "analysis": _scene_analysis_zh(d, wet, precip, kind),
+                "precip_prior_15d": precip,
+                "media": {
+                    "rgb_url": media.get("rgb_url"),
+                    "large_rgb_url": media.get("large_rgb_url"),
+                    "heatmap_url": media.get("heatmap_url"),
+                    "s2_heatmap_url": media.get("s2_heatmap_url"),
+                    "preview_url": preview,
+                    "json_oss_key": media.get("json_oss_key"),
+                    "has_oss": bool(media.get("json_oss_key")),
+                },
+            }
+        )
+
+    # Overall analysis
+    kinds = [e["kind"] for e in enriched]
+    rainish = sum(1 for k in kinds if k in ("rain_driven", "likely_rain"))
+    persist = sum(1 for k in kinds if k in ("persistent_water", "low_rain_persistent"))
+    total_n = len(scenes_all)
+    shown_n = len(enriched)
+    parts = [
+        f"卫星在生育期内共见明水面 {total_n} 景",
+    ]
+    if shown_n < total_n:
+        parts.append(f"本报告按湿指数挑出最湿的 {shown_n} 景展示影像与雨前降水")
+    else:
+        parts.append("以下逐景对照前15日降水")
+    if rainish >= max(1, shown_n // 2):
+        parts.append("多数场景前有较明显降雨，更像雨后积水/短时涝渍")
+    elif persist >= max(1, shown_n // 2):
+        parts.append("多数场景前降雨不多，更像持续水面或洼地积水，不完全是暴雨造成")
+    else:
+        parts.append("有的像雨后积水，有的像持续水面，建议结合低洼地形与田间核实")
+    wettest = enriched[0]
+    parts.append(f"最湿一景 {wettest['date']}（湿指数≈{wettest.get('wet_mean')}）")
+    analysis = "；".join(parts) + "。"
+
+    return {
+        "absolute_open_water_scenes": total_n,
+        "selected_count": shown_n,
+        "scenes": enriched,
+        "analysis": analysis,
+        "all_dates": [
+            {
+                "date": s["date"],
+                "wet_mean": s.get("wet_mean"),
+                "ndvi_mean": s.get("ndvi_mean"),
+            }
+            for s in scenes_all
+        ],
+    }
+
+
+def download_url_bytes(url: str, *, timeout: float = 25.0) -> bytes | None:
+    """Download public HTTP(S) image/bytes; return None on failure."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "OpenFarm-land-assessment/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return resp.read()
+    except Exception:
+        return None
+
+
+def cache_media_images(
+    flood_evidence: dict[str, Any] | None,
+    out_dir: Path,
+    *,
+    also_stage_media: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Path]:
+    """Download rgb/heatmap previews to out_dir; return logical-name -> path."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+
+    def _save(tag: str, url: str | None) -> Path | None:
+        if not url:
+            return None
+        data = download_url_bytes(url)
+        if not data:
+            return None
+        # sniff extension
+        ext = ".png"
+        if data[:3] == b"\xff\xd8\xff":
+            ext = ".jpg"
+        elif data[:4] == b"RIFF":
+            ext = ".webp"
+        path = out_dir / f"{tag}{ext}"
+        path.write_bytes(data)
+        return path
+
+    if flood_evidence:
+        for i, sc in enumerate(flood_evidence.get("scenes") or []):
+            d = str(sc.get("date") or f"s{i}")[:10]
+            media = sc.get("media") or {}
+            preview = (
+                media.get("preview_url")
+                or media.get("rgb_url")
+                or media.get("large_rgb_url")
+            )
+            p = _save(f"flood_rgb_{d}", preview)
+            if p:
+                written[f"flood_rgb_{d}"] = p
+                sc.setdefault("media", {})["local_rgb_path"] = str(p)
+            hp = media.get("heatmap_url") or media.get("s2_heatmap_url")
+            hp_path = _save(f"flood_hm_{d}", hp)
+            if hp_path:
+                written[f"flood_hm_{d}"] = hp_path
+                sc.setdefault("media", {})["local_heatmap_path"] = str(hp_path)
+
+    if also_stage_media:
+        for d, media in also_stage_media.items():
+            preview = media.get("rgb_url") or media.get("large_rgb_url")
+            p = _save(f"stage_rgb_{d}", preview)
+            if p:
+                written[f"stage_rgb_{d}"] = p
+            hp = media.get("heatmap_url") or media.get("s2_heatmap_url")
+            hp_path = _save(f"stage_hm_{d}", hp)
+            if hp_path:
+                written[f"stage_hm_{d}"] = hp_path
+
+    return written

@@ -877,6 +877,7 @@
         "pickDate": "Seleccione una fecha en la curva para cargar el mapa de calor",
         "pixelsMeta": " · {pixels} píxeles",
         "meanMeta": " · media≈{mean}",
+        "cloudCover": "nubes {percent}%",
         "refreshComplete": "Actualización de teledetección completa; escenas recargadas",
         "progressBridge": "Escribiendo agri lonlat…",
         "progressCounts": "Completado {done}/{total} (en curso {running}, en cola {pending})"

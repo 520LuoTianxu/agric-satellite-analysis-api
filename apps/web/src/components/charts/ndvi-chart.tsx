@@ -9,6 +9,7 @@ import {
     TooltipComponent,
     LegendComponent,
     MarkLineComponent,
+    MarkAreaComponent,
     DataZoomComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
@@ -35,9 +36,20 @@ echarts.use([
     TooltipComponent,
     LegendComponent,
     MarkLineComponent,
+    MarkAreaComponent,
     DataZoomComponent,
     CanvasRenderer,
 ]);
+
+export type GrowthStageBand = {
+    name: string;
+    /** Inclusive start YYYY-MM-DD (or year-agnostic applied per year) */
+    startMonth: number;
+    startDay?: number;
+    endMonth: number;
+    endDay?: number;
+    color?: string;
+};
 
 interface NdviChartProps {
     stats: FieldStat[];
@@ -53,6 +65,15 @@ interface NdviChartProps {
     weatherData?: WeatherDaily[];
     /** Whether to show weather overlay (default false) */
     showWeatherOverlay?: boolean;
+    /** Crop season months (1-12) — soft shade */
+    seasonMonths?: number[];
+    /** Peak months — stronger shade */
+    peakMonths?: number[];
+    /** Phenology stage bands for markArea */
+    stageBands?: GrowthStageBand[];
+    /** NDVI below this in peak months → treat as likely bare / uncropped */
+    bareThreshold?: number;
+    /** Optional caption / legend note under chart is handled by parent */
 }
 
 export default function NdviChart({
@@ -63,6 +84,10 @@ export default function NdviChart({
     indexType = "NDVI",
     weatherData,
     showWeatherOverlay = false,
+    seasonMonths,
+    peakMonths,
+    stageBands,
+    bareThreshold = 0.25,
 }: NdviChartProps) {
     const config = INDEX_CONFIG[indexType];
     const seriesName = `Mean ${config.label}`;
@@ -89,12 +114,38 @@ export default function NdviChart({
 
     const option = useMemo(() => {
         // NDVI data as [date, value] pairs for time axis
-        const ndviData = stats.map((s) => [s.date, s.mean ?? null] as [string, number | null]);
         const bandLowData = stats.map((s) => [s.date, s.p10 ?? null] as [string, number | null]);
         const bandHighData = stats.map((s) => {
             const p90 = s.p90 ?? null;
             const p10 = s.p10 ?? null;
             return [s.date, p90 != null && p10 != null ? p90 - p10 : null] as [string, number | null];
+        });
+        const ndviData = stats.map((s) => {
+            const d = s.date;
+            const v = s.mean ?? null;
+            const m = Number(String(d).slice(5, 7));
+            const inSeason = !seasonMonths?.length || seasonMonths.includes(m);
+            const inPeak = !!peakMonths?.length && peakMonths.includes(m);
+            const bare = !isSar && inPeak && typeof v === "number" && v < bareThreshold;
+            let color = indexLineColor(indexType);
+            let opacity = 1;
+            let symbolSize = isSar && stats.length <= 3 ? 8 : 4;
+            if (d === selectedDate) {
+                color = tokenColor("--danger");
+                symbolSize = 10;
+            } else if (bare) {
+                color = "#9ca3af";
+                opacity = 0.6;
+                symbolSize = 7;
+            } else if (!inSeason && !isSar) {
+                color = "#94a3b8";
+                opacity = 0.45;
+            }
+            return {
+                value: [d, v] as [string, number | null],
+                itemStyle: { color, opacity },
+                symbolSize,
+            };
         });
 
         // Weather overlay: daily precip bars and ET₀ line on their actual dates
@@ -106,8 +157,60 @@ export default function NdviChart({
             ? weatherSorted.map((w) => [w.date, w.et0_fao_mm ?? 0] as [string, number])
             : [];
 
+        const years = Array.from(
+            new Set(stats.map((s) => Number(String(s.date).slice(0, 4))).filter((y) => Number.isFinite(y))),
+        ).sort();
+
+        const pad2 = (n: number) => String(n).padStart(2, "0");
+        const markAreaData: any[] = [];
+        if (stageBands?.length && years.length) {
+            const bandColors = ["rgba(216,243,220,0.35)", "rgba(149,213,178,0.28)", "rgba(82,183,136,0.22)", "rgba(244,162,97,0.18)"];
+            years.forEach((y) => {
+                stageBands.forEach((b, i) => {
+                    const sd = b.startDay ?? 1;
+                    const ed = b.endDay ?? 28;
+                    markAreaData.push([
+                        {
+                            name: years.length <= 2 ? b.name : undefined,
+                            xAxis: `${y}-${pad2(b.startMonth)}-${pad2(sd)}`,
+                            itemStyle: { color: b.color || bandColors[i % bandColors.length] },
+                        },
+                        { xAxis: `${y}-${pad2(b.endMonth)}-${pad2(ed)}` },
+                    ]);
+                });
+            });
+        } else if (seasonMonths?.length && years.length) {
+            years.forEach((y) => {
+                const sm = Math.min(...seasonMonths);
+                const em = Math.max(...seasonMonths);
+                markAreaData.push([
+                    {
+                        name: years.length <= 2 ? "生育期" : undefined,
+                        xAxis: `${y}-${pad2(sm)}-01`,
+                        itemStyle: { color: "rgba(216,243,220,0.32)" },
+                    },
+                    { xAxis: `${y}-${pad2(em)}-28` },
+                ]);
+                if (peakMonths?.length) {
+                    const ps = Math.min(...peakMonths);
+                    const pe = Math.max(...peakMonths);
+                    markAreaData.push([
+                        {
+                            name: years.length <= 2 ? "旺长期" : undefined,
+                            xAxis: `${y}-${pad2(ps)}-01`,
+                            itemStyle: { color: "rgba(149,213,178,0.28)" },
+                        },
+                        { xAxis: `${y}-${pad2(pe)}-28` },
+                    ]);
+                }
+            });
+        }
+        const markAreaOption = markAreaData.length
+            ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: "#3f6212" }, data: markAreaData }
+            : undefined;
+
         return {
-            grid: { top: hasWeather ? 30 : 10, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
+            grid: { top: hasWeather ? 36 : 18, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
             legend: hasWeather
                 ? {
                     data: [seriesName, "Precip (mm)", "ET₀ (mm)"],
@@ -179,29 +282,19 @@ export default function NdviChart({
                     },
                     emphasis: { disabled: true },
                 },
-                // Mean line
+                // Mean line (dim off-season / bare peak points)
                 {
                     name: seriesName,
                     type: "line",
                     data: ndviData,
                     smooth: true,
                     lineStyle: { color: indexLineColor(indexType), width: 2 },
-                    itemStyle: {
-                        color: (params: any) => {
-                            const d = Array.isArray(params.value) ? params.value[0] : stats[params.dataIndex]?.date;
-                            return d === selectedDate ? tokenColor("--danger") : indexLineColor(indexType);
-                        },
-                    },
-                    symbolSize: (value: any) => {
-                        const d = Array.isArray(value) ? value[0] : null;
-                        if (d === selectedDate) return 10;
-                        return isSar && stats.length <= 3 ? 8 : 4;
-                    },
-                    showSymbol: isSar || stats.length <= 3 ? true : undefined,
+                    showSymbol: true,
                     markLine: {
                         silent: true,
                         data: [thresholdMarkLine(config.threshold, "Threshold")],
                     },
+                    markArea: markAreaOption,
                 },
                 // Weather overlay: daily precipitation bars on actual dates
                 ...(hasWeather
@@ -229,14 +322,15 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar]);
+    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold]);
 
     const onEvents = useMemo(
         () => ({
             click: (params: any) => {
                 if (params.seriesName === seriesName && params.value != null) {
-                    const date = Array.isArray(params.value) ? params.value[0] : null;
-                    if (date) onDateSelect?.(date);
+                    const raw = params.value;
+                    const date = Array.isArray(raw) ? raw[0] : (raw?.value ? raw.value[0] : null);
+                    if (date) onDateSelect?.(String(date));
                 }
             },
         }),

@@ -1,73 +1,204 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { Maximize2 } from "lucide-react";
 import type { AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS } from "@/lib/agri-heatmap";
 import { MAP_CHROME } from "@/lib/design-tokens";
 import { cn } from "@/lib/utils";
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 
 interface AgriHeatmapLegendProps {
     heatmap: AgriHeatmapImage;
     compact?: boolean;
 }
 
+function PreviewImg({
+    src,
+    alt,
+    className,
+    onFailed,
+}: {
+    src: string;
+    alt: string;
+    className?: string;
+    onFailed: () => void;
+}) {
+    return (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            className={cn("h-full w-full object-contain", className)}
+            onError={onFailed}
+        />
+    );
+}
+
+function PreviewFrame({
+    src,
+    alt,
+    caption,
+    compact,
+    overlaySrc,
+    onFailed,
+    onOverlayFailed,
+}: {
+    src: string;
+    alt: string;
+    caption: string;
+    compact: boolean;
+    overlaySrc?: string | null;
+    onFailed: () => void;
+    onOverlayFailed?: () => void;
+}) {
+    const [open, setOpen] = useState(false);
+
+    const frame = cn(
+        "relative w-full overflow-hidden rounded-md border border-border bg-muted/60",
+        compact ? "h-[80px]" : "h-[120px]",
+    );
+
+    return (
+        <div>
+            <div className={frame}>
+                <button
+                    type="button"
+                    className="absolute inset-0 z-0 cursor-zoom-in"
+                    onClick={() => setOpen(true)}
+                    aria-label={`放大查看${caption}`}
+                >
+                    <PreviewImg
+                        src={src}
+                        alt={alt}
+                        className="absolute inset-0 pointer-events-none"
+                        onFailed={onFailed}
+                    />
+                    {overlaySrc ? (
+                        <PreviewImg
+                            src={overlaySrc}
+                            alt={`${alt}叠加`}
+                            className="absolute inset-0 opacity-60 pointer-events-none"
+                            onFailed={onOverlayFailed ?? (() => undefined)}
+                        />
+                    ) : null}
+                </button>
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setOpen(true);
+                    }}
+                    className="absolute right-1 top-1 z-10 inline-flex h-6 w-6 items-center justify-center rounded-md border border-border/80 bg-background/90 text-foreground shadow-sm hover:bg-background"
+                    title="放大"
+                    aria-label={`放大${caption}`}
+                >
+                    <Maximize2 className="h-3.5 w-3.5" />
+                </button>
+            </div>
+            <p className="mt-0.5 text-[9px] leading-none text-muted-foreground">{caption}</p>
+
+            <Dialog open={open} onOpenChange={setOpen}>
+                <DialogContent className="max-w-[min(92vw,56rem)] p-3 sm:p-4">
+                    <DialogHeader className="space-y-1 pr-8">
+                        <DialogTitle className="text-sm font-medium">{caption}</DialogTitle>
+                    </DialogHeader>
+                    <div className="relative max-h-[min(78vh,40rem)] overflow-auto rounded-md bg-muted/40">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                            src={src}
+                            alt={alt}
+                            className="mx-auto max-h-[min(78vh,40rem)] w-auto max-w-full object-contain"
+                        />
+                        {overlaySrc ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                                src={overlaySrc}
+                                alt={`${alt}叠加`}
+                                className="pointer-events-none absolute inset-0 mx-auto max-h-[min(78vh,40rem)] w-auto max-w-full object-contain opacity-55"
+                            />
+                        ) : null}
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </div>
+    );
+}
+
+/**
+ * OSS preview: prefer large_rgb (tile true-color). Parcel field_rgb is often a
+ * near-black crop with only a red outline — looks like "no 真彩". Heatmap is
+ * same extent as parcel rgb; do not overlay it on large tile (misaligned).
+ * Previews stay expanded by default; each frame has a click-to-enlarge control.
+ */
 function OssPreviewStack({
-    rgbUrl,
+    parcelRgbUrl,
+    largeRgbUrl,
     heatmapUrl,
     compact,
 }: {
-    rgbUrl: string | null;
+    parcelRgbUrl: string | null;
+    largeRgbUrl: string | null;
     heatmapUrl: string | null;
     compact: boolean;
 }) {
-    const [rgbFailed, setRgbFailed] = useState(false);
+    const [largeFailed, setLargeFailed] = useState(false);
+    const [parcelFailed, setParcelFailed] = useState(false);
     const [hmFailed, setHmFailed] = useState(false);
 
     useEffect(() => {
-        setRgbFailed(false);
+        setLargeFailed(false);
+        setParcelFailed(false);
         setHmFailed(false);
-    }, [rgbUrl, heatmapUrl]);
+    }, [parcelRgbUrl, largeRgbUrl, heatmapUrl]);
 
-    const showRgb = Boolean(rgbUrl) && !rgbFailed;
+    const showLarge = Boolean(largeRgbUrl) && !largeFailed;
+    const showParcel = Boolean(parcelRgbUrl) && !parcelFailed;
     const showHm = Boolean(heatmapUrl) && !hmFailed;
-    if (!showRgb && !showHm) return null;
 
-    const caption =
-        showRgb && showHm ? "真彩+色斑" : showRgb ? "真彩" : "色斑";
+    const trueColorUrl = showLarge ? largeRgbUrl : showParcel ? parcelRgbUrl : null;
+    const trueColorIsLarge = showLarge;
+    const overlayHm = Boolean(trueColorUrl && !trueColorIsLarge && showHm);
+    const hmAlone = showHm && (trueColorIsLarge || !trueColorUrl);
+
+    if (!trueColorUrl && !showHm) return null;
 
     return (
-        <div className={cn(compact ? "mt-1" : "mt-1.5")}>
-            <div
-                className={cn(
-                    "relative w-full overflow-hidden rounded-md border border-border bg-muted/60",
-                    compact ? "h-[72px]" : "h-[110px]",
-                )}
-            >
-                {showRgb && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                        src={rgbUrl!}
-                        alt="真彩预览"
-                        loading="lazy"
-                        className="absolute inset-0 h-full w-full object-contain"
-                        onError={() => setRgbFailed(true)}
-                    />
-                )}
-                {showHm && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                        src={heatmapUrl!}
-                        alt="色斑预览"
-                        loading="lazy"
-                        className={cn(
-                            "absolute inset-0 h-full w-full object-contain",
-                            showRgb ? "opacity-60" : "opacity-100",
-                        )}
-                        onError={() => setHmFailed(true)}
-                    />
-                )}
-            </div>
-            <p className="mt-0.5 text-[9px] leading-none text-muted-foreground">{caption}</p>
+        <div className={cn(compact ? "mt-1 space-y-1" : "mt-1.5 space-y-1.5")}>
+            {trueColorUrl && (
+                <PreviewFrame
+                    src={trueColorUrl}
+                    alt="真彩预览"
+                    caption={
+                        overlayHm
+                            ? "真彩+色斑"
+                            : trueColorIsLarge
+                              ? "真彩（瓦片）"
+                              : "真彩"
+                    }
+                    compact={compact}
+                    overlaySrc={overlayHm ? heatmapUrl : null}
+                    onFailed={() =>
+                        trueColorIsLarge ? setLargeFailed(true) : setParcelFailed(true)
+                    }
+                    onOverlayFailed={() => setHmFailed(true)}
+                />
+            )}
+            {hmAlone && heatmapUrl && (
+                <PreviewFrame
+                    src={heatmapUrl}
+                    alt="色斑预览"
+                    caption="色斑"
+                    compact={compact}
+                    onFailed={() => setHmFailed(true)}
+                />
+            )}
         </div>
     );
 }
@@ -80,16 +211,16 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
             ? heatmap.mean.toFixed(2)
             : null;
 
-    const { rgbUrl, heatmapUrl } = useMemo(() => {
-        const rgb =
-            (heatmap.previewRgbUrl && heatmap.previewRgbUrl.trim()) ||
-            (heatmap.previewLargeRgbUrl && heatmap.previewLargeRgbUrl.trim()) ||
-            null;
+    const { parcelRgbUrl, largeRgbUrl, heatmapUrl } = useMemo(() => {
+        const parcel =
+            (heatmap.previewRgbUrl && heatmap.previewRgbUrl.trim()) || null;
+        const large =
+            (heatmap.previewLargeRgbUrl && heatmap.previewLargeRgbUrl.trim()) || null;
         const hm =
             (heatmap.previewHeatmapUrl && heatmap.previewHeatmapUrl.trim()) ||
             (heatmap.previewS2HeatmapUrl && heatmap.previewS2HeatmapUrl.trim()) ||
             null;
-        return { rgbUrl: rgb, heatmapUrl: hm };
+        return { parcelRgbUrl: parcel, largeRgbUrl: large, heatmapUrl: hm };
     }, [
         heatmap.previewRgbUrl,
         heatmap.previewLargeRgbUrl,
@@ -97,7 +228,7 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
         heatmap.previewS2HeatmapUrl,
     ]);
 
-    const hasPreview = Boolean(rgbUrl || heatmapUrl);
+    const hasPreview = Boolean(parcelRgbUrl || largeRgbUrl || heatmapUrl);
 
     return (
         <div
@@ -161,8 +292,14 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
                 </>
             )}
 
+            {/* Always expanded when URLs exist — no collapse toggle */}
             {hasPreview && (
-                <OssPreviewStack rgbUrl={rgbUrl} heatmapUrl={heatmapUrl} compact={compact} />
+                <OssPreviewStack
+                    parcelRgbUrl={parcelRgbUrl}
+                    largeRgbUrl={largeRgbUrl}
+                    heatmapUrl={heatmapUrl}
+                    compact={compact}
+                />
             )}
 
             <p className="mt-1.5 text-[10px] text-muted-foreground tabular-nums">

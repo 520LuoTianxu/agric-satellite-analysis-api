@@ -86,11 +86,40 @@ def generate_assessment_report(self, job_id: str) -> dict:
             content_type="application/pdf",
         )
 
+        flood = result.get("flood_evidence")
+        flood_summary = None
+        if flood:
+            flood_summary = {
+                "absolute_open_water_scenes": flood.get("absolute_open_water_scenes"),
+                "selected_count": flood.get("selected_count"),
+                "analysis": flood.get("analysis"),
+                "all_dates": flood.get("all_dates"),
+                "scenes": [
+                    {
+                        "date": s.get("date"),
+                        "wet_mean": s.get("wet_mean"),
+                        "ndvi_mean": s.get("ndvi_mean"),
+                        "kind": s.get("kind"),
+                        "analysis": s.get("analysis"),
+                        "precip_prior_15d": {
+                            k: v
+                            for k, v in (s.get("precip_prior_15d") or {}).items()
+                            if k != "days"
+                        },
+                        "media": {
+                            "preview_url": (s.get("media") or {}).get("preview_url"),
+                            "has_oss": (s.get("media") or {}).get("has_oss"),
+                        },
+                    }
+                    for s in (flood.get("scenes") or [])
+                ],
+            }
         progress = {
             "stage": "done",
             "percent": 100,
             "object_key": object_key,
-            "filename": f"{result['field_name'] or 'field'}_选地分析报告.pdf",
+            "filename": result.get("download_filename")
+            or f"{result['field_name'] or 'field'}地块--分析报告.pdf",
             "score": result["score"],
             "grade": result["grade"],
             "light": result["light"],
@@ -98,6 +127,15 @@ def generate_assessment_report(self, job_id: str) -> dict:
             "area_mu": result.get("area_mu"),
             "indices_source": result.get("indices_source"),
             "content_type": "application/pdf",
+            "flood_evidence": flood_summary,
+            "scorecard": result.get("scorecard"),
+            "rs": {
+                "absolute_open_water_scenes": (result.get("rs") or {}).get(
+                    "absolute_open_water_scenes"
+                ),
+                "open_water_dates": (result.get("rs") or {}).get("open_water_dates"),
+                "rs_flood_level": (result.get("rs") or {}).get("rs_flood_level"),
+            },
         }
         _update_job(session, job, "succeeded", progress=progress)
         logger.info(

@@ -1201,6 +1201,8 @@ export default function FieldDetailPage() {
                                         <NdviTab
                                             fieldId={fieldId}
                                             fieldTags={field?.tags ?? null}
+                                            cropType={field?.crop_type}
+                                            areaHa={field?.area_ha}
                                             onShowLayer={handleShowLayer}
                                             activeIndexOverride={activeIndexType}
                                             onActiveIndexChange={setActiveIndexType}

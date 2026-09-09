@@ -4,11 +4,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic";
 import {
     agriApi,
+    cropsApi,
     fieldsApi,
     parseAgriLandId,
     type AgriLandScenesSummary,
     type AgriSceneProduct,
     type BackfillStatusResponse,
+    type CropOption,
     type FieldStat,
     type IndexType,
 } from "@/lib/api";
@@ -25,15 +27,43 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History } from "lucide-react";
+import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AgriIndexGlossary } from "@/components/field/agri-index-glossary";
 import { toast } from "sonner";
+import { haToMu } from "@/lib/area";
+import type { DayGradeShare } from "@/components/charts/ndvi-grade-shares-chart";
+import {
+    computePixelNdviGradeShares,
+    NDVI_DAY_GRADE_RULE_ZH,
+} from "@/components/charts/ndvi-grade-shares-chart";
 
 const NdviChart = dynamic(() => import("@/components/charts/ndvi-chart"), {
     ssr: false,
     loading: () => <Skeleton className="h-[200px] w-full rounded-md" />,
 });
+
+const NdviGradeSharesChart = dynamic(
+    () => import("@/components/charts/ndvi-grade-shares-chart"),
+    {
+        ssr: false,
+        loading: () => <Skeleton className="h-[220px] w-full rounded-md" />,
+    },
+);
 
 type SeriesKey = AgriHeatIndex;
 
@@ -191,6 +221,35 @@ function isLowCloud(scene: AgriSceneProduct): boolean {
     return false;
 }
 
+function sceneCloudPct(scene: AgriSceneProduct | null | undefined): number | null {
+    if (!scene) return null;
+    const parcel = scene.parcel_cloud_cover_pct;
+    if (typeof parcel === "number" && Number.isFinite(parcel)) return parcel;
+    const cc = scene.cloud_cover;
+    if (typeof cc === "number" && Number.isFinite(cc)) return cc;
+    return null;
+}
+
+const RECENT_DATE_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+const RECENT_DATE_CHIP_CAP = 14;
+const PRIMARY_SERIES_KEYS: SeriesKey[] = ["ndvi", "evi", "drought", "flood"];
+
+function seriesIsAvailable(key: SeriesKey, scenes: AgriSceneProduct[]): boolean {
+    const meta = SERIES_META[key];
+    const hasSensor = scenes.some((s) => s.sensor === meta.sensor);
+    if (!hasSensor) return false;
+    if (key === "drought" || key === "flood") return true;
+    if (
+        meta.avgKey &&
+        !scenes.some(
+            (s) => s.sensor === meta.sensor && typeof s[meta.avgKey!] === "number",
+        )
+    ) {
+        return false;
+    }
+    return true;
+}
+
 /** Optical veg indices where avg > 0.1 is a useful clear-sky signal. */
 const VEG_AVG_KEYS = new Set<SeriesKey>(["ndvi", "evi", "ndmi", "ndre", "cire", "drought"]);
 
@@ -247,9 +306,17 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
     return cloudy || lowVeg;
 }
 
+const UNCROPPED_NDVI = 0.25;
+
+/** Default maize-like stage bands (month ranges) — overridden by crop season when available */
+
 export interface AgriTimeseriesPanelProps {
     fieldId: string;
     fieldTags: string[] | null | undefined;
+    /** Bound crop key / label for season calendar */
+    cropType?: string | null;
+    /** Field area in hectares — donut center shows 亩 (×15) */
+    areaHa?: number | null;
     /** When true, parent already has monitoring layers */
     hasMonitoringData?: boolean;
     /** Push 色斑图 overlay to the field map */
@@ -264,6 +331,8 @@ export interface AgriTimeseriesPanelProps {
 export default function AgriTimeseriesPanel({
     fieldId,
     fieldTags,
+    cropType,
+    areaHa = null,
     hasMonitoringData = false,
     onHeatmapChange,
     mode: modeProp,
@@ -279,6 +348,7 @@ export default function AgriTimeseriesPanel({
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [summary, setSummary] = useState<AgriLandScenesSummary | null>(null);
     const [scenes, setScenes] = useState<AgriSceneProduct[]>([]);
+    const [cropOption, setCropOption] = useState<CropOption | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [seriesInternal, setSeriesInternal] = useState<SeriesKey>("ndvi");
@@ -299,6 +369,11 @@ export default function AgriTimeseriesPanel({
         index: string;
         mean: number | null;
     } | null>(null);
+    /** Per-date pixel NDVI grade shares (图一 bands) — fills as heatmaps/prefetch load. */
+    const [dayGradeByDate, setDayGradeByDate] = useState<Record<string, DayGradeShare>>({});
+    const dayGradeByDateRef = useRef(dayGradeByDate);
+    dayGradeByDateRef.current = dayGradeByDate;
+    const gradePrefetchDoneRef = useRef<string | null>(null);
     /** Bumps on every loadHeatmap call; stale async results are ignored. */
     const heatmapLoadGenRef = useRef(0);
     /** Prefetched film — kept even when enabled=false (map cleared, cache retained). */
@@ -320,10 +395,35 @@ export default function AgriTimeseriesPanel({
     }, [modeProp, seriesInternal]);
 
     useEffect(() => {
+        let cancelled = false;
+        cropsApi
+            .list()
+            .then((list) => {
+                if (cancelled) return;
+                const key = (cropType || "").toLowerCase();
+                const hit =
+                    list.find((c) => c.key === key) ||
+                    list.find((c) => c.name_zh === cropType) ||
+                    list.find((c) => c.key === "corn") ||
+                    list[0] ||
+                    null;
+                setCropOption(hit);
+            })
+            .catch(() => {
+                if (!cancelled) setCropOption(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [cropType]);
+
+    useEffect(() => {
         if (!landId) return;
         let cancelled = false;
         setLoading(true);
         setError(null);
+        setDayGradeByDate({});
+        gradePrefetchDoneRef.current = null;
         (async () => {
             try {
                 const [sum, s2, s1] = await Promise.all([
@@ -523,6 +623,20 @@ export default function AgriTimeseriesPanel({
                     });
                     return;
                 }
+                // Day pixel NDVI grade shares (图一) — prefer lonlat; clear pixels preferred
+                if (meta.sensor === "S2" && (index === "ndvi" || index === "drought" || index === "evi")) {
+                    const sharePixels = lonlat?.length
+                        ? lonlat
+                        : null;
+                    if (sharePixels?.length) {
+                        const share = computePixelNdviGradeShares(sharePixels);
+                        if (share) {
+                            setDayGradeByDate((prev) =>
+                                prev[date] && prev[date]!.n === share.n ? prev : { ...prev, [date]: share },
+                            );
+                        }
+                    }
+                }
                 const img = lonlat?.length
                     ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
                     : rasterizeAgriPixels(grid!, index, meta.sensor);
@@ -565,6 +679,35 @@ export default function AgriTimeseriesPanel({
         [landId, publishHeatmap],
     );
     loadHeatmapRef.current = loadHeatmap;
+
+    /** Background-only: fetch pixels for grade shares without touching map overlay. */
+    const prefetchDayGradeShares = useCallback(
+        async (dates: string[]) => {
+            if (!landId || !dates.length) return;
+            for (const date of dates) {
+                if (dayGradeByDateRef.current[date]) continue;
+                try {
+                    const res = await agriApi.scenes(landId, {
+                        sensor: "S2",
+                        from: date,
+                        to: date,
+                        limit: 3,
+                        includePixels: 1,
+                    });
+                    const scene =
+                        res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ?? res.items[0];
+                    const lonlat = scene?.pixels_lonlat;
+                    if (!lonlat?.length) continue;
+                    const share = computePixelNdviGradeShares(lonlat);
+                    if (!share) continue;
+                    setDayGradeByDate((prev) => (prev[date] ? prev : { ...prev, [date]: share }));
+                } catch {
+                    /* ignore prefetch errors */
+                }
+            }
+        },
+        [landId],
+    );
 
     const selectDateExplicit = useCallback(
         (date: string) => {
@@ -616,6 +759,132 @@ export default function AgriTimeseriesPanel({
     }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
+
+    const availableKeys = useMemo(
+        () => BUTTON_ORDER.filter((key) => seriesIsAvailable(key, scenes)),
+        [scenes],
+    );
+    const primaryKeys = useMemo(() => {
+        const preferred = PRIMARY_SERIES_KEYS.filter((k) => availableKeys.includes(k));
+        return preferred.length ? preferred : availableKeys.slice(0, 4);
+    }, [availableKeys]);
+    const overflowKeys = useMemo(
+        () => availableKeys.filter((k) => !primaryKeys.includes(k)),
+        [availableKeys, primaryKeys],
+    );
+    const seriesInOverflow = overflowKeys.includes(series);
+
+    const allDates = useMemo(
+        () => [...new Set(stats.map((s) => s.date))].sort((a, b) => b.localeCompare(a)),
+        [stats],
+    );
+    const recentDates = useMemo(() => {
+        if (!allDates.length) return [] as string[];
+        const latest = allDates[0]!; // already desc
+        const latestMs = Date.parse(`${latest}T00:00:00Z`);
+        if (!Number.isFinite(latestMs)) return allDates.slice(0, RECENT_DATE_CHIP_CAP);
+        const cutoff = latestMs - RECENT_DATE_WINDOW_MS;
+        const inWindow = allDates.filter((d) => {
+            const ms = Date.parse(`${d}T00:00:00Z`);
+            return Number.isFinite(ms) && ms >= cutoff;
+        });
+        return inWindow.slice(0, RECENT_DATE_CHIP_CAP);
+    }, [allDates]);
+    const chipDates = useMemo(() => {
+        const set = new Set(recentDates);
+        if (selectedDate && !set.has(selectedDate) && allDates.includes(selectedDate)) {
+            return [selectedDate, ...recentDates];
+        }
+        return recentDates;
+    }, [recentDates, selectedDate, allDates]);
+
+    const cloudPctByDate = useMemo(() => {
+        const sensor = sensorForIndex(series);
+        const out: Record<string, number | null> = {};
+        for (const d of allDates) {
+            const scene = scenes.find((s) => s.sensor === sensor && s.date === d);
+            out[d] = sceneCloudPct(scene);
+        }
+        return out;
+    }, [allDates, scenes, series]);
+
+    const seasonMonths = useMemo(
+        () => cropOption?.season_months ?? [6, 7, 8, 9],
+        [cropOption?.season_months],
+    );
+    const peakMonths = useMemo(
+        () => cropOption?.peak_months ?? [7, 8],
+        [cropOption?.peak_months],
+    );
+
+    const selectedBare = useMemo(() => {
+        if (!selectedDate || (series !== "ndvi" && series !== "drought" && series !== "evi")) return false;
+        const st = stats.find((s) => s.date === selectedDate);
+        if (!st || st.mean == null) return false;
+        const m = Number(selectedDate.slice(5, 7));
+        return peakMonths.includes(m) && st.mean < UNCROPPED_NDVI;
+    }, [selectedDate, stats, series, peakMonths]);
+
+    const areaMu = useMemo(() => {
+        if (areaHa == null || !Number.isFinite(areaHa)) return null;
+        return haToMu(areaHa);
+    }, [areaHa]);
+
+    const selectedDayShare = useMemo(() => {
+        if (!selectedDate) return null;
+        return dayGradeByDate[selectedDate] ?? null;
+    }, [selectedDate, dayGradeByDate]);
+
+    /** Selected scene for current series sensor + date (cloud cover, etc.). */
+    const selectedScene = useMemo(() => {
+        if (!selectedDate) return null;
+        const sensor = sensorForIndex(series);
+        return scenes.find((s) => s.sensor === sensor && s.date === selectedDate) ?? null;
+    }, [scenes, selectedDate, series]);
+
+    const cloudCoverPct = useMemo(() => {
+        if (!selectedScene || sensorForIndex(series) !== "S2") return null;
+        return sceneCloudPct(selectedScene);
+    }, [selectedScene, series]);
+
+    const cloudCoverOver30 = useMemo(() => {
+        if (!selectedScene) return false;
+        if (selectedScene.cloud_cover_over_30 === true) return true;
+        if (cloudCoverPct != null && cloudCoverPct > 30) return true;
+        return false;
+    }, [selectedScene, cloudCoverPct]);
+
+    const sceneMeanByDate = useMemo(() => {
+        const out: Record<string, number | null> = {};
+        for (const s of scenes) {
+            if (s.sensor !== "S2") continue;
+            if (typeof s.ndvi_avg === "number" && Number.isFinite(s.ndvi_avg)) {
+                out[s.date] = s.ndvi_avg;
+            }
+        }
+        return out;
+    }, [scenes]);
+
+    // Prefetch up to ~12 recent in-season S2 dates for stacked 图一 (no map publish)
+    useEffect(() => {
+        if (!landId || !scenes.length) return;
+        const s2Dates = [
+            ...new Set(
+                scenes
+                    .filter((s) => s.sensor === "S2" && typeof s.ndvi_avg === "number")
+                    .map((s) => s.date),
+            ),
+        ].sort();
+        const inSeason = s2Dates.filter((d) => seasonMonths.includes(Number(d.slice(5, 7))));
+        const pool = (inSeason.length ? inSeason : s2Dates).slice(-12);
+        const prefetchKey = `${landId}:${pool.join(",")}`;
+        if (gradePrefetchDoneRef.current === prefetchKey) return;
+        gradePrefetchDoneRef.current = prefetchKey;
+        const missing = pool.filter((d) => !dayGradeByDateRef.current[d]);
+        if (!missing.length) return;
+        void prefetchDayGradeShares(missing);
+    }, [landId, scenes, seasonMonths, prefetchDayGradeShares]);
+
     const total = summary?.total ?? 0;
 
     if (!landId) return null;
@@ -637,14 +906,18 @@ export default function AgriTimeseriesPanel({
 
     return (
         <Card className="border-primary/20 bg-primary-subtle/30">
-            <CardHeader className="pb-2 pt-3 px-3">
-                <div className="flex items-start justify-between gap-2">
-                    <div>
-                        <CardTitle className="flex items-center gap-1.5 text-xs font-semibold">
-                            <Satellite className="h-3.5 w-3.5 text-primary" />
-                            {t("title")}
+            <CardHeader className="pb-3 pt-3.5 px-3.5">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1">
+                        <CardTitle className="flex flex-wrap items-center gap-1.5 text-sm font-semibold tracking-tight">
+                            <Satellite className="h-3.5 w-3.5 shrink-0 text-primary" />
+                            <span>{t("title")}</span>
+                            <AgriIndexGlossary
+                                initialKey={series}
+                                triggerClassName="h-6 ml-0.5 font-normal"
+                            />
                         </CardTitle>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        <p className="text-[11px] leading-snug text-muted-foreground">
                             {t("subtitle", {
                                 landId: landId ?? "—",
                                 scenes: summary ? t("scenesCount", { total: summary.total }) : "",
@@ -680,7 +953,7 @@ export default function AgriTimeseriesPanel({
                     </div>
                 </div>
             </CardHeader>
-            <CardContent className="px-3 pb-3 pt-0 space-y-2">
+            <CardContent className="px-3.5 pb-3.5 pt-0 space-y-3">
                 {backfillActive && (
                     <div className="rounded-md border border-info/30 bg-info-subtle/60 px-2.5 py-2 space-y-1.5">
                         <p className="text-[11px] text-info flex items-center gap-1.5 font-medium">
@@ -732,24 +1005,9 @@ export default function AgriTimeseriesPanel({
                 )}
                 {!loading && total > 0 && (
                     <>
-                        <div className="flex flex-wrap gap-1 items-center">
-                            {BUTTON_ORDER.map((key) => {
+                        <div className="flex flex-nowrap gap-1.5 items-center overflow-x-auto">
+                            {primaryKeys.map((key) => {
                                 const meta = SERIES_META[key];
-                                const hasSensor = scenes.some((s) => s.sensor === meta.sensor);
-                                if (!hasSensor) return null;
-                                // Primary drought/flood always shown when sensor exists
-                                if (
-                                    key !== "drought" &&
-                                    key !== "flood" &&
-                                    meta.avgKey &&
-                                    !scenes.some(
-                                        (s) =>
-                                            s.sensor === meta.sensor &&
-                                            typeof s[meta.avgKey!] === "number",
-                                    )
-                                ) {
-                                    return null;
-                                }
                                 return (
                                     <Button
                                         key={key}
@@ -757,7 +1015,7 @@ export default function AgriTimeseriesPanel({
                                         size="sm"
                                         variant={series === key ? "default" : "outline"}
                                         className={cn(
-                                            "h-7 text-xs px-2.5",
+                                            "h-7 text-xs px-2.5 shrink-0",
                                             (key === "drought" || key === "flood") &&
                                                 series !== key &&
                                                 "border-primary/40",
@@ -769,11 +1027,57 @@ export default function AgriTimeseriesPanel({
                                     </Button>
                                 );
                             })}
+                            {seriesInOverflow && (
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="default"
+                                    className="h-7 text-xs px-2.5 shrink-0"
+                                    onClick={() => setSeries(series)}
+                                    title={SERIES_META[series].hint}
+                                >
+                                    {SERIES_META[series].label}
+                                </Button>
+                            )}
+                            {overflowKeys.length > 0 && (
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant={seriesInOverflow ? "secondary" : "outline"}
+                                            className="h-7 w-7 p-0 shrink-0"
+                                            title="更多指数"
+                                        >
+                                            <MoreHorizontal className="h-3.5 w-3.5" />
+                                            <span className="sr-only">更多指数</span>
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="start" className="min-w-[10rem]">
+                                        {overflowKeys.map((key) => {
+                                            const meta = SERIES_META[key];
+                                            const active = series === key;
+                                            return (
+                                                <DropdownMenuItem
+                                                    key={key}
+                                                    onSelect={() => setSeries(key)}
+                                                    className="text-xs gap-2"
+                                                >
+                                                    <span className="flex-1">{meta.label}</span>
+                                                    {active ? (
+                                                        <Check className="h-3.5 w-3.5 text-primary" />
+                                                    ) : null}
+                                                </DropdownMenuItem>
+                                            );
+                                        })}
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
                             <Button
                                 type="button"
                                 size="sm"
                                 variant="ghost"
-                                className="h-7 w-7 p-0 ml-auto"
+                                className="h-7 w-7 p-0 shrink-0 ml-auto"
                                 title={heatmapVisible ? t("hideHeatmap") : t("showHeatmap")}
                                 onClick={() => {
                                     setHeatmapVisible((v) => {
@@ -795,22 +1099,63 @@ export default function AgriTimeseriesPanel({
                                 {SERIES_META[series].hint}
                             </p>
                         )}
-                        {stats.length > 0 ? (
-                            <NdviChart
-                                stats={stats}
-                                selectedDate={selectedDate}
-                                onDateSelect={(d) => selectDateExplicit(d)}
-                                height={200}
-                                indexType={chartIndexType}
-                            />
-                        ) : (
-                            <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
+                        {(series === "ndvi" || series === "evi" || series === "drought") && (
+                            <>
+                                <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="text-[11px] font-medium text-foreground">当日长势等级</span>
+                                        <Badge variant="secondary" className="text-[10px]">
+                                            {cropOption?.season_label_zh || "夏玉米季（6–9月）"}
+                                        </Badge>
+                                        {selectedBare && (
+                                            <Badge variant="destructive" className="text-[10px]">
+                                                疑似未种植/裸地（旺季 NDVI 低于 {UNCROPPED_NDVI}）
+                                            </Badge>
+                                        )}
+                                    </div>
+                                    <p className="text-[10px] text-muted-foreground leading-snug">
+                                        分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}；圆环中心为地块面积（亩）。
+                                    </p>
+                                    <NdviGradeSharesChart
+                                        variant="donut"
+                                        selectedShare={selectedDayShare}
+                                        areaMu={areaMu}
+                                        selectedDate={selectedDate}
+                                        height={200}
+                                    />
+                                </div>
+                                <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1">
+                                    <span className="text-[11px] font-medium text-foreground">多日长势占比趋势</span>
+                                    <NdviGradeSharesChart
+                                        variant="stacked"
+                                        historyByDate={dayGradeByDate}
+                                        meanByDate={sceneMeanByDate}
+                                        height={250}
+                                    />
+                                </div>
+                            </>
                         )}
-                        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                            <span>
+                        <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2">
+                            {stats.length > 0 ? (
+                                <NdviChart
+                                    stats={stats}
+                                    selectedDate={selectedDate}
+                                    onDateSelect={(d) => selectDateExplicit(d)}
+                                    height={220}
+                                    indexType={chartIndexType}
+                                />
+                            ) : (
+                                <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
+                            )}
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/50 bg-background/40 px-2.5 py-2">
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
                                 {selectedDate
                                     ? t("heatmapDate", { date: selectedDate, mode: AGRI_MODE_LABELS[series] })
                                     : t("pickDate")}
+                                {cloudCoverPct != null
+                                    ? ` · ${t("cloudCover", { percent: Math.round(cloudCoverPct) })}`
+                                    : ""}
                                 {heatmapLoading ? t("rendering") : ""}
                                 {heatmapMeta
                                     ? `${t("pixelsMeta", { pixels: heatmapMeta.pixels })}${
@@ -819,24 +1164,77 @@ export default function AgriTimeseriesPanel({
                                               : ""
                                       }`
                                     : ""}
-                            </span>
+                            </p>
                             {selectedDate && (
-                                <div className="flex gap-1 max-w-[50%] overflow-x-auto">
-                                    {stats
-                                        .slice(-8)
-                                        .reverse()
-                                        .map((s) => (
-                                            <Button
-                                                key={s.date}
-                                                type="button"
-                                                size="sm"
-                                                variant={selectedDate === s.date ? "default" : "outline"}
-                                                className="h-6 text-[10px] px-1.5 tabular-nums shrink-0"
-                                                onClick={() => selectDateExplicit(s.date)}
+                                <div className="space-y-2">
+                                    <div className="flex flex-wrap gap-1.5 items-center">
+                                        {chipDates.map((date) => {
+                                            const active = selectedDate === date;
+                                            const chipCloud = active ? cloudCoverPct : cloudPctByDate[date];
+                                            const chipOver30 =
+                                                typeof chipCloud === "number" && chipCloud > 30;
+                                            return (
+                                                <Button
+                                                    key={date}
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={active ? "default" : "outline"}
+                                                    className={cn(
+                                                        "h-6 text-[10px] px-1.5 tabular-nums shrink-0 gap-1",
+                                                        active && cloudCoverOver30 && "ring-1 ring-warning/50",
+                                                    )}
+                                                    onClick={() => selectDateExplicit(date)}
+                                                >
+                                                    {date.slice(5)}
+                                                    {active && chipCloud != null && (
+                                                        <span
+                                                            className={cn(
+                                                                "rounded px-0.5 text-[9px] font-normal tabular-nums",
+                                                                chipOver30
+                                                                    ? "bg-warning-subtle text-warning"
+                                                                    : "bg-primary-foreground/15 text-primary-foreground",
+                                                            )}
+                                                        >
+                                                            {Math.round(chipCloud)}%
+                                                        </span>
+                                                    )}
+                                                </Button>
+                                            );
+                                        })}
+                                    </div>
+                                    {allDates.length > 0 && (
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="text-[10px] text-muted-foreground shrink-0">
+                                                全年日期
+                                            </span>
+                                            <Select
+                                                value={selectedDate}
+                                                onValueChange={(v) => selectDateExplicit(v)}
                                             >
-                                                {s.date.slice(5)}
-                                            </Button>
-                                        ))}
+                                                <SelectTrigger className="h-7 text-[11px] w-full max-w-[14rem]">
+                                                    <SelectValue placeholder="选择日期" />
+                                                </SelectTrigger>
+                                                <SelectContent className="max-h-72">
+                                                    {allDates.map((date) => {
+                                                        const pct = cloudPctByDate[date];
+                                                        const label =
+                                                            pct != null
+                                                                ? `${date} · 云量 ${Math.round(pct)}%`
+                                                                : date;
+                                                        return (
+                                                            <SelectItem
+                                                                key={date}
+                                                                value={date}
+                                                                className="text-xs tabular-nums"
+                                                            >
+                                                                {label}
+                                                            </SelectItem>
+                                                        );
+                                                    })}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>

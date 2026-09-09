@@ -23,6 +23,22 @@ PEAK_GOOD = 0.65
 PEAK_OK = 0.50
 PEAK_WEAK = 0.35
 
+PEAK_WEAK = 0.35
+
+# 长势等级（地块场景均值 NDVI）——与前端/报告口径一致
+# 优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3
+NDVI_GRADE_THRESHOLDS = {
+    "优": 0.7,
+    "良": 0.5,
+    "中": 0.3,
+}
+NDVI_GRADE_ORDER = ("优", "良", "中", "差")
+NDVI_GRADE_RULE_ZH = (
+    "优≥0.7 / 良0.5–0.7 / 中0.3–0.5 / 差<0.3"
+    "（按地块场景均值 NDVI；只统计生育期内相对清晰景）"
+)
+
+
 WEIGHTS = {
     "crop": 0.25,
     "soil": 0.20,
@@ -108,6 +124,257 @@ def _pick_crop_suit(suit: dict[str, Any] | None, crop_key: str) -> dict[str, Any
     }
 
 
+def classify_ndvi_grade(ndvi: float) -> str:
+    """Map scene-mean NDVI to 优/良/中/差."""
+    if ndvi >= NDVI_GRADE_THRESHOLDS["优"]:
+        return "优"
+    if ndvi >= NDVI_GRADE_THRESHOLDS["良"]:
+        return "良"
+    if ndvi >= NDVI_GRADE_THRESHOLDS["中"]:
+        return "中"
+    return "差"
+
+
+def compute_ndvi_grade_shares(
+    values: list[float],
+    *,
+    exclude_bare: bool = False,
+    bare_threshold: float = UNCROPPED_NDVI,
+) -> dict[str, Any]:
+    """Count + percent shares of NDVI grades from scene means."""
+    used = [float(v) for v in values if v is not None]
+    if exclude_bare:
+        used = [v for v in used if v >= bare_threshold]
+    counts = {g: 0 for g in NDVI_GRADE_ORDER}
+    for v in used:
+        counts[classify_ndvi_grade(v)] += 1
+    n = len(used)
+    pct = {g: (round(counts[g] * 100.0 / n, 1) if n else 0.0) for g in NDVI_GRADE_ORDER}
+    return {
+        "n": n,
+        "counts": counts,
+        "pct": pct,
+        "rule_zh": NDVI_GRADE_RULE_ZH,
+        "exclude_bare": exclude_bare,
+        "bare_threshold": bare_threshold,
+    }
+
+
+def build_soil_analysis_plain(soil: dict[str, Any], crop_label: str) -> str:
+    """Coherent Chinese soil paragraph for PDF narrative."""
+    soil = soil or {}
+    texture = soil.get("dominant_texture") or "质地未知"
+    ph = soil.get("avg_ph")
+    drain = soil.get("drainage_class") or "排水等级未知"
+    awc = soil.get("rootzone_awc_mm")
+    wl = soil.get("waterlogging_risk")
+    soc = soil.get("total_soc_stock_t_ha") or soil.get("topsoil_soc_stock_t_ha")
+    bits: list[str] = [f"这块地土壤以「{texture}」为主"]
+    if ph is not None:
+        ph_f = float(ph)
+        if ph_f > 7.5:
+            bits.append(f"偏碱（pH {ph_f:.2f}），对{crop_label}养分有效性略有影响")
+        elif ph_f < 5.5:
+            bits.append(f"偏酸（pH {ph_f:.2f}），要注意钙镁与部分微量元素")
+        else:
+            bits.append(f"酸碱适中（pH {ph_f:.2f}）")
+    bits.append(f"排水等级：{drain}")
+    if awc is not None:
+        bits.append(f"根系层有效持水约 {float(awc):.0f} mm，决定干旱时能「扛几天」")
+    if wl is not None:
+        wlf = float(wl)
+        if wlf > 0.3:
+            bits.append(f"渍水风险偏高（{wlf:.2f}），连阴雨后低洼处要盯积水")
+        else:
+            bits.append(f"渍水风险不高（{wlf:.2f}）")
+    if soc is not None:
+        bits.append(f"有机碳储量约 {float(soc):.1f} t/ha，肥力家底可参考")
+    return "；".join(bits) + "。"
+
+
+def summarize_weather_history(
+    weather_history: dict[str, Any] | None,
+    crop_label: str,
+) -> str:
+    """Plain-Chinese weather history analysis from seasonal aggregates."""
+    wh = weather_history or {}
+    if not wh.get("season_totals") and not wh.get("months"):
+        return (
+            f"暂无足够的历史日天气记录，天气项仍以近月摘要为主；"
+            f"有数据后将按{crop_label}生育期统计降水与高温。"
+        )
+    precip = wh.get("season_precip_mm")
+    et0 = wh.get("season_et0_mm")
+    heat = wh.get("season_heat_days")
+    dry = wh.get("longest_dry_spell_days")
+    years = wh.get("years_covered") or []
+    period = wh.get("period_label") or ""
+    bits: list[str] = []
+    if years:
+        bits.append(
+            f"覆盖 {min(years)}–{max(years)} 年" + (f"（{period}）" if period else "")
+        )
+    if precip is not None:
+        bits.append(f"生育期累计降水约 {float(precip):.0f} mm")
+    if et0 is not None:
+        bits.append(f"参考蒸散约 {float(et0):.0f} mm")
+    if precip is not None and et0 is not None:
+        bal = float(precip) - float(et0)
+        if bal >= 30:
+            bits.append(
+                f"降水整体多于蒸散（盈约 {bal:.0f} mm），偏湿风险要结合土壤排水看"
+            )
+        elif bal <= -40:
+            bits.append(f"蒸散明显大于降水（亏约 {-bal:.0f} mm），旺长期更怕卡脖旱")
+        else:
+            bits.append(f"水热大致平衡（盈亏约 {bal:.0f} mm）")
+    if heat is not None:
+        bits.append(f"日最高温≥33℃ 约 {int(heat)} 天")
+    if dry is not None and int(dry) >= 10:
+        bits.append(f"最长连续少雨约 {int(dry)} 天，需对照绿度是否同步走弱")
+    elif dry is not None:
+        bits.append(f"最长连续少雨约 {int(dry)} 天")
+    return "；".join(bits) + "。" if bits else "历史天气记录有限，仅作参考。"
+
+
+def build_narrative_bridge(
+    *,
+    soil_plain: str,
+    weather_plain: str,
+    grade_shares: dict[str, Any] | None,
+    phenology: list[dict[str, Any]] | None,
+    crop_label: str,
+    peak_mean: float,
+    uncropped_years: list[int] | None = None,
+) -> str:
+    """One short story tying soil ↔ weather ↔ NDVI stages ↔ risks."""
+    gs = grade_shares or {}
+    pct = gs.get("pct") or {}
+    good = float(pct.get("优") or 0) + float(pct.get("良") or 0)
+    poor = float(pct.get("差") or 0)
+    stage_bits = []
+    for st in phenology or []:
+        label = st.get("label") or st.get("key")
+        mean = st.get("mean_ndvi")
+        bare = st.get("likely_bare")
+        if mean is None:
+            continue
+        if bare:
+            stage_bits.append(f"{label}像未种植/极低绿度（NDVI≈{mean:.2f}）")
+        else:
+            stage_bits.append(f"{label}均绿度≈{mean:.2f}")
+    stage_txt = "；".join(stage_bits) if stage_bits else "生育阶段绿度样本不足"
+    soil_short = (soil_plain or "").rstrip("。")
+    weather_short = (weather_plain or "").rstrip("。")
+    vigor_bit = (
+        f"生育期场景里优+良约占 {good:.0f}%，差约占 {poor:.0f}%"
+        if gs.get("n")
+        else "生育期等级样本不足"
+    )
+    bare_bit = ""
+    if uncropped_years:
+        bare_bit = f"另有 {uncropped_years} 年峰值极低，更像当年大面积未种/绝产，不宜当成「种得很差」。"
+    return (
+        f"把土壤、天气和绿度放在一起看：{soil_short}。"
+        f"天气侧：{weather_short}。"
+        f"{crop_label}旺季平均绿度约 {peak_mean:.2f}，{vigor_bit}；"
+        f"按生育阶段：{stage_txt}。"
+        f"{bare_bit}"
+        "因此涝旱提醒要对照排水与降水节律，长势结论只采信生育期内非裸地场景。"
+    )
+
+
+def compute_phenology_stage_summary(
+    stages: dict[str, dict[str, Any]],
+    by_date: dict[str, dict[str, float]],
+    *,
+    peak_months: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Per-stage NDVI mean/min/max + trend vs previous + bare flag.
+
+    ``stages`` comes from ``pick_phenology_stages`` (key -> {date, label, ndvi, ...}).
+    Also aggregates nearby in-window scenes when available via stage date month.
+    """
+    # Keep order aligned with charts.STAGE_SPECS (avoid circular import)
+    stage_labels = {
+        "seedling": "苗期",
+        "vegetative": "拔节—抽雄",
+        "peak": "旺长",
+        "maturity": "成熟回落",
+    }
+    ordered = ["seedling", "vegetative", "peak", "maturity"]
+    peak_months = peak_months or PEAK_MONTHS
+    out: list[dict[str, Any]] = []
+    prev_mean: float | None = None
+    for key in ordered:
+        st = stages.get(key) or {}
+        label = st.get("label") or stage_labels.get(key, key)
+        d = st.get("date")
+        vals: list[float] = []
+        if d and d in by_date and by_date[d].get("NDVI") is not None:
+            vals.append(float(by_date[d]["NDVI"]))
+        # include same-month season scenes around the stage for robustness
+        if d:
+            y, m = int(d[:4]), int(d[5:7])
+            for dd, layers in by_date.items():
+                if int(dd[:4]) != y or int(dd[5:7]) != m:
+                    continue
+                nv = layers.get("NDVI")
+                if nv is None:
+                    continue
+                vals.append(float(nv))
+        vals = vals or ([float(st["ndvi"])] if st.get("ndvi") is not None else [])
+        if not vals:
+            out.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "date": d,
+                    "mean_ndvi": None,
+                    "min_ndvi": None,
+                    "max_ndvi": None,
+                    "n": 0,
+                    "trend_vs_prev": None,
+                    "likely_bare": False,
+                    "grade": None,
+                }
+            )
+            continue
+        mean_v = float(np.mean(vals))
+        min_v = float(np.min(vals))
+        max_v = float(np.max(vals))
+        trend = None
+        if prev_mean is not None:
+            delta = mean_v - prev_mean
+            if delta >= 0.05:
+                trend = "升"
+            elif delta <= -0.05:
+                trend = "降"
+            else:
+                trend = "平"
+        stage_month = int(d[5:7]) if d else None
+        likely_bare = bool(
+            max_v < UNCROPPED_NDVI
+            and (stage_month in peak_months if stage_month is not None else True)
+        )
+        out.append(
+            {
+                "key": key,
+                "label": label,
+                "date": d,
+                "mean_ndvi": round(mean_v, 3),
+                "min_ndvi": round(min_v, 3),
+                "max_ndvi": round(max_v, 3),
+                "n": len(vals),
+                "trend_vs_prev": trend,
+                "likely_bare": bool(likely_bare),
+                "grade": None if likely_bare else classify_ndvi_grade(mean_v),
+            }
+        )
+        prev_mean = mean_v
+    return out
+
+
 def compute_assessment(
     indices: list[dict[str, Any]],
     soil: dict[str, Any],
@@ -115,6 +382,7 @@ def compute_assessment(
     weather_stress: dict[str, Any] | None = None,
     suitability: dict[str, Any] | None = None,
     field_meta: dict[str, Any] | None = None,
+    weather_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute scorecard / rs / risk payloads from index rows + soil/weather.
 
@@ -291,9 +559,26 @@ def compute_assessment(
         if (_wet_layer(d) or {}).get("mean", -1) > ndwi_p85
         and by[d]["NDVI"]["mean"] < ndvi_p50
     )
-    abs_water = sum(
-        1 for d in season_dates if (_wet_layer(d) or {}).get("mean", -1) > 0
-    )
+    open_water_dates: list[dict[str, Any]] = []
+    for d in season_dates:
+        wl = _wet_layer(d)
+        if wl is None:
+            continue
+        wet_mean = float(wl.get("mean", -1))
+        if wet_mean <= 0:
+            continue
+        ndvi_mean = None
+        if "NDVI" in by[d]:
+            ndvi_mean = round(float(by[d]["NDVI"]["mean"]), 4)
+        open_water_dates.append(
+            {
+                "date": d,
+                "wet_mean": round(wet_mean, 4),
+                "ndvi_mean": ndvi_mean,
+            }
+        )
+    open_water_dates.sort(key=lambda x: (-float(x["wet_mean"]), x["date"]))
+    abs_water = len(open_water_dates)
 
     if abs_water == 0 and flood_cand < 3:
         rs_flood = "低（未见明水面）"
@@ -329,6 +614,7 @@ def compute_assessment(
         "rs_flood_level": rs_flood,
         "rs_drought_level": rs_drought,
         "absolute_open_water_scenes": abs_water,
+        "open_water_dates": open_water_dates,
         "drought_moderate_vci_lt35": drought_mod,
         "drought_severe_vci_lt20": drought_sev,
         "flood_candidates": flood_cand,
@@ -600,16 +886,48 @@ def compute_assessment(
         "method_wet_drought": {
             "rule": "no_red_without_hard_flood_or_drought_evidence",
             "absolute_open_water_scenes": abs_water,
+            "open_water_dates": open_water_dates,
             "peak_ndvi_mean": round(peak_mean, 3),
             "wet_score": wet_safety,
             "drought_score": drought_safety,
         },
     }
 
+    # ---- NDVI grade shares (season scenes; drop peak bare) ----
+    season_vals_for_grade: list[float] = []
+    for d in season_dates:
+        n = by[d]["NDVI"]["mean"]
+        if _month(d) in peak_months and n < UNCROPPED_NDVI:
+            continue
+        season_vals_for_grade.append(n)
+    ndvi_grade_shares = compute_ndvi_grade_shares(season_vals_for_grade)
+    peak_vals_for_grade = [
+        by[d]["NDVI"]["mean"]
+        for d in peak_dates
+        if by[d]["NDVI"]["mean"] >= UNCROPPED_NDVI
+    ]
+    ndvi_grade_shares_peak = compute_ndvi_grade_shares(peak_vals_for_grade)
+
+    soil_analysis_plain = build_soil_analysis_plain(soil, crop_label)
+    weather_history_plain = summarize_weather_history(weather_history, crop_label)
+    # Near-term weather plain already in dims; keep both
+    analysis = {
+        "soil_analysis_plain": soil_analysis_plain,
+        "weather_history": weather_history or {},
+        "weather_history_plain": weather_history_plain,
+        "weather_recent_plain": wplain,
+        "ndvi_grade_shares": ndvi_grade_shares,
+        "ndvi_grade_shares_peak": ndvi_grade_shares_peak,
+        "ndvi_grade_rule_zh": NDVI_GRADE_RULE_ZH,
+        "narrative_bridge": None,  # filled after phenology in service
+        "phenology_stage_summary": [],
+    }
+
     return {
         "scorecard": scorecard,
         "rs": rs,
         "risk": risk,
+        "analysis": analysis,
         "by_date": {
             d: {k: v["mean"] for k, v in layers.items()} for d, layers in by.items()
         },
@@ -623,5 +941,9 @@ def compute_assessment(
             "evi_p30": evi_p30,
             "ndwi_p85": ndwi_p85,
             "month_hits": dict(month_hits),
+            "crop_key": crop_key,
+            "crop_label": crop_label,
+            "season_months": sorted(season_months),
+            "peak_months": sorted(peak_months),
         },
     }
