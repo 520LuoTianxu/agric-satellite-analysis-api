@@ -108,8 +108,32 @@ def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
     return pixels or None
 
 
-def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
-    """Fetch original OSS parcel JSON; return pixels + heatmap_url or None on failure."""
+def _oss_str_url(value: Any) -> str | None:
+    """Accept non-empty string URLs from OSS JSON; reject other types."""
+    if isinstance(value, str):
+        s = value.strip()
+        if s:
+            return s
+    return None
+
+
+def _extract_oss_media_urls(obj: dict[str, Any]) -> dict[str, str | None]:
+    """Pull preview image URLs from an OSS parcel product JSON object."""
+    rgb_url = _oss_str_url(obj.get("rgb_url"))
+    large_rgb_url = _oss_str_url(obj.get("large_rgb_url"))
+    heatmap_url = _oss_str_url(obj.get("heatmap_url"))
+    s2_heatmap_url = _oss_str_url(obj.get("s2_heatmap_url"))
+    return {
+        "rgb_url": rgb_url,
+        "large_rgb_url": large_rgb_url,
+        # Backward-compatible single heatmap field (prefer dedicated heatmap, else S2).
+        "heatmap_url": heatmap_url or s2_heatmap_url,
+        "s2_heatmap_url": s2_heatmap_url,
+    }
+
+
+def _load_oss_scene_json(json_oss_key: str | None) -> dict[str, Any] | None:
+    """Fetch and parse original OSS parcel JSON; return dict or None on failure."""
     if not json_oss_key or not isinstance(json_oss_key, str):
         return None
     key = json_oss_key.strip()
@@ -120,22 +144,59 @@ def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
         raw = storage.get_bytes(key)
         obj = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 — fallback to DB grid is intentional
-        logger.warning("OSS pixel fetch failed for %s: %s", key, exc)
+        logger.warning("OSS scene JSON fetch failed for %s: %s", key, exc)
         return None
     if not isinstance(obj, dict):
         return None
-    pixels = _normalize_oss_pixels(obj.get("pixels"))
-    if not pixels:
-        logger.warning("OSS JSON %s has no lon/lat pixels", key)
+    return obj
+
+
+def _load_oss_scene_media(json_oss_key: str | None) -> dict[str, str | None] | None:
+    """Load rgb/heatmap preview URLs from OSS JSON without requiring pixels.
+
+    Used when pixels come from DB lonlat_v1 but json_oss_key still has preview images.
+    """
+    obj = _load_oss_scene_json(json_oss_key)
+    if obj is None:
         return None
-    heatmap_url = obj.get("heatmap_url") or obj.get("s2_heatmap_url")
-    if heatmap_url is not None and not isinstance(heatmap_url, str):
-        heatmap_url = None
+    return _extract_oss_media_urls(obj)
+
+
+def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
+    """Fetch original OSS parcel JSON; return pixels + media URLs, or media-only if no pixels."""
+    obj = _load_oss_scene_json(json_oss_key)
+    if obj is None:
+        return None
+    pixels = _normalize_oss_pixels(obj.get("pixels"))
+    media = _extract_oss_media_urls(obj)
+    if not pixels:
+        logger.warning(
+            "OSS JSON %s has no lon/lat pixels; returning media URLs only",
+            json_oss_key,
+        )
+        return {"pixels_lonlat": None, "pixel_count": None, **media}
     return {
         "pixels_lonlat": pixels,
-        "heatmap_url": heatmap_url,
         "pixel_count": obj.get("pixel_count") or len(pixels),
+        **media,
     }
+
+
+def _clear_scene_media_urls(d: dict[str, Any]) -> None:
+    d["rgb_url"] = None
+    d["large_rgb_url"] = None
+    d["heatmap_url"] = None
+    d["s2_heatmap_url"] = None
+
+
+def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) -> None:
+    if media:
+        d["rgb_url"] = media.get("rgb_url")
+        d["large_rgb_url"] = media.get("large_rgb_url")
+        d["heatmap_url"] = media.get("heatmap_url")
+        d["s2_heatmap_url"] = media.get("s2_heatmap_url")
+    else:
+        _clear_scene_media_urls(d)
 
 
 async def _agri_ready(db: AsyncSession) -> None:
@@ -429,31 +490,38 @@ async def list_land_scenes(
         if not include_pixels:
             d.pop("pixel_data", None)
             d.pop("pixels_lonlat", None)
+            d.pop("rgb_url", None)
+            d.pop("large_rgb_url", None)
             d.pop("heatmap_url", None)
+            d.pop("s2_heatmap_url", None)
             d.pop("pixels_source", None)
         else:
             db_lonlat = _pixels_from_db_lonlat(d.get("pixel_data"))
             if db_lonlat:
                 d["pixels_lonlat"] = db_lonlat
-                d["heatmap_url"] = None
                 d["pixels_source"] = "db_lonlat"
                 # Prefer DB lon/lat; drop grid payload so clients use pixels_lonlat.
                 d["pixel_data"] = None
                 if not d.get("pixel_count"):
                     d["pixel_count"] = len(db_lonlat)
+                # Keep OSS preview images even when pixels come from DB lonlat_v1.
+                _attach_scene_media_urls(
+                    d, _load_oss_scene_media(d.get("json_oss_key"))
+                )
             else:
                 oss_payload = _load_oss_scene_pixels(d.get("json_oss_key"))
-                if oss_payload:
+                if oss_payload and oss_payload.get("pixels_lonlat"):
                     d["pixels_lonlat"] = oss_payload["pixels_lonlat"]
-                    d["heatmap_url"] = oss_payload.get("heatmap_url")
                     d["pixels_source"] = "oss"
                     # Prefer OSS lon/lat; drop lossy grid to avoid frontend using it.
                     d["pixel_data"] = None
                     if oss_payload.get("pixel_count") and not d.get("pixel_count"):
                         d["pixel_count"] = oss_payload["pixel_count"]
+                    _attach_scene_media_urls(d, oss_payload)
                 else:
                     d["pixels_lonlat"] = None
-                    d["heatmap_url"] = None
+                    # Attach media from same OSS fetch (or None if JSON missing).
+                    _attach_scene_media_urls(d, oss_payload)
                     if d.get("pixel_data"):
                         d["pixels_source"] = "db_grid"
                     else:
@@ -470,7 +538,10 @@ async def list_land_scenes(
                     exclude={
                         "pixel_data",
                         "pixels_lonlat",
+                        "rgb_url",
+                        "large_rgb_url",
                         "heatmap_url",
+                        "s2_heatmap_url",
                         "pixels_source",
                     },
                 )

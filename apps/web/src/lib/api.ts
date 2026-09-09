@@ -1040,7 +1040,10 @@ export interface AgriSceneProduct {
         VH_db?: number;
         [key: string]: number | undefined;
     }> | null;
+    rgb_url?: string | null;
+    large_rgb_url?: string | null;
     heatmap_url?: string | null;
+    s2_heatmap_url?: string | null;
     pixels_source?: "db_lonlat" | "oss" | "db_grid" | null;
 }
 

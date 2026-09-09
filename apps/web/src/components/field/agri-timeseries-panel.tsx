@@ -526,6 +526,12 @@ export default function AgriTimeseriesPanel({
                 const img = lonlat?.length
                     ? rasterizeAgriLonLatPixels(lonlat, index, meta.sensor)
                     : rasterizeAgriPixels(grid!, index, meta.sensor);
+                if (img && scene) {
+                    img.previewRgbUrl = scene.rgb_url ?? null;
+                    img.previewLargeRgbUrl = scene.large_rgb_url ?? null;
+                    img.previewHeatmapUrl = scene.heatmap_url ?? null;
+                    img.previewS2HeatmapUrl = scene.s2_heatmap_url ?? null;
+                }
                 if (gen !== heatmapLoadGenRef.current) return;
                 cachedHeatmapRef.current = { date, index, img };
                 setHeatmapMeta(
