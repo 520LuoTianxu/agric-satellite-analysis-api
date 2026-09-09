@@ -16,6 +16,7 @@ from app.core.agri_classify import (
     classify_drought,
     classify_flood,
 )
+from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
@@ -27,6 +28,8 @@ from app.schemas.agri import (
     OverviewStatsOut,
     OverviewTotals,
     OverviewWeakGrowth,
+    OverviewWeakParcelOut,
+    OverviewWeakParcelsOut,
 )
 
 router = APIRouter(tags=["agri-overview"])
@@ -58,6 +61,29 @@ def _default_window() -> tuple[date, date]:
     to_d = date.today()
     from_d = to_d - timedelta(days=60)
     return from_d, to_d
+
+
+def _phenology_months(crop: str | None) -> list[int]:
+    """Resolve phenology months for weak-growth; crop switches season window only."""
+    if crop:
+        months = sorted(get_crop_season(crop).season_months)
+        if months:
+            return months
+    return list(PHENOLOGY_MONTHS)
+
+
+def _month_in_clause(
+    months: list[int], params: dict[str, Any], prefix: str = "pm"
+) -> str:
+    """Bind EXTRACT(MONTH ...) IN (:pm0, :pm1, ...) without array drivers."""
+    if not months:
+        months = list(PHENOLOGY_MONTHS)
+    keys: list[str] = []
+    for i, m in enumerate(months):
+        key = f"{prefix}{i}"
+        params[key] = int(m)
+        keys.append(f":{key}")
+    return f"EXTRACT(MONTH FROM s.date)::int IN ({', '.join(keys)})"
 
 
 def _pad_adcode(level: OverviewLevel, code: str | None) -> str | None:
@@ -235,6 +261,10 @@ async def overview_stats(
     name: str | None = Query(None),
     from_: date | None = Query(None, alias="from"),
     to: date | None = Query(None),
+    crop: str | None = Query(
+        None,
+        description="Crop key (e.g. corn) — sets phenology months for weak-growth only; does not filter parcels by planted crop.",
+    ),
 ):
     """Aggregate drought / flood / weak-growth stats for a China admin region."""
     await _agri_ready(db)
@@ -244,6 +274,9 @@ async def overview_stats(
     if from_d > to_d:
         raise HTTPException(status_code=400, detail="from must be <= to")
 
+    crop_key = normalize_crop_key(crop) if crop else None
+    pheno_months = _phenology_months(crop)
+
     params: dict[str, Any] = {
         "from_d": from_d,
         "to_d": to_d,
@@ -251,6 +284,7 @@ async def overview_stats(
         "weak_ndvi": WEAK_NDVI_LT,
     }
     region_wh = _region_where(level, code, name, params)
+    month_wh = _month_in_clause(pheno_months, params)
 
     # Parcels in region
     parcels = (
@@ -311,6 +345,7 @@ async def overview_stats(
                 "parcel_count": 0,
                 "area_mu": 0.0,
                 "drought_severe": 0,
+                "drought_alert": 0,
                 "flood": 0,
                 "weak_growth": 0,
             }
@@ -355,8 +390,11 @@ async def overview_stats(
             drought_counts[cls] += 1
             drought_area[cls] += area_by_land.get(r.land_id, 0.0)
             ck = land_to_child.get(r.land_id)
-            if ck and cls == "severe" and ck in child_agg:
-                child_agg[ck]["drought_severe"] += 1
+            if ck and ck in child_agg:
+                if cls == "severe":
+                    child_agg[ck]["drought_severe"] += 1
+                if cls in ("severe", "moderate", "mild"):
+                    child_agg[ck]["drought_alert"] += 1
 
         # Latest S1 per parcel (no cloud filter)
         s1_rows = (
@@ -400,7 +438,7 @@ async def overview_stats(
                     WHERE {region_wh}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
-                      AND EXTRACT(MONTH FROM s.date)::int BETWEEN 6 AND 9
+                      AND {month_wh}
                       AND s.ndvi_avg IS NOT NULL
                       AND NOT (
                           coalesce(s.parcel_cloud_cover_pct, s.cloud_cover) > :cloud_max
@@ -446,6 +484,7 @@ async def overview_stats(
             name=v["name"],
             parcel_count=v["parcel_count"],
             drought_severe=v["drought_severe"],
+            drought_alert=v["drought_alert"],
             flood=v["flood"],
             weak_growth=v["weak_growth"],
             area_mu=round(v["area_mu"], 2),
@@ -468,8 +507,9 @@ async def overview_stats(
         filters={
             "from": from_d.isoformat(),
             "to": to_d.isoformat(),
+            "crop": crop_key,
             "cloud_max_pct": CLOUD_MAX_PCT,
-            "phenology_months": list(PHENOLOGY_MONTHS),
+            "phenology_months": pheno_months,
             "weak_ndvi_lt": WEAK_NDVI_LT,
         },
         totals=OverviewTotals(parcel_count=total_count, area_mu=round(total_area, 2)),
@@ -558,3 +598,134 @@ async def overview_regions(
         parent_name=parent_name or ("全国" if pl == "country" else None),
         children=children,
     )
+
+
+@router.get("/overview/weak-parcels", response_model=OverviewWeakParcelsOut)
+async def overview_weak_parcels(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    from_: date | None = Query(None, alias="from"),
+    to: date | None = Query(None),
+    crop: str | None = Query(
+        None,
+        description="Crop key — phenology months for weak-growth only (no parcel crop filter).",
+    ),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """List parcels with weak growth (clear S2 mean NDVI in phenology months < threshold)."""
+    await _agri_ready(db)
+    default_from, default_to = _default_window()
+    from_d = from_ or default_from
+    to_d = to or default_to
+    if from_d > to_d:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    pheno_months = _phenology_months(crop)
+    params: dict[str, Any] = {
+        "from_d": from_d,
+        "to_d": to_d,
+        "cloud_max": CLOUD_MAX_PCT,
+        "weak_ndvi": WEAK_NDVI_LT,
+        "limit": limit,
+        "offset": offset,
+    }
+    region_wh = _region_where(level, code, name, params)
+    month_wh = _month_in_clause(pheno_months, params)
+
+    clear_s2 = f"""
+        s.sensor = 'S2'
+        AND s.date >= :from_d AND s.date <= :to_d
+        AND {month_wh}
+        AND s.ndvi_avg IS NOT NULL
+        AND NOT (
+            coalesce(s.parcel_cloud_cover_pct, s.cloud_cover) > :cloud_max
+            OR s.cloud_cover_over_30 IS TRUE
+        )
+    """
+
+    total_row = (
+        await db.execute(
+            text(
+                f"""
+                SELECT count(*)::int AS total
+                FROM (
+                    SELECT s.land_id
+                    FROM agri.parcel_scene_products s
+                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    WHERE {region_wh}
+                      AND {clear_s2}
+                    GROUP BY s.land_id
+                    HAVING avg(s.ndvi_avg) < :weak_ndvi
+                ) w
+                """
+            ),
+            params,
+        )
+    ).fetchone()
+    total = int(total_row.total) if total_row else 0
+
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                WITH weak AS (
+                    SELECT s.land_id,
+                           avg(s.ndvi_avg)::float AS ndvi_avg
+                    FROM agri.parcel_scene_products s
+                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    WHERE {region_wh}
+                      AND {clear_s2}
+                    GROUP BY s.land_id
+                    HAVING avg(s.ndvi_avg) < :weak_ndvi
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (s.land_id)
+                           s.land_id,
+                           s.date AS scene_date,
+                           coalesce(s.parcel_cloud_cover_pct, s.cloud_cover)::float AS cloud_pct
+                    FROM agri.parcel_scene_products s
+                    JOIN weak w ON w.land_id = s.land_id
+                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    WHERE {region_wh}
+                      AND {clear_s2}
+                    ORDER BY s.land_id, s.date DESC
+                )
+                SELECT w.land_id,
+                       p.land_name,
+                       p.province_name,
+                       p.city_name,
+                       p.county_name,
+                       coalesce(p.land_area_mu, 0)::float AS land_area_mu,
+                       w.ndvi_avg,
+                       l.scene_date,
+                       l.cloud_pct
+                FROM weak w
+                JOIN agri.land_parcels p ON p.land_id = w.land_id
+                LEFT JOIN latest l ON l.land_id = w.land_id
+                ORDER BY w.ndvi_avg ASC, coalesce(p.land_area_mu, 0) DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        )
+    ).fetchall()
+
+    items = [
+        OverviewWeakParcelOut(
+            land_id=str(r.land_id),
+            land_name=r.land_name,
+            province_name=r.province_name,
+            city_name=r.city_name,
+            county_name=r.county_name,
+            land_area_mu=round(float(r.land_area_mu or 0), 2),
+            ndvi_avg=round(float(r.ndvi_avg), 4),
+            scene_date=r.scene_date,
+            cloud_pct=round(float(r.cloud_pct), 2) if r.cloud_pct is not None else None,
+        )
+        for r in rows
+    ]
+    return OverviewWeakParcelsOut(total=total, items=items)

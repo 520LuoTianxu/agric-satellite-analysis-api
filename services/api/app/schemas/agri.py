@@ -275,6 +275,7 @@ class OverviewChildOut(BaseModel):
     name: str
     parcel_count: int = 0
     drought_severe: int = 0
+    drought_alert: int = 0  # severe + moderate + mild
     flood: int = 0
     weak_growth: int = 0
     area_mu: float = 0.0
@@ -303,3 +304,20 @@ class OverviewRegionsOut(BaseModel):
     parent_code: str | None = None
     parent_name: str | None = None
     children: list[OverviewRegionOut]
+
+
+class OverviewWeakParcelOut(BaseModel):
+    land_id: str
+    land_name: str | None = None
+    province_name: str | None = None
+    city_name: str | None = None
+    county_name: str | None = None
+    land_area_mu: float = 0.0
+    ndvi_avg: float
+    scene_date: date | None = None
+    cloud_pct: float | None = None
+
+
+class OverviewWeakParcelsOut(BaseModel):
+    total: int
+    items: list[OverviewWeakParcelOut]
