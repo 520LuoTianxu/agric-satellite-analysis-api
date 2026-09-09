@@ -2,8 +2,8 @@
  * Agri 色斑图 helpers — prefer OSS lon/lat pixels (pixels_lonlat) rasterized at
  * ~10 m in Web Mercator into a continuous canvas color film (MapLibre image
  * source). Legacy DB grid pixel_data ([row,col,...]) is fallback only.
- * Optional field.geom mask (skipped if it would wipe the canvas). GeoJSON fill
- * cells (turf intersect) remain the reliable fallback when the image is empty.
+ * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
+ * GeoJSON fill is fallback only when the image is empty — not turf-on-tiny-cells.
  *
  * OSS S2 pixel: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}
  * OSS S1 pixel: {lon,lat,VV_db,VH_db}
@@ -430,13 +430,13 @@ export interface AgriHeatmapImage {
     /** Sparse 10 m UTM cells as WGS84 polygons — fallback if image overlay unavailable. */
     geojson: AgriHeatmapGeoJSON;
     /**
-     * Lon/lat sample centers for MapLibre circle layer (preferred for OSS pixels_lonlat).
-     * Avoids turf.intersect on tiny ~10 m squares that often empty the fill layer.
+     * Lon/lat sample centers (optional / debug). Primary map overlay is the
+     * canvas image film — circle layer is disabled by default.
      */
     points?: AgriHeatmapPoints;
-    /** True when built from OSS lon/lat pixels (WebMercator film / points). */
+    /** True when built from OSS lon/lat pixels (WebMercator film). */
     fromLonLat?: boolean;
-    /** Source UTM grid (for field-boundary canvas mask / remask). */
+    /** Source grid (WebMercator 3857 for lon/lat films; UTM for legacy DB). */
     grid: AgriPixelGrid;
     width: number;
     height: number;
@@ -796,12 +796,13 @@ export function maskCanvasToFieldGeom(
  * 4326 lon/lat films, apply mask but restore unmasked when alpha is wiped.
  */
 /**
- * Destination-in field masks have wiped the film before (esp. lonLat↔UTM).
- * Lon/lat / WebMercator films are already parcel-sampled from OSS — skip mask.
- * UTM path historically wiped film too — skip.
+ * Apply destination-in field mask only for WebMercator / lonlat canvas grids.
+ * Never run lonLatToUtm against an EPSG:3857 grid (that wiped the film before).
+ * UTM legacy grids skip mask here; page may still soft-clip GeoJSON separately.
+ * applyFieldMaskIfHealthy restores unmasked pixels if alpha≈0 after mask.
  */
-function shouldApplyCanvasFieldMask(_grid: AgriPixelGrid): boolean {
-    return false;
+function shouldApplyCanvasFieldMask(grid: AgriPixelGrid): boolean {
+    return grid.epsg === 3857 || grid.epsg === 4326;
 }
 
 function applyFieldMaskIfHealthy(
@@ -866,7 +867,10 @@ export function clipHeatmapImageToField(
         const ctx = canvas.getContext("2d");
         if (!ctx) return hm;
 
-        const img = ctx.createImageData(hm.width, hm.height);
+        // Full-cell film (expand slightly) — same style as rasterizeAgriLonLatPixels.
+        ctx.imageSmoothingEnabled = false;
+        const expand = 1.12;
+        const inset = (expand - 1) / 2;
         let paintedCells = 0;
         for (const feat of hm.geojson?.features ?? []) {
             const row = Number(feat.properties?.row);
@@ -884,14 +888,10 @@ export function clipHeatmapImageToField(
                       ]
                     : hexToRgba(feat.properties?.color ?? "#000000", 230);
             if (![r, g, b, a].every(Number.isFinite) || a === 0) continue;
-            const i = (row * hm.width + col) * 4;
-            img.data[i] = r;
-            img.data[i + 1] = g;
-            img.data[i + 2] = b;
-            img.data[i + 3] = a;
+            ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
+            ctx.fillRect(col - inset, row - inset, expand, expand);
             paintedCells++;
         }
-        ctx.putImageData(img, 0, 0);
         const painted = applyFieldMaskIfHealthy(
             ctx,
             grid,
@@ -1338,17 +1338,16 @@ export function rasterizeAgriLonLatPixels(
             canvas.height = height;
             const ctx = canvas.getContext("2d");
             if (ctx) {
-                // Soft filled cells (~1.2 px) to reduce visible gaps between 10 m samples.
+                // Continuous solid film: each sample paints its full ~10 m cell.
+                // Slightly expand (1.12) to kill hairline gaps between adjacent cells.
+                // No arcs/circles — those leave satellite basemap showing through.
+                ctx.imageSmoothingEnabled = false;
+                const expand = 1.12;
+                const inset = (expand - 1) / 2;
                 for (const cell of cellsWithRc) {
                     const [r, g, b, a] = cell.rgba;
                     ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
-                    const cx = cell.col + 0.5;
-                    const cy = cell.row + 0.5;
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, 0.65, 0, Math.PI * 2);
-                    ctx.fill();
-                    // Also paint the native cell for denser film coverage.
-                    ctx.fillRect(cell.col, cell.row, 1, 1);
+                    ctx.fillRect(cell.col - inset, cell.row - inset, expand, expand);
                 }
                 const alphaCount = applyFieldMaskIfHealthy(
                     ctx,

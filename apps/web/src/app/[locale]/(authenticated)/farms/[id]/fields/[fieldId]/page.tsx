@@ -9,7 +9,7 @@ import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
-import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapImageToField, clipHeatmapToField, filterHeatmapPointsInField, heatmapImageHasContent } from "@/lib/agri-heatmap";
+import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, clipHeatmapImageToField, clipHeatmapToField, heatmapImageHasContent } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -334,9 +334,10 @@ export default function FieldDetailPage() {
     }, []);
 
     /**
-     * Draw agri 色膜. For OSS lon/lat pixels prefer MapLibre circles (meters-ish
-     * radius) — never depend on turf.intersect of tiny cell polygons. Legacy DB
-     * grids keep image + clipped fill. Toast when pixels exist but nothing drew.
+     * Draw agri 色膜 as a continuous MapLibre image raster (canvas film).
+     * Primary path: lon/lat → WebMercator ~10 m cells → PNG image source.
+     * Circle layer is not used (gappy dots). GeoJSON fill is fallback only when
+     * the image is empty/unusable. Do not turf.intersect tiny cells as primary.
      */
     const applyAgriHeatmapToMap = useCallback(
         (
@@ -349,75 +350,15 @@ export default function FieldDetailPage() {
             const imgLayerId = "agri-heatmap-raster";
             const fillSrcId = "agri-heatmap-geojson";
             const fillLayerId = "agri-heatmap-fill";
-            const ptsSrcId = "agri-heatmap-points";
-            const ptsLayerId = "agri-heatmap-circles";
             let drew = false;
             let clipEmptied = false;
 
-            // 1) Lon/lat path: circle layer from sample points (reliable NDVI film)
-            if (hm.fromLonLat && (hm.points?.features?.length ?? 0) > 0) {
-                const filtered = filterHeatmapPointsInField(hm.points!, fieldGeom);
-                map.addSource(ptsSrcId, { type: "geojson", data: filtered });
-                map.addLayer(
-                    {
-                        id: ptsLayerId,
-                        type: "circle",
-                        source: ptsSrcId,
-                        paint: {
-                            // ~5–8 m appearance around field zoom (15–18)
-                            "circle-radius": [
-                                "interpolate",
-                                ["exponential", 2],
-                                ["zoom"],
-                                12,
-                                2,
-                                14,
-                                4,
-                                16,
-                                6,
-                                18,
-                                9,
-                                20,
-                                14,
-                            ],
-                            "circle-color": ["get", "color"],
-                            "circle-opacity": 0.88,
-                            "circle-blur": 0.15,
-                            "circle-stroke-width": 0,
-                        },
-                    },
-                    beforeId,
-                );
-                drew = true;
-
-                // Optional denser continuous film underneath circles (no remask wipe)
-                if (heatmapImageHasContent(hm)) {
-                    try {
-                        map.addSource(imgSrcId, {
-                            type: "image",
-                            url: hm.dataUrl!,
-                            coordinates: hm.coordinates,
-                        });
-                        map.addLayer(
-                            {
-                                id: imgLayerId,
-                                type: "raster",
-                                source: imgSrcId,
-                                paint: {
-                                    "raster-opacity": 0.75,
-                                    "raster-resampling": "nearest",
-                                },
-                            },
-                            ptsLayerId,
-                        );
-                    } catch {
-                        /* image optional when circles already draw */
-                    }
-                }
-            } else {
-                // 2) Legacy / fallback: image then turf-soft-clipped GeoJSON fill
-                const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
-                if (heatmapImageHasContent(clippedImg)) {
+            // 1) Primary: continuous canvas color film (nearest = crisp cells)
+            // clipHeatmapImageToField remasks in WebMercator canvas space; if the
+            // mask would wipe alpha it restores the unmasked film.
+            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+            if (heatmapImageHasContent(clippedImg)) {
+                try {
                     map.addSource(imgSrcId, {
                         type: "image",
                         url: clippedImg.dataUrl!,
@@ -436,38 +377,43 @@ export default function FieldDetailPage() {
                         beforeId,
                     );
                     drew = true;
+                } catch (e) {
+                    console.warn("[agri-heatmap] image overlay failed", e);
                 }
-                if (!drew && hm.geojson) {
-                    const beforeClip = hm.geojson.features.length;
-                    const clipped = hm.fromLonLat
-                        ? hm.geojson // already on parcel — skip turf clip
-                        : clipHeatmapToField(hm.geojson, fieldGeom);
-                    if (!hm.fromLonLat && beforeClip > 0 && clipped.features.length === 0) {
-                        clipEmptied = true;
-                    }
-                    const data =
-                        clipped.features.length > 0
-                            ? clipped
-                            : beforeClip > 0
-                              ? hm.geojson
-                              : clipped;
-                    if (data.features.length) {
-                        map.addSource(fillSrcId, { type: "geojson", data });
-                        map.addLayer(
-                            {
-                                id: fillLayerId,
-                                type: "fill",
-                                source: fillSrcId,
-                                paint: {
-                                    "fill-color": ["get", "color"],
-                                    "fill-opacity": 0.85,
-                                    "fill-outline-color": "rgba(0,0,0,0)",
-                                },
+            }
+
+            // 2) Fallback only: GeoJSON fill cells when image is empty/unusable.
+            // Lon/lat cells skip turf clip (tiny squares emptied features before).
+            if (!drew && hm.geojson) {
+                const beforeClip = hm.geojson.features.length;
+                const clipped = hm.fromLonLat
+                    ? hm.geojson
+                    : clipHeatmapToField(hm.geojson, fieldGeom);
+                if (!hm.fromLonLat && beforeClip > 0 && clipped.features.length === 0) {
+                    clipEmptied = true;
+                }
+                const data =
+                    clipped.features.length > 0
+                        ? clipped
+                        : beforeClip > 0
+                          ? hm.geojson
+                          : clipped;
+                if (data.features.length) {
+                    map.addSource(fillSrcId, { type: "geojson", data });
+                    map.addLayer(
+                        {
+                            id: fillLayerId,
+                            type: "fill",
+                            source: fillSrcId,
+                            paint: {
+                                "fill-color": ["get", "color"],
+                                "fill-opacity": 0.85,
+                                "fill-outline-color": "rgba(0,0,0,0)",
                             },
-                            beforeId,
-                        );
-                        drew = true;
-                    }
+                        },
+                        beforeId,
+                    );
+                    drew = true;
                 }
             }
 
@@ -635,7 +581,7 @@ export default function FieldDetailPage() {
         }
     }, [indexLayer, field, mapInstance, activeIndexType]);
 
-    // Agri 色斑图 — lon/lat: circle film (no turf tiny-cell clip); legacy: image/geojson
+    // Agri 色斑图 — continuous canvas image film (gapless cells); GeoJSON fallback only
     useEffect(() => {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
