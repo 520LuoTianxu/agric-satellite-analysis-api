@@ -46,11 +46,6 @@ class Settings(BaseSettings):
     titiler_internal_url: str = "http://tiler:80"
     titiler_public_url: str = "http://localhost:8080"
 
-    # Boundary Detection (ML)
-    ftw_model_path: str = "models/ftw/prue_efnetb5_ccby_checkpoint.ckpt"
-    ftw_model_cache_dir: str = "/tmp/models"
-    detection_max_area_km2: float = 50.0
-
     # Weather (Open-Meteo)
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
     open_meteo_archive_url: str = "https://archive-api.open-meteo.com/v1/archive"

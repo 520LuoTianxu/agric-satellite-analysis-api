@@ -33,7 +33,7 @@ Collects, standardizes, and stores raw signals about every field. Source-agnosti
 | **Satellite** | Sentinel-2 (NDVI, EVI, SAVI, NDWI), STAC ingestion, COG storage, 24-month backfill | Landsat, Planet, SAR (Sentinel-1), cloud masking, fusion |
 | **Weather** | Open-Meteo (ERA5 + forecast), GDD, ET₀, water balance, drought index | Additional providers, irrigation scheduling inputs |
 | **Soil** | SoilGrids (global 250m) + POLARIS (US 30m), 10 properties × 6 depths, texture classification, AWC, risk scoring, Rosetta PTF hydraulic properties, crop suitability, sampling zones, carbon estimation | Terrain layers (DEM), sensor calibration |
-| **Boundaries** | FTW deep learning model, interactive review, GeoJSON/KML import | Multi-model ensemble, higher-res detection |
+| **Boundaries** | GeoJSON/KML import and manual draw | — |
 | **Sensors** | - | IoT soil sensors, weather stations, device plugin framework |
 
 ### Layer B - Intelligence Engine (Moat)
@@ -67,7 +67,7 @@ Ensures OpenFarm is a platform others can build on, not just a tool.
 
 ## Current Status
 
-OpenFarm **Milestone 11 (Soil Intelligence & Decision Support) is complete**. The platform delivers end-to-end satellite-powered crop intelligence with four vegetation indices (NDVI, EVI, SAVI, NDWI), ML-powered automatic field boundary detection, daily weather data with agricultural indices, automatic 24-month historical index backfill, soil profile intelligence with derived agronomic layers, and a full intelligence engine - crop suitability scoring (68 crops, 4-pillar model), nutrient risk classification, carbon sequestration estimation, soil×weather stress monitoring, intelligent sampling zones, and soil-aware alerts - all functional and deployed. The focus now shifts to anomaly detection, phenology tracking, and broader agricultural intelligence. See [Future Ideas](#future-ideas-post-mvp) for what's next.
+OpenFarm **Milestone 11 (Soil Intelligence & Decision Support) is complete**. The platform delivers end-to-end satellite-powered crop intelligence with four vegetation indices (NDVI, EVI, SAVI, NDWI), daily weather data with agricultural indices, automatic 24-month historical index backfill, soil profile intelligence with derived agronomic layers, and a full intelligence engine - crop suitability scoring (68 crops, 4-pillar model), nutrient risk classification, carbon sequestration estimation, soil×weather stress monitoring, intelligent sampling zones, and soil-aware alerts - all functional and deployed. The focus now shifts to anomaly detection, phenology tracking, and broader agricultural intelligence. See [Future Ideas](#future-ideas-post-mvp) for what's next.
 
 ---
 
@@ -157,19 +157,11 @@ OpenFarm **Milestone 11 (Soil Intelligence & Decision Support) is complete**. Th
 - [x] SAVI L factor stored in layer `params_json` and displayed in UI
 - [x] In-app changelog page with parsed Keep a Changelog rendering
 
-## Milestone 7 - Automatic Boundary Detection (Complete)
+## Milestone 7 - Automatic Boundary Detection (REMOVED)
 
-- [x] FTW (Fields of The World) deep learning model integration for field boundary detection
-- [x] Dedicated ML processor Docker service with PyTorch, torchgeo, and model weights
-- [x] Detection API - trigger, list, accept, discard, with org-scoped access control
-- [x] Full-page detection UI (`/farms/[id]/detect`) with draw → detecting → review workflow
-- [x] Interactive polygon drawing with MapLibre GL Draw (draw, move, edit vertices, delete)
-- [x] Viewport preservation across phase transitions
-- [x] Boundary review with confidence scores, bulk accept/discard, zoom-to-boundary
-- [x] Boundary geometry editing before accepting as a field
-- [x] 7-step progress tracking (validate → STAC search → download → prepare → inference → polygonize → store)
-- [x] Alembic migrations for detected boundaries, nullable job field_id, updated_at
-- [x] i18n translations (English + Spanish) for all detection UI
+ML field-boundary detection (FTW / dedicated ML worker / detect UI) was removed from
+the product. Field boundaries are created via manual draw or GeoJSON import.
+Alembic `0015_drop_detected_boundaries` drops the unused table.
 
 ## Milestone 8 - Weather Data Integration (Complete)
 
@@ -287,7 +279,6 @@ Organized by architecture layer and ordered by dependency. Items higher in each 
 
 **Field & Spatial:**
 - **Terrain layers** - elevation, slope, aspect from SRTM/Copernicus DEM
-- **Multi-model boundary detection** - ensemble approach for improved accuracy
 
 **Sensors & External Data:**
 - **Device/Sensor plugin framework** - connect soil sensors, weather stations, IoT devices

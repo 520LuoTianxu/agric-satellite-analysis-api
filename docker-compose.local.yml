@@ -12,8 +12,6 @@ services:
       -Q default,celery
       --loglevel=info
       --concurrency=1
-  ml-processor:
-    profiles: ["ml"]
   db:
     ports:
       - "5432:5432"

@@ -16,7 +16,6 @@ import {
     Map,
     MapPin,
     Plus,
-    ScanSearch,
     Save,
     Trash2,
     Upload,
@@ -266,12 +265,6 @@ export default function FarmDetailPage() {
                     </h2>
                     <div className="flex gap-2">
                         <Button variant="outline" asChild>
-                            <Link href={`/farms/${farmId}/detect`}>
-                                <ScanSearch className="h-4 w-4 mr-2" />
-                                Detect Boundaries
-                            </Link>
-                        </Button>
-                        <Button variant="outline" asChild>
                             <label className="cursor-pointer">
                                 {importing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Upload className="h-4 w-4 mr-2" />}
                                 Import GeoJSON
@@ -296,11 +289,6 @@ export default function FarmDetailPage() {
                                 {tFarms("noFieldsDesc")}
                             </p>
                             <div className="mt-4 flex justify-center gap-3">
-                                <Button variant="outline" asChild>
-                                    <Link href={`/farms/${farmId}/detect`}>
-                                        <ScanSearch className="h-4 w-4 mr-2" /> Detect Boundaries
-                                    </Link>
-                                </Button>
                                 <Button variant="outline" asChild>
                                     <label className="cursor-pointer">
                                         <Upload className="h-4 w-4 mr-2" /> Import GeoJSON

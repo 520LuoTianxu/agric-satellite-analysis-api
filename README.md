@@ -31,7 +31,6 @@ This repository is a fork of **[OpenFarm](https://github.com/superzero11/OpenFar
 
 - Self-hostable services: Next.js ↔ FastAPI ↔ TiTiler ↔ Aliyun OSS (MinIO optional) ↔ PostGIS
 - Vegetation indices from Sentinel-2: NDVI, EVI, SAVI, NDWI, with 24-month backfill
-- ML field-boundary detection (FTW) with review workflow
 - Daily weather (Open-Meteo) plus agricultural indices (GDD, water balance, drought)
 - Soil intelligence from SoilGrids (global, 250 m) and POLARIS (US, 30 m)
 - Provenance: Element84 STAC → COG → TiTiler tiles

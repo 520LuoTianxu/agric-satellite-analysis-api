@@ -60,14 +60,6 @@ services:
           cpus: "1.0"
           memory: 2G
 
-  ml-processor:
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 3G
-
   tiler:
     restart: unless-stopped
     deploy:

@@ -156,43 +156,6 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── ML Processor (Boundary Detection) ──────────────────────────────
-  ml-processor:
-    build:
-      context: ./services/api
-      dockerfile: Dockerfile.ml
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
-      OSS_REGION: ${OSS_REGION:-}
-      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
-      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
-      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
-      OSS_BUCKET: ${OSS_BUCKET:-}
-      OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
-      STAC_API_URL: ${STAC_API_URL}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "celery -A app.worker inspect ping --timeout 5 2>/dev/null | grep -q OK",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
   # ── TiTiler ────────────────────────────────────────────────────────
   # Default: S3-compatible access to Aliyun OSS (same keys as OSS_*).
   # For local MinIO: --profile minio and set
