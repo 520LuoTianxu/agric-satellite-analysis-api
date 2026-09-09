@@ -164,9 +164,24 @@ class SceneProductOut(BaseModel):
             "S1: {lon,lat,VV_db,VH_db}."
         ),
     )
+    rgb_url: str | None = Field(
+        default=None,
+        description="Parcel true-color RGB preview URL from OSS JSON (include_pixels=1).",
+    )
+    large_rgb_url: str | None = Field(
+        default=None,
+        description="Larger true-color RGB preview URL from OSS JSON (include_pixels=1).",
+    )
     heatmap_url: str | None = Field(
         default=None,
-        description="Optional pre-rendered heatmap PNG URL from OSS JSON (include_pixels=1).",
+        description=(
+            "Optional pre-rendered heatmap PNG URL from OSS JSON (include_pixels=1). "
+            "Falls back to s2_heatmap_url when heatmap_url is absent."
+        ),
+    )
+    s2_heatmap_url: str | None = Field(
+        default=None,
+        description="Sentinel-2 heatmap PNG URL from OSS JSON (include_pixels=1).",
     )
     pixels_source: Literal["db_lonlat", "oss", "db_grid"] | None = Field(
         default=None,

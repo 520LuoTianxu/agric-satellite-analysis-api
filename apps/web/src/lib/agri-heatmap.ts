@@ -449,6 +449,14 @@ export interface AgriHeatmapImage {
     min: number | null;
     max: number | null;
     legend: AgriHeatmapLegend;
+    /** OSS parcel true-color preview (prefer over large). */
+    previewRgbUrl?: string | null;
+    /** OSS larger true-color preview. */
+    previewLargeRgbUrl?: string | null;
+    /** OSS heatmap / 色斑 preview (may already fall back to S2 on API). */
+    previewHeatmapUrl?: string | null;
+    /** Distinct S2 heatmap preview URL from OSS JSON. */
+    previewS2HeatmapUrl?: string | null;
 }
 
 function continuousLegend(index: Exclude<AgriHeatIndex, "drought" | "flood">): AgriHeatmapLegend {
