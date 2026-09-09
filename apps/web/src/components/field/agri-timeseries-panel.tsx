@@ -27,8 +27,21 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History } from "lucide-react";
+import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { haToMu } from "@/lib/area";
@@ -205,6 +218,35 @@ function isLowCloud(scene: AgriSceneProduct): boolean {
         return scene.parcel_cloud_cover_pct <= 30;
     }
     return false;
+}
+
+function sceneCloudPct(scene: AgriSceneProduct | null | undefined): number | null {
+    if (!scene) return null;
+    const parcel = scene.parcel_cloud_cover_pct;
+    if (typeof parcel === "number" && Number.isFinite(parcel)) return parcel;
+    const cc = scene.cloud_cover;
+    if (typeof cc === "number" && Number.isFinite(cc)) return cc;
+    return null;
+}
+
+const RECENT_DATE_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
+const RECENT_DATE_CHIP_CAP = 14;
+const PRIMARY_SERIES_KEYS: SeriesKey[] = ["ndvi", "evi", "drought", "flood"];
+
+function seriesIsAvailable(key: SeriesKey, scenes: AgriSceneProduct[]): boolean {
+    const meta = SERIES_META[key];
+    const hasSensor = scenes.some((s) => s.sensor === meta.sensor);
+    if (!hasSensor) return false;
+    if (key === "drought" || key === "flood") return true;
+    if (
+        meta.avgKey &&
+        !scenes.some(
+            (s) => s.sensor === meta.sensor && typeof s[meta.avgKey!] === "number",
+        )
+    ) {
+        return false;
+    }
+    return true;
 }
 
 /** Optical veg indices where avg > 0.1 is a useful clear-sky signal. */
@@ -716,6 +758,55 @@ export default function AgriTimeseriesPanel({
     }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
+
+    const availableKeys = useMemo(
+        () => BUTTON_ORDER.filter((key) => seriesIsAvailable(key, scenes)),
+        [scenes],
+    );
+    const primaryKeys = useMemo(() => {
+        const preferred = PRIMARY_SERIES_KEYS.filter((k) => availableKeys.includes(k));
+        return preferred.length ? preferred : availableKeys.slice(0, 4);
+    }, [availableKeys]);
+    const overflowKeys = useMemo(
+        () => availableKeys.filter((k) => !primaryKeys.includes(k)),
+        [availableKeys, primaryKeys],
+    );
+    const seriesInOverflow = overflowKeys.includes(series);
+
+    const allDates = useMemo(
+        () => [...new Set(stats.map((s) => s.date))].sort((a, b) => b.localeCompare(a)),
+        [stats],
+    );
+    const recentDates = useMemo(() => {
+        if (!allDates.length) return [] as string[];
+        const latest = allDates[0]!; // already desc
+        const latestMs = Date.parse(`${latest}T00:00:00Z`);
+        if (!Number.isFinite(latestMs)) return allDates.slice(0, RECENT_DATE_CHIP_CAP);
+        const cutoff = latestMs - RECENT_DATE_WINDOW_MS;
+        const inWindow = allDates.filter((d) => {
+            const ms = Date.parse(`${d}T00:00:00Z`);
+            return Number.isFinite(ms) && ms >= cutoff;
+        });
+        return inWindow.slice(0, RECENT_DATE_CHIP_CAP);
+    }, [allDates]);
+    const chipDates = useMemo(() => {
+        const set = new Set(recentDates);
+        if (selectedDate && !set.has(selectedDate) && allDates.includes(selectedDate)) {
+            return [selectedDate, ...recentDates];
+        }
+        return recentDates;
+    }, [recentDates, selectedDate, allDates]);
+
+    const cloudPctByDate = useMemo(() => {
+        const sensor = sensorForIndex(series);
+        const out: Record<string, number | null> = {};
+        for (const d of allDates) {
+            const scene = scenes.find((s) => s.sensor === sensor && s.date === d);
+            out[d] = sceneCloudPct(scene);
+        }
+        return out;
+    }, [allDates, scenes, series]);
+
     const seasonMonths = useMemo(
         () => cropOption?.season_months ?? [6, 7, 8, 9],
         [cropOption?.season_months],
@@ -752,11 +843,7 @@ export default function AgriTimeseriesPanel({
 
     const cloudCoverPct = useMemo(() => {
         if (!selectedScene || sensorForIndex(series) !== "S2") return null;
-        const parcel = selectedScene.parcel_cloud_cover_pct;
-        if (typeof parcel === "number" && Number.isFinite(parcel)) return parcel;
-        const cc = selectedScene.cloud_cover;
-        if (typeof cc === "number" && Number.isFinite(cc)) return cc;
-        return null;
+        return sceneCloudPct(selectedScene);
     }, [selectedScene, series]);
 
     const cloudCoverOver30 = useMemo(() => {
@@ -913,24 +1000,9 @@ export default function AgriTimeseriesPanel({
                 )}
                 {!loading && total > 0 && (
                     <>
-                        <div className="flex flex-wrap gap-1.5 items-center">
-                            {BUTTON_ORDER.map((key) => {
+                        <div className="flex flex-nowrap gap-1.5 items-center overflow-x-auto">
+                            {primaryKeys.map((key) => {
                                 const meta = SERIES_META[key];
-                                const hasSensor = scenes.some((s) => s.sensor === meta.sensor);
-                                if (!hasSensor) return null;
-                                // Primary drought/flood always shown when sensor exists
-                                if (
-                                    key !== "drought" &&
-                                    key !== "flood" &&
-                                    meta.avgKey &&
-                                    !scenes.some(
-                                        (s) =>
-                                            s.sensor === meta.sensor &&
-                                            typeof s[meta.avgKey!] === "number",
-                                    )
-                                ) {
-                                    return null;
-                                }
                                 return (
                                     <Button
                                         key={key}
@@ -938,7 +1010,7 @@ export default function AgriTimeseriesPanel({
                                         size="sm"
                                         variant={series === key ? "default" : "outline"}
                                         className={cn(
-                                            "h-7 text-xs px-2.5",
+                                            "h-7 text-xs px-2.5 shrink-0",
                                             (key === "drought" || key === "flood") &&
                                                 series !== key &&
                                                 "border-primary/40",
@@ -950,11 +1022,57 @@ export default function AgriTimeseriesPanel({
                                     </Button>
                                 );
                             })}
+                            {seriesInOverflow && (
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="default"
+                                    className="h-7 text-xs px-2.5 shrink-0"
+                                    onClick={() => setSeries(series)}
+                                    title={SERIES_META[series].hint}
+                                >
+                                    {SERIES_META[series].label}
+                                </Button>
+                            )}
+                            {overflowKeys.length > 0 && (
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant={seriesInOverflow ? "secondary" : "outline"}
+                                            className="h-7 w-7 p-0 shrink-0"
+                                            title="更多指数"
+                                        >
+                                            <MoreHorizontal className="h-3.5 w-3.5" />
+                                            <span className="sr-only">更多指数</span>
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="start" className="min-w-[10rem]">
+                                        {overflowKeys.map((key) => {
+                                            const meta = SERIES_META[key];
+                                            const active = series === key;
+                                            return (
+                                                <DropdownMenuItem
+                                                    key={key}
+                                                    onSelect={() => setSeries(key)}
+                                                    className="text-xs gap-2"
+                                                >
+                                                    <span className="flex-1">{meta.label}</span>
+                                                    {active ? (
+                                                        <Check className="h-3.5 w-3.5 text-primary" />
+                                                    ) : null}
+                                                </DropdownMenuItem>
+                                            );
+                                        })}
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
                             <Button
                                 type="button"
                                 size="sm"
                                 variant="ghost"
-                                className="h-7 w-7 p-0 ml-auto"
+                                className="h-7 w-7 p-0 ml-auto shrink-0"
                                 title={heatmapVisible ? t("hideHeatmap") : t("showHeatmap")}
                                 onClick={() => {
                                     setHeatmapVisible((v) => {
@@ -1043,15 +1161,16 @@ export default function AgriTimeseriesPanel({
                                     : ""}
                             </p>
                             {selectedDate && (
-                                <div className="flex flex-wrap gap-1.5">
-                                    {stats
-                                        .slice(-8)
-                                        .reverse()
-                                        .map((s) => {
-                                            const active = selectedDate === s.date;
+                                <div className="space-y-2">
+                                    <div className="flex flex-wrap gap-1.5 items-center">
+                                        {chipDates.map((date) => {
+                                            const active = selectedDate === date;
+                                            const chipCloud = active ? cloudCoverPct : cloudPctByDate[date];
+                                            const chipOver30 =
+                                                typeof chipCloud === "number" && chipCloud > 30;
                                             return (
                                                 <Button
-                                                    key={s.date}
+                                                    key={date}
                                                     type="button"
                                                     size="sm"
                                                     variant={active ? "default" : "outline"}
@@ -1059,24 +1178,58 @@ export default function AgriTimeseriesPanel({
                                                         "h-6 text-[10px] px-1.5 tabular-nums shrink-0 gap-1",
                                                         active && cloudCoverOver30 && "ring-1 ring-warning/50",
                                                     )}
-                                                    onClick={() => selectDateExplicit(s.date)}
+                                                    onClick={() => selectDateExplicit(date)}
                                                 >
-                                                    {s.date.slice(5)}
-                                                    {active && cloudCoverPct != null && (
+                                                    {date.slice(5)}
+                                                    {active && chipCloud != null && (
                                                         <span
                                                             className={cn(
                                                                 "rounded px-0.5 text-[9px] font-normal tabular-nums",
-                                                                cloudCoverOver30
+                                                                chipOver30
                                                                     ? "bg-warning-subtle text-warning"
                                                                     : "bg-primary-foreground/15 text-primary-foreground",
                                                             )}
                                                         >
-                                                            {Math.round(cloudCoverPct)}%
+                                                            {Math.round(chipCloud)}%
                                                         </span>
                                                     )}
                                                 </Button>
                                             );
                                         })}
+                                    </div>
+                                    {allDates.length > 0 && (
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="text-[10px] text-muted-foreground shrink-0">
+                                                全年日期
+                                            </span>
+                                            <Select
+                                                value={selectedDate}
+                                                onValueChange={(v) => selectDateExplicit(v)}
+                                            >
+                                                <SelectTrigger className="h-7 text-[11px] w-full max-w-[14rem]">
+                                                    <SelectValue placeholder="选择日期" />
+                                                </SelectTrigger>
+                                                <SelectContent className="max-h-72">
+                                                    {allDates.map((date) => {
+                                                        const pct = cloudPctByDate[date];
+                                                        const label =
+                                                            pct != null
+                                                                ? `${date} · 云量 ${Math.round(pct)}%`
+                                                                : date;
+                                                        return (
+                                                            <SelectItem
+                                                                key={date}
+                                                                value={date}
+                                                                className="text-xs tabular-nums"
+                                                            >
+                                                                {label}
+                                                            </SelectItem>
+                                                        );
+                                                    })}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
