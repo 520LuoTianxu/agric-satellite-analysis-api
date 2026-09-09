@@ -106,7 +106,11 @@ def _styles(ov_light: str) -> dict[str, ParagraphStyle]:
             textColor=white,
         ),
         "card_body": ParagraphStyle(
-            "card_body", fontName="CN", fontSize=9, leading=13.5, textColor=HexColor("#333")
+            "card_body",
+            fontName="CN",
+            fontSize=9,
+            leading=13.5,
+            textColor=HexColor("#333"),
         ),
         "tip": ParagraphStyle(
             "tip", fontName="CN", fontSize=9, leading=13, textColor=HexColor("#1f4d38")
@@ -118,7 +122,11 @@ def _styles(ov_light: str) -> dict[str, ParagraphStyle]:
             "tbl_c", fontName="CN", fontSize=8.5, leading=12, textColor=HexColor("#222")
         ),
         "tbl_b": ParagraphStyle(
-            "tbl_b", fontName="CNB", fontSize=8.5, leading=12, textColor=HexColor("#222")
+            "tbl_b",
+            fontName="CNB",
+            fontSize=8.5,
+            leading=12,
+            textColor=HexColor("#222"),
         ),
     }
 
@@ -156,7 +164,9 @@ class ScoreBadge(Flowable):
             c.circle(12 * mm, y, 3.5 * mm if on else 2.8 * mm, fill=1, stroke=0)
         c.setFillColor(fg)
         c.setFont("CNB", 36)
-        c.drawCentredString(self.width / 2 + 4 * mm, self.height / 2 + 2 * mm, f"{self.score}")
+        c.drawCentredString(
+            self.width / 2 + 4 * mm, self.height / 2 + 2 * mm, f"{self.score}"
+        )
         c.setFont("CN", 11)
         c.setFillColor(HexColor("#444"))
         c.drawCentredString(
@@ -166,7 +176,9 @@ class ScoreBadge(Flowable):
         )
 
 
-def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: dict) -> dict:
+def _build_plain_dims(
+    scorecard: dict, soil: dict, rs: dict, weather_summary: dict
+) -> dict:
     dims = {d["key"]: d for d in scorecard["dimensions"]}
     ph = soil.get("avg_ph")
     texture = soil.get("dominant_texture") or "土壤"
@@ -176,9 +188,9 @@ def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: di
     heat = weather_summary.get("heat_stress_days")
     wd = weather_summary.get("water_deficit_mm")
 
-    crop_d = dims["crop"]
-    soil_d = dims["soil"]
-    vigor_d = dims["vigor"]
+    dims["crop"]
+    dims["soil"]
+    dims["vigor"]
     weather_d = dims["weather"]
     wet_d = dims["wet_safety"]
     dry_d = dims["drought_safety"]
@@ -191,7 +203,11 @@ def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: di
     else:
         soil_say += "排水一般。"
     if ph is not None:
-        soil_say += f"酸碱度偏碱（大约 {float(ph):.1f}），" if float(ph) > 7.5 else f"酸碱度大约 {float(ph):.1f}，"
+        soil_say += (
+            f"酸碱度偏碱（大约 {float(ph):.1f}），"
+            if float(ph) > 7.5
+            else f"酸碱度大约 {float(ph):.1f}，"
+        )
     if float(soil.get("waterlogging_risk") or 0) > 0.3:
         soil_say += "有一点点积水风险。"
     else:
@@ -199,7 +215,7 @@ def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: di
 
     vigor_say = (
         "只看夏天玉米旺长的时候（大概 6–9 月，尤其 7–8 月）。"
-        f"那段时间地里「绿得程度」"
+        "那段时间地里「绿得程度」"
         + (
             f"达到较好水平（约 {peak}）"
             if peak and peak >= 0.65
@@ -214,8 +230,10 @@ def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: di
 
     weather_say = weather_d["plain"]
     if heat:
-        weather_say = f"近一个月温度正常偏热，有几天高温；" + (
-            "雨水和蒸发差不多，墒情还过得去。" if abs(float(wd or 0)) < 20 else weather_d["plain"]
+        weather_say = "近一个月温度正常偏热，有几天高温；" + (
+            "雨水和蒸发差不多，墒情还过得去。"
+            if abs(float(wd or 0)) < 20
+            else weather_d["plain"]
         )
 
     return {
@@ -223,7 +241,7 @@ def _build_plain_dims(scorecard: dict, soil: dict, rs: dict, weather_summary: di
             "title": "适不适合种玉米",
             "say": (
                 "这块地种玉米总体合适。"
-                + (f"土偏碱一点、" if ph and float(ph) > 7.5 else "")
+                + ("土偏碱一点、" if ph and float(ph) > 7.5 else "")
                 + "但不至于种不了。"
             ),
             "tip": "选耐碱品种更稳妥；别指望当「完美高产地」。"
@@ -367,7 +385,11 @@ def render_pdf(
 
     def hr():
         return HRFlowable(
-            width="100%", thickness=0.8, color=HexColor("#cfe0cf"), spaceBefore=2, spaceAfter=8
+            width="100%",
+            thickness=0.8,
+            color=HexColor("#cfe0cf"),
+            spaceBefore=2,
+            spaceAfter=8,
         )
 
     def dim_card(key):
@@ -380,7 +402,8 @@ def render_pdf(
             [
                 [
                     Paragraph(
-                        f"<font color='white'><b>{pl['title']}</b></font>", styles["badge"]
+                        f"<font color='white'><b>{pl['title']}</b></font>",
+                        styles["badge"],
                     ),
                     Paragraph(
                         f"<font color='white'><b>{d['score']} 分 · {LIGHT_WORD[light]}</b></font>",
@@ -466,7 +489,10 @@ def render_pdf(
     meta = [
         ["地块", f"{field.get('name')}（约 {area_mu} 亩 / {area_ha} 公顷）"],
         ["位置", field.get("location") or "—"],
-        ["作物", field.get("crop_label") or "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）"],
+        [
+            "作物",
+            field.get("crop_label") or "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）",
+        ],
         ["边界", field.get("boundary") or "—"],
         ["数据时段", risk.get("period") or "—"],
         ["报告时间", now_str],
@@ -520,7 +546,12 @@ def render_pdf(
         story.append(dim_card(key))
 
     rows = [
-        [cell("看什么", "tbl_h"), cell("分数", "tbl_h"), cell("灯", "tbl_h"), cell("白话", "tbl_h")]
+        [
+            cell("看什么", "tbl_h"),
+            cell("分数", "tbl_h"),
+            cell("灯", "tbl_h"),
+            cell("白话", "tbl_h"),
+        ]
     ]
     for key in ["crop", "soil", "vigor", "weather", "wet_safety", "drought_safety"]:
         d = dims[key]
@@ -538,7 +569,14 @@ def render_pdf(
     ):
         st.setStyle(
             TableStyle(
-                [("TEXTCOLOR", (2, i), (2, i), HexColor(LIGHT_COLOR[dims[key]["light"]]))]
+                [
+                    (
+                        "TEXTCOLOR",
+                        (2, i),
+                        (2, i),
+                        HexColor(LIGHT_COLOR[dims[key]["light"]]),
+                    )
+                ]
             )
         )
     story.append(KeepTogether([p("分数一览", "h2"), st]))
@@ -561,7 +599,9 @@ def render_pdf(
         if i == 0:
             watch_data.append([cell(x, "tbl_h") for x in r])
         else:
-            watch_data.append([cell(r[0], "tbl_b"), cell(r[1], "tbl_b"), cell(r[2], "tbl_c")])
+            watch_data.append(
+                [cell(r[0], "tbl_b"), cell(r[1], "tbl_b"), cell(r[2], "tbl_c")]
+            )
     wt = make_table(watch_data, [18 * mm, 28 * mm, 119 * mm])
     story.append(KeepTogether([p("优先看这些", "h2"), wt]))
     story.append(Spacer(1, 5 * mm))
@@ -580,11 +620,17 @@ def render_pdf(
     evs_all = risk.get("events") or []
     evs = [e for e in evs_all if not _is_false_alarm(e)][:5]
     story.append(p("玉米季里值得记一笔的变化", "h2"))
-    story.append(p("已去掉苗期偏低、成熟回落这类正常现象；只保留更值得留意的时段。", "small"))
+    story.append(
+        p("已去掉苗期偏低、成熟回落这类正常现象；只保留更值得留意的时段。", "small")
+    )
     story.append(Spacer(1, 2 * mm))
     if evs:
         erows = [
-            [cell("大概时间", "tbl_h"), cell("发生了什么", "tbl_h"), cell("下田可以看", "tbl_h")]
+            [
+                cell("大概时间", "tbl_h"),
+                cell("发生了什么", "tbl_h"),
+                cell("下田可以看", "tbl_h"),
+            ]
         ]
         for e in evs:
             typ = e.get("type") or ""
@@ -609,7 +655,10 @@ def render_pdf(
         story.append(p("生育期里没有需要特别点名的异常段。", "body"))
     story.append(Spacer(1, 3 * mm))
     story.append(
-        p("说明：单日弱信号不必紧张；连续多天且正好赶在旺长期，才更值得下田看一眼。", "small")
+        p(
+            "说明：单日弱信号不必紧张；连续多天且正好赶在旺长期，才更值得下田看一眼。",
+            "small",
+        )
     )
 
     story.append(PageBreak())
@@ -624,8 +673,13 @@ def render_pdf(
     )
     story += img("ndvi.png", caption="绿度（NDVI）：越高通常苗越旺；请看阴影里的夏天")
     story += img("evi.png", caption="另一路绿度（EVI）：用来交叉确认夏天是否真的旺")
-    story += img("ndwi.png", caption="干湿相关（NDWI/MNDWI）：玉米季里突然偏高且苗又弱，要怀疑积水")
-    story += img("monthly.png", caption="哪些月份更容易出现需要留意的信号（灰色月份不在玉米季）")
+    story += img(
+        "ndwi.png",
+        caption="干湿相关（NDWI/MNDWI）：玉米季里突然偏高且苗又弱，要怀疑积水",
+    )
+    story += img(
+        "monthly.png", caption="哪些月份更容易出现需要留意的信号（灰色月份不在玉米季）"
+    )
 
     # ===== Phenology / stage NDVI =====
     phenology_name = None
@@ -651,7 +705,10 @@ def render_pdf(
     if phenology_name:
         # Caption year from filename when possible
         year_bit = ""
-        if phenology_name.startswith("ndvi_phenology_") and phenology_name[15:19].isdigit():
+        if (
+            phenology_name.startswith("ndvi_phenology_")
+            and phenology_name[15:19].isdigit()
+        ):
             year_bit = phenology_name[15:19] + " 年"
         story += img(
             phenology_name,
@@ -732,7 +789,9 @@ def render_pdf(
             "small",
         )
     )
-    story.append(p(f"置信提示：{scorecard.get('confidence', {}).get('plain', '')}", "small"))
+    story.append(
+        p(f"置信提示：{scorecard.get('confidence', {}).get('plain', '')}", "small")
+    )
 
     doc = SimpleDocTemplate(
         str(out_path),

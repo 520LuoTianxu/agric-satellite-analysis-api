@@ -79,9 +79,7 @@ def _cluster(dates_list: list[str], typ: str) -> list[dict[str, Any]]:
             "start": start,
             "end": prev,
             "type": typ,
-            "days": (
-                datetime.fromisoformat(prev) - datetime.fromisoformat(start)
-            ).days
+            "days": (datetime.fromisoformat(prev) - datetime.fromisoformat(start)).days
             + 1,
             "severity": "中",
             "confidence": "中",
@@ -101,7 +99,12 @@ def _pick_corn_suit(suit: dict[str, Any] | None) -> dict[str, Any]:
         name = (c.get("crop") or c.get("name") or "").lower()
         if "corn" in name or "maize" in name or "玉米" in name:
             return c
-    return rice or {"crop": "corn", "score": 72.0, "rating": "fair", "limiting_factors": []}
+    return rice or {
+        "crop": "corn",
+        "score": 72.0,
+        "rating": "fair",
+        "limiting_factors": [],
+    }
 
 
 def compute_assessment(
@@ -131,7 +134,9 @@ def compute_assessment(
             continue
         row = {
             "mean": float(mean),
-            "median": float(r["median"]) if r.get("median") is not None else float(mean),
+            "median": float(r["median"])
+            if r.get("median") is not None
+            else float(mean),
             "p10": float(r["p10"]) if r.get("p10") is not None else float(mean),
             "p90": float(r["p90"]) if r.get("p90") is not None else float(mean),
             "quality": float(r.get("quality_score") or r.get("quality") or 0.5),
@@ -153,9 +158,7 @@ def compute_assessment(
     ndvi_s = [by[d]["NDVI"]["mean"] for d in season_dates]
     ndvi_p = [by[d]["NDVI"]["mean"] for d in peak_dates]
     ndvi_off = [by[d]["NDVI"]["mean"] for d in off_dates]
-    ndwi_s = [
-        _wet_layer(d)["mean"] for d in season_dates if _wet_layer(d) is not None
-    ]
+    ndwi_s = [_wet_layer(d)["mean"] for d in season_dates if _wet_layer(d) is not None]
 
     years = sorted({_year(d) for d in peak_dates})
     year_peak: dict[str, dict[str, Any]] = {}
@@ -277,9 +280,7 @@ def compute_assessment(
         and by[d]["NDVI"]["mean"] < ndvi_p50
     )
     abs_water = sum(
-        1
-        for d in season_dates
-        if (_wet_layer(d) or {}).get("mean", -1) > 0
+        1 for d in season_dates if (_wet_layer(d) or {}).get("mean", -1) > 0
     )
 
     if abs_water == 0 and flood_cand < 3:
@@ -299,7 +300,10 @@ def compute_assessment(
     rs = {
         "method": "seasonal_maize_6_9_peak_7_8",
         "counts": {"season_scenes": len(season_dates), "peak_scenes": len(peak_dates)},
-        "ndvi_range": [round(float(np.min(ndvi_s_arr)), 3), round(float(np.max(ndvi_s_arr)), 3)],
+        "ndvi_range": [
+            round(float(np.min(ndvi_s_arr)), 3),
+            round(float(np.max(ndvi_s_arr)), 3),
+        ],
         "ndwi_range": (
             [round(float(np.min(ndwi_s_arr)), 3), round(float(np.max(ndwi_s_arr)), 3)]
             if len(ndwi_s)
@@ -360,7 +364,9 @@ def compute_assessment(
         vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，玉米季冠层中等偏好"
     elif peak_mean >= PEAK_WEAK:
         vigor = 55.0
-        vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，生育期长势偏弱，建议看密度/水肥"
+        vigor_plain = (
+            f"峰值期平均 NDVI≈{peak_mean:.2f}，生育期长势偏弱，建议看密度/水肥"
+        )
     else:
         vigor = 40.0
         vigor_plain = f"峰值期平均 NDVI≈{peak_mean:.2f}，明显偏低"
@@ -449,13 +455,13 @@ def compute_assessment(
         # relative VCI dips are reminders only
         if drought_sev or drought_mod:
             drought_safety -= min(6, drought_sev * 1.5 + drought_mod * 0.5)
-            d_bits.append(
-                "相对历史偏绿少只作提醒；苗期/成熟回落不算旱"
-            )
+            d_bits.append("相对历史偏绿少只作提醒；苗期/成熟回落不算旱")
         awc = soil.get("rootzone_awc_mm")
         if awc is not None:
             d_bits.append(f"土壤保水约 {float(awc):.0f} mm")
-    drought_safety = max(55.0 if not hard_drought else 25.0, min(95.0, round(drought_safety, 1)))
+    drought_safety = max(
+        55.0 if not hard_drought else 25.0, min(95.0, round(drought_safety, 1))
+    )
     drought_plain = "；".join(d_bits) + f"。综合 {drought_safety} 分。"
 
     dims = [
@@ -527,7 +533,9 @@ def compute_assessment(
 
     hard_flood = abs_water >= 1
     if not hard_flood and not hard_drought and overall >= 70:
-        one_liner = "能种玉米，夏天长势不错；没有真涝真旱硬证据，涝旱项已按保守提醒重算。"
+        one_liner = (
+            "能种玉米，夏天长势不错；没有真涝真旱硬证据，涝旱项已按保守提醒重算。"
+        )
     elif overall >= 70:
         one_liner = "生育期长势尚可，综合条件中等偏好"
     elif overall >= 55:
@@ -544,9 +552,7 @@ def compute_assessment(
         f"分数仍是开源体检不是买地判决。"
     )
 
-    annual_means = [
-        by[d]["NDVI"]["mean"] for d in dates if "NDVI" in by[d]
-    ]
+    annual_means = [by[d]["NDVI"]["mean"] for d in dates if "NDVI" in by[d]]
     scorecard = {
         "overall": {
             "score": overall,
@@ -591,7 +597,9 @@ def compute_assessment(
         "scorecard": scorecard,
         "rs": rs,
         "risk": risk,
-        "by_date": {d: {k: v["mean"] for k, v in layers.items()} for d, layers in by.items()},
+        "by_date": {
+            d: {k: v["mean"] for k, v in layers.items()} for d, layers in by.items()
+        },
         "meta": {
             "qmean": round(qmean, 4),
             "n_dates": len(dates),

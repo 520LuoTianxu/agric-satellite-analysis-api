@@ -70,7 +70,9 @@ def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list
     for r in rows:
         out.append(
             {
-                "date": r.date.isoformat() if hasattr(r.date, "isoformat") else str(r.date),
+                "date": r.date.isoformat()
+                if hasattr(r.date, "isoformat")
+                else str(r.date),
                 "layer_type": r.layer_type,
                 "mean": float(r.mean) if r.mean is not None else None,
                 "median": float(r.median) if r.median is not None else None,
@@ -79,7 +81,9 @@ def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list
                 "min": float(r.min) if r.min is not None else None,
                 "max": float(r.max) if r.max is not None else None,
                 "stddev": float(r.stddev) if r.stddev is not None else None,
-                "quality_score": float(r.quality_score) if r.quality_score is not None else 0.5,
+                "quality_score": float(r.quality_score)
+                if r.quality_score is not None
+                else 0.5,
             }
         )
     return out
@@ -90,18 +94,22 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
 
     Uses MNDWI as NDWI proxy when NDWI is absent.
     """
-    rows = session.execute(
-        text(
-            """
+    rows = (
+        session.execute(
+            text(
+                """
             SELECT date, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
                    parcel_cloud_cover_pct, cloud_cover
             FROM agri.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
             ORDER BY date
             """
-        ),
-        {"land_id": land_id},
-    ).mappings().all()
+            ),
+            {"land_id": land_id},
+        )
+        .mappings()
+        .all()
+    )
     out: list[dict] = []
     for r in rows:
         d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])
@@ -136,8 +144,9 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
     return out
 
 
-
-def _extract_lonlat_pixels(pixel_data: Any, *, prefer_clear: bool = True) -> list[dict[str, Any]]:
+def _extract_lonlat_pixels(
+    pixel_data: Any, *, prefer_clear: bool = True
+) -> list[dict[str, Any]]:
     """Normalize agri lonlat_v1 pixel_data.pixels; optionally keep clear=1 only."""
     if not isinstance(pixel_data, dict):
         return []
@@ -166,7 +175,6 @@ def _extract_lonlat_pixels(pixel_data: Any, *, prefer_clear: bool = True) -> lis
     return out
 
 
-
 def load_agri_lonlat_pixels(
     session: Session,
     land_id: str,
@@ -185,7 +193,11 @@ def load_agri_lonlat_pixels(
     if not land_id:
         return {}
     params: dict[str, Any] = {"land_id": land_id}
-    where = ["land_id = :land_id", "sensor = 'S2'", "pixel_data->>'format' = 'lonlat_v1'"]
+    where = [
+        "land_id = :land_id",
+        "sensor = 'S2'",
+        "pixel_data->>'format' = 'lonlat_v1'",
+    ]
     if dates:
         # Expand IN list safely for SQLAlchemy text()
         placeholders = []
@@ -325,15 +337,23 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     if not rows:
         return {}, {}
 
-    temps = [float(r.temperature_2m_mean) for r in rows if r.temperature_2m_mean is not None]
-    tmin = [float(r.temperature_2m_min) for r in rows if r.temperature_2m_min is not None]
-    tmax = [float(r.temperature_2m_max) for r in rows if r.temperature_2m_max is not None]
+    temps = [
+        float(r.temperature_2m_mean) for r in rows if r.temperature_2m_mean is not None
+    ]
+    tmin = [
+        float(r.temperature_2m_min) for r in rows if r.temperature_2m_min is not None
+    ]
+    tmax = [
+        float(r.temperature_2m_max) for r in rows if r.temperature_2m_max is not None
+    ]
     precip = sum(float(r.precipitation_sum or 0) for r in rows)
     et0 = sum(float(r.et0_fao_mm or 0) for r in rows)
     heat = sum(1 for r in rows if (r.temperature_2m_max or 0) >= 33)
     frost = sum(1 for r in rows if (r.temperature_2m_min or 99) <= 0)
     latest = rows[-1]
-    water_deficit = float(latest.water_balance_30d_mm) if latest.water_balance_30d_mm is not None else (precip - et0)
+    float(latest.water_balance_30d_mm) if latest.water_balance_30d_mm is not None else (
+        precip - et0
+    )
     # water_deficit_mm: positive = deficit in some APIs; here store precip-et0 style
     # Match hebei fixture: water_deficit_mm ~ 2.89 meaning slight deficit naming.
     # Use negated water balance if balance is precip-ET.
@@ -354,7 +374,9 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
         "water_deficit_mm": round(water_deficit_mm, 2),
         "heat_stress_days": heat,
         "frost_days": frost,
-        "drought_index": float(latest.drought_index) if latest.drought_index is not None else None,
+        "drought_index": float(latest.drought_index)
+        if latest.drought_index is not None
+        else None,
         "data_source": "open-meteo",
     }
 
@@ -363,7 +385,11 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     if soil.get("rootzone_awc_mm") is not None:
         awc = float(soil["rootzone_awc_mm"])
 
-    balance = float(latest.water_balance_30d_mm) if latest.water_balance_30d_mm is not None else (precip - et0)
+    balance = (
+        float(latest.water_balance_30d_mm)
+        if latest.water_balance_30d_mm is not None
+        else (precip - et0)
+    )
     if balance >= -15:
         status = "optimal"
         moisture_status = "Adequate moisture conditions"
@@ -385,7 +411,9 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     return summary, stress
 
 
-def load_suitability_sync(session: Session, field_id: uuid.UUID, weather_summary: dict) -> dict:
+def load_suitability_sync(
+    session: Session, field_id: uuid.UUID, weather_summary: dict
+) -> dict:
     """Best-effort corn suitability via soil_intelligence (may be partial)."""
     try:
         from app.core.soil_intelligence import assess_crop_suitability
@@ -402,9 +430,7 @@ def load_suitability_sync(session: Session, field_id: uuid.UUID, weather_summary
     layer_dicts: list[dict] = []
     if profile:
         layers = (
-            session.execute(
-                select(SoilLayer).where(SoilLayer.profile_id == profile.id)
-            )
+            session.execute(select(SoilLayer).where(SoilLayer.profile_id == profile.id))
             .scalars()
             .all()
         )
@@ -516,7 +542,11 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
                 break
 
     tags = field.tags_json or []
-    boundary = "测绘 WGS 坐标（档案地块，不是手画框）" if land_id else "地块边界（平台绘制/导入）"
+    boundary = (
+        "测绘 WGS 坐标（档案地块，不是手画框）"
+        if land_id
+        else "地块边界（平台绘制/导入）"
+    )
     crop = (field.crop_type or "").lower()
     if crop in ("maize", "corn", "夏玉米", "玉米") or not crop:
         crop_label = "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）"
@@ -554,7 +584,11 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     """Load JSON/CSV fixtures (openfarm-report-hebei style) for CLI offline runs."""
     data_dir = Path(data_dir)
     field = json.loads((data_dir / "field.json").read_text(encoding="utf-8"))
-    soil = json.loads((data_dir / "soil.json").read_text(encoding="utf-8")) if (data_dir / "soil.json").exists() else {}
+    soil = (
+        json.loads((data_dir / "soil.json").read_text(encoding="utf-8"))
+        if (data_dir / "soil.json").exists()
+        else {}
+    )
     suit = (
         json.loads((data_dir / "suitability.json").read_text(encoding="utf-8"))
         if (data_dir / "suitability.json").exists()
@@ -596,7 +630,8 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
             "area_ha": area_ha,
             "tags": field.get("tags") or [],
             "location": field.get("location") or field.get("name") or "—",
-            "boundary": field.get("boundary") or "测绘 WGS 坐标（档案地块，不是手画框）",
+            "boundary": field.get("boundary")
+            or "测绘 WGS 坐标（档案地块，不是手画框）",
             "crop_label": "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）",
             "crop_key": "maize",
             "land_id": None,

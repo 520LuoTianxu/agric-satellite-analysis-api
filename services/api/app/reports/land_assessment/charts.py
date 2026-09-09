@@ -100,7 +100,6 @@ def _nearest_date(
     return scored[0][2], scored[0][3]
 
 
-
 def pick_phenology_stages(
     by_date: dict[str, dict[str, float]],
     year: int,
@@ -153,14 +152,18 @@ def pick_phenology_stages(
             "ndvi": best[1],
         }
 
-    peak_date = _parse_date(stages["peak"]["date"]) if "peak" in stages else date(year, 8, 10)
+    peak_date = (
+        _parse_date(stages["peak"]["date"]) if "peak" in stages else date(year, 8, 10)
+    )
     peak_ndvi = float(stages["peak"]["ndvi"]) if "peak" in stages else 0.0
 
     # Seedling: near mid-Jun, prefer lower NDVI than peak
     seed_pool = pool({6}) or [(d, v) for d, v in pool() if _parse_date(d) < peak_date]
     hit = _nearest_date(seed_pool, date(year, 6, 15), window_days=20, prefer_high=False)
     if hit is None and seed_pool:
-        hit = min(seed_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 6, 15)).days))
+        hit = min(
+            seed_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 6, 15)).days)
+        )
     if hit:
         stages["seedling"] = {
             "key": "seedling",
@@ -171,14 +174,20 @@ def pick_phenology_stages(
         }
 
     # Vegetative: early Jul, rising between seedling and peak
-    veg_lo = _parse_date(stages["seedling"]["date"]) if "seedling" in stages else date(year, 6, 20)
+    veg_lo = (
+        _parse_date(stages["seedling"]["date"])
+        if "seedling" in stages
+        else date(year, 6, 20)
+    )
     veg_pool = pool({7}) or [
         (d, v) for d, v in pool() if veg_lo < _parse_date(d) < peak_date
     ]
     # Prefer mid-rise: not as low as seedling, not peak
     hit = _nearest_date(veg_pool, date(year, 7, 7), window_days=18, prefer_high=True)
     if hit is None and veg_pool:
-        hit = min(veg_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 7, 7)).days))
+        hit = min(
+            veg_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 7, 7)).days)
+        )
     if hit:
         stages["vegetative"] = {
             "key": "vegetative",
@@ -189,11 +198,7 @@ def pick_phenology_stages(
         }
 
     # Maturity: late Sep after peak; prefer drop below peak
-    mat_pool = [
-        (d, v)
-        for d, v in (pool({9}) or pool())
-        if _parse_date(d) > peak_date
-    ]
+    mat_pool = [(d, v) for d, v in (pool({9}) or pool()) if _parse_date(d) > peak_date]
     if not mat_pool:
         mat_pool = [(d, v) for d, v in pool({9}) if _parse_date(d) >= date(year, 9, 10)]
     target_mat = date(year, 9, 25)
@@ -220,15 +225,17 @@ def _marker_size(lons: np.ndarray, lats: np.ndarray) -> float:
     """Square marker size so points roughly tile the parcel."""
     if lons.size < 2:
         return 28.0
-    u_lon = np.unique(np.round(lons, 6))
-    u_lat = np.unique(np.round(lats, 6))
+    np.unique(np.round(lons, 6))
+    np.unique(np.round(lats, 6))
     # denser grids → smaller markers; bias slightly large to avoid white gaps
     n = max(lons.size, 1)
     base = 3200.0 / max(n**0.52, 1.0)
     return float(np.clip(base, 10.0, 64.0))
 
 
-def _pixels_xy_ndvi(pixels: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _pixels_xy_ndvi(
+    pixels: list[dict[str, Any]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     lons, lats, vals = [], [], []
     for p in pixels:
         try:
@@ -277,7 +284,15 @@ def render_phenology_curve(
             continue
         dt = datetime.fromisoformat(st["date"])
         val = float(st["ndvi"])
-        ax.scatter([dt], [val], s=70, color="#e63946", zorder=4, edgecolors="white", linewidths=0.6)
+        ax.scatter(
+            [dt],
+            [val],
+            s=70,
+            color="#e63946",
+            zorder=4,
+            edgecolors="white",
+            linewidths=0.6,
+        )
         ax.annotate(
             f"{st['label']} {val:.2f}",
             xy=(dt, val),
@@ -310,7 +325,9 @@ def render_stages_panel(
     usable = [
         k
         for k in ordered_keys
-        if k in stages and stages[k]["date"] in pixels_by_date and pixels_by_date[stages[k]["date"]]
+        if k in stages
+        and stages[k]["date"] in pixels_by_date
+        and pixels_by_date[stages[k]["date"]]
     ]
     if len(usable) < 2:
         return None
@@ -357,9 +374,13 @@ def render_stages_panel(
         ax.set_title(f"{st['title']}\n{d} 均≈{mean_v:.2f}", fontsize=9)
 
     if mappable is not None:
-        cbar = fig.colorbar(mappable, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04)
+        cbar = fig.colorbar(
+            mappable, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04
+        )
         cbar.set_label("NDVI")
-    fig.subplots_adjust(left=0.04, right=0.88, top=0.90, bottom=0.04, wspace=0.12, hspace=0.28)
+    fig.subplots_adjust(
+        left=0.04, right=0.88, top=0.90, bottom=0.04, wspace=0.12, hspace=0.28
+    )
     out_path = Path(out_path)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -486,7 +507,9 @@ def render_charts(
                 label="峰值期7–8月" if y == years[0] else None,
             )
         if thr is not None:
-            ax.axhline(thr, ls="--", color="#e76f51", lw=1, label=f"生育期阈值 {thr:.2f}")
+            ax.axhline(
+                thr, ls="--", color="#e76f51", lw=1, label=f"生育期阈值 {thr:.2f}"
+            )
         ax.set_title(f"{layer}（阴影=玉米生育期；阈值仅来自生育期）")
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, loc="best")
@@ -528,7 +551,9 @@ def render_charts(
             if stages[k]["date"] in pixels_by_date
         }
         if len(stage_pixels) >= 2:
-            panel = render_stages_panel(stages, pixels_by_date, out_dir / "ndvi_stages_panel.png")
+            panel = render_stages_panel(
+                stages, pixels_by_date, out_dir / "ndvi_stages_panel.png"
+            )
             if panel:
                 written["ndvi_stages_panel.png"] = panel
             written.update(render_stage_maps(stages, pixels_by_date, out_dir))

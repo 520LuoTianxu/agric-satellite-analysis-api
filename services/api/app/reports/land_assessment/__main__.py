@@ -10,15 +10,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate 选地体检（白话版）PDF")
     parser.add_argument("--field-id", help="OpenFarm field UUID")
-    parser.add_argument("--from-dir", help="Fixture directory (field.json + all_indices.csv)")
+    parser.add_argument(
+        "--from-dir", help="Fixture directory (field.json + all_indices.csv)"
+    )
     parser.add_argument("--out", help="Output PDF path")
-    parser.add_argument("--json-summary", action="store_true", help="Print scorecard summary JSON")
+    parser.add_argument(
+        "--json-summary", action="store_true", help="Print scorecard summary JSON"
+    )
     args = parser.parse_args(argv)
 
     if not args.field_id and not args.from_dir:

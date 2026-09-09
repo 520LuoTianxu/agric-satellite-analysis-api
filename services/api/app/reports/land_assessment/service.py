@@ -39,9 +39,7 @@ def _load_stage_pixels(
 
     index = load_agri_pixel_date_index(session, land_id, cloud_max=None)
     pixel_dates = {row["date"] for row in index if row.get("has_pixels")}
-    stages = pick_phenology_stages(
-        by_date, year, pixel_dates=pixel_dates or None
-    )
+    stages = pick_phenology_stages(by_date, year, pixel_dates=pixel_dates or None)
     wanted = sorted({st["date"] for st in stages.values()})
     if not wanted:
         return {}
@@ -130,7 +128,10 @@ def generate_assessment_pdf(
     )
 
     if out_path is None:
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (field.get("name") or "field"))
+        safe = "".join(
+            c if c.isalnum() or c in "-_" else "_"
+            for c in (field.get("name") or "field")
+        )
         out_path = tmp_root / f"{safe}_选地分析报告.pdf"
     out_path = Path(out_path)
 
