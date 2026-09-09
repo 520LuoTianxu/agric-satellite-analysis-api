@@ -335,6 +335,7 @@ def render_pdf(
     weather_summary: dict[str, Any],
     chart_paths: dict[str, Path] | None = None,
     title_suffix: str = "OpenFarm",
+    flood_evidence: dict[str, Any] | None = None,
 ) -> Path:
     _register_fonts()
     out_path = Path(out_path)
@@ -456,7 +457,7 @@ def render_pdf(
                 ]
             )
         )
-        return KeepTogether([wrap, Spacer(1, 3.5 * mm)])
+        return KeepTogether([wrap, Spacer(1, 2.2 * mm)])
 
     def img(name, w=165 * mm, ratio=0.36, caption=None):
         path = chart_paths.get(name)
@@ -480,7 +481,7 @@ def render_pdf(
         c.restoreState()
 
     story = []
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 5 * mm))
     story.append(p("地块选地体检报告", "cover_title"))
     story.append(p("白话版 · 给非遥感专业的人看的", "cover_sub"))
     story.append(Spacer(1, 3 * mm))
@@ -515,7 +516,7 @@ def render_pdf(
         )
     )
     story.append(mt)
-    story.append(Spacer(1, 6 * mm))
+    story.append(Spacer(1, 4 * mm))
     story.append(p("总成绩（越高越好）", "center"))
     story.append(Spacer(1, 2 * mm))
     story.append(ScoreBadge(ov["score"], ov["light"], ov["grade"]))
@@ -580,6 +581,78 @@ def render_pdf(
             )
         )
     story.append(KeepTogether([p("分数一览", "h2"), st]))
+
+    # ===== 明水面 / 涝证据（硬证据时）=====
+    if flood_evidence and int(flood_evidence.get("absolute_open_water_scenes") or 0) > 0:
+        story.append(Spacer(1, 3 * mm))
+        story.append(p("明水面涝证据（卫星 + 雨前降水）", "h1"))
+        story.append(hr())
+        n_all = flood_evidence.get("absolute_open_water_scenes")
+        n_sel = flood_evidence.get("selected_count")
+        story.append(
+            p(
+                f"生育期内卫星共见明水面 <b>{n_all}</b> 景"
+                + (f"（下图展示湿指数最高的 {n_sel} 景）" if n_sel and n_sel < n_all else "")
+                + "。对照每景前 15 日降水，判断更像雨后积水还是持续水面。",
+                "body",
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
+        if chart_paths.get("flood_rgb_collage.png"):
+            story += img(
+                "flood_rgb_collage.png",
+                w=165 * mm,
+                ratio=0.55,
+                caption="明水面场景真彩预览（来自 OSS rgb_url）",
+            )
+        if chart_paths.get("flood_precip_top.png"):
+            story += img(
+                "flood_precip_top.png",
+                w=140 * mm,
+                ratio=0.38,
+                caption="最湿一景的前15日日降水",
+            )
+        # Compact per-scene table
+        fe_rows = [
+            [
+                cell("日期", "tbl_h"),
+                cell("湿指数", "tbl_h"),
+                cell("前15日累计", "tbl_h"),
+                cell("峰值日/量", "tbl_h"),
+                cell("判断", "tbl_h"),
+            ]
+        ]
+        kind_zh = {
+            "rain_driven": "雨后积水",
+            "likely_rain": "偏雨后积水",
+            "persistent_water": "持续水面",
+            "low_rain_persistent": "少雨持续水",
+            "mixed": "需核实",
+        }
+        for sc in flood_evidence.get("scenes") or []:
+            pr = sc.get("precip_prior_15d") or {}
+            fe_rows.append(
+                [
+                    cell(str(sc.get("date") or "—"), "tbl_c"),
+                    cell(str(sc.get("wet_mean") if sc.get("wet_mean") is not None else "—"), "tbl_c"),
+                    cell(f"{pr.get('cumulative_mm', '—')} mm", "tbl_c"),
+                    cell(
+                        f"{pr.get('peak_date') or '—'} / {pr.get('peak_mm', '—')} mm",
+                        "tbl_c",
+                    ),
+                    cell(kind_zh.get(sc.get("kind"), sc.get("kind") or "—"), "tbl_c"),
+                ]
+            )
+        story.append(
+            make_table(fe_rows, [28 * mm, 24 * mm, 28 * mm, 45 * mm, 40 * mm])
+        )
+        story.append(Spacer(1, 2 * mm))
+        story.append(
+            p(f"<b>综合研判：</b>{flood_evidence.get('analysis') or ''}", "body")
+        )
+        # Short per-scene notes (top 3 to avoid bloat)
+        for sc in (flood_evidence.get("scenes") or [])[:3]:
+            story.append(p(sc.get("analysis") or "", "small"))
 
     story.append(PageBreak())
     story.append(p("最该盯的几件事", "h1"))
@@ -697,13 +770,13 @@ def render_pdf(
         p(
             "你的理解是对的：同一块地，苗期绿度通常不高，旺长期最高，靠近成熟又会掉下来。"
             "所以评估长势要对着生育阶段看，不能拿一个固定 NDVI 门槛套全年。"
-            "下面四张图是同一块地、同一套红黄绿色标，没有地图底图，只看地里的绿度分布。",
+            "下面用紧凑四宫格展示同一块地四个阶段；有真彩底图时叠半透明绿度色斑（接近前端图三），"
+            "否则退回色斑散点。",
             "body",
         )
     )
-    story.append(Spacer(1, 2 * mm))
+    story.append(Spacer(1, 1.5 * mm))
     if phenology_name:
-        # Caption year from filename when possible
         year_bit = ""
         if (
             phenology_name.startswith("ndvi_phenology_")
@@ -713,7 +786,7 @@ def render_pdf(
         story += img(
             phenology_name,
             w=165 * mm,
-            ratio=0.38,
+            ratio=0.34,
             caption=f"{year_bit}地块平均绿度曲线：升→峰→成熟回落".strip(),
         )
     has_panel = bool(chart_paths.get("ndvi_stages_panel.png"))
@@ -722,27 +795,18 @@ def render_pdf(
             KeepTogether(
                 img(
                     "ndvi_stages_panel.png",
-                    w=155 * mm,
-                    ratio=0.88,
-                    caption="四阶段对比（苗期→拔节抽雄→旺长→成熟），色标统一，方便看升降",
+                    w=158 * mm,
+                    ratio=0.82,
+                    caption="四阶段紧凑对比（苗期→拔节抽雄→旺长→成熟）；真彩+叠色优先",
                 )
             )
         )
-        story.append(p("分阶段单图（可对照地里实际苗情）", "h2"))
-        stage_imgs = [
-            ("ndvi_stage_seedling.png", "苗期/早期"),
-            ("ndvi_stage_vegetative.png", "拔节—抽雄前后"),
-            ("ndvi_stage_peak.png", "旺长期"),
-            ("ndvi_stage_maturity.png", "成熟期附近（回落是正常的）"),
-        ]
-        for fname, cap in stage_imgs:
-            if chart_paths.get(fname):
-                story += img(fname, w=120 * mm, ratio=0.85, caption=cap)
+        # Do NOT also dump four large single-stage images (was causing huge whitespace).
     else:
         story.append(
             p(
-                "说明：本块地暂无可用的 lonlat 像元色斑数据，已保留生育阶段绿度曲线；"
-                "空间四阶段对比图待像元回填后自动补上。",
+                "说明：本块地暂无可用的 lonlat 像元/真彩预览，已保留生育阶段绿度曲线；"
+                "空间四阶段对比图待像元或 OSS 影像回填后自动补上。",
                 "small",
             )
         )

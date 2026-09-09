@@ -291,9 +291,26 @@ def compute_assessment(
         if (_wet_layer(d) or {}).get("mean", -1) > ndwi_p85
         and by[d]["NDVI"]["mean"] < ndvi_p50
     )
-    abs_water = sum(
-        1 for d in season_dates if (_wet_layer(d) or {}).get("mean", -1) > 0
-    )
+    open_water_dates: list[dict[str, Any]] = []
+    for d in season_dates:
+        wl = _wet_layer(d)
+        if wl is None:
+            continue
+        wet_mean = float(wl.get("mean", -1))
+        if wet_mean <= 0:
+            continue
+        ndvi_mean = None
+        if "NDVI" in by[d]:
+            ndvi_mean = round(float(by[d]["NDVI"]["mean"]), 4)
+        open_water_dates.append(
+            {
+                "date": d,
+                "wet_mean": round(wet_mean, 4),
+                "ndvi_mean": ndvi_mean,
+            }
+        )
+    open_water_dates.sort(key=lambda x: (-float(x["wet_mean"]), x["date"]))
+    abs_water = len(open_water_dates)
 
     if abs_water == 0 and flood_cand < 3:
         rs_flood = "低（未见明水面）"
@@ -329,6 +346,7 @@ def compute_assessment(
         "rs_flood_level": rs_flood,
         "rs_drought_level": rs_drought,
         "absolute_open_water_scenes": abs_water,
+        "open_water_dates": open_water_dates,
         "drought_moderate_vci_lt35": drought_mod,
         "drought_severe_vci_lt20": drought_sev,
         "flood_candidates": flood_cand,
@@ -600,6 +618,7 @@ def compute_assessment(
         "method_wet_drought": {
             "rule": "no_red_without_hard_flood_or_drought_evidence",
             "absolute_open_water_scenes": abs_water,
+            "open_water_dates": open_water_dates,
             "peak_ndvi_mean": round(peak_mean, 3),
             "wet_score": wet_safety,
             "drought_score": drought_safety,

@@ -16,10 +16,13 @@ from app.reports.land_assessment.charts import (
     render_charts,
 )
 from app.reports.land_assessment.data_loader import (
+    build_flood_evidence,
+    cache_media_images,
     load_agri_lonlat_pixels,
     load_agri_pixel_date_index,
     load_bundle_from_dir,
     load_field_bundle,
+    load_oss_media_for_dates,
 )
 from app.reports.land_assessment.pdf_render import render_pdf
 from app.reports.land_assessment.scoring import compute_assessment
@@ -79,6 +82,20 @@ def _load_stage_pixels(
     return pixels
 
 
+def _stage_media_maps(
+    cached: dict[str, Path],
+) -> tuple[dict[str, Path], dict[str, Path]]:
+    """Split cache_media_images keys into date->rgb / date->heatmap for stages."""
+    rgb: dict[str, Path] = {}
+    hm: dict[str, Path] = {}
+    for name, path in cached.items():
+        if name.startswith("stage_rgb_"):
+            rgb[name[len("stage_rgb_") :]] = path
+        elif name.startswith("stage_hm_"):
+            hm[name[len("stage_hm_") :]] = path
+    return rgb, hm
+
+
 def generate_assessment_pdf(
     *,
     session: Session | None = None,
@@ -89,7 +106,7 @@ def generate_assessment_pdf(
     """Generate 选地体检 PDF.
 
     Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
-    Returns dict with out_path, scorecard summary, object payload.
+    Returns dict with out_path, scorecard summary, flood_evidence, object payload.
     """
     if data_dir is not None:
         bundle = load_bundle_from_dir(Path(data_dir))
@@ -113,19 +130,64 @@ def generate_assessment_pdf(
         },
     )
 
+    land_id = field.get("land_id")
+    fid_raw = field.get("id") or field_id
+    open_water = (computed.get("rs") or {}).get("open_water_dates") or []
+
+    flood_evidence = None
+    if open_water and session is not None:
+        flood_evidence = build_flood_evidence(
+            session,
+            field_id=fid_raw,
+            land_id=land_id,
+            open_water_dates=open_water,
+        )
+    elif open_water:
+        # Offline fixtures: still expose dates + placeholder analysis
+        flood_evidence = build_flood_evidence(
+            None,
+            field_id=None,
+            land_id=None,
+            open_water_dates=open_water,
+        )
+
     pixels_by_date = _load_stage_pixels(
         session if data_dir is None else None,
-        field.get("land_id"),
+        land_id,
         computed["by_date"],
     )
 
+    # Stage OSS media (RGB / heatmap) for frontend-like 图三 panel
+    stage_media: dict[str, dict[str, Any]] = {}
+    if session is not None and land_id:
+        year = pick_phenology_year(computed["by_date"])
+        if year is not None:
+            stages = pick_phenology_stages(
+                computed["by_date"],
+                year,
+                pixel_dates=set(pixels_by_date.keys()) or None,
+            )
+            stage_dates = [st["date"] for st in stages.values()]
+            if stage_dates:
+                stage_media = load_oss_media_for_dates(session, land_id, stage_dates)
+
     tmp_root = Path(tempfile.mkdtemp(prefix="land_assess_"))
     charts_dir = tmp_root / "charts"
+    media_dir = tmp_root / "media"
+    cached = cache_media_images(
+        flood_evidence, media_dir, also_stage_media=stage_media or None
+    )
+    stage_rgb, stage_hm = _stage_media_maps(cached)
+
     chart_paths = render_charts(
         computed["by_date"],
         computed["meta"],
         charts_dir,
         pixels_by_date=pixels_by_date,
+        stage_rgb_paths=stage_rgb or None,
+        stage_heatmap_paths=stage_hm or None,
+        flood_evidence=flood_evidence,
+        write_individual_stage_maps=False,
     )
 
     if out_path is None:
@@ -146,10 +208,46 @@ def generate_assessment_pdf(
         weather_summary=bundle["weather_summary"],
         chart_paths=chart_paths,
         title_suffix="OpenFarm",
+        flood_evidence=flood_evidence,
     )
 
     ov = computed["scorecard"]["overall"]
     chart_names = sorted(k for k in chart_paths if isinstance(chart_paths[k], Path))
+
+    # Attach flood_evidence into scorecard method block for API consumers
+    if flood_evidence is not None:
+        mwd = computed["scorecard"].setdefault("method_wet_drought", {})
+        mwd["flood_evidence"] = {
+            "absolute_open_water_scenes": flood_evidence.get(
+                "absolute_open_water_scenes"
+            ),
+            "selected_count": flood_evidence.get("selected_count"),
+            "analysis": flood_evidence.get("analysis"),
+            "all_dates": flood_evidence.get("all_dates"),
+            "scenes": [
+                {
+                    "date": s.get("date"),
+                    "wet_mean": s.get("wet_mean"),
+                    "ndvi_mean": s.get("ndvi_mean"),
+                    "kind": s.get("kind"),
+                    "analysis": s.get("analysis"),
+                    "precip_prior_15d": {
+                        k: v
+                        for k, v in (s.get("precip_prior_15d") or {}).items()
+                        if k != "days"  # keep payload lighter; days stay in full object
+                    },
+                    "media": {
+                        "preview_url": (s.get("media") or {}).get("preview_url"),
+                        "rgb_url": (s.get("media") or {}).get("rgb_url"),
+                        "heatmap_url": (s.get("media") or {}).get("heatmap_url"),
+                        "has_oss": (s.get("media") or {}).get("has_oss"),
+                    },
+                }
+                for s in (flood_evidence.get("scenes") or [])
+            ],
+        }
+        # Full scenes with daily precip retained on top-level flood_evidence
+
     return {
         "out_path": str(out_path),
         "field_id": field.get("id"),
@@ -166,6 +264,7 @@ def generate_assessment_pdf(
         "scorecard": computed["scorecard"],
         "rs": computed["rs"],
         "risk": computed["risk"],
+        "flood_evidence": flood_evidence,
         "charts_dir": str(charts_dir),
         "charts": chart_names,
     }
