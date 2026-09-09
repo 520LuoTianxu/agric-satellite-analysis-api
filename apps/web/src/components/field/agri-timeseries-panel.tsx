@@ -909,9 +909,13 @@ export default function AgriTimeseriesPanel({
             <CardHeader className="pb-3 pt-3.5 px-3.5">
                 <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 space-y-1">
-                        <CardTitle className="flex items-center gap-1.5 text-sm font-semibold tracking-tight">
+                        <CardTitle className="flex flex-wrap items-center gap-1.5 text-sm font-semibold tracking-tight">
                             <Satellite className="h-3.5 w-3.5 shrink-0 text-primary" />
-                            {t("title")}
+                            <span>{t("title")}</span>
+                            <AgriIndexGlossary
+                                initialKey={series}
+                                triggerClassName="h-6 ml-0.5 font-normal"
+                            />
                         </CardTitle>
                         <p className="text-[11px] leading-snug text-muted-foreground">
                             {t("subtitle", {
@@ -1069,15 +1073,11 @@ export default function AgriTimeseriesPanel({
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             )}
-                            <AgriIndexGlossary
-                                initialKey={series}
-                                triggerClassName="ml-auto"
-                            />
                             <Button
                                 type="button"
                                 size="sm"
                                 variant="ghost"
-                                className="h-7 w-7 p-0 shrink-0"
+                                className="h-7 w-7 p-0 shrink-0 ml-auto"
                                 title={heatmapVisible ? t("hideHeatmap") : t("showHeatmap")}
                                 onClick={() => {
                                     setHeatmapVisible((v) => {
