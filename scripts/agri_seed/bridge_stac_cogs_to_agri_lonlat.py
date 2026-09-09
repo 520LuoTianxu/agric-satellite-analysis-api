@@ -2,9 +2,10 @@
 """Bridge STAC/Celery COGs in MinIO → agri.parcel_scene_products lonlat_v1.
 
 For a public.fields row (and agri land_id), list date folders under
-``cogs/{org_id}/{field_id}/`` in the openfarm MinIO bucket, sample NDVI/EVI/NDWI
-(and optional SAVI) GeoTIFFs inside the field polygon at native COG resolution,
-and upsert one S2 row per date with ``pixel_data.format = lonlat_v1``.
+``cogs/{org_id}/{field_id}/`` in the openfarm MinIO bucket, sample the six agri
+optical indices (NDVI/EVI/NDMI/NDRE/CIre/MNDWI; NDWI COG only as MNDWI fallback)
+inside the field polygon at native COG resolution, and upsert one S2 row per
+date with ``pixel_data.format = lonlat_v1``.
 
 Usage (repo root, compose up; api image has rasterio/minio):
 
@@ -42,14 +43,20 @@ from rasterio.warp import transform_geom
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# Pixel index keys in lonlat_v1 (NDWI COG → MNDWI for agri UI)
-BAND_FILES = (
+# Pixel index keys in lonlat_v1.
+# Prefer true mndwi.tif; ndwi.tif is only a fallback when mndwi is absent.
+PRIMARY_BAND_FILES = (
     ("ndvi", "NDVI"),
     ("evi", "EVI"),
-    ("ndwi", "MNDWI"),
-    ("savi", "SAVI"),  # optional; omitted from pixels if missing
+    ("ndmi", "NDMI"),
+    ("ndre", "NDRE"),
+    ("cire", "CIre"),
+    ("mndwi", "MNDWI"),
 )
+MNDWI_FALLBACK = ("ndwi", "MNDWI")  # legacy NDWI COG → MNDWI column
 REQUIRED_BAND = "ndvi"
+# Pixel keys emitted into lonlat_v1 (order stable for UI)
+EMIT_PIXEL_KEYS = ("NDVI", "EVI", "NDMI", "NDRE", "CIre", "MNDWI")
 
 UPSERT_SQL = """
 INSERT INTO agri.parcel_scene_products (
@@ -59,6 +66,9 @@ INSERT INTO agri.parcel_scene_products (
   pixel_data_url,
   ndvi_avg, ndvi_min, ndvi_max,
   evi_avg, evi_min, evi_max,
+  ndmi_avg, ndmi_min, ndmi_max,
+  ndre_avg, ndre_min, ndre_max,
+  cire_avg, cire_min, cire_max,
   mndwi_avg, mndwi_min, mndwi_max,
   pixel_data
 ) VALUES (
@@ -68,6 +78,9 @@ INSERT INTO agri.parcel_scene_products (
   %(pixel_data_url)s,
   %(ndvi_avg)s, %(ndvi_min)s, %(ndvi_max)s,
   %(evi_avg)s, %(evi_min)s, %(evi_max)s,
+  %(ndmi_avg)s, %(ndmi_min)s, %(ndmi_max)s,
+  %(ndre_avg)s, %(ndre_min)s, %(ndre_max)s,
+  %(cire_avg)s, %(cire_min)s, %(cire_max)s,
   %(mndwi_avg)s, %(mndwi_min)s, %(mndwi_max)s,
   %(pixel_data)s::jsonb
 )
@@ -86,6 +99,15 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   evi_avg = EXCLUDED.evi_avg,
   evi_min = EXCLUDED.evi_min,
   evi_max = EXCLUDED.evi_max,
+  ndmi_avg = EXCLUDED.ndmi_avg,
+  ndmi_min = EXCLUDED.ndmi_min,
+  ndmi_max = EXCLUDED.ndmi_max,
+  ndre_avg = EXCLUDED.ndre_avg,
+  ndre_min = EXCLUDED.ndre_min,
+  ndre_max = EXCLUDED.ndre_max,
+  cire_avg = EXCLUDED.cire_avg,
+  cire_min = EXCLUDED.cire_min,
+  cire_max = EXCLUDED.cire_max,
   mndwi_avg = EXCLUDED.mndwi_avg,
   mndwi_min = EXCLUDED.mndwi_min,
   mndwi_max = EXCLUDED.mndwi_max,
@@ -300,8 +322,7 @@ def _sample_lonlat(
         ys = np.asarray(lats, dtype=np.float64)
 
     pixels: list[dict[str, Any]] = []
-    # Prefer core bands for UI; include SAVI only when present
-    emit_keys = [k for k in ("NDVI", "EVI", "MNDWI", "SAVI") if k in bands]
+    emit_keys = [k for k in EMIT_PIXEL_KEYS if k in bands]
     for i in range(rows.size):
         r, c = int(rows[i]), int(cols[i])
         pix: dict[str, Any] = {
@@ -311,12 +332,6 @@ def _sample_lonlat(
         }
         ok = True
         for key in emit_keys:
-            if key == "SAVI":
-                # optional — skip if this cell is nan
-                v = bands[key][r, c]
-                if np.isfinite(v):
-                    pix[key] = _round6(v)
-                continue
             v = bands[key][r, c]
             if not np.isfinite(v):
                 if key == "NDVI":
@@ -354,29 +369,47 @@ def process_date(
     band_arrays: dict[str, np.ndarray] = {}
     transform = None
     crs = None
+    loaded_stems: set[str] = set()
 
-    for file_stem, pix_key in BAND_FILES:
+    def _load_one(file_stem: str, pix_key: str, *, required: bool) -> bool:
+        nonlocal transform, crs
         key = f"{prefix}{date_str}/{file_stem}.tif"
         path = _vsis3(bucket, key)
-        if file_stem == REQUIRED_BAND:
-            opened = _open_band(path)
-            if opened is None:
+        opened = _open_band(path)
+        if opened is None:
+            if required:
                 print(f"  skip {date_str}: no readable NDVI", file=sys.stderr)
-                return None
-            data, transform, crs = opened
+            return False
+        data, t, c = opened
+        if required:
+            transform, crs = t, c
             band_arrays[pix_key] = data
-        else:
-            opened = _open_band(path)
-            if opened is None:
-                continue
-            data, t2, _c2 = opened
-            if data.shape != band_arrays["NDVI"].shape:
-                print(
-                    f"  warn {date_str} {file_stem}: shape mismatch, omit",
-                    file=sys.stderr,
-                )
-                continue
-            band_arrays[pix_key] = data
+            loaded_stems.add(file_stem)
+            return True
+        if "NDVI" not in band_arrays or data.shape != band_arrays["NDVI"].shape:
+            print(
+                f"  warn {date_str} {file_stem}: shape mismatch, omit",
+                file=sys.stderr,
+            )
+            return False
+        # Do not overwrite an already-loaded primary (e.g. mndwi) with fallback
+        if pix_key in band_arrays:
+            return False
+        band_arrays[pix_key] = data
+        loaded_stems.add(file_stem)
+        return True
+
+    if not _load_one(REQUIRED_BAND, "NDVI", required=True):
+        return None
+
+    for file_stem, pix_key in PRIMARY_BAND_FILES:
+        if file_stem == REQUIRED_BAND:
+            continue
+        _load_one(file_stem, pix_key, required=False)
+
+    # NDWI → MNDWI fallback only when true mndwi COG missing
+    if "MNDWI" not in band_arrays:
+        _load_one(MNDWI_FALLBACK[0], MNDWI_FALLBACK[1], required=False)
 
     assert transform is not None
     pixels = _sample_lonlat(meta["geom"], band_arrays, transform, crs)
@@ -384,21 +417,28 @@ def process_date(
         print(f"  skip {date_str}: 0 pixels inside polygon", file=sys.stderr)
         return None
 
-    ndvi_s = _stats(band_arrays["NDVI"])
-    evi_s = _stats(band_arrays["EVI"]) if "EVI" in band_arrays else (None, None, None)
+    def _avg_triple(pix_key: str, layer_label: str):
+        sampled = (
+            _stats(band_arrays[pix_key])
+            if pix_key in band_arrays
+            else (None, None, None)
+        )
+        return _pick_stats(sampled, fs_map.get((date_str, layer_label)))
+
+    ndvi_avg, ndvi_min, ndvi_max = _avg_triple("NDVI", "NDVI")
+    evi_avg, evi_min, evi_max = _avg_triple("EVI", "EVI")
+    ndmi_avg, ndmi_min, ndmi_max = _avg_triple("NDMI", "NDMI")
+    ndre_avg, ndre_min, ndre_max = _avg_triple("NDRE", "NDRE")
+    cire_avg, cire_min, cire_max = _avg_triple("CIre", "CIRE")
+    # Prefer MNDWI field_stats; fall back to legacy NDWI stats
     mndwi_s = (
         _stats(band_arrays["MNDWI"]) if "MNDWI" in band_arrays else (None, None, None)
     )
-
-    ndvi_avg, ndvi_min, ndvi_max = _pick_stats(ndvi_s, fs_map.get((date_str, "NDVI")))
-    evi_avg, evi_min, evi_max = _pick_stats(evi_s, fs_map.get((date_str, "EVI")))
-    # field_stats stores NDWI; map to mndwi_* columns
-    mndwi_avg, mndwi_min, mndwi_max = _pick_stats(
-        mndwi_s, fs_map.get((date_str, "NDWI"))
-    )
+    mndwi_fs = fs_map.get((date_str, "MNDWI")) or fs_map.get((date_str, "NDWI"))
+    mndwi_avg, mndwi_min, mndwi_max = _pick_stats(mndwi_s, mndwi_fs)
 
     q = None
-    for layer in ("NDVI", "EVI", "NDWI"):
+    for layer in ("NDVI", "EVI", "NDMI", "NDRE", "CIRE", "MNDWI", "NDWI"):
         if (date_str, layer) in fs_map:
             q = fs_map[(date_str, layer)].get("quality_score")
             break
@@ -412,10 +452,6 @@ def process_date(
             cloud_over_30 = qf < 0.05  # almost no clear pixels
         except (TypeError, ValueError):
             pass
-
-    # Drop SAVI from stored pixels to match agri UI contract (keep if user wants denser)
-    for p in pixels:
-        p.pop("SAVI", None)
 
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
     scene_id = f"stac_bridge_{date_str}_S2"
@@ -439,6 +475,15 @@ def process_date(
         "evi_avg": evi_avg,
         "evi_min": evi_min,
         "evi_max": evi_max,
+        "ndmi_avg": ndmi_avg,
+        "ndmi_min": ndmi_min,
+        "ndmi_max": ndmi_max,
+        "ndre_avg": ndre_avg,
+        "ndre_min": ndre_min,
+        "ndre_max": ndre_max,
+        "cire_avg": cire_avg,
+        "cire_min": cire_min,
+        "cire_max": cire_max,
         "mndwi_avg": mndwi_avg,
         "mndwi_min": mndwi_min,
         "mndwi_max": mndwi_max,
@@ -447,7 +492,9 @@ def process_date(
     if dry_run:
         print(
             f"  dry-run {date_str}: pixels={len(pixels)} "
-            f"ndvi_avg={ndvi_avg} evi_avg={evi_avg} mndwi_avg={mndwi_avg}"
+            f"ndvi={ndvi_avg} evi={evi_avg} ndmi={ndmi_avg} "
+            f"ndre={ndre_avg} cire={cire_avg} mndwi={mndwi_avg} "
+            f"stems={sorted(loaded_stems)}"
         )
     return row
 

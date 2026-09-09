@@ -1,4 +1,4 @@
-"""Vegetation index tasks - EVI, SAVI, NDWI.
+"""Vegetation index tasks - EVI, SAVI, NDWI, NDMI, NDRE, CIRE, MNDWI.
 
 Each task follows the same 7-step pipeline as NDVI but uses the
 index registry for formula selection, band resolution, and alert defaults.
@@ -226,3 +226,63 @@ def process_savi(self, job_id: str) -> dict:
 def process_ndwi(self, job_id: str) -> dict:
     """Process NDWI for a field."""
     return _run_index_pipeline(self, job_id, "ndwi")
+
+
+# ── NDMI ─────────────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.vegetation.process_ndmi",
+    bind=True,
+    max_retries=3,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def process_ndmi(self, job_id: str) -> dict:
+    """Process NDMI for a field."""
+    return _run_index_pipeline(self, job_id, "ndmi")
+
+
+# ── NDRE ─────────────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.vegetation.process_ndre",
+    bind=True,
+    max_retries=3,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def process_ndre(self, job_id: str) -> dict:
+    """Process NDRE for a field."""
+    return _run_index_pipeline(self, job_id, "ndre")
+
+
+# ── CIRE ─────────────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.vegetation.process_cire",
+    bind=True,
+    max_retries=3,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def process_cire(self, job_id: str) -> dict:
+    """Process CIre (chlorophyll index red-edge) for a field."""
+    return _run_index_pipeline(self, job_id, "cire")
+
+
+# ── MNDWI ────────────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.vegetation.process_mndwi",
+    bind=True,
+    max_retries=3,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def process_mndwi(self, job_id: str) -> dict:
+    """Process MNDWI for a field."""
+    return _run_index_pipeline(self, job_id, "mndwi")

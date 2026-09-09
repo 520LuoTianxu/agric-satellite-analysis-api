@@ -45,11 +45,18 @@ def backfill_indices_for_field(
     field_id: str,
     months: int | None = None,
     sentinel_job_id: str | None = None,
+    allow_agri: bool = False,
+    indices: list[str] | None = None,
+    force: bool = False,
 ) -> dict:
-    """Backfill all 4 vegetation indices for *field_id* over *months*.
+    """Backfill vegetation indices for *field_id* over *months*.
 
     Splits the date range into 90-day chunks and dispatches one
     pipeline job per (chunk × index) with staggered countdowns.
+
+    ``allow_agri``: run even for agri-tagged fields (bridge/seed workflows).
+    ``indices``: optional subset of registry keys (default: all).
+    ``force``: re-dispatch even when raster_layers already exist in the chunk.
     """
     from app.models.tables import Field, Job, RasterLayer
 
@@ -69,7 +76,7 @@ def backfill_indices_for_field(
 
         from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
 
-        if is_agri_tagged(field.tags_json):
+        if is_agri_tagged(field.tags_json) and not allow_agri:
             land_id = parse_agri_land_id(field.tags_json)
             logger.info(
                 "backfill_indices_skipped_agri_field",
@@ -98,9 +105,22 @@ def backfill_indices_for_field(
         end_date = date.today()
         start_date = end_date - timedelta(days=months * 30)
 
+        if indices:
+            wanted = [k.lower() for k in indices]
+            unknown = [k for k in wanted if k not in INDEX_REGISTRY]
+            if unknown:
+                return {
+                    "field_id": field_id,
+                    "status": "error",
+                    "detail": f"Unknown indices: {unknown}",
+                }
+            index_keys = wanted
+        else:
+            index_keys = list(INDEX_REGISTRY.keys())
+
         # Determine which dates already have computed layers (per index)
         existing_dates: dict[str, set[date]] = {}
-        for idx_key in INDEX_REGISTRY:
+        for idx_key in index_keys:
             idx_def = INDEX_REGISTRY[idx_key]
             rows = (
                 session.execute(
@@ -120,30 +140,31 @@ def backfill_indices_for_field(
         stagger_seconds = 30  # seconds between chunk groups
 
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-            # Skip chunk if all indices already have data within its range
-            indices_covered = 0
-            for idx_key in INDEX_REGISTRY:
-                dates = existing_dates.get(idx_key, set())
-                if any(chunk_start <= d <= chunk_end for d in dates):
-                    indices_covered += 1
-            if indices_covered == len(INDEX_REGISTRY):
-                chunks_skipped += 1
-                logger.info(
-                    "backfill_chunk_skipped",
-                    field_id=field_id,
-                    chunk=f"{chunk_start} → {chunk_end}",
-                    reason="all indices have data",
-                )
-                continue
+            # Skip chunk if all requested indices already have data within its range
+            if not force:
+                indices_covered = 0
+                for idx_key in index_keys:
+                    dates = existing_dates.get(idx_key, set())
+                    if any(chunk_start <= d <= chunk_end for d in dates):
+                        indices_covered += 1
+                if indices_covered == len(index_keys):
+                    chunks_skipped += 1
+                    logger.info(
+                        "backfill_chunk_skipped",
+                        field_id=field_id,
+                        chunk=f"{chunk_start} → {chunk_end}",
+                        reason="all indices have data",
+                    )
+                    continue
 
-            for idx_key in sorted(INDEX_REGISTRY.keys()):
+            for idx_key in sorted(index_keys):
                 task_name = INDEX_TASK_MAP.get(idx_key)
                 if not task_name:
                     continue
 
                 # Skip individual index if it already has data in this chunk
                 dates = existing_dates.get(idx_key, set())
-                if any(chunk_start <= d <= chunk_end for d in dates):
+                if not force and any(chunk_start <= d <= chunk_end for d in dates):
                     logger.info(
                         "backfill_index_skipped",
                         field_id=field_id,
@@ -199,8 +220,10 @@ def backfill_indices_for_field(
             field_id=field_id,
             chunks=len(chunks),
             chunks_skipped=chunks_skipped,
-            indices=len(INDEX_REGISTRY),
+            indices=len(index_keys),
             jobs_dispatched=jobs_dispatched,
+            allow_agri=allow_agri,
+            force=force,
         )
         return {
             "field_id": field_id,
@@ -208,6 +231,9 @@ def backfill_indices_for_field(
             "jobs": jobs_dispatched,
             "chunks": len(chunks),
             "chunks_skipped": chunks_skipped,
+            "indices": index_keys,
+            "allow_agri": allow_agri,
+            "force": force,
         }
 
     except Exception as e:

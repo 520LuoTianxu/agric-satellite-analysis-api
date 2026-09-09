@@ -8,6 +8,7 @@ import {
     type AgriLandScenesSummary,
     type AgriSceneProduct,
     type FieldStat,
+    type IndexType,
 } from "@/lib/api";
 import {
     rasterizeAgriPixels,
@@ -506,7 +507,16 @@ export default function AgriTimeseriesPanel({
     if (!landId) return null;
     if (!loading && hasMonitoringData && total === 0) return null;
 
-    const chartIndexType = series === "evi" ? "EVI" : "NDVI";
+    const CHART_INDEX_TYPE: Partial<Record<SeriesKey, IndexType>> = {
+        ndvi: "NDVI",
+        evi: "EVI",
+        ndmi: "NDMI",
+        ndre: "NDRE",
+        cire: "CIRE",
+        mndwi: "MNDWI",
+        drought: "NDVI",
+    };
+    const chartIndexType: IndexType = CHART_INDEX_TYPE[series] ?? "NDVI";
 
     return (
         <Card className="border-primary/20 bg-primary-subtle/30">

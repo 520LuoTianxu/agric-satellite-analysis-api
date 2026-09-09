@@ -102,7 +102,7 @@ export function sensorForIndex(index: AgriHeatIndex): "S1" | "S2" {
  */
 export const HEAT_RESCALE: Record<Exclude<AgriHeatIndex, "drought" | "flood">, [number, number]> = {
     ndvi: [0, 0.9],
-    evi: [0, 0.8],
+    evi: [0, 1.2],
     ndmi: [-0.5, 0.5],
     ndre: [-0.2, 0.8],
     mndwi: [-0.5, 0.5],

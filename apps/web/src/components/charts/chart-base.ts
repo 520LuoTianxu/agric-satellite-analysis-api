@@ -35,14 +35,18 @@ export function viz(n: number, alpha?: number): string {
     return tokenColor(`--viz-${i}`, alpha);
 }
 
-/** Vegetation indices share sig-vegetation; NDWI is a water quantity. */
+/** Vegetation indices share sig-vegetation; NDWI/MNDWI are water quantities. */
 export function indexLineColor(indexType: IndexType): string {
-    return indexType === "NDWI" ? sig("water") : sig("vegetation");
+    return indexType === "NDWI" || indexType === "MNDWI"
+        ? sig("water")
+        : sig("vegetation");
 }
 
 /** p10-p90 distribution band: series colour at 15% opacity. */
 export function indexBandColor(indexType: IndexType): string {
-    return indexType === "NDWI" ? sig("water", 0.15) : sig("vegetation", 0.15);
+    return indexType === "NDWI" || indexType === "MNDWI"
+        ? sig("water", 0.15)
+        : sig("vegetation", 0.15);
 }
 
 /** Axis labels: 11px, muted. */

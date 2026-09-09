@@ -207,7 +207,7 @@ export interface FieldImportResult {
 
 // ── Index Configuration ──────────────────────────────────────────────
 
-export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI";
+export type IndexType = "NDVI" | "EVI" | "SAVI" | "NDWI" | "NDMI" | "NDRE" | "CIRE" | "MNDWI";
 
 export interface IndexConfig {
     label: string;
@@ -232,8 +232,9 @@ export const INDEX_CONFIG: Record<IndexType, IndexConfig> = {
     EVI: {
         label: "EVI",
         colormap: "rdylgn",
+        // Wider than historical 0.8 — EVI often exceeds 1.0; avoid chart maxing
         rescaleMin: -0.2,
-        rescaleMax: 0.8,
+        rescaleMax: 1.2,
         gradient: "var(--ramp-vegetation)",
         threshold: 0.2,
     },
@@ -253,9 +254,50 @@ export const INDEX_CONFIG: Record<IndexType, IndexConfig> = {
         gradient: "var(--ramp-water)",
         threshold: 0.0,
     },
+    NDMI: {
+        label: "NDMI",
+        colormap: "rdylgn",
+        rescaleMin: -0.5,
+        rescaleMax: 0.5,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.0,
+    },
+    NDRE: {
+        label: "NDRE",
+        colormap: "rdylgn",
+        rescaleMin: -0.2,
+        rescaleMax: 0.8,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.2,
+    },
+    CIRE: {
+        label: "CIRE",
+        colormap: "rdylgn",
+        rescaleMin: 0,
+        rescaleMax: 1.5,
+        gradient: "var(--ramp-vegetation)",
+        threshold: 0.2,
+    },
+    MNDWI: {
+        label: "MNDWI",
+        colormap: "rdbu",
+        rescaleMin: -0.5,
+        rescaleMax: 0.5,
+        gradient: "var(--ramp-water)",
+        threshold: 0.0,
+    },
 };
 
-export const ALL_INDEX_TYPES: IndexType[] = ["NDVI", "EVI", "SAVI", "NDWI"];
+export const ALL_INDEX_TYPES: IndexType[] = [
+    "NDVI",
+    "EVI",
+    "SAVI",
+    "NDWI",
+    "NDMI",
+    "NDRE",
+    "CIRE",
+    "MNDWI",
+];
 
 // ── Monitoring Types ─────────────────────────────────────────────────
 
