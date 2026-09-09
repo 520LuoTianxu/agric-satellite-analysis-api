@@ -99,9 +99,6 @@ export async function generateMetadata({
             ],
             apple: "/apple-icon.png",
         },
-            ],
-            apple: "/apple-icon",
-        },
     };
 }
 
