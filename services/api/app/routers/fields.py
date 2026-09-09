@@ -220,7 +220,7 @@ async def update_field(
     if body.name is not None:
         field.name = body.name
     if body.crop_type is not None:
-        from app.core.crops import normalize_crop_key, require_crop_key
+        from app.core.crops import require_crop_key
 
         raw = (
             body.crop_type.strip()
