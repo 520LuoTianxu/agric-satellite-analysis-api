@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,25 @@ from app.reports.land_assessment.scoring import (
     compute_assessment,
     compute_phenology_stage_summary,
 )
+
+
+
+def assessment_pdf_filename(
+    field_name: str | None,
+    when: datetime | None = None,
+) -> str:
+    """Download/display name: `{地块名}地块--YYYY-MM-DD-分析报告.pdf`."""
+    name = (field_name or "地块").strip() or "地块"
+    for ch in '/\\:*?"<>|\n\r\t':
+        name = name.replace(ch, "_")
+    if not name.endswith("地块"):
+        name = f"{name}地块"
+    dt = when or datetime.now(ZoneInfo("Asia/Shanghai"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        dt = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+    return f"{name}--{dt.strftime('%Y-%m-%d')}-分析报告.pdf"
 
 
 def _load_stage_pixels(
@@ -225,11 +246,7 @@ def generate_assessment_pdf(
     )
 
     if out_path is None:
-        safe = "".join(
-            c if c.isalnum() or c in "-_" else "_"
-            for c in (field.get("name") or "field")
-        )
-        out_path = tmp_root / f"{safe}_选地分析报告.pdf"
+        out_path = tmp_root / assessment_pdf_filename(field.get("name"))
     out_path = Path(out_path)
 
     render_pdf(
@@ -285,6 +302,7 @@ def generate_assessment_pdf(
 
     return {
         "out_path": str(out_path),
+        "download_filename": assessment_pdf_filename(field.get("name")),
         "field_id": field.get("id"),
         "field_name": field.get("name"),
         "area_ha": field.get("area_ha"),

@@ -118,7 +118,8 @@ def generate_assessment_report(self, job_id: str) -> dict:
             "stage": "done",
             "percent": 100,
             "object_key": object_key,
-            "filename": f"{result['field_name'] or 'field'}_选地分析报告.pdf",
+            "filename": result.get("download_filename")
+            or f"{result['field_name'] or 'field'}地块--分析报告.pdf",
             "score": result["score"],
             "grade": result["grade"],
             "light": result["light"],
