@@ -77,26 +77,31 @@ export function computePixelNdviGradeShares(
     return { counts, pct, n, mean: sum / n };
 }
 
+type ChartVariant = "donut" | "stacked";
+
 interface NdviGradeSharesChartProps {
+    /** Render only one chart — parent supplies card chrome (no inner borders). */
+    variant: ChartVariant;
     /** Selected-day shares for the donut */
-    selectedShare: DayGradeShare | null;
+    selectedShare?: DayGradeShare | null;
     /** History map date → shares (fills as heatmaps/prefetch load) */
-    historyByDate: Record<string, DayGradeShare>;
+    historyByDate?: Record<string, DayGradeShare>;
     /** Optional mean NDVI override per date (scene ndvi_avg) when share.mean missing */
     meanByDate?: Record<string, number | null | undefined>;
     /** Field area in 亩 for donut center */
-    areaMu: number | null;
+    areaMu?: number | null;
     selectedDate?: string | null;
     height?: number;
 }
 
 export default function NdviGradeSharesChart({
-    selectedShare,
-    historyByDate,
+    variant,
+    selectedShare = null,
+    historyByDate = {},
     meanByDate,
-    areaMu,
+    areaMu = null,
     selectedDate,
-    height = 220,
+    height,
 }: NdviGradeSharesChartProps) {
     const historyDates = useMemo(
         () => Object.keys(historyByDate).sort((a, b) => a.localeCompare(b)),
@@ -135,7 +140,7 @@ export default function NdviGradeSharesChart({
             },
             title: [
                 {
-                    text: selectedDate ? `长势等级占比 · ${selectedDate}` : "长势等级占比",
+                    text: selectedDate ? selectedDate : "当日",
                     left: 8,
                     top: 4,
                     textStyle: { fontSize: 11, fontWeight: 600, color: "#374151" },
@@ -185,7 +190,7 @@ export default function NdviGradeSharesChart({
         });
         return {
             animation: false,
-            grid: { top: 40, right: 52, bottom: 40, left: 44 },
+            grid: { top: 36, right: 52, bottom: 36, left: 44 },
             legend: {
                 data: [...NDVI_DAY_GRADE_ORDER, "平均NDVI"],
                 top: 0,
@@ -247,55 +252,48 @@ export default function NdviGradeSharesChart({
         };
     }, [historyDates, historyByDate, meanByDate]);
 
-    if (!selectedShare && !showStacked) {
+    if (variant === "donut") {
+        const h = height ?? 200;
+        if (!selectedShare) {
+            return (
+                <div
+                    className="flex items-center justify-center text-[11px] text-muted-foreground px-1"
+                    style={{ height: h }}
+                >
+                    当日暂无像素分档（可点选其他日期或等待色斑加载）
+                </div>
+            );
+        }
         return (
-            <p className="text-[11px] text-muted-foreground py-2 px-1">
-                选择有像素的日期后显示当日长势等级占比；加载多日后出现趋势柱图。
-            </p>
+            <ReactEChartsCore
+                echarts={echarts}
+                option={donutOption}
+                style={{ height: h, width: "100%" }}
+                notMerge
+                lazyUpdate
+            />
         );
     }
 
-    const stackedHeight = Math.max(height, 250);
-
+    // stacked
+    const stackedHeight = Math.max(height ?? 250, 250);
+    if (!showStacked) {
+        return (
+            <div
+                className="flex items-center justify-center text-[11px] text-muted-foreground px-1 text-center"
+                style={{ height: Math.min(stackedHeight, 120) }}
+            >
+                已有 {historyDates.length} 日分档；再加载 ≥1 日后显示占比趋势
+            </div>
+        );
+    }
     return (
-        <div className="flex flex-col gap-2">
-            <div className="rounded-md border border-border/50 bg-background/60 overflow-hidden">
-                {selectedShare ? (
-                    <ReactEChartsCore
-                        echarts={echarts}
-                        option={donutOption}
-                        style={{ height, width: "100%" }}
-                        notMerge
-                        lazyUpdate
-                    />
-                ) : (
-                    <div
-                        className="flex items-center justify-center text-[11px] text-muted-foreground px-3"
-                        style={{ height }}
-                    >
-                        当日暂无像素分档（可点选其他日期或等待色斑加载）
-                    </div>
-                )}
-            </div>
-            <div className="rounded-md border border-border/50 bg-background/60 overflow-hidden">
-                <p className="px-2.5 pt-2 text-[11px] font-medium text-foreground">多日长势占比趋势</p>
-                {showStacked ? (
-                    <ReactEChartsCore
-                        echarts={echarts}
-                        option={stackedOption}
-                        style={{ height: stackedHeight, width: "100%" }}
-                        notMerge
-                        lazyUpdate
-                    />
-                ) : (
-                    <div
-                        className="flex items-center justify-center text-[11px] text-muted-foreground px-3 text-center"
-                        style={{ height: Math.min(stackedHeight, 120) }}
-                    >
-                        已有 {historyDates.length} 日分档；再加载 ≥1 日后显示占比趋势
-                    </div>
-                )}
-            </div>
-        </div>
+        <ReactEChartsCore
+            echarts={echarts}
+            option={stackedOption}
+            style={{ height: stackedHeight, width: "100%" }}
+            notMerge
+            lazyUpdate
+        />
     );
 }

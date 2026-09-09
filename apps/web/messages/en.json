@@ -877,6 +877,7 @@
         "pickDate": "Select a date on the chart to load the heatmap",
         "pixelsMeta": " · {pixels} pixels",
         "meanMeta": " · mean≈{mean}",
+        "cloudCover": "cloud {percent}%",
         "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
         "progressBridge": "Writing agri lonlat…",
         "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})"

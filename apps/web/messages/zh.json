@@ -877,6 +877,7 @@
         "pickDate": "选择曲线上的日期以加载色斑图",
         "pixelsMeta": " · {pixels} 像素",
         "meanMeta": " · 均≈{mean}",
+        "cloudCover": "云量 {percent}%",
         "refreshComplete": "遥感数据拉取完成，已刷新场景",
         "progressBridge": "正在写入 agri lonlat…",
         "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）"
