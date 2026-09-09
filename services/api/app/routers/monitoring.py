@@ -21,9 +21,15 @@ router = APIRouter()
 
 
 def _cog_uri_to_s3_path(cog_uri: str) -> str:
-    """Convert s3://bucket/path to /vsis3/bucket/path for TiTiler."""
+    """Convert s3:// or oss:// URIs to /vsis3/ paths for TiTiler/GDAL.
+
+    Aliyun OSS is reached via the S3-compatible API when TiTiler's
+    ``AWS_S3_ENDPOINT`` points at the OSS endpoint.
+    """
     if cog_uri.startswith("s3://"):
-        return cog_uri.replace("s3://", "/vsis3/")
+        return cog_uri.replace("s3://", "/vsis3/", 1)
+    if cog_uri.startswith("oss://"):
+        return cog_uri.replace("oss://", "/vsis3/", 1)
     return cog_uri
 
 
