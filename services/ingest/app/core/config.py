@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     soil_fetch_timeout_seconds: int = 60
     # Concurrent SoilGrids WCS GetCoverage calls (props × depths × quantiles).
     soil_fetch_max_workers: int = 12
+    # Concurrent Sentinel scene download+process threads inside one ingest job.
+    # Celery --concurrency is separate (typically 4); this speeds the per-job
+    # serial scene loop. Each thread opens its own DB session.
+    ingest_scene_max_workers: int = 16
     soil_source_priority: str = "auto"  # auto | soilgrids | polaris
 
     # Email (Resend)
@@ -79,3 +83,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def scene_max_workers() -> int:
+    """Positive thread count for per-scene work inside one ingest job."""
+    try:
+        n = int(settings.ingest_scene_max_workers)
+    except (TypeError, ValueError):
+        n = 16
+    return max(1, n)

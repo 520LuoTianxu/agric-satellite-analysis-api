@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -29,8 +31,9 @@ from rasterio.warp import Resampling, reproject
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 from shapely.geometry import mapping
+from sqlalchemy.orm.attributes import flag_modified
 
-from app.core.config import settings
+from app.core.config import settings, scene_max_workers
 from app.core.storage import get_storage, restore_gdal_env
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
@@ -51,6 +54,8 @@ STAC_S1_COLLECTION = "sentinel-1-grd"
 # Full LUT calibration is not applied; values are approximate but flood-usable.
 _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
+# os.environ mutation in _gdal_public_aws is process-wide; serialize reads.
+_gdal_public_aws_lock = threading.Lock()
 
 UPSERT_S1_SQL = """
 INSERT INTO agri.parcel_scene_products (
@@ -206,27 +211,34 @@ def _read_band_windowed_db(
     if href.startswith("s3://"):
         s3_path = href.replace("s3://", "/vsis3/", 1)
     dst = np.zeros(target_shape, dtype=np.float32)
-    with _gdal_public_aws():
-        with rasterio.open(s3_path) as src:
-            # Always warp via VRT so GCP-only products work
-            with WarpedVRT(src, crs="EPSG:4326", resampling=Resampling.bilinear) as vrt:
-                # WarpedVRT forbids boundless reads — clip window to VRT extent
-                window = rasterio.windows.from_bounds(
-                    *bounds, transform=vrt.transform
-                ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
-                if window.width <= 0 or window.height <= 0:
-                    return dst  # all-nan after dn_to_db of zeros→nan path
-                window = window.round_offsets().round_lengths()
-                data = vrt.read(1, window=window, boundless=False)
-                src_transform = rasterio.windows.transform(window, vrt.transform)
-                reproject(
-                    source=data.astype(np.float32),
-                    destination=dst,
-                    src_transform=src_transform,
-                    src_crs="EPSG:4326",
-                    dst_transform=target_transform,
-                    dst_crs="EPSG:4326",
-                    resampling=Resampling.bilinear)
+    with _gdal_public_aws_lock:
+        with _gdal_public_aws():
+            with rasterio.open(s3_path) as src:
+                # Always warp via VRT so GCP-only products work
+                with WarpedVRT(
+                    src, crs="EPSG:4326", resampling=Resampling.bilinear
+                ) as vrt:
+                    # WarpedVRT forbids boundless reads — clip window to VRT extent
+                    window = rasterio.windows.from_bounds(
+                        *bounds, transform=vrt.transform
+                    ).intersection(
+                        rasterio.windows.Window(0, 0, vrt.width, vrt.height)
+                    )
+                    if window.width <= 0 or window.height <= 0:
+                        return dst  # all-nan after dn_to_db of zeros→nan path
+                    window = window.round_offsets().round_lengths()
+                    data = vrt.read(1, window=window, boundless=False)
+                    src_transform = rasterio.windows.transform(
+                        window, vrt.transform
+                    )
+                    reproject(
+                        source=data.astype(np.float32),
+                        destination=dst,
+                        src_transform=src_transform,
+                        src_crs="EPSG:4326",
+                        dst_transform=target_transform,
+                        dst_crs="EPSG:4326",
+                        resampling=Resampling.bilinear)
     return _dn_to_db(dst)
 
 
@@ -239,8 +251,10 @@ def _write_index_cog(
     stem: str) -> str:
     """Write float32 COG to active storage; return storage URI."""
     object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{stem}.tif"
-    tmp_src = tempfile.mktemp(suffix="_src.tif")
-    tmp_dst = tempfile.mktemp(suffix="_cog.tif")
+    src_fd, tmp_src = tempfile.mkstemp(suffix="_src.tif")
+    dst_fd, tmp_dst = tempfile.mkstemp(suffix="_cog.tif")
+    os.close(src_fd)
+    os.close(dst_fd)
     try:
         profile = {
             "driver": "GTiff",
@@ -433,6 +447,205 @@ def _upsert_agri_s1(
     return json_url
 
 
+def _process_one_s1_scene(
+    *,
+    job_id: str,
+    scene: dict,
+    idx: int,
+    total_scenes: int,
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    field_mask: np.ndarray,
+    org_id_str: str,
+    field_id_str: str,
+    field_id,
+    date_from: date,
+    date_to: date,
+    agri_meta: dict | None,
+    field_geom_geojson: dict) -> bool:
+    """Download, write COGs, and upsert one S1 scene. Own DB session."""
+    from app.models.tables import Job, RasterLayer
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    session = get_db_session()
+    try:
+        job = session.get(Job, uuid.UUID(job_id))
+        if job is None:
+            logger.error("job_not_found_in_s1_scene_worker", job_id=job_id)
+            return False
+
+        update_job_progress(
+            session,
+            job,
+            "download_bands",
+            {
+                "scene": idx + 1,
+                "total_scenes": total_scenes,
+                "scene_id": scene["id"],
+            })
+        vv = _read_band_windowed_db(
+            scene["vv_href"], bounds, target_shape, target_transform
+        )
+        vh = _read_band_windowed_db(
+            scene["vh_href"], bounds, target_shape, target_transform
+        )
+        vv[~field_mask] = np.nan
+        vh[~field_mask] = np.nan
+        complete_step(session, job, "download_bands")
+
+        update_job_progress(session, job, "write_cog")
+        vv_uri = _write_index_cog(
+            vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
+        )
+        vh_uri = _write_index_cog(
+            vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
+        )
+        complete_step(session, job, "write_cog")
+
+        vv_stats = compute_zonal_stats(vv)
+        vh_stats = compute_zonal_stats(vh)
+
+        for label, uri, stats in (
+            ("VV", vv_uri, vv_stats),
+            ("VH", vh_uri, vh_stats)):
+            layer_values = dict(
+
+                field_id=field_id,
+                layer_type=label,
+                satellite="S1",
+                date=scene["date"],
+                cog_uri=uri,
+                min=stats.get("min"),
+                max=stats.get("max"),
+                params_json={
+                    "date_from": str(date_from),
+                    "date_to": str(date_to),
+                    "source": STAC_S1_COLLECTION,
+                },
+                provenance_json={
+                    "scene_id": scene["id"],
+                    "processed_at": datetime.now(timezone.utc).isoformat(),
+                    "pipeline_version": "s1-1.0.0",
+                })
+            stmt = (
+                pg_insert(RasterLayer)
+                .values(**layer_values)
+                .on_conflict_do_update(
+                    constraint="uq_raster_field_date_type",
+                    set_={
+                        "cog_uri": uri,
+                        "min": stats.get("min"),
+                        "max": stats.get("max"),
+                        "params_json": layer_values["params_json"],
+                        "provenance_json": layer_values["provenance_json"],
+                        "satellite": "S1",
+                    })
+            )
+            session.execute(stmt)
+        session.commit()
+
+        if agri_meta is not None:
+            pixels = _sample_s1_lonlat(
+                field_geom_geojson, vv, vh, target_transform
+            )
+            if pixels:
+                _upsert_agri_s1(
+                    session,
+                    agri_meta,
+                    scene["date"],
+                    f"{scene['id']}_stac",
+                    field_id_str,
+                    pixels,
+                    vv_stats,
+                    vh_stats)
+        return True
+    except Exception as e:
+        logger.error(
+            "s1_scene_failed",
+            scene_id=scene.get("id"),
+            error=str(e))
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        session.close()
+
+
+def _process_s1_scenes_parallel(
+    *,
+    job_id: str,
+    scenes: list[dict],
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    field_mask: np.ndarray,
+    org_id_str: str,
+    field_id_str: str,
+    field_id,
+    date_from: date,
+    date_to: date,
+    agri_meta: dict | None,
+    field_geom_geojson: dict) -> int:
+    """Process S1 scenes concurrently. Returns the processed count."""
+    total = len(scenes)
+    if total == 0:
+        return 0
+    workers = min(scene_max_workers(), total)
+    logger.info(
+        "scene_parallel_start",
+        job_id=job_id,
+        index="s1",
+        scenes=total,
+        workers=workers)
+
+    processed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _process_one_s1_scene,
+                job_id=job_id,
+                scene=scene,
+                idx=idx,
+                total_scenes=total,
+                bounds=bounds,
+                target_shape=target_shape,
+                target_transform=target_transform,
+                field_mask=field_mask,
+                org_id_str=org_id_str,
+                field_id_str=field_id_str,
+                field_id=field_id,
+                date_from=date_from,
+                date_to=date_to,
+                agri_meta=agri_meta,
+                field_geom_geojson=field_geom_geojson): scene
+            for idx, scene in enumerate(scenes)
+        }
+        for fut in as_completed(futures):
+            scene = futures[fut]
+            try:
+                ok = fut.result()
+            except Exception as e:
+                logger.error(
+                    "s1_scene_failed",
+                    scene_id=scene.get("id"),
+                    error=str(e))
+                continue
+            if ok:
+                processed += 1
+
+    logger.info(
+        "scene_parallel_done",
+        job_id=job_id,
+        index="s1",
+        layers_created=processed,
+        total_scenes=total,
+        workers=workers)
+    return processed
+
+
 @celery_app.task(
     name="app.tasks.sentinel1.process_s1_backfill",
     bind=True,
@@ -441,8 +654,7 @@ def _upsert_agri_s1(
     soft_time_limit=1500)
 def process_s1_backfill(self, job_id: str) -> dict:
     """Celery entry: search S1 GRD, write OSS COGs, upsert agri lonlat_v1."""
-    from app.models.tables import Job, Field, RasterLayer
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.models.tables import Job, Field
 
     session = get_db_session()
     try:
@@ -533,105 +745,50 @@ def process_s1_backfill(self, job_id: str) -> dict:
             invert=True)
 
         agri_meta = _resolve_agri_meta(session, field)
-        processed = 0
-        for idx, scene in enumerate(scenes):
-            try:
-                update_job_progress(
-                    session,
-                    job,
-                    "download_bands",
-                    {
-                        "scene": idx + 1,
-                        "total_scenes": len(scenes),
-                        "scene_id": scene["id"],
-                    })
-                vv = _read_band_windowed_db(
-                    scene["vv_href"], bounds, target_shape, target_transform
-                )
-                vh = _read_band_windowed_db(
-                    scene["vh_href"], bounds, target_shape, target_transform
-                )
-                vv[~field_mask] = np.nan
-                vh[~field_mask] = np.nan
-                complete_step(session, job, "download_bands")
+        workers = min(scene_max_workers(), len(scenes))
+        update_job_progress(
+            session,
+            job,
+            "process_scenes",
+            {"total_scenes": len(scenes), "workers": workers})
+        field_id = job.field_id
+        processed = _process_s1_scenes_parallel(
+            job_id=job_id,
+            scenes=scenes,
+            bounds=bounds,
+            target_shape=target_shape,
+            target_transform=target_transform,
+            field_mask=field_mask,
+            org_id_str=org_id_str,
+            field_id_str=field_id_str,
+            field_id=field_id,
+            date_from=date_from,
+            date_to=date_to,
+            agri_meta=agri_meta,
+            field_geom_geojson=field_geom_geojson)
 
-                update_job_progress(session, job, "write_cog")
-                vv_uri = _write_index_cog(
-                    vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
-                )
-                vh_uri = _write_index_cog(
-                    vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
-                )
-                complete_step(session, job, "write_cog")
-
-                vv_stats = compute_zonal_stats(vv)
-                vh_stats = compute_zonal_stats(vh)
-
-                # Upsert raster_layers for VV/VH (satellite=S1)
-                for label, uri, stats in (
-                    ("VV", vv_uri, vv_stats),
-                    ("VH", vh_uri, vh_stats)):
-                    layer_values = dict(
-
-                        field_id=job.field_id,
-                        layer_type=label,
-                        satellite="S1",
-                        date=scene["date"],
-                        cog_uri=uri,
-                        min=stats.get("min"),
-                        max=stats.get("max"),
-                        params_json={
-                            "date_from": str(date_from),
-                            "date_to": str(date_to),
-                            "source": STAC_S1_COLLECTION,
-                        },
-                        provenance_json={
-                            "scene_id": scene["id"],
-                            "processed_at": datetime.now(timezone.utc).isoformat(),
-                            "pipeline_version": "s1-1.0.0",
-                        })
-                    stmt = (
-                        pg_insert(RasterLayer)
-                        .values(**layer_values)
-                        .on_conflict_do_update(
-                            constraint="uq_raster_field_date_type",
-                            set_={
-                                "cog_uri": uri,
-                                "min": stats.get("min"),
-                                "max": stats.get("max"),
-                                "params_json": layer_values["params_json"],
-                                "provenance_json": layer_values["provenance_json"],
-                                "satellite": "S1",
-                            })
-                    )
-                    session.execute(stmt)
-                session.commit()
-
-                if agri_meta is not None:
-                    pixels = _sample_s1_lonlat(
-                        mapping(field_geom), vv, vh, target_transform
-                    )
-                    if pixels:
-                        _upsert_agri_s1(
-                            session,
-                            agri_meta,
-                            scene["date"],
-                            f"{scene['id']}_stac",
-                            field_id_str,
-                            pixels,
-                            vv_stats,
-                            vh_stats)
-                processed += 1
-            except Exception as e:
-                logger.error(
-                    "s1_scene_failed",
-                    scene_id=scene.get("id"),
-                    error=str(e))
-                session.rollback()
-                continue
-
+        session.expire(job)
+        job = session.get(Job, uuid.UUID(job_id))
+        if not job:
+            return {
+                "job_id": job_id,
+                "status": "error",
+                "detail": "Job not found",
+            }
+        complete_step(
+            session,
+            job,
+            "process_scenes",
+            {"layers_created": processed, "workers": workers})
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
+        progress = job.progress_json or {}
+        progress["current_step"] = "complete"
+        progress["layers_created"] = processed
+        progress["total_scenes"] = len(scenes)
+        progress["scene_workers"] = workers
+        job.progress_json = progress
+        flag_modified(job, "progress_json")
         session.commit()
         return {
             "job_id": job_id,
