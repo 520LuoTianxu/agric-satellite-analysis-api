@@ -5,7 +5,6 @@ import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
 import maplibregl from "maplibre-gl";
-import { useOrg } from "@/components/org-context";
 import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
 import CropSelect from "@/components/field/crop-select";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
@@ -231,7 +230,6 @@ export default function FieldDetailPage() {
     const confirm = useConfirm();
     const params = useParams();
     const router = useRouter();
-    const { currentOrg } = useOrg();
     const farmId = params.id as string;
     const fieldId = params.fieldId as string;
 
@@ -353,7 +351,7 @@ export default function FieldDetailPage() {
 
     // Fetch alert count independently (so badge shows without opening alerts tab)
     useEffect(() => {
-        if (!currentOrg || !fieldId) return;
+        if (!fieldId) return;
         let cancelled = false;
         alertsApi.listForField(fieldId, 200).then((res) => {
             if (!cancelled) {
@@ -361,7 +359,7 @@ export default function FieldDetailPage() {
             }
         }).catch(() => { });
         return () => { cancelled = true; };
-    }, [currentOrg, fieldId]);
+    }, [fieldId]);
 
     // Fetch which index types have computed layers
     const refreshAvailableTypes = useCallback(() => {
@@ -409,8 +407,8 @@ export default function FieldDetailPage() {
     }, [fieldId, farmId, router, t]);
 
     useEffect(() => {
-        if (currentOrg) loadField();
-    }, [currentOrg, loadField]);
+        loadField();
+    }, [loadField]);
 
     const clearAgriHeatmapLayers = useCallback((map: maplibregl.Map) => {
         // Cancel any in-flight canvas.toBlob → ImageSource apply

@@ -40,8 +40,7 @@ from app.tasks.pipeline import (
     compute_zonal_stats,
     filter_scenes_skip_existing,
     get_db_session,
-    update_job_progress,
-)
+    update_job_progress)
 from app.worker import celery_app
 
 logger = structlog.get_logger()
@@ -100,8 +99,7 @@ def _gdal_public_aws():
         "AWS_HTTPS",
         "AWS_NO_SIGN_REQUEST",
         "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    )
+        "AWS_DEFAULT_REGION")
     previous = {k: os.environ[k] for k in keys if k in os.environ}
     os.environ.pop("AWS_S3_ENDPOINT", None)
     os.environ.pop("AWS_ACCESS_KEY_ID", None)
@@ -135,23 +133,20 @@ def _dn_to_db(dn: np.ndarray) -> np.ndarray:
 def search_s1_scenes(
     field_geom_geojson: dict,
     date_from: date,
-    date_to: date,
-) -> list[dict]:
+    date_to: date) -> list[dict]:
     """Search sentinel-1-grd; keep lowest-id scene per ISO week (IW DV preferred)."""
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_S1_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        max_items=200,
-    )
+        max_items=200)
     items = list(search.items())
     logger.info(
         "s1_stac_search_results",
         count=len(items),
         date_from=str(date_from),
-        date_to=str(date_to),
-    )
+        date_to=str(date_to))
     if not items:
         return []
 
@@ -231,8 +226,7 @@ def _read_band_windowed_db(
                     src_crs="EPSG:4326",
                     dst_transform=target_transform,
                     dst_crs="EPSG:4326",
-                    resampling=Resampling.bilinear,
-                )
+                    resampling=Resampling.bilinear)
     return _dn_to_db(dst)
 
 
@@ -242,8 +236,7 @@ def _write_index_cog(
     org_id: str,
     field_id: str,
     scene_date: date,
-    stem: str,
-) -> str:
+    stem: str) -> str:
     """Write float32 COG to active storage; return storage URI."""
     object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{stem}.tif"
     tmp_src = tempfile.mktemp(suffix="_src.tif")
@@ -277,16 +270,14 @@ def _sample_s1_lonlat(
     geom4326: dict,
     vv: np.ndarray,
     vh: np.ndarray,
-    transform,
-) -> list[dict[str, Any]]:
+    transform) -> list[dict[str, Any]]:
     h, w = vv.shape
     inside = ~geometry_mask(
         [geom4326],
         out_shape=(h, w),
         transform=transform,
         all_touched=False,
-        invert=False,
-    )
+        invert=False)
     finite = np.isfinite(vv) & inside
     rows, cols = np.where(finite)
     if rows.size == 0:
@@ -329,8 +320,7 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
             text(
                 "SELECT land_id, tile_id, land_name FROM agri.land_parcels WHERE land_id = :lid"
             ),
-            {"lid": str(land_id)},
-        )
+            {"lid": str(land_id)})
         .mappings()
         .first()
     )
@@ -351,8 +341,7 @@ def _upsert_agri_s1(
     field_id: str,
     pixels: list,
     vv_stats: dict,
-    vh_stats: dict,
-) -> str | None:
+    vh_stats: dict) -> str | None:
     """Upsert S1 lonlat row and upload DB-ready JSON to OSS (same path as S2).
 
     Returns public JSON URL when upload succeeds, else None.
@@ -372,8 +361,7 @@ def _upsert_agri_s1(
     try:
         from openfarm_common.mq_results import (
             scene_json_oss_key,
-            upload_scene_product_json,
-        )
+            upload_scene_product_json)
 
         json_oss_key = scene_json_oss_key(meta["land_id"], date_str, "S1")
         product = {
@@ -404,16 +392,14 @@ def _upsert_agri_s1(
             land_id=meta["land_id"],
             date_str=date_str,
             sensor="S1",
-            product=product,
-        )
+            product=product)
         product["json_url"] = json_url
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "s1_scene_json_upload_failed",
             land_id=meta.get("land_id"),
             date=date_str,
-            error=str(exc),
-        )
+            error=str(exc))
         json_oss_key = None
         json_url = None
 
@@ -452,8 +438,7 @@ def _upsert_agri_s1(
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500,
-)
+    soft_time_limit=1500)
 def process_s1_backfill(self, job_id: str) -> dict:
     """Celery entry: search S1 GRD, write OSS COGs, upsert agri lonlat_v1."""
     from app.models.tables import Job, Field, RasterLayer
@@ -483,7 +468,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
-        org_id_str = str(job.org_id)
+        org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
         field_id_str = str(job.field_id)
 
         update_job_progress(session, job, "scene_search")
@@ -496,16 +481,14 @@ def process_s1_backfill(self, job_id: str) -> dict:
                 field,
                 layer_type="VV",
                 satellite="S1",
-                agri_sensor="S1",
-            )
+                agri_sensor="S1")
             before = len(scenes)
             scenes = filter_scenes_skip_existing(
                 scenes,
                 existing,
                 force=False,
                 field_id=field_id_str,
-                index="s1",
-            )
+                index="s1")
             skipped_existing = before - len(scenes)
             complete_step(
                 session,
@@ -515,8 +498,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
                     "scene_count": before,
                     "scenes_after_dedup": len(scenes),
                     "skipped_existing": skipped_existing,
-                },
-            )
+                })
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
@@ -548,8 +530,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
             [mapping(field_geom)],
             out_shape=target_shape,
             transform=target_transform,
-            invert=True,
-        )
+            invert=True)
 
         agri_meta = _resolve_agri_meta(session, field)
         processed = 0
@@ -563,8 +544,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
                         "scene": idx + 1,
                         "total_scenes": len(scenes),
                         "scene_id": scene["id"],
-                    },
-                )
+                    })
                 vv = _read_band_windowed_db(
                     scene["vv_href"], bounds, target_shape, target_transform
                 )
@@ -590,10 +570,9 @@ def process_s1_backfill(self, job_id: str) -> dict:
                 # Upsert raster_layers for VV/VH (satellite=S1)
                 for label, uri, stats in (
                     ("VV", vv_uri, vv_stats),
-                    ("VH", vh_uri, vh_stats),
-                ):
+                    ("VH", vh_uri, vh_stats)):
                     layer_values = dict(
-                        org_id=job.org_id,
+
                         field_id=job.field_id,
                         layer_type=label,
                         satellite="S1",
@@ -610,8 +589,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
                             "scene_id": scene["id"],
                             "processed_at": datetime.now(timezone.utc).isoformat(),
                             "pipeline_version": "s1-1.0.0",
-                        },
-                    )
+                        })
                     stmt = (
                         pg_insert(RasterLayer)
                         .values(**layer_values)
@@ -624,8 +602,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
                                 "params_json": layer_values["params_json"],
                                 "provenance_json": layer_values["provenance_json"],
                                 "satellite": "S1",
-                            },
-                        )
+                            })
                     )
                     session.execute(stmt)
                 session.commit()
@@ -643,15 +620,13 @@ def process_s1_backfill(self, job_id: str) -> dict:
                             field_id_str,
                             pixels,
                             vv_stats,
-                            vh_stats,
-                        )
+                            vh_stats)
                 processed += 1
             except Exception as e:
                 logger.error(
                     "s1_scene_failed",
                     scene_id=scene.get("id"),
-                    error=str(e),
-                )
+                    error=str(e))
                 session.rollback()
                 continue
 
@@ -675,8 +650,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
                 if retries < self.max_retries:
                     raise self.retry(
                         exc=e,
-                        countdown=RETRY_DELAYS[min(retries, len(RETRY_DELAYS) - 1)],
-                    )
+                        countdown=RETRY_DELAYS[min(retries, len(RETRY_DELAYS) - 1)])
                 job.status = "failed"
                 job.error = str(e)[:500]
                 job.finished_at = datetime.now(timezone.utc)
@@ -693,14 +667,12 @@ def process_s1_backfill(self, job_id: str) -> dict:
     bind=True,
     max_retries=1,
     time_limit=120,
-    soft_time_limit=90,
-)
+    soft_time_limit=90)
 def backfill_s1_for_field(
     self,
     field_id: str,
     months: int | None = None,
-    force: bool = False,
-) -> dict:
+    force: bool = False) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
     from app.models.tables import Field, Job
 
@@ -731,7 +703,7 @@ def backfill_s1_for_field(
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
             job = Job(
-                org_id=field.org_id,
+
                 field_id=field.id,
                 type="s1",
                 status="pending",
@@ -741,16 +713,13 @@ def backfill_s1_for_field(
                     "is_backfill": True,
                     "sensor": "S1",
                     "force": bool(force),
-                },
-                created_by=field.created_by,
-            )
+                })
             session.add(job)
             session.flush()
             celery_app.send_task(
                 "app.tasks.sentinel1.process_s1_backfill",
                 args=[str(job.id)],
-                countdown=chunk_idx * 30,
-            )
+                countdown=chunk_idx * 30)
             dispatched += 1
 
         session.commit()

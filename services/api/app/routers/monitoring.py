@@ -71,8 +71,7 @@ def _layer_to_out(layer: RasterLayer) -> RasterLayerOut:
         max=float(layer.max) if layer.max is not None else None,
         params_json=layer.params_json,
         provenance_json=layer.provenance_json,
-        created_at=layer.created_at,
-    )
+        created_at=layer.created_at)
 
 
 @router.get(
@@ -84,13 +83,11 @@ async def list_layers(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: str = Query("NDVI"),
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     base = select(RasterLayer).where(
         RasterLayer.field_id == field_id,
-        org_scope(RasterLayer.org_id, ctx),
-        RasterLayer.layer_type == type,
-    )
+        org_scope(None, ctx),
+        RasterLayer.layer_type == type)
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
@@ -102,8 +99,7 @@ async def list_layers(
         items=[_layer_to_out(layer) for layer in layers],
         total=total,
         limit=limit,
-        offset=offset,
-    )
+        offset=offset)
 
 
 @router.get("/fields/{field_id}/stats", response_model=PaginatedResponse[FieldStatOut])
@@ -113,16 +109,14 @@ async def list_stats(
     db: Annotated[AsyncSession, Depends(get_db)],
     type: str = Query("NDVI"),
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     base = (
         select(FieldStat)
         .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
         .where(
             FieldStat.field_id == field_id,
-            org_scope(FieldStat.org_id, ctx),
-            RasterLayer.layer_type == type,
-        )
+            org_scope(None, ctx),
+            RasterLayer.layer_type == type)
     )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
@@ -134,21 +128,18 @@ async def list_stats(
         items=result.scalars().all(),
         total=total,
         limit=limit,
-        offset=offset,
-    )
+        offset=offset)
 
 
 @router.get("/fields/{field_id}/layers/types", response_model=list[str])
 async def list_layer_types(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     """Return the distinct index types available for a field."""
     result = await db.execute(
         select(distinct(RasterLayer.layer_type)).where(
             RasterLayer.field_id == field_id,
-            org_scope(RasterLayer.org_id, ctx),
-        )
+            org_scope(None, ctx))
     )
     return sorted(result.scalars().all())

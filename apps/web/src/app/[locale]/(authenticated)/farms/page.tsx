@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from "react";
 import { Link } from "@/i18n/navigation";
-import { useOrg } from "@/components/org-context";
 import { farmsApi } from "@/lib/api";
 import type { Farm } from "@/lib/api";
 import {
@@ -19,14 +18,12 @@ import { CreateFarmModal } from "@/components/create-farm-modal";
 
 export default function FarmsListPage() {
     const t = useTranslations("farmsPage");
-    const { currentOrg, loading: orgLoading } = useOrg();
     const [farms, setFarms] = useState<Farm[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (!currentOrg) return;
-        let cancelled = false;
+                let cancelled = false;
         (async () => {
             setLoading(true);
             try {
@@ -42,9 +39,9 @@ export default function FarmsListPage() {
             }
         })();
         return () => { cancelled = true; };
-    }, [currentOrg]);
+    }, []);
 
-    if (orgLoading || loading) {
+    if (loading) {
         return (
             <div className="p-6 lg:p-8 max-w-6xl mx-auto">
                 <div className="flex items-center justify-between mb-8">

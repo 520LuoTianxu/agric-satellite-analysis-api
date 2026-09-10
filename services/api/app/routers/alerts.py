@@ -43,8 +43,7 @@ def _alert_out(
     alert: Alert,
     field_name: str | None,
     farm_id: uuid.UUID | None,
-    farm_name: str | None,
-) -> AlertOut:
+    farm_name: str | None) -> AlertOut:
     """Build the response from an (alert, field name, farm) row."""
     return AlertOut.model_validate(alert).model_copy(
         update={
@@ -65,9 +64,8 @@ async def list_alerts(
     severity: str | None = Query(None),
     index_type: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    base = _with_context(select(Alert)).where(org_scope(Alert.org_id, ctx))
+    offset: int = Query(0, ge=0)):
+    base = _with_context(select(Alert)).where(org_scope(None, ctx))
     if field_id:
         base = base.where(Alert.field_id == field_id)
     if status_filter:
@@ -94,15 +92,13 @@ async def list_alerts(
         items=[_alert_out(*row) for row in rows],
         total=total,
         limit=limit,
-        offset=offset,
-    )
+        offset=offset)
 
 
 @router.get("/alerts/summary", response_model=AlertSummaryOut)
 async def alerts_summary(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     """Open alert counts by severity, for the summary cards.
 
     One grouped query rather than four counts, and computed server-side
@@ -112,7 +108,7 @@ async def alerts_summary(
     rows = (
         await db.execute(
             select(Alert.severity, func.count())
-            .where(org_scope(Alert.org_id, ctx), Alert.status == "open")
+            .where(org_scope(None, ctx), Alert.status == "open")
             .group_by(Alert.severity)
         )
     ).all()
@@ -121,8 +117,7 @@ async def alerts_summary(
         open_total=sum(counts.values()),
         high=counts.get("high", 0),
         medium=counts.get("medium", 0),
-        low=counts.get("low", 0),
-    )
+        low=counts.get("low", 0))
 
 
 @router.get("/fields/{field_id}/alerts", response_model=PaginatedResponse[AlertOut])
@@ -131,10 +126,9 @@ async def list_field_alerts(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     base = _with_context(select(Alert)).where(
-        org_scope(Alert.org_id, ctx), Alert.field_id == field_id
+        org_scope(None, ctx), Alert.field_id == field_id
     )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
@@ -151,8 +145,7 @@ async def list_field_alerts(
         items=[_alert_out(*row) for row in rows],
         total=total,
         limit=limit,
-        offset=offset,
-    )
+        offset=offset)
 
 
 @router.patch("/alerts/{alert_id}", response_model=AlertOut)
@@ -160,10 +153,9 @@ async def update_alert(
     alert_id: uuid.UUID,
     body: AlertUpdate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     alert = await db.get(Alert, alert_id)
-    if not alert or not org_matches(alert.org_id, ctx.org_id):
+    if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
     if body.status not in ("open", "closed"):

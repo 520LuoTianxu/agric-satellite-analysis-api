@@ -46,8 +46,7 @@ PRIMARY_BAND_FILES = (
     ("ndmi", "NDMI"),
     ("ndre", "NDRE"),
     ("cire", "CIre"),
-    ("mndwi", "MNDWI"),
-)
+    ("mndwi", "MNDWI"))
 MNDWI_FALLBACK = ("ndwi", "MNDWI")  # legacy NDWI COG → MNDWI column
 REQUIRED_BAND = "ndvi"
 # Pixel keys emitted into lonlat_v1 (order stable for UI)
@@ -133,8 +132,7 @@ def _stats(arr: np.ndarray) -> tuple[float | None, float | None, float | None]:
     return (
         _round6(float(np.mean(valid))),
         _round6(float(np.min(valid))),
-        _round6(float(np.max(valid))),
-    )
+        _round6(float(np.max(valid))))
 
 
 def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
@@ -142,15 +140,14 @@ def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
         cur.execute(
             """
             SELECT f.id::text AS field_id,
-                   f.org_id::text AS org_id,
+                   
                    f.name AS field_name,
                    f.tags_json,
                    ST_AsGeoJSON(f.geom)::text AS geom_geojson
             FROM fields f
             WHERE f.id = %s::uuid AND f.deleted_at IS NULL
             """,
-            (field_id,),
-        )
+            (field_id))
         row = cur.fetchone()
         if not row:
             raise SystemExit(f"field not found: {field_id}")
@@ -175,15 +172,14 @@ def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
             FROM agri.land_parcels
             WHERE land_id = %s
             """,
-            (resolved,),
-        )
+            (resolved))
         parcel = cur.fetchone()
         if not parcel:
             raise SystemExit(f"agri.land_parcels missing land_id={resolved}")
 
         return {
             "field_id": row["field_id"],
-            "org_id": row["org_id"],
+
             "field_name": row["field_name"],
             "geom": json.loads(row["geom_geojson"]),
             "land_id": parcel["land_id"],
@@ -204,8 +200,7 @@ def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, flo
             JOIN raster_layers rl ON rl.id = fs.layer_id
             WHERE fs.field_id = %s::uuid
             """,
-            (field_id,),
-        )
+            (field_id))
         for r in cur.fetchall():
             out[(r["d"], r["layer_type"])] = {
                 "mean": r["mean"],
@@ -235,8 +230,7 @@ def _list_dates_from_storage(storage, prefix: str) -> list[str]:
     except Exception as e:  # noqa: BLE001
         print(
             f"  storage.list_keys skipped ({type(e).__name__}: {e})",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
     return sorted(dates)
 
 
@@ -249,9 +243,8 @@ def _list_dates_from_db(conn, field_id: str) -> list[str]:
             FROM raster_layers
             WHERE field_id = %s::uuid AND date IS NOT NULL
             """,
-            (field_id,),
-        )
-        for (d,) in cur.fetchall():
+            (field_id))
+        for (d) in cur.fetchall():
             if d and DATE_RE.match(d):
                 dates.add(d)
     return sorted(dates)
@@ -273,8 +266,7 @@ def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
               AND params_json ? 'date_from'
               AND params_json ? 'date_to'
             """,
-            (field_id,),
-        )
+            (field_id))
         for df, dt in cur.fetchall():
             if not df or not dt:
                 continue
@@ -313,8 +305,7 @@ def _discover_dates_via_exists(
     prefix: str,
     candidates: list[str],
     *,
-    stems: tuple[str, ...] = (REQUIRED_BAND, "vv", "vh"),
-) -> list[str]:
+    stems: tuple[str, ...] = (REQUIRED_BAND, "vv", "vh")) -> list[str]:
     """Probe ``prefix{date}/{stem}.tif`` with Head/exists — no ListObjects."""
     found: set[str] = set()
     for d in candidates:
@@ -329,8 +320,7 @@ def _discover_dates_via_exists(
             except Exception as e:  # noqa: BLE001
                 print(
                     f"  exists({key}) failed ({type(e).__name__}: {e})",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr)
                 break
     return sorted(found)
 
@@ -356,8 +346,7 @@ def _sample_lonlat(
     geom4326: dict,
     bands: dict[str, np.ndarray],
     transform,
-    crs,
-) -> list[dict[str, Any]]:
+    crs) -> list[dict[str, Any]]:
     """Emit lonlat_v1 pixels for cells inside polygon with finite NDVI."""
     if "NDVI" not in bands:
         return []
@@ -373,8 +362,7 @@ def _sample_lonlat(
         out_shape=(h, w),
         transform=transform,
         all_touched=False,
-        invert=False,
-    )
+        invert=False)
     finite = np.isfinite(ndvi) & inside
     rows, cols = np.where(finite)
     if rows.size == 0:
@@ -418,14 +406,12 @@ def _sample_lonlat(
 
 def _pick_stats(
     sampled: tuple[float | None, float | None, float | None],
-    fs: dict[str, float] | None,
-) -> tuple[float | None, float | None, float | None]:
+    fs: dict[str, float] | None) -> tuple[float | None, float | None, float | None]:
     if fs and fs.get("mean") is not None:
         return (
             _round6(fs["mean"]) if fs.get("mean") is not None else None,
             _round6(fs["min"]) if fs.get("min") is not None else None,
-            _round6(fs["max"]) if fs.get("max") is not None else None,
-        )
+            _round6(fs["max"]) if fs.get("max") is not None else None)
     return sampled
 
 
@@ -437,8 +423,7 @@ def process_date(
     meta: dict[str, Any],
     fs_map: dict[tuple[str, str], dict[str, float]],
     dry_run: bool,
-    storage=None,
-) -> dict[str, Any] | None:
+    storage=None) -> dict[str, Any] | None:
     band_arrays: dict[str, np.ndarray] = {}
     transform = None
     crs = None
@@ -454,8 +439,7 @@ def process_date(
                     if required:
                         print(
                             f"  skip {date_str}: no {file_stem}.tif on {storage.backend}",
-                            file=sys.stderr,
-                        )
+                            file=sys.stderr)
                     return False
             except Exception:  # noqa: BLE001
                 pass
@@ -465,8 +449,7 @@ def process_date(
             if required:
                 print(
                     f"  skip {date_str}: no readable NDVI on active store",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr)
             return False
         data, t, c = opened
         if required:
@@ -477,8 +460,7 @@ def process_date(
         if "NDVI" not in band_arrays or data.shape != band_arrays["NDVI"].shape:
             print(
                 f"  warn {date_str} {file_stem}: shape mismatch, omit",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
             return False
         if pix_key in band_arrays:
             return False
@@ -592,8 +574,7 @@ def bridge_field_stac_to_agri(
     dry_run: bool = False,
     limit: int = 0,
     dates: list[str] | None = None,
-    quiet: bool = False,
-) -> dict[str, Any]:
+    quiet: bool = False) -> dict[str, Any]:
     """Sample active-store STAC COGs for *field_id* and upsert agri lonlat_v1 rows.
 
     Uses ``get_storage()`` (OSS by default). Raises on hard errors.
@@ -613,7 +594,7 @@ def bridge_field_stac_to_agri(
     try:
         meta = _load_field(conn, field_id, land_id)
         fs_map = _field_stats_map(conn, meta["field_id"])
-        prefix = f"cogs/{meta['org_id']}/{meta['field_id']}/"
+        prefix = f"cogs/default/{meta['field_id']}/"
         uri_scheme = "oss" if storage.backend == "oss" else "s3"
         _log(
             f"field={meta['field_id']} land={meta['land_id']} "
@@ -651,8 +632,7 @@ def bridge_field_stac_to_agri(
                     meta=meta,
                     fs_map=fs_map,
                     dry_run=dry_run,
-                    storage=storage,
-                )
+                    storage=storage)
                 if row is None:
                     skipped += 1
                     continue
@@ -662,8 +642,7 @@ def bridge_field_stac_to_agri(
                     try:
                         from openfarm_common.mq_results import (
                             scene_json_oss_key,
-                            upload_scene_product_json,
-                        )
+                            upload_scene_product_json)
 
                         key = scene_json_oss_key(row["land_id"], row["date"], "S2")
                         product = {
@@ -704,15 +683,13 @@ def bridge_field_stac_to_agri(
                             land_id=row["land_id"],
                             date_str=row["date"],
                             sensor="S2",
-                            product=product,
-                        )
+                            product=product)
                         row["json_oss_key"] = key
                         product["json_url"] = oss_url
                     except Exception as exc:  # noqa: BLE001
                         print(
                             f"  warn {d}: scene JSON OSS upload failed: {exc}",
-                            file=sys.stderr,
-                        )
+                            file=sys.stderr)
                     cur.execute(UPSERT_SQL, row)
                 upserted += 1
                 if row.get("json_oss_key") and oss_url:
@@ -761,8 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--dates",
         default="",
-        help="Comma-separated YYYY-MM-DD subset (optional)",
-    )
+        help="Comma-separated YYYY-MM-DD subset (optional)")
     args = ap.parse_args(argv)
     dates = [d.strip() for d in args.dates.split(",") if d.strip()] or None
     bridge_field_stac_to_agri(
@@ -770,8 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         args.land_id,
         dry_run=args.dry_run,
         limit=args.limit,
-        dates=dates,
-    )
+        dates=dates)
     return 0
 
 

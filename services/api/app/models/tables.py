@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models - mirrors 0001_initial_schema.py."""
+"""SQLAlchemy ORM models (auth/org tables removed in migration 0018)."""
 
 from __future__ import annotations
 
@@ -29,103 +29,6 @@ class Base(DeclarativeBase):
     pass
 
 
-# ── Auth / RBAC ──────────────────────────────────────────────────────
-
-
-class User(Base):
-    __tablename__ = "users"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    memberships: Mapped[list[OrgMember]] = relationship(
-        back_populates="user", lazy="selectin"
-    )
-
-
-class Org(Base):
-    __tablename__ = "orgs"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    members: Mapped[list[OrgMember]] = relationship(
-        back_populates="org", lazy="selectin"
-    )
-
-
-class OrgMember(Base):
-    __tablename__ = "org_members"
-    __table_args__ = (UniqueConstraint("org_id", "user_id", name="uq_org_member"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False  # FK to orgs dropped in 0017
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
-    )
-    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    org: Mapped[Org] = relationship(back_populates="members")
-    user: Mapped[User] = relationship(back_populates="memberships")
-
-
-class Invite(Base):
-    __tablename__ = "invites"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False  # FK to orgs dropped in 0017
-    )
-    email: Mapped[str] = mapped_column(String(320), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    invited_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    accepted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-
 # ── Farms / Fields ───────────────────────────────────────────────────
 
 
@@ -134,9 +37,6 @@ class Farm(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country: Mapped[str | None] = mapped_column(String(3), nullable=True)
@@ -161,9 +61,6 @@ class Field(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     farm_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("farms.id"), nullable=False
     )
@@ -173,9 +70,6 @@ class Field(Base):
     crop_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     season: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json = mapped_column(JSONB, nullable=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -203,9 +97,6 @@ class RasterLayer(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
     )
@@ -227,9 +118,6 @@ class FieldStat(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
     )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
@@ -260,9 +148,6 @@ class Alert(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
     )
@@ -291,9 +176,6 @@ class ScoutingObservation(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
     )
@@ -306,9 +188,6 @@ class ScoutingObservation(Base):
     tags_json = mapped_column(JSONB, nullable=True)
     photo_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     weather_snapshot = mapped_column(JSONB, nullable=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -326,9 +205,6 @@ class Job(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     field_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=True, index=True
     )
@@ -337,9 +213,6 @@ class Job(Base):
     progress_json = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     params_json = mapped_column(JSONB, nullable=True)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -357,12 +230,6 @@ class AuditEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     metadata_json = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -376,9 +243,6 @@ class ShareLink(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
     )
@@ -389,12 +253,6 @@ class ShareLink(Base):
     )
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
-    )
-    revoked_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
-    )
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -409,14 +267,10 @@ class WeatherDaily(Base):
     __table_args__ = (
         UniqueConstraint("field_id", "date", name="uq_weather_field_date"),
         Index("idx_weather_field_date", "field_id", "date"),
-        Index("idx_weather_org_id", "org_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
     )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -472,14 +326,10 @@ class SoilProfile(Base):
     __tablename__ = "soil_profiles"
     __table_args__ = (
         Index("idx_soil_profiles_field_id", "field_id"),
-        Index("idx_soil_profiles_org_id", "org_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
-    )
-    org_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True  # FK dropped in 0017; auth removed
     )
     field_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

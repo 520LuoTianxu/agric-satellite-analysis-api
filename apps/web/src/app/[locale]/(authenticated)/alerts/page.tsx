@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import { useOrg } from "@/components/org-context";
 import { alertsApi } from "@/lib/api";
 import type { Alert, AlertSummary } from "@/lib/api";
 import { toast } from "sonner";
@@ -36,7 +35,6 @@ const PAGE_SIZE = 10;
 
 export default function AlertsPage() {
     const t = useTranslations("alertsPage");
-    const { currentOrg, loading: orgLoading } = useOrg();
 
     const [alerts, setAlerts] = useState<Alert[]>([]);
     const [total, setTotal] = useState(0);
@@ -80,14 +78,12 @@ export default function AlertsPage() {
     }, []);
 
     useEffect(() => {
-        if (!currentOrg) return;
-        loadAlerts();
-    }, [currentOrg, loadAlerts]);
+                loadAlerts();
+    }, [loadAlerts]);
 
     useEffect(() => {
-        if (!currentOrg) return;
-        loadSummary();
-    }, [currentOrg, loadSummary]);
+                loadSummary();
+    }, [loadSummary]);
 
     // A filter change invalidates the current offset: page 8 of "all"
     // is not page 8 of "high".
@@ -119,7 +115,7 @@ export default function AlertsPage() {
     const rangeFrom = total === 0 ? 0 : page * PAGE_SIZE + 1;
     const rangeTo = Math.min(total, (page + 1) * PAGE_SIZE);
 
-    if (orgLoading || loading) {
+    if (loading) {
         return (
             <div className="p-6 lg:p-8 max-w-6xl mx-auto space-y-6">
                 <div className="space-y-2">

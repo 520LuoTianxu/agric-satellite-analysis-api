@@ -30,49 +30,13 @@ export function getApiBase(): string {
     return raw.replace(/\/$/, "");
 }
 
-let cachedToken: string | null = null;
-let tokenExpiresAt: number = 0;
-
-/**
- * Mint (or re-use) an API JWT via the NextAuth bridge endpoint.
- * After OpenFarm auth removal the API no longer requires a token; this
- * returns null when there is no session so callers can omit Authorization.
- */
-async function getToken(): Promise<string | null> {
-    const now = Date.now();
-    // Re-use if >60s remaining
-    if (cachedToken && tokenExpiresAt - now > 60_000) {
-        return cachedToken;
-    }
-
-    try {
-        const res = await fetch("/api/auth/token", { method: "POST" });
-        if (!res.ok) {
-            cachedToken = null;
-            tokenExpiresAt = 0;
-            return null;
-        }
-        const data = await res.json();
-        cachedToken = data.token;
-        tokenExpiresAt = new Date(data.expires_at).getTime();
-        return cachedToken!;
-    } catch {
-        cachedToken = null;
-        tokenExpiresAt = 0;
-        return null;
-    }
-}
-
-/** Get the currently selected org ID from localStorage. */
+/** Auth/org headers removed — API AUTH_DISABLED; no JWT / X-Org-Id. */
 export function getOrgId(): string | null {
-    if (typeof window === "undefined") return null;
-    return localStorage.getItem("openfarm_org_id");
+    return null;
 }
 
-export function setOrgId(orgId: string) {
-    if (typeof window !== "undefined") {
-        localStorage.setItem("openfarm_org_id", orgId);
-    }
+export function setOrgId(_orgId: string) {
+    /* no-op: org localStorage removed */
 }
 
 export class ApiError extends Error {
@@ -90,21 +54,10 @@ async function apiFetch<T>(
     path: string,
     opts: RequestInit & { orgId?: string | null; skipOrg?: boolean } = {},
 ): Promise<T> {
-    const { orgId, skipOrg, ...fetchOpts } = opts;
-    const token = await getToken();
+    const { orgId: _orgId, skipOrg: _skipOrg, ...fetchOpts } = opts;
     const headers: Record<string, string> = {
         ...(fetchOpts.headers as Record<string, string>),
     };
-    // Authorization optional — API auth bypassed (AUTH_DISABLED).
-    if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    // X-Org-Id optional; API ignores missing org when auth removed.
-    const org = orgId ?? getOrgId();
-    if (org && !skipOrg) {
-        headers["X-Org-Id"] = org;
-    }
 
     // Don't set Content-Type for FormData
     if (!(fetchOpts.body instanceof FormData) && !headers["Content-Type"]) {
@@ -128,12 +81,7 @@ async function apiFetch<T>(
 
 /** Authenticated binary/CSV download → triggers browser save. */
 async function apiDownload(path: string, fallbackName: string): Promise<void> {
-    const token = await getToken();
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const org = getOrgId();
-    if (org) headers["X-Org-Id"] = org;
-    const res = await fetch(`${getApiBase()}${path}`, { headers });
+    const res = await fetch(`${getApiBase()}${path}`);
     if (!res.ok) {
         let detail = res.statusText;
         try {
@@ -542,41 +490,7 @@ export interface PresignedUpload {
     object_key: string;
 }
 
-// ── Users ────────────────────────────────────────────────────────────
-
-export const usersApi = {
-    me: () => apiFetch<UserMe>("/users/me", { skipOrg: true }),
-};
-
-// ── Orgs ─────────────────────────────────────────────────────────────
-
-export const orgsApi = {
-    list: () => apiFetch<Org[]>("/orgs", { skipOrg: true }),
-    get: (orgId: string) => apiFetch<OrgDetail>(`/orgs/${orgId}`, { orgId }),
-    create: (name: string) => apiFetch<Org>("/orgs", { method: "POST", body: JSON.stringify({ name }), skipOrg: true }),
-    update: (orgId: string, name: string) => apiFetch<Org>(`/orgs/${orgId}`, { method: "PATCH", body: JSON.stringify({ name }), orgId }),
-    members: (orgId: string) => apiFetch<Paginated<Member>>(`/orgs/${orgId}/members`, { orgId }),
-    changeMemberRole: (orgId: string, userId: string, role: string) =>
-        apiFetch(`/orgs/${orgId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }), orgId }),
-    removeMember: (orgId: string, userId: string) =>
-        apiFetch(`/orgs/${orgId}/members/${userId}`, { method: "DELETE", orgId }),
-    invite: (orgId: string, email: string, role: string) =>
-        apiFetch<Invite>(`/orgs/${orgId}/invites`, { method: "POST", body: JSON.stringify({ email, role }), orgId }),
-    listInvites: (orgId: string, status = "pending") =>
-        apiFetch<Invite[]>(`/orgs/${orgId}/invites?status=${status}`, { orgId }),
-    cancelInvite: (orgId: string, inviteId: string) =>
-        apiFetch(`/orgs/${orgId}/invites/${inviteId}`, { method: "DELETE", orgId }),
-    transferOwnership: (orgId: string, newOwnerUserId: string) =>
-        apiFetch(`/orgs/${orgId}/transfer-ownership`, { method: "POST", body: JSON.stringify({ new_owner_user_id: newOwnerUserId }), orgId }),
-    auditEvents: (orgId: string, limit = 50, offset = 0) =>
-        apiFetch<Paginated<any>>(`/orgs/${orgId}/audit-events?limit=${limit}&offset=${offset}`, { orgId }),
-    /** What deleting this workspace would take with it. Owner only. */
-    deletionImpact: (orgId: string) =>
-        apiFetch<OrgDeletionImpact>(`/orgs/${orgId}/deletion-impact`, { orgId }),
-    /** Soft-delete the workspace and cascade to its farms and fields. Owner only. */
-    delete: (orgId: string) =>
-        apiFetch<void>(`/orgs/${orgId}`, { method: "DELETE", orgId }),
-};
+// usersApi / orgsApi removed (auth/orgs dropped)
 
 // ── Farms ────────────────────────────────────────────────────────────
 
@@ -687,15 +601,8 @@ export const assessmentApi = {
     latestMeta: (fieldId: string) =>
         apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
     downloadLatest: async (fieldId: string) => {
-        const token = await getToken();
-        const orgId = getOrgId();
-        const headers: Record<string, string> = {
-            Authorization: `Bearer ${token}`,
-        };
-        if (orgId) headers["X-Org-Id"] = orgId;
         const res = await fetch(
             `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
-            { headers },
         );
         if (!res.ok) {
             const detail = await res.text();

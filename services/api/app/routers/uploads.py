@@ -25,14 +25,12 @@ _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 async def get_presigned_upload(
     request: Request,
     body: PresignedUploadRequest,
-    ctx: Annotated[OrgContext, Depends(_writer)],
-):
+    ctx: Annotated[OrgContext, Depends(_writer)]):
     """Generate a presigned PUT URL for direct-to-storage upload."""
     if body.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported content type. Allowed: {', '.join(sorted(_ALLOWED_CONTENT_TYPES))}",
-        )
+            detail=f"Unsupported content type. Allowed: {', '.join(sorted(_ALLOWED_CONTENT_TYPES))}")
     from datetime import timedelta
 
     from app.core.storage import get_storage
@@ -45,8 +43,7 @@ async def get_presigned_upload(
     url = get_storage().presigned_put(
         object_key,
         expires=timedelta(minutes=15),
-        content_type=body.content_type,
-    )
+        content_type=body.content_type)
 
     logger.info("presigned_upload", object_key=object_key, org_id=org_seg)
     return PresignedUploadOut(upload_url=url, object_key=object_key)

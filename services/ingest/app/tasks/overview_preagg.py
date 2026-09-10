@@ -55,8 +55,7 @@ def _upsert_row(
     metric: dict[str, Any],
     window_from: date,
     window_to: date,
-    crop: str,
-) -> None:
+    crop: str) -> None:
     session.execute(
         text(
             """
@@ -85,8 +84,7 @@ def _upsert_row(
             "window_from": window_from,
             "window_to": window_to,
             "crop": crop or "",
-        },
-    )
+        })
 
 
 async def _compute_and_store_async(
@@ -97,8 +95,7 @@ async def _compute_and_store_async(
     from_d: date,
     to_d: date,
     crop: str | None,
-    parent_code: str | None = None,
-) -> dict[str, Any]:
+    parent_code: str | None = None) -> dict[str, Any]:
     """Run live stats via async session (same path as HTTP) and return payload."""
     from app.routers.agri_overview import _compute_live_stats
 
@@ -115,8 +112,7 @@ async def _compute_and_store_async(
             from_d=from_d,
             to_d=to_d,
             crop=crop,
-            allow_pixels=allow_pixels,
-        )
+            allow_pixels=allow_pixels)
         payload = out.model_dump(mode="json")
         # Sync upsert with SyncSession for DDL/DML simplicity
         session = SyncSession()
@@ -134,8 +130,7 @@ async def _compute_and_store_async(
                 metric=payload,
                 window_from=from_d,
                 window_to=to_d,
-                crop=crop_key or "",
-            )
+                crop=crop_key or "")
             session.commit()
         except Exception:
             session.rollback()
@@ -172,8 +167,7 @@ def _list_provinces_sync() -> list[tuple[str | None, str]]:
 @celery_app.task(name="app.tasks.overview_preagg.refresh_overview_stats")
 def refresh_overview_stats(
     window_days: int = 60,
-    crop: str | None = None,
-) -> dict[str, Any]:
+    crop: str | None = None) -> dict[str, Any]:
     """Pre-aggregate country + all provinces for default window (crop=null).
 
     Country uses scene_avg (no pixel blobs). Provinces may use pixel drought.
@@ -185,8 +179,7 @@ def refresh_overview_stats(
         "overview_preagg_start",
         from_d=from_d.isoformat(),
         to_d=to_d.isoformat(),
-        crop=crop,
-    )
+        crop=crop)
 
     session = SyncSession()
     try:
@@ -205,8 +198,7 @@ def refresh_overview_stats(
                 name=None,
                 from_d=from_d,
                 to_d=to_d,
-                crop=crop,
-            )
+                crop=crop)
         )
         provinces = _list_provinces_sync()
         for code, name in provinces:
@@ -219,16 +211,14 @@ def refresh_overview_stats(
                         from_d=from_d,
                         to_d=to_d,
                         crop=crop,
-                        parent_code=None,
-                    )
+                        parent_code=None)
                 )
             except Exception as exc:
                 logger.warning(
                     "overview_preagg_province_failed",
                     code=code,
                     name=name,
-                    error=str(exc),
-                )
+                    error=str(exc))
 
     asyncio.run(_run_all())
     logger.info("overview_preagg_done", regions=len(results))

@@ -38,8 +38,7 @@ def _date_chunks(start: date, end: date, chunk_days: int) -> list[tuple[date, da
     bind=True,
     max_retries=1,
     time_limit=120,
-    soft_time_limit=90,
-)
+    soft_time_limit=90)
 def backfill_indices_for_field(
     self,
     field_id: str,
@@ -47,8 +46,7 @@ def backfill_indices_for_field(
     sentinel_job_id: str | None = None,
     allow_agri: bool = False,
     indices: list[str] | None = None,
-    force: bool = False,
-) -> dict:
+    force: bool = False) -> dict:
     """Backfill vegetation indices for *field_id* over *months*.
 
     Splits the date range into 90-day chunks and dispatches one
@@ -82,8 +80,7 @@ def backfill_indices_for_field(
                 "backfill_indices_skipped_agri_field",
                 field_id=field_id,
                 land_id=land_id,
-                reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill",
-            )
+                reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill")
             if sentinel_job_id:
                 sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
                 if sentinel:
@@ -99,8 +96,6 @@ def backfill_indices_for_field(
                 "reason": "agri_tagged",
                 "land_id": land_id,
             }
-
-        org_id = field.org_id
 
         end_date = date.today()
         start_date = end_date - timedelta(days=months * 30)
@@ -138,13 +133,11 @@ def backfill_indices_for_field(
                 }
 
                 job = Job(
-                    org_id=org_id,
+
                     field_id=field.id,
                     type=idx_key,
                     status="pending",
-                    params_json=params_json,
-                    created_by=field.created_by,
-                )
+                    params_json=params_json)
                 session.add(job)
                 session.flush()
 
@@ -152,8 +145,7 @@ def backfill_indices_for_field(
                 celery_app.send_task(
                     task_name,
                     args=[str(job.id)],
-                    countdown=countdown,
-                )
+                    countdown=countdown)
                 jobs_dispatched += 1
 
                 logger.info(
@@ -162,8 +154,7 @@ def backfill_indices_for_field(
                     field_id=field_id,
                     index=idx_key,
                     chunk=f"{chunk_start} → {chunk_end}",
-                    countdown=countdown,
-                )
+                    countdown=countdown)
 
         # Mark sentinel job as completed now that real jobs are dispatched
         if sentinel_job_id:
@@ -196,8 +187,7 @@ def backfill_indices_for_field(
             jobs_dispatched=jobs_dispatched,
             allow_agri=allow_agri,
             force=force,
-            s1=s1_result,
-        )
+            s1=s1_result)
         return {
             "field_id": field_id,
             "status": "dispatched",
@@ -225,8 +215,7 @@ def backfill_indices_for_field(
     bind=True,
     max_retries=1,
     time_limit=300,
-    soft_time_limit=240,
-)
+    soft_time_limit=240)
 def schedule_weekly_index_compute(self) -> dict:
     """Query all active fields, skip fresh ones, dispatch index jobs for stale ones.
 
@@ -243,7 +232,7 @@ def schedule_weekly_index_compute(self) -> dict:
     try:
         # Fetch all active field IDs
         field_rows = session.execute(
-            select(Field.id, Field.org_id, Field.created_by).where(
+            select(Field.id).where(
                 Field.deleted_at.is_(None)
             )
         ).all()
@@ -256,7 +245,7 @@ def schedule_weekly_index_compute(self) -> dict:
         for batch_start in range(0, len(field_rows), batch_size):
             batch = field_rows[batch_start : batch_start + batch_size]
 
-            for field_id, org_id, created_by in batch:
+            for (field_id,) in batch:
                 fields_checked += 1
 
                 # Check staleness: latest raster layer date
@@ -286,16 +275,14 @@ def schedule_weekly_index_compute(self) -> dict:
                         continue
 
                     job = Job(
-                        org_id=org_id,
+
                         field_id=field_id,
                         type=idx_key,
                         status="pending",
                         params_json={
                             "date_from": date_from.isoformat(),
                             "date_to": date_to.isoformat(),
-                        },
-                        created_by=created_by,
-                    )
+                        })
                     session.add(job)
                     session.flush()
 
@@ -303,8 +290,7 @@ def schedule_weekly_index_compute(self) -> dict:
                     celery_app.send_task(
                         task_name,
                         args=[str(job.id)],
-                        countdown=countdown,
-                    )
+                        countdown=countdown)
                     jobs_dispatched += 1
 
                 fields_dispatched += 1
@@ -315,8 +301,7 @@ def schedule_weekly_index_compute(self) -> dict:
             "weekly_index_compute_complete",
             fields_checked=fields_checked,
             fields_dispatched=fields_dispatched,
-            jobs_dispatched=jobs_dispatched,
-        )
+            jobs_dispatched=jobs_dispatched)
         return {
             "status": "completed",
             "fields_checked": fields_checked,
@@ -340,8 +325,7 @@ def schedule_weekly_index_compute(self) -> dict:
     bind=True,
     max_retries=1,
     time_limit=300,
-    soft_time_limit=240,
-)
+    soft_time_limit=240)
 def backfill_all_existing_fields(self, months: int | None = None) -> dict:
     """Iterate all active fields and dispatch backfill for each one.
 
@@ -372,8 +356,7 @@ def backfill_all_existing_fields(self, months: int | None = None) -> dict:
             backfill_indices_for_field.apply_async(
                 args=[str(field.id)],
                 kwargs={"months": months},
-                countdown=dispatched * stagger_seconds,
-            )
+                countdown=dispatched * stagger_seconds)
             dispatched += 1
 
         logger.info(
@@ -381,8 +364,7 @@ def backfill_all_existing_fields(self, months: int | None = None) -> dict:
             total_fields=len(fields),
             dispatched=dispatched,
             skipped_agri=skipped_agri,
-            months=months,
-        )
+            months=months)
         return {
             "status": "dispatched",
             "total_fields": len(fields),

@@ -28,7 +28,7 @@ class FarmUpdate(BaseModel):
 
 class FarmOut(BaseModel):
     id: uuid.UUID
-    org_id: uuid.UUID
+    org_id: uuid.UUID | None = None
     name: str
     country: str | None = None
     region: str | None = None
@@ -61,7 +61,7 @@ class FieldUpdate(BaseModel):
 
 class FieldOut(BaseModel):
     id: uuid.UUID
-    org_id: uuid.UUID
+    org_id: uuid.UUID | None = None
     farm_id: uuid.UUID
     name: str
     geom: dict[str, Any] | None = None  # GeoJSON geometry
@@ -69,7 +69,7 @@ class FieldOut(BaseModel):
     crop_type: str | None = None
     season: str | None = None
     tags: list[str] | None = PydanticField(default=None, validation_alias="tags_json")
-    created_by: uuid.UUID
+    created_by: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 

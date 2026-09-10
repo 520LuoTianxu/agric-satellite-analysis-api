@@ -35,8 +35,7 @@ async def _get_weather_snapshot(db: AsyncSession, field_id: uuid.UUID) -> dict |
         .where(
             WeatherDaily.field_id == field_id,
             WeatherDaily.date >= start,
-            WeatherDaily.date <= today,
-        )
+            WeatherDaily.date <= today)
         .order_by(WeatherDaily.date.desc())
     )
     rows = result.scalars().all()
@@ -77,9 +76,8 @@ def _obs_to_out(obs: ScoutingObservation) -> ScoutingOut:
         tags=obs.tags_json,
         photo_uri=obs.photo_uri,
         weather_snapshot=obs.weather_snapshot,
-        created_by=obs.created_by,
-        created_at=obs.created_at,
-    )
+
+        created_at=obs.created_at)
 
 
 @router.get(
@@ -90,12 +88,10 @@ async def list_scouting(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     base = select(ScoutingObservation).where(
         ScoutingObservation.field_id == field_id,
-        org_scope(ScoutingObservation.org_id, ctx),
-    )
+        org_scope(None, ctx))
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
@@ -106,23 +102,20 @@ async def list_scouting(
         items=[_obs_to_out(o) for o in result.scalars().all()],
         total=total,
         limit=limit,
-        offset=offset,
-    )
+        offset=offset)
 
 
 @router.post(
     "/fields/{field_id}/scouting",
     response_model=ScoutingOut,
-    status_code=status.HTTP_201_CREATED,
-)
+    status_code=status.HTTP_201_CREATED)
 async def create_scouting(
     field_id: uuid.UUID,
     body: ScoutingCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     field = await db.get(Field, field_id)
-    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
     try:
@@ -136,7 +129,7 @@ async def create_scouting(
     weather_snapshot = await _get_weather_snapshot(db, field_id)
 
     obs = ScoutingObservation(
-        org_id=ctx.org_id,
+
         field_id=field_id,
         alert_id=body.alert_id,
         geom_point=from_shape(point, srid=4326),
@@ -144,9 +137,7 @@ async def create_scouting(
         note=body.note,
         tags_json=body.tags,
         photo_uri=body.photo_uri,
-        weather_snapshot=weather_snapshot,
-        created_by=ctx.user.id,
-    )
+        weather_snapshot=weather_snapshot)
     db.add(obs)
     await db.flush()
     logger.info("scouting_created", obs_id=str(obs.id), field_id=str(field_id))
@@ -159,10 +150,9 @@ async def update_scouting(
     obs_id: uuid.UUID,
     body: ScoutingUpdate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     obs = await db.get(ScoutingObservation, obs_id)
-    if not obs or not org_matches(obs.org_id, ctx.org_id) or obs.field_id != field_id:
+    if not obs or obs.field_id != field_id:
         raise HTTPException(status_code=404, detail="Scouting observation not found")
 
     if body.title is not None:
@@ -183,9 +173,8 @@ async def delete_scouting(
     field_id: uuid.UUID,
     obs_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     obs = await db.get(ScoutingObservation, obs_id)
-    if not obs or not org_matches(obs.org_id, ctx.org_id) or obs.field_id != field_id:
+    if not obs or obs.field_id != field_id:
         raise HTTPException(status_code=404, detail="Scouting observation not found")
     await db.delete(obs)

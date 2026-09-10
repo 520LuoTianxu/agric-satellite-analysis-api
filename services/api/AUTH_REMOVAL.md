@@ -1,23 +1,28 @@
-# OpenFarm auth / orgs removal (0017)
+# OpenFarm auth / orgs removal (0017 + 0018)
 
 ## What this change does
 
 - **API**: `AUTH_DISABLED=True` in `services/api/app/middleware/auth.py`. JWT and `X-Org-Id` are not required. `require_roles` always passes. Org scoping helpers (`org_scope` / `org_matches`) are no-ops.
-- **Migration 0017**: Drops all `*_org_id_fkey` FKs to `orgs.id`, makes domain `org_id` columns **nullable**, drops selected `users.id` FKs on domain writers (`created_by` / `audit_events.user_id` / `share_links.*`) and makes them nullable.
-- **mq_result_writer**: Weather upsert no longer requires `org_id`; inserts `NULL` when missing (fixes cross-host `ForeignKeyViolation` when Demo org UUID is absent).
-- **Frontend**: Authenticated layout no longer redirects to login. `apiFetch` works without a NextAuth session / JWT.
-
-## Leftover (follow-up)
-
-- Tables still present: `users`, `orgs`, `org_members`, `invites`.
-- Domain columns still present (nullable, no FK): `org_id` on `farms`, `fields`, `raster_layers`, `field_stats`, `alerts`, `scouting_observations`, `jobs`, `audit_events`, `share_links`, `weather_daily`, `soil_profiles`.
-- NextAuth providers / `/api/auth/*` / sidebar org switcher / sign-out UI remain but are unused for API access.
-- Dropping `org_id` columns and auth tables is deferred to a later PR.
+- **Migration 0017**: Dropped `*_org_id_fkey` FKs to `orgs.id`, made domain `org_id` nullable, dropped selected `users.id` FKs on domain writers and made them nullable.
+- **Migration 0018 (DESTRUCTIVE)**:
+  - **Dropped columns**: `org_id` from `farms`, `fields`, `raster_layers`, `field_stats`, `alerts`, `scouting_observations`, `jobs`, `audit_events`, `share_links`, `weather_daily`, `soil_profiles` (plus `idx_weather_org_id` / `idx_soil_profiles_org_id`).
+  - **Dropped user-attribution columns**: `fields.created_by`, `scouting_observations.created_by`, `jobs.created_by`, `audit_events.user_id`, `share_links.created_by`, `share_links.revoked_by`.
+  - **Dropped tables** (FK order): `invites`, `org_members`, `orgs`, `users`.
+- **mq_result_writer**: Weather/soil upserts no longer write `org_id`.
+- **Ingest**: ORM inserts omit `org_id` / `created_by`. Object storage path segment that formerly used org UUID is the literal `default` (e.g. `cogs/default/{field_id}/...`). Existing objects under historical org UUID prefixes are not rewritten.
+- **API routers**: `/v1/orgs*` and `/v1/users*` return **410 Gone**. Domain creates no longer set `org_id` / `created_by`.
+- **Frontend**: Login / NextAuth / org switcher / `OrgProvider` / `openfarm_org_id` localStorage / demo-login / `/api/auth/*` removed. App shell loads farm/field UI without auth chrome.
 
 ## Destructive note
 
-Migration **0017 is schema-loosening** (drops FKs, allows NULLs). Downgrade may fail if NULL `org_id` / `created_by` rows exist. Backup before applying on production.
+Migration **0018 permanently deletes** auth tables and org/user columns. Downgrade only recreates empty table/column shells — **data is not restored**. Backup before applying on any shared or production database.
 
 ## MQ / PR #17
 
-Download/process queue split and result writer paths are preserved. Weather/soil writes no longer depend on a shared Demo org row.
+Download/process queue split and result writer paths are preserved. Do not start competing `mq_consumer` / `mq_result_writer` workers against the shared CloudAMQP during verification.
+
+## Residual risks
+
+- Historical COG keys under `cogs/{old-org-uuid}/...` are not migrated; bridge/list code now prefers `cogs/default/...`.
+- Response schemas may still expose optional `org_id` / `created_by` fields as `null` for API compatibility.
+- NextAuth npm dependency may remain in `package.json` until a follow-up dependency cleanup.

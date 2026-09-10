@@ -3,7 +3,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
-import { useOrg } from "@/components/org-context";
 import { farmsApi, fieldsApi } from "@/lib/api";
 import type { Farm, Field } from "@/lib/api";
 import { formatAreaMu } from "@/lib/area";
@@ -40,7 +39,6 @@ export default function FarmDetailPage() {
     const params = useParams();
     const router = useRouter();
     const farmId = params.id as string;
-    const { currentOrg } = useOrg();
 
     const [farm, setFarm] = useState<Farm | null>(null);
     const [fields, setFields] = useState<Field[]>([]);
@@ -83,8 +81,8 @@ export default function FarmDetailPage() {
     }, [farmId, router, tFarms]);
 
     useEffect(() => {
-        if (currentOrg) loadData();
-    }, [currentOrg, loadData]);
+        loadData();
+    }, [loadData]);
 
     const handleSave = async () => {
         if (!editName.trim()) return;
