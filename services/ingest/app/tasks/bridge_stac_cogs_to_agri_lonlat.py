@@ -147,7 +147,8 @@ def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
             FROM fields f
             WHERE f.id = %s::uuid AND f.deleted_at IS NULL
             """,
-            (field_id))
+            (field_id,),  # (x,) required; (x) is a str and psycopg2 binds each char
+        )
         row = cur.fetchone()
         if not row:
             raise SystemExit(f"field not found: {field_id}")
@@ -172,7 +173,8 @@ def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
             FROM agri.land_parcels
             WHERE land_id = %s
             """,
-            (resolved))
+            (resolved,),
+        )
         parcel = cur.fetchone()
         if not parcel:
             raise SystemExit(f"agri.land_parcels missing land_id={resolved}")
@@ -200,7 +202,8 @@ def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, flo
             JOIN raster_layers rl ON rl.id = fs.layer_id
             WHERE fs.field_id = %s::uuid
             """,
-            (field_id))
+            (field_id,),
+        )
         for r in cur.fetchall():
             out[(r["d"], r["layer_type"])] = {
                 "mean": r["mean"],
@@ -243,8 +246,9 @@ def _list_dates_from_db(conn, field_id: str) -> list[str]:
             FROM raster_layers
             WHERE field_id = %s::uuid AND date IS NOT NULL
             """,
-            (field_id))
-        for (d) in cur.fetchall():
+            (field_id,),
+        )
+        for (d,) in cur.fetchall():
             if d and DATE_RE.match(d):
                 dates.add(d)
     return sorted(dates)
@@ -266,7 +270,8 @@ def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
               AND params_json ? 'date_from'
               AND params_json ? 'date_to'
             """,
-            (field_id))
+            (field_id,),
+        )
         for df, dt in cur.fetchall():
             if not df or not dt:
                 continue
