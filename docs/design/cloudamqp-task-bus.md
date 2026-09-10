@@ -65,7 +65,7 @@ mq_result_writer
 
 | type | extras（常用） | Celery 派发 | ResultMessage |
 |------|----------------|-------------|---------------|
-| `satellite_analysis` | `months`, `force`, `allow_agri`, `sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | `backfill_indices_for_field`；可选 bridge | bridge 完成后：`oss_urls`（scene JSON） |
+| `satellite_analysis` | `months`（默认 **60**）、`force`（默认 **false**，补缺）、`allow_agri`, `sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | `backfill_indices_for_field`；可选 bridge | bridge 完成后：`oss_urls`（scene JSON） |
 | `agri_bridge` | `mode=bridge_only` | `bridge_field_stac_to_agri` | `oss_urls` |
 | `weather_backfill` | `days?: int` | `backfill_weather_for_field(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
 | `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |

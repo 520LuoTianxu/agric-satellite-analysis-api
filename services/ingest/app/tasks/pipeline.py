@@ -108,6 +108,119 @@ def complete_step(session, job, step: str, details: dict | None = None):
     session.commit()
 
 
+# ── Existing-scene dedup (pre-COG) ────────────────────────────────────
+
+
+def existing_layer_dates(
+    session,
+    field_id,
+    layer_type: str,
+    satellite: str | None = None,
+) -> set[date]:
+    """Dates already present in raster_layers for this field + layer_type."""
+    from app.models.tables import RasterLayer
+
+    q = select(RasterLayer.date).where(
+        RasterLayer.field_id == field_id,
+        RasterLayer.layer_type == layer_type,
+    )
+    if satellite is not None:
+        q = q.where(RasterLayer.satellite == satellite)
+    rows = session.execute(q).scalars().all()
+    return {d for d in rows if d is not None}
+
+
+def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
+    """Dates already present in agri.parcel_scene_products for land_id + sensor."""
+    from sqlalchemy import text as sa_text
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT DISTINCT date
+            FROM agri.parcel_scene_products
+            WHERE land_id = :land_id
+              AND sensor = :sensor
+            """
+        ),
+        {"land_id": str(land_id), "sensor": sensor},
+    ).fetchall()
+    out: set[date] = set()
+    for (d,) in rows:
+        if d is None:
+            continue
+        if isinstance(d, date):
+            out.add(d)
+        elif hasattr(d, "date"):
+            out.add(d.date())
+        else:
+            out.add(date.fromisoformat(str(d)[:10]))
+    return out
+
+
+def collect_existing_scene_dates(
+    session,
+    field,
+    *,
+    layer_type: str,
+    satellite: str,
+    agri_sensor: str | None = None,
+) -> set[date]:
+    """Union of raster_layers dates and (for agri fields) parcel_scene_products dates."""
+    existing = existing_layer_dates(
+        session, field.id, layer_type, satellite=satellite
+    )
+    sensor = agri_sensor or satellite
+    try:
+        from app.core.agri_tags import parse_agri_land_id
+
+        land_id = parse_agri_land_id(getattr(field, "tags_json", None))
+    except Exception:
+        land_id = None
+    if land_id:
+        try:
+            existing |= existing_agri_scene_dates(session, land_id, sensor)
+        except Exception as e:
+            logger.warning(
+                "agri_existing_dates_failed",
+                land_id=land_id,
+                sensor=sensor,
+                error=str(e),
+            )
+    return existing
+
+
+def filter_scenes_skip_existing(
+    scenes: list[dict],
+    existing: set[date],
+    *,
+    force: bool,
+    field_id: str | None = None,
+    index: str | None = None,
+) -> list[dict]:
+    """Drop scenes whose date is already present unless force=True."""
+    if force or not existing or not scenes:
+        return scenes
+    kept: list[dict] = []
+    skipped = 0
+    for scene in scenes:
+        d = scene.get("date")
+        if isinstance(d, date) and d in existing:
+            skipped += 1
+            continue
+        kept.append(scene)
+    if skipped:
+        logger.info(
+            "scene_skipped_existing",
+            field_id=field_id,
+            index=index,
+            skipped=skipped,
+            remaining=len(kept),
+            existing_count=len(existing),
+        )
+    return kept
+
+
 # ── STAC scene search ────────────────────────────────────────────────
 
 

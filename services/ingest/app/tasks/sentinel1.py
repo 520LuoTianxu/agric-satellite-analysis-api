@@ -35,8 +35,10 @@ from app.core.storage import get_storage, restore_gdal_env
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
     RETRY_DELAYS,
+    collect_existing_scene_dates,
     complete_step,
     compute_zonal_stats,
+    filter_scenes_skip_existing,
     get_db_session,
     update_job_progress,
 )
@@ -486,13 +488,48 @@ def process_s1_backfill(self, job_id: str) -> dict:
 
         update_job_progress(session, job, "scene_search")
         scenes = search_s1_scenes(field_geom_geojson, date_from, date_to)
-        complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        force = bool(params.get("force") or False)
+        skipped_existing = 0
+        if not force:
+            existing = collect_existing_scene_dates(
+                session,
+                field,
+                layer_type="VV",
+                satellite="S1",
+                agri_sensor="S1",
+            )
+            before = len(scenes)
+            scenes = filter_scenes_skip_existing(
+                scenes,
+                existing,
+                force=False,
+                field_id=field_id_str,
+                index="s1",
+            )
+            skipped_existing = before - len(scenes)
+            complete_step(
+                session,
+                job,
+                "scene_search",
+                {
+                    "scene_count": before,
+                    "scenes_after_dedup": len(scenes),
+                    "skipped_existing": skipped_existing,
+                },
+            )
+        else:
+            complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
         if not scenes:
             job.status = "completed"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
-            return {"job_id": job_id, "status": "completed", "scenes": 0}
+            return {
+                "job_id": job_id,
+                "status": "completed",
+                "scenes": 0,
+                "skipped_existing": skipped_existing,
+            }
 
         minx, miny, maxx, maxy = field_geom.bounds
         buf = 0.001
@@ -626,6 +663,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
             "status": "completed",
             "scenes": len(scenes),
             "processed": processed,
+            "skipped_existing": skipped_existing,
             "backend": get_storage().backend,
         }
     except Exception as e:
@@ -664,8 +702,7 @@ def backfill_s1_for_field(
     force: bool = False,
 ) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
-    from app.models.tables import Field, Job, RasterLayer
-    from sqlalchemy import select
+    from app.models.tables import Field, Job
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
@@ -682,18 +719,8 @@ def backfill_s1_for_field(
         end_date = date.today()
         start_date = end_date - timedelta(days=months * 30)
 
-        existing = set(
-            session.execute(
-                select(RasterLayer.date).where(
-                    RasterLayer.field_id == field.id,
-                    RasterLayer.satellite == "S1",
-                    RasterLayer.layer_type == "VV",
-                )
-            )
-            .scalars()
-            .all()
-        )
-
+        # Always dispatch chunks; process_s1_backfill skips dates already present
+        # unless force=True (coarse chunk skip left gaps unfilled).
         chunks: list[tuple[date, date]] = []
         cursor = start_date
         while cursor < end_date:
@@ -703,8 +730,6 @@ def backfill_s1_for_field(
 
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-            if not force and any(chunk_start <= d <= chunk_end for d in existing if d):
-                continue
             job = Job(
                 org_id=field.org_id,
                 field_id=field.id,
@@ -715,6 +740,7 @@ def backfill_s1_for_field(
                     "date_to": chunk_end.isoformat(),
                     "is_backfill": True,
                     "sensor": "S1",
+                    "force": bool(force),
                 },
                 created_by=field.created_by,
             )

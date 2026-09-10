@@ -56,9 +56,9 @@ def backfill_indices_for_field(
 
     ``allow_agri``: run even for agri-tagged fields (bridge/seed workflows).
     ``indices``: optional subset of registry keys (default: all).
-    ``force``: re-dispatch even when raster_layers already exist in the chunk.
+    ``force``: passed to workers; when true they re-download/reprocess even if dates exist.
     """
-    from app.models.tables import Field, Job, RasterLayer
+    from app.models.tables import Field, Job
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
@@ -118,65 +118,23 @@ def backfill_indices_for_field(
         else:
             index_keys = list(INDEX_REGISTRY.keys())
 
-        # Determine which dates already have computed layers (per index)
-        existing_dates: dict[str, set[date]] = {}
-        for idx_key in index_keys:
-            idx_def = INDEX_REGISTRY[idx_key]
-            rows = (
-                session.execute(
-                    select(RasterLayer.date).where(
-                        RasterLayer.field_id == field.id,
-                        RasterLayer.layer_type == idx_def.label,
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            existing_dates[idx_key] = {d for d in rows if d is not None}
-
+        # Always dispatch chunk jobs; workers skip per-scene dates already present
+        # (force=True still reprocesses). Coarse chunk skip left gaps unfilled.
         chunks = _date_chunks(start_date, end_date, chunk_days)
         jobs_dispatched = 0
-        chunks_skipped = 0
         stagger_seconds = 30  # seconds between chunk groups
 
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-            # Skip chunk if all requested indices already have data within its range
-            if not force:
-                indices_covered = 0
-                for idx_key in index_keys:
-                    dates = existing_dates.get(idx_key, set())
-                    if any(chunk_start <= d <= chunk_end for d in dates):
-                        indices_covered += 1
-                if indices_covered == len(index_keys):
-                    chunks_skipped += 1
-                    logger.info(
-                        "backfill_chunk_skipped",
-                        field_id=field_id,
-                        chunk=f"{chunk_start} → {chunk_end}",
-                        reason="all indices have data",
-                    )
-                    continue
-
             for idx_key in sorted(index_keys):
                 task_name = INDEX_TASK_MAP.get(idx_key)
                 if not task_name:
-                    continue
-
-                # Skip individual index if it already has data in this chunk
-                dates = existing_dates.get(idx_key, set())
-                if not force and any(chunk_start <= d <= chunk_end for d in dates):
-                    logger.info(
-                        "backfill_index_skipped",
-                        field_id=field_id,
-                        index=idx_key,
-                        chunk=f"{chunk_start} → {chunk_end}",
-                    )
                     continue
 
                 params_json = {
                     "date_from": chunk_start.isoformat(),
                     "date_to": chunk_end.isoformat(),
                     "is_backfill": True,
+                    "force": bool(force),
                 }
 
                 job = Job(
@@ -234,7 +192,6 @@ def backfill_indices_for_field(
             "backfill_orchestration_complete",
             field_id=field_id,
             chunks=len(chunks),
-            chunks_skipped=chunks_skipped,
             indices=len(index_keys),
             jobs_dispatched=jobs_dispatched,
             allow_agri=allow_agri,
@@ -246,7 +203,6 @@ def backfill_indices_for_field(
             "status": "dispatched",
             "jobs": jobs_dispatched,
             "chunks": len(chunks),
-            "chunks_skipped": chunks_skipped,
             "indices": index_keys,
             "allow_agri": allow_agri,
             "force": force,
