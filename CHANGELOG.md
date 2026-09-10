@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.
+- Linking satellite index products to a field after backfill no longer fails on an internal formatting error.
 
 ---
 
