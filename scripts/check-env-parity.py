@@ -8,7 +8,7 @@ Three real defects motivated this, all of which a file-to-file diff of
     produced broken photo URLs, because compose never passed it to the
     web service and Next.js inlines NEXT_PUBLIC_* at build time.
   * Four soil variables were documented and read by tasks/soil.py, but
-    never given to the processor that runs those tasks, so editing them
+    never given to the worker (processor/ingest) that runs those tasks, so editing them
     did nothing and the code defaults applied silently.
   * MINIO_CONSOLE_PORT existed in .env.example and nowhere else at all.
 
@@ -109,12 +109,15 @@ for key in sorted(used_public):
 config = read("services/api/app/core/config.py")
 settings = {m.upper() for m in re.findall(r"^    ([a-z0-9_]+):", config, re.MULTILINE)}
 api_block = service_block(compose, "api")
-proc_block = service_block(compose, "processor")
+proc_block = service_block(compose, "processor")  # legacy name; removed after ingest/storage split
+ingest_block = service_block(compose, "ingest")
+storage_block = service_block(compose, "storage")
 ml_block = service_block(compose, "ml-processor")
+worker_blocks = (api_block, proc_block, ingest_block, storage_block, ml_block)
 for key in sorted(example_active & settings):
-    if not any(key in b for b in (api_block, proc_block, ml_block)):
+    if not any(key in b for b in worker_blocks):
         failures.append(
-            f"{key} is a documented API setting but reaches no api/processor container"
+            f"{key} is a documented API setting but reaches no api/ingest/storage container"
         )
 
 # 5. Informational: how far a local .env has drifted from the template.
