@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button";
 import {
     Tractor,
     Map,
-    Users,
     Plus,
     ChevronRight,
     Bell,
@@ -224,16 +223,6 @@ export default function DashboardPage() {
                                         </div>
                                     </button>
                                 </CreateFarmModal>
-                                <Link
-                                    href="/settings?tab=team"
-                                    className="flex items-center gap-3 rounded-lg border p-4 hover:border-primary/30 hover:bg-primary-subtle transition-colors"
-                                >
-                                    <IconWell><Users className="h-5 w-5 text-primary" /></IconWell>
-                                    <div>
-                                        <p className="text-sm font-medium">{t("inviteMembers")}</p>
-                                        <p className="mt-0.5 text-[11px] text-muted-foreground">{t("inviteMembersDesc")}</p>
-                                    </div>
-                                </Link>
                             </div>
                         </CardContent>
                     </Card>

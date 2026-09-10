@@ -123,6 +123,19 @@ OpenFarm `/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should targe
 - `manifest.json` — part checksums + expected joined sha256
 
 
+## Sync project areas → OpenFarm farms/fields
+
+Map each `agri.virtual_project_areas` tile to a `farms` row and each
+`agri.land_parcels` parcel to a `fields` row (tagged `agri:<land_id>`, geom
+from `boundary_geojson`). Deterministic uuid5 IDs; conflicts skipped.
+
+```bash
+python3 scripts/agri_seed/sync_project_areas_to_farms.py
+```
+
+Uses `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` or `DATABASE_URL_SYNC`.
+Does not delete existing sample farms.
+
 ## Bridge agri scenes → OpenFarm monitoring (optional)
 
 For OpenFarm fields tagged `agri:<land_id>`, copy S1/S2 index averages into
