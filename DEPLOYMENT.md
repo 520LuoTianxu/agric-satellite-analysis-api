@@ -166,6 +166,14 @@ Internal network (not exposed):
 
 Worker split (ingest download vs storage OSS upload): [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
 
+Celery workers (ingest, storage, beat) share Redis broker settings from
+`packages/openfarm_common`. Socket timeouts, TCP keepalive, and
+`retry_on_timeout` are on by default so a stale remote Redis session cannot
+block the consumer loop. Override via `CELERY_REDIS_*` and
+`CELERY_BROKER_*` in `.env` (see `.env.example`). After a Redis blip,
+`docker compose exec ingest celery -A app.worker inspect ping` should return
+OK and the `ingest` queue length should fall without restarting the container.
+
 **物理拆包已落地**：`packages/openfarm_common` + `services/ingest` / `services/storage` 独立 Dockerfile；compose `build.context` 为仓库根目录。storage 镜像不含 GDAL。
 
 ---

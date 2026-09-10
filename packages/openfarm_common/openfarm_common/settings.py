@@ -15,6 +15,16 @@ class CommonSettings(BaseSettings):
 
     redis_url: str = "redis://redis:6379/0"
 
+    # Celery / kombu Redis transport. Defaults match a remote broker over a
+    # flaky path (download-machine, nested Docker NAT). 0 max retries = forever.
+    celery_broker_visibility_timeout: int = 7200
+    celery_redis_socket_timeout: float = 5.0
+    celery_redis_socket_connect_timeout: float = 5.0
+    celery_redis_socket_keepalive: bool = True
+    celery_redis_retry_on_timeout: bool = True
+    celery_redis_health_check_interval: int = 25
+    celery_broker_connection_max_retries: int = 0
+
     # Sync DB (ingest Celery tasks)
     database_url: str = "postgresql+asyncpg://openfarm:openfarm_dev@db:5432/openfarm"
     database_url_sync: str = ""

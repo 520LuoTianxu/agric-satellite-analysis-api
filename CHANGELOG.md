@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 16 per job by default), so a field backfill finishes faster without adding more Celery workers.
 
+### Fixed
+- Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.
+- Linking satellite index products to a field after backfill no longer fails on an internal formatting error.
+
 ---
 
 ## [0.8.0] - 2026-03-19

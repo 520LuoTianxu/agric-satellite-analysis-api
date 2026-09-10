@@ -19,7 +19,7 @@ from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import (
     Alert,
     AuditEvent,
@@ -29,13 +29,15 @@ from app.models.tables import (
     ScoutingObservation,
     ShareLink,
     SoilFieldSummary,
-    WeatherDaily)
+    WeatherDaily,
+)
 from app.schemas.monitoring import (
     ScoutingOut,
     ShareCreate,
     ShareOut,
     ShareReportOut,
-    ShareStatPoint)
+    ShareStatPoint,
+)
 
 router = APIRouter()
 
@@ -111,12 +113,8 @@ def _quality_from_cloud(cloud: Any) -> float:
 
 
 def _stat_point(
-    *,
-    field_id: uuid.UUID,
-    d: Any,
-    mean: float,
-    quality: float,
-    idx: str) -> ShareStatPoint:
+    *, field_id: uuid.UUID, d: Any, mean: float, quality: float, idx: str
+) -> ShareStatPoint:
     from datetime import date as date_cls
 
     if isinstance(d, date_cls):
@@ -140,13 +138,13 @@ def _stat_point(
         p90=mean,
         stddev=None,
         quality_score=quality,
-        created_at=datetime.now(timezone.utc))
+        created_at=datetime.now(timezone.utc),
+    )
 
 
 async def _load_agri_share_series(
-    db: AsyncSession,
-    field_id: uuid.UUID,
-    land_id: str) -> tuple[list[str], dict[str, list[ShareStatPoint]], list[ShareStatPoint], bool]:
+    db: AsyncSession, field_id: uuid.UUID, land_id: str
+) -> tuple[list[str], dict[str, list[ShareStatPoint]], list[ShareStatPoint], bool]:
     """Load S1/S2 means from agri.parcel_scene_products into share chart series.
 
     Returns (available_index_types, stats_by_type, all_stats, heatmap_available).
@@ -173,7 +171,8 @@ async def _load_agri_share_series(
                     LIMIT 500
                     """
                     ),
-                    {"land_id": land_id})
+                    {"land_id": land_id},
+                )
             )
             .mappings()
             .all()
@@ -239,12 +238,14 @@ async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, 
 async def list_share_links(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     result = await db.execute(
         select(ShareLink).where(
             ShareLink.field_id == field_id,
             org_scope(None, ctx),
-            ShareLink.revoked_at.is_(None))
+            ShareLink.revoked_at.is_(None),
+        )
     )
     # Filter out expired links
     now = datetime.now(timezone.utc)
@@ -258,12 +259,14 @@ async def list_share_links(
 @router.post(
     "/fields/{field_id}/share",
     response_model=ShareOut,
-    status_code=status.HTTP_201_CREATED)
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_share_link(
     field_id: uuid.UUID,
     body: ShareCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     field = await db.get(Field, field_id)
     if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
@@ -273,24 +276,23 @@ async def create_share_link(
         expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days)
 
     link = ShareLink(
-
         field_id=field_id,
         token=secrets.token_urlsafe(32),
         scope=body.scope,
-        expires_at=expires_at)
+        expires_at=expires_at,
+    )
     db.add(link)
 
     # Audit event: report_shared (per PRD Section 5.1)
     db.add(
         AuditEvent(
-
-
             event_type="report_shared",
             metadata_json={
                 "field_id": str(field_id),
                 "scope": body.scope,
                 "token": link.token,
-            })
+            },
+        )
     )
     await db.flush()
     logger.info("report_shared", field_id=str(field_id), scope=body.scope)
@@ -304,12 +306,14 @@ async def revoke_share_link(
     field_id: uuid.UUID,
     token: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     result = await db.execute(
         select(ShareLink).where(
             ShareLink.field_id == field_id,
             org_scope(None, ctx),
-            ShareLink.token == token)
+            ShareLink.token == token,
+        )
     )
     link = result.scalar_one_or_none()
     if not link:
@@ -320,9 +324,7 @@ async def revoke_share_link(
 
 
 @router.get("/share/{token}", response_model=ShareReportOut)
-async def get_shared_report(
-    token: str,
-    db: Annotated[AsyncSession, Depends(get_db)]):
+async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_db)]):
     """Public endpoint - no auth required."""
     result = await db.execute(select(ShareLink).where(ShareLink.token == token))
     link = result.scalar_one_or_none()
@@ -370,9 +372,7 @@ async def get_shared_report(
     for idx_type in available_index_types:
         lyr_result = await db.execute(
             select(RasterLayer)
-            .where(
-                RasterLayer.field_id == field.id,
-                RasterLayer.layer_type == idx_type)
+            .where(RasterLayer.field_id == field.id, RasterLayer.layer_type == idx_type)
             .order_by(RasterLayer.date.desc())
             .limit(1)
         )
@@ -390,9 +390,7 @@ async def get_shared_report(
         stats_result = await db.execute(
             select(FieldStat)
             .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
-            .where(
-                FieldStat.field_id == field.id,
-                RasterLayer.layer_type == idx_type)
+            .where(FieldStat.field_id == field.id, RasterLayer.layer_type == idx_type)
             .order_by(FieldStat.date.desc())
             .limit(12)
         )
@@ -410,7 +408,8 @@ async def get_shared_report(
             agri_types,
             agri_stats_by_type,
             agri_all_stats,
-            agri_heatmap_available) = await _load_agri_share_series(db, field.id, land_id)
+            agri_heatmap_available,
+        ) = await _load_agri_share_series(db, field.id, land_id)
         if agri_types:
             available_index_types = agri_types
             stats_by_type = agri_stats_by_type
@@ -461,8 +460,8 @@ async def get_shared_report(
                 tags=obs.tags_json,
                 photo_uri=obs.photo_uri,
                 weather_snapshot=obs.weather_snapshot,
-
-                created_at=obs.created_at)
+                created_at=obs.created_at,
+            )
         )
 
     # Weather summary (last 30 days)
@@ -471,7 +470,8 @@ async def get_shared_report(
         select(WeatherDaily)
         .where(
             WeatherDaily.field_id == field.id,
-            WeatherDaily.date >= (now.date() - timedelta(days=30)))
+            WeatherDaily.date >= (now.date() - timedelta(days=30)),
+        )
         .order_by(WeatherDaily.date.desc())
     )
     weather_rows = weather_result.scalars().all()
@@ -504,7 +504,8 @@ async def get_shared_report(
         select(WeatherDaily)
         .where(
             WeatherDaily.field_id == field.id,
-            WeatherDaily.date >= (now.date() - timedelta(days=90)))
+            WeatherDaily.date >= (now.date() - timedelta(days=90)),
+        )
         .order_by(WeatherDaily.date.asc())
     )
     for wd in wd_result.scalars().all():
@@ -574,7 +575,8 @@ async def get_shared_report(
         soil_summary=soil_summary_out,
         rs_source=rs_source,
         agri_land_id=agri_land_id,
-        agri_heatmap_available=agri_heatmap_available)
+        agri_heatmap_available=agri_heatmap_available,
+    )
 
 
 @router.get("/share/{token}/tiles/{z}/{x}/{y}.png")
@@ -585,7 +587,8 @@ async def proxy_share_tile(
     x: int,
     y: int,
     db: Annotated[AsyncSession, Depends(get_db)],
-    index_type: str = "NDVI"):
+    index_type: str = "NDVI",
+):
     """Public tile proxy - validates share token, proxies to TiTiler."""
     result = await db.execute(select(ShareLink).where(ShareLink.token == token))
     link = result.scalar_one_or_none()
@@ -640,8 +643,8 @@ async def proxy_share_tile(
     client = _get_http_client(request)
     try:
         resp = await client.get(
-            tiler_url,
-            headers={"Authorization": f"Bearer {service_token}"})
+            tiler_url, headers={"Authorization": f"Bearer {service_token}"}
+        )
         if resp.status_code != 200:
             # Return transparent tile for missing/out-of-bounds tiles
             return Response(
@@ -650,14 +653,16 @@ async def proxy_share_tile(
                 headers={
                     "Cache-Control": "public, max-age=86400",
                     "Access-Control-Allow-Origin": "*",
-                })
+                },
+            )
         return Response(
             content=resp.content,
             media_type="image/png",
             headers={
                 "Cache-Control": "public, max-age=86400",
                 "Access-Control-Allow-Origin": "*",
-            })
+            },
+        )
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Tile server unavailable")
 
@@ -667,7 +672,8 @@ async def get_share_agri_pixels(
     token: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     index_type: str = "NDVI",
-    scene_date: str | None = None):
+    scene_date: str | None = None,
+):
     """Public agri lonlat pixels for share map overlay (no auth; gated by token)."""
     from app.routers.agri import _pixels_from_db_lonlat
 
@@ -702,7 +708,8 @@ async def get_share_agri_pixels(
                 LIMIT 1
                 """
                 ),
-                params)
+                params,
+            )
         )
         .mappings()
         .first()
@@ -724,7 +731,8 @@ async def get_share_agri_pixels(
                     LIMIT 1
                     """
                     ),
-                    params)
+                    params,
+                )
             )
             .mappings()
             .first()

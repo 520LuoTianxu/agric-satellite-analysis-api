@@ -1,3 +1,14 @@
+# Shared Celery Redis transport knobs (ingest/storage/beat/api/mq_consumer).
+# Code defaults live in packages/openfarm_common; these let .env override them.
+x-celery-redis-env: &celery-redis-env
+  CELERY_BROKER_VISIBILITY_TIMEOUT: ${CELERY_BROKER_VISIBILITY_TIMEOUT:-7200}
+  CELERY_REDIS_SOCKET_TIMEOUT: ${CELERY_REDIS_SOCKET_TIMEOUT:-5}
+  CELERY_REDIS_SOCKET_CONNECT_TIMEOUT: ${CELERY_REDIS_SOCKET_CONNECT_TIMEOUT:-5}
+  CELERY_REDIS_SOCKET_KEEPALIVE: ${CELERY_REDIS_SOCKET_KEEPALIVE:-true}
+  CELERY_REDIS_RETRY_ON_TIMEOUT: ${CELERY_REDIS_RETRY_ON_TIMEOUT:-true}
+  CELERY_REDIS_HEALTH_CHECK_INTERVAL: ${CELERY_REDIS_HEALTH_CHECK_INTERVAL:-25}
+  CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-0}
+
 services:
   # ── Postgres + PostGIS ──────────────────────────────────────────────
   db:
@@ -77,6 +88,7 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     environment:
+      <<: *celery-redis-env
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
@@ -131,6 +143,7 @@ services:
       --loglevel=info
       --concurrency=4
     environment:
+      <<: *celery-redis-env
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
@@ -185,6 +198,7 @@ services:
       --loglevel=info
       --concurrency=2
     environment:
+      <<: *celery-redis-env
       REDIS_URL: ${REDIS_URL}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
@@ -223,6 +237,7 @@ services:
       celery -A app.worker beat
       --loglevel=info
     environment:
+      <<: *celery-redis-env
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       REDIS_URL: ${REDIS_URL}
@@ -308,6 +323,7 @@ services:
       context: .
       dockerfile: services/mq_consumer/Dockerfile
     environment:
+      <<: *celery-redis-env
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
       CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}

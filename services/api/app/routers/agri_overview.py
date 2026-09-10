@@ -22,10 +22,11 @@ from app.core.agri_classify import (
     classify_drought_from_pixels,
     classify_flood,
     is_flood_alert,
-    is_open_water_flood)
+    is_open_water_flood,
+)
 from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
-from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
     OverviewChildOut,
     OverviewDroughtCounts,
@@ -36,7 +37,8 @@ from app.schemas.agri import (
     OverviewTotals,
     OverviewWeakGrowth,
     OverviewWeakParcelOut,
-    OverviewWeakParcelsOut)
+    OverviewWeakParcelsOut,
+)
 
 router = APIRouter(tags=["agri-overview"])
 
@@ -139,7 +141,8 @@ async def _agri_ready(db: AsyncSession) -> None:
     if q.scalar() is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="agri schema not installed")
+            detail="agri schema not installed",
+        )
 
 
 async def ensure_overview_cache_table(db: AsyncSession) -> None:
@@ -150,10 +153,8 @@ async def ensure_overview_cache_table(db: AsyncSession) -> None:
 
 
 def _region_where(
-    level: OverviewLevel,
-    code: str | None,
-    name: str | None,
-    params: dict[str, Any]) -> str:
+    level: OverviewLevel, code: str | None, name: str | None, params: dict[str, Any]
+) -> str:
     """Build WHERE for parcels in the selected region (code preferred, else exact name)."""
     if level == "country":
         return "TRUE"
@@ -176,17 +177,16 @@ def _region_where(
     if not clauses:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"level={level} requires code or name")
+            detail=f"level={level} requires code or name",
+        )
     if len(clauses) == 1:
         return clauses[0]
     return " AND ".join(clauses)
 
 
 async def _resolve_region_label(
-    db: AsyncSession,
-    level: OverviewLevel,
-    code: str | None,
-    name: str | None) -> tuple[str | None, str]:
+    db: AsyncSession, level: OverviewLevel, code: str | None, name: str | None
+) -> tuple[str | None, str]:
     """Return (code, name) for the current region."""
     if level == "country":
         return None, "全国"
@@ -206,7 +206,8 @@ async def _resolve_region_label(
                 LIMIT 1
                 """
             ),
-            params)
+            params,
+        )
     ).fetchone()
     if row and row.name:
         return (str(row.code) if row.code else code), str(row.name)
@@ -218,10 +219,8 @@ async def _resolve_region_label(
 
 
 async def _build_path(
-    db: AsyncSession,
-    level: OverviewLevel,
-    code: str | None,
-    name: str | None) -> list[dict[str, Any]]:
+    db: AsyncSession, level: OverviewLevel, code: str | None, name: str | None
+) -> list[dict[str, Any]]:
     path: list[dict[str, Any]] = [{"level": "country", "code": None, "name": "全国"}]
     if level == "country":
         return path
@@ -239,7 +238,8 @@ async def _build_path(
                 LIMIT 1
                 """
             ),
-            params)
+            params,
+        )
     ).fetchone()
     if not row:
         resolved_code, resolved_name = await _resolve_region_label(
@@ -289,7 +289,8 @@ async def _read_cache(
     region_code: str | None,
     from_d: date,
     to_d: date,
-    crop_key: str | None) -> OverviewStatsOut | None:
+    crop_key: str | None,
+) -> OverviewStatsOut | None:
     """Return cached stats if a fresh row exists (updated_at within 36h)."""
     await ensure_overview_cache_table(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_CACHE_FRESH_HOURS)
@@ -316,7 +317,8 @@ async def _read_cache(
                 "to_d": to_d,
                 "crop": crop_key or "",
                 "cutoff": cutoff,
-            })
+            },
+        )
     ).fetchone()
     if not row:
         return None
@@ -346,7 +348,8 @@ async def _compute_live_stats(
     from_d: date,
     to_d: date,
     crop: str | None,
-    allow_pixels: bool) -> OverviewStatsOut:
+    allow_pixels: bool,
+) -> OverviewStatsOut:
     """Compute live overview stats; pixel drought when allow_pixels and data exists."""
     crop_key = normalize_crop_key(crop) if crop else None
     pheno_months = _phenology_months(crop)
@@ -373,7 +376,8 @@ async def _compute_live_stats(
                 WHERE {region_wh}
                 """
             ),
-            params)
+            params,
+        )
     ).fetchall()
 
     area_by_land = {r.land_id: float(r.area_mu or 0) for r in parcels}
@@ -382,12 +386,7 @@ async def _compute_live_stats(
 
     drought_counts = {"severe": 0, "moderate": 0, "mild": 0, "normal": 0, "unknown": 0}
     drought_area = {k: 0.0 for k in drought_counts}
-    flood_keys = (
-        "flood_severe",
-        "flood_moderate",
-        "flood_mild",
-        "dry",
-        "unknown")
+    flood_keys = ("flood_severe", "flood_moderate", "flood_mild", "dry", "unknown")
     flood_counts = {k: 0 for k in flood_keys}
     flood_area = {k: 0.0 for k in flood_keys}
     weak_lands: set[str] = set()
@@ -460,7 +459,8 @@ async def _compute_live_stats(
                     ORDER BY s.land_id, s.date DESC
                     """
                 ),
-                params)
+                params,
+            )
         ).fetchall()
 
         for r in s2_rows:
@@ -504,7 +504,8 @@ async def _compute_live_stats(
                     ORDER BY s.land_id, s.date DESC
                     """
                 ),
-                params)
+                params,
+            )
         ).fetchall()
 
         for r in s1_rows:
@@ -541,7 +542,8 @@ async def _compute_live_stats(
                     HAVING avg(s.ndvi_avg) < :weak_ndvi
                     """
                 ),
-                params)
+                params,
+            )
         ).fetchall()
 
         for r in weak_rows:
@@ -579,7 +581,8 @@ async def _compute_live_stats(
             flood=v["flood"],
             flood_alert=v["flood_alert"],
             weak_growth=v["weak_growth"],
-            area_mu=round(v["area_mu"], 2))
+            area_mu=round(v["area_mu"], 2),
+        )
         for v in sorted(
             child_agg.values(), key=lambda x: (-x["parcel_count"], x["name"])
         )
@@ -624,7 +627,8 @@ async def _compute_live_stats(
             mild=drought_counts["mild"],
             normal=drought_counts["normal"],
             unknown=drought_counts["unknown"],
-            area_mu={k: round(v, 2) for k, v in drought_area.items()}),
+            area_mu={k: round(v, 2) for k, v in drought_area.items()},
+        ),
         flood=OverviewFloodCounts(
             flood_severe=flood_counts["flood_severe"],
             flood_moderate=flood_counts["flood_moderate"],
@@ -633,11 +637,13 @@ async def _compute_live_stats(
             wet=mild,
             dry=flood_counts["dry"],
             unknown=flood_counts["unknown"],
-            area_mu=flood_area_out),
+            area_mu=flood_area_out,
+        ),
         weak_growth=OverviewWeakGrowth(
             parcel_count=len(weak_lands), area_mu=round(weak_area, 2)
         ),
-        children=children)
+        children=children,
+    )
 
 
 @router.get("/overview/stats", response_model=OverviewStatsOut)
@@ -651,15 +657,19 @@ async def overview_stats(
     to: date | None = Query(None),
     crop: str | None = Query(
         None,
-        description="Crop key (e.g. corn) — sets phenology months for weak-growth only; does not filter parcels by planted crop."),
+        description="Crop key (e.g. corn) — sets phenology months for weak-growth only; does not filter parcels by planted crop.",
+    ),
     use_cache: bool | None = Query(
         None,
-        description="Prefer pre-agg cache when fresh. Default true for level=country."),
+        description="Prefer pre-agg cache when fresh. Default true for level=country.",
+    ),
     live: int = Query(
         0,
         ge=0,
         le=1,
-        description="Force live compute (skip cache). live=1 disables cache.")):
+        description="Force live compute (skip cache). live=1 disables cache.",
+    ),
+):
     """Aggregate drought / flood / weak-growth stats for a China admin region."""
     await _agri_ready(db)
     default_from, default_to = _default_window()
@@ -680,7 +690,8 @@ async def overview_stats(
             region_code=code,
             from_d=from_d,
             to_d=to_d,
-            crop_key=crop_key)
+            crop_key=crop_key,
+        )
         if cached is not None:
             return cached
 
@@ -695,7 +706,8 @@ async def overview_stats(
         from_d=from_d,
         to_d=to_d,
         crop=crop,
-        allow_pixels=allow_pixels)
+        allow_pixels=allow_pixels,
+    )
 
 
 def _csv_response(filename: str, rows: list[dict[str, Any]]) -> Response:
@@ -717,7 +729,8 @@ def _csv_response(filename: str, rows: list[dict[str, Any]]) -> Response:
     return Response(
         content=data,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": disp})
+        headers={"Content-Disposition": disp},
+    )
 
 
 @router.get("/overview/export/stats.csv")
@@ -730,7 +743,8 @@ async def overview_export_stats_csv(
     from_: date | None = Query(None, alias="from"),
     to: date | None = Query(None),
     crop: str | None = Query(None),
-    live: int = Query(0, ge=0, le=1)):
+    live: int = Query(0, ge=0, le=1),
+):
     """CSV of children rows from overview stats (UTF-8 BOM)."""
     stats = await overview_stats(
         ctx=ctx,
@@ -742,7 +756,8 @@ async def overview_export_stats_csv(
         to=to,
         crop=crop,
         use_cache=None,
-        live=live)
+        live=live,
+    )
     rows = [
         {
             "level": c.level,
@@ -772,7 +787,8 @@ async def overview_export_weak_parcels_csv(
     from_: date | None = Query(None, alias="from"),
     to: date | None = Query(None),
     crop: str | None = Query(None),
-    limit: int = Query(5000, ge=1, le=5000)):
+    limit: int = Query(5000, ge=1, le=5000),
+):
     """CSV of weak-growth parcels (same filters as weak-parcels; limit ≤5000)."""
     res = await overview_weak_parcels(
         ctx=ctx,
@@ -784,7 +800,8 @@ async def overview_export_weak_parcels_csv(
         to=to,
         crop=crop,
         limit=limit,
-        offset=0)
+        offset=0,
+    )
     rows = [
         {
             "land_id": it.land_id,
@@ -808,7 +825,8 @@ async def overview_regions(
     db: Annotated[AsyncSession, Depends(get_db)],
     parent_level: OverviewLevel | None = Query(None),
     parent_code: str | None = Query(None),
-    parent_name: str | None = Query(None)):
+    parent_name: str | None = Query(None),
+):
     """List child regions under a parent (for map labels)."""
     await _agri_ready(db)
     pl: OverviewLevel = parent_level or "country"
@@ -818,7 +836,8 @@ async def overview_regions(
             parent_level=pl,
             parent_code=parent_code,
             parent_name=parent_name,
-            children=[])
+            children=[],
+        )
 
     params: dict[str, Any] = {}
     if pl == "country":
@@ -842,7 +861,8 @@ async def overview_regions(
                 ORDER BY parcel_count DESC, name
                 """
             ),
-            params)
+            params,
+        )
     ).fetchall()
 
     children = [
@@ -851,14 +871,16 @@ async def overview_regions(
             code=str(r.code) if r.code else None,
             name=str(r.name),
             parcel_count=int(r.parcel_count),
-            area_mu=round(float(r.area_mu or 0), 2))
+            area_mu=round(float(r.area_mu or 0), 2),
+        )
         for r in rows
     ]
     return OverviewRegionsOut(
         parent_level=pl,
         parent_code=parent_code,
         parent_name=parent_name or ("全国" if pl == "country" else None),
-        children=children)
+        children=children,
+    )
 
 
 @router.get("/overview/weak-parcels", response_model=OverviewWeakParcelsOut)
@@ -872,9 +894,11 @@ async def overview_weak_parcels(
     to: date | None = Query(None),
     crop: str | None = Query(
         None,
-        description="Crop key — phenology months for weak-growth only (no parcel crop filter)."),
+        description="Crop key — phenology months for weak-growth only (no parcel crop filter).",
+    ),
     limit: int = Query(50, ge=1, le=5000),
-    offset: int = Query(0, ge=0)):
+    offset: int = Query(0, ge=0),
+):
     """List parcels with weak growth (clear S2 mean NDVI in phenology months < threshold)."""
     await _agri_ready(db)
     default_from, default_to = _default_window()
@@ -922,7 +946,8 @@ async def overview_weak_parcels(
                 ) w
                 """
             ),
-            params)
+            params,
+        )
     ).fetchone()
     total = int(total_row.total) if total_row else 0
 
@@ -968,7 +993,8 @@ async def overview_weak_parcels(
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            params)
+            params,
+        )
     ).fetchall()
 
     items = [
@@ -981,7 +1007,8 @@ async def overview_weak_parcels(
             land_area_mu=round(float(r.land_area_mu or 0), 2),
             ndvi_avg=round(float(r.ndvi_avg), 4),
             scene_date=r.scene_date,
-            cloud_pct=round(float(r.cloud_pct), 2) if r.cloud_pct is not None else None)
+            cloud_pct=round(float(r.cloud_pct), 2) if r.cloud_pct is not None else None,
+        )
         for r in rows
     ]
     return OverviewWeakParcelsOut(total=total, items=items)

@@ -199,6 +199,7 @@ PDF 生成可留在 ingest 或 api 侧临时目录，**上传 OSS** 必须走 st
 |------|-----|--------|---------|
 | `DATABASE_URL(_SYNC)` | ✓ | ✓ | ✗（除非要写审计，默认否） |
 | `REDIS_URL` | ✓ | ✓ | ✓ |
+| `CELERY_REDIS_*` / `CELERY_BROKER_*` | ✓ | ✓ | ✓ |
 | `STAC_API_URL` | ✗ | ✓ | ✗ |
 | `SOILGRIDS_*` / `POLARIS_*` | ✗ | ✓ | ✗ |
 | `OSS_*` / `STORAGE_BACKEND` | 仅 presign 需要时可留 | ✗ | ✓ |
