@@ -14,7 +14,7 @@
  *
  * Modes:
  * - Continuous vegetation/SAR indices (NDVI/EVI/…)
- * - drought: NDDI (Gu et al., 2007) + NDMI moisture complement
+ * - drought: NDDI (Gu et al., 2007) with NDDI-primary class bands
  * - flood: Sentinel-1 VV/VH backscatter thresholding (operational S1 flood mapping)
  */
 
@@ -181,12 +181,33 @@ export const FLOOD_CLASS_STYLE: Record<
 };
 
 /**
- * NDDI drought index (Gu, Brown, Verdin & Wardlow, 2007):
+ * NDDI drought index (Gu, Brown, Verdin & Wardlow, 2007, GRL):
  *   NDDI = (NDVI − NDWI) / (NDVI + NDWI)
- * Here NDWI is approximated by Gao (1996) NDMI (NIR/SWIR moisture index),
- * available as `ndmi` in S2 pixel_data. Higher NDDI ⇒ stronger moisture stress.
- * Fallback: low NDMI alone indicates moisture stress when NDVI+NDMI≈0.
+ * Gao (1996) NDMI (NIR/SWIR) stands in for NDWI (`ndmi` in S2 pixels).
+ * Higher NDDI ⇒ drier. Later categorical NDDI applications (e.g. Frontiers
+ * in Environmental Science 2023; tropical NDDI papers) commonly use ~0.1-wide
+ * bins: 0–0.1 dry, 0.1–0.2 moderate, 0.2–0.3 severe, ≥0.3–0.4 extreme.
+ *
+ * Agri parcel mapping (four UI classes, keep in sync with agri_classify.py):
+ * literature 0 / 0.1 / 0.2 / 0.3 bins shifted +0.3 because 10 m crop
+ * canopy often has NDVI 0.6–0.8 and NDMI 0.2–0.4 (NDDI already ~0.2–0.5
+ * when well watered). Copying 0.2 as “severe” would paint most green
+ * fields as drought.
+ *   NDDI < 0.3           normal
+ *   0.3 ≤ NDDI < 0.4     mild
+ *   0.4 ≤ NDDI < 0.5     moderate
+ *   NDDI ≥ 0.5           severe (Gu-like high NDDI; previous NDDI severe)
+ *
+ * Previous OR shortcuts (ndmi < 0.1 / 0 / −0.2) over-flagged healthy canopy
+ * where NDMI often sits near 0.0–0.2. NDMI is only a last-resort fallback
+ * when NDDI cannot be formed, and then only ndmi < −0.2 → severe.
  */
+export const NDDI_MILD_MIN = 0.3;
+export const NDDI_MODERATE_MIN = 0.4;
+export const NDDI_SEVERE_MIN = 0.5;
+export const NDMI_FALLBACK_SEVERE = -0.2;
+export const DROUGHT_CLOUD_MAX_PCT = 30;
+
 export function computeNddi(ndvi: number, ndmi: number): number | null {
     if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) return null;
     const denom = ndvi + ndmi;
@@ -196,17 +217,27 @@ export function computeNddi(ndvi: number, ndmi: number): number | null {
 
 export function classifyDrought(ndvi: number, ndmi: number): AgriDroughtClass {
     const nddi = computeNddi(ndvi, ndmi);
-    if (nddi == null) {
-        // Complement: Gao NDMI moisture stress thresholds
-        if (ndmi < -0.2) return "severe";
-        if (ndmi < 0) return "moderate";
-        if (ndmi < 0.1) return "mild";
+    if (nddi != null) {
+        if (nddi >= NDDI_SEVERE_MIN) return "severe";
+        if (nddi >= NDDI_MODERATE_MIN) return "moderate";
+        if (nddi >= NDDI_MILD_MIN) return "mild";
         return "normal";
     }
-    if (nddi >= 0.5 || ndmi < -0.2) return "severe";
-    if (nddi >= 0.3 || ndmi < 0) return "moderate";
-    if (nddi >= 0.1 || ndmi < 0.1) return "mild";
+    if (Number.isFinite(ndmi) && ndmi < NDMI_FALLBACK_SEVERE) return "severe";
     return "normal";
+}
+
+export function isDroughtDayClass(cls: AgriDroughtClass | null | undefined): boolean {
+    return cls === "mild" || cls === "moderate" || cls === "severe";
+}
+
+export function droughtClassFromAvgs(
+    ndvi: number | null | undefined,
+    ndmi: number | null | undefined,
+): AgriDroughtClass | null {
+    if (typeof ndvi !== "number" || !Number.isFinite(ndvi)) return null;
+    if (typeof ndmi !== "number" || !Number.isFinite(ndmi)) return null;
+    return classifyDrought(ndvi, ndmi);
 }
 
 /**
@@ -480,7 +511,7 @@ function droughtLegend(): AgriHeatmapLegend {
     return {
         kind: "classes",
         label: "干旱 NDDI",
-        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007",
+        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007; 0.3 / 0.4 / 0.5",
         classes: (Object.keys(DROUGHT_CLASS_STYLE) as AgriDroughtClass[]).map((k) => ({
             key: k,
             label: DROUGHT_CLASS_STYLE[k].label,
@@ -1274,6 +1305,9 @@ function collectLonLatPainted(
             const ndvi = numProp(p, "NDVI");
             const ndmi = numProp(p, "NDMI");
             if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) continue;
+            // Cloudy pixels: skip drought class (cloud > 30% scenes are
+            // excluded by the panel; per-pixel clear=0 is the same rule).
+            if (Number(p.clear) === 0) continue;
             const cls = classifyDrought(ndvi, ndmi);
             const rgba = DROUGHT_CLASS_STYLE[cls].rgba;
             if (rgba[3] === 0) continue;

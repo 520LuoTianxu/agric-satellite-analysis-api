@@ -12,6 +12,28 @@ CLOUD_MAX_PCT = 30.0
 WEAK_NDVI_LT = 0.25
 PHENOLOGY_MONTHS = (6, 7, 8, 9)
 
+# NDDI-primary drought bands for agri parcels (keep in sync with
+# apps/web/src/lib/agri-heatmap.ts). Citations:
+# - Gu, Brown, Verdin & Wardlow, 2007, Geophys. Res. Lett.:
+#   NDDI = (NDVI - NDWI) / (NDVI + NDWI); higher NDDI = drier.
+#   Gao (1996) NDMI (NIR/SWIR) stands in for NDWI here.
+# - Later categorical NDDI applications (e.g. Frontiers in Env. Sci. 2023
+#   and tropical NDDI papers) commonly use ~0.1-wide bins:
+#   0-0.1 dry, 0.1-0.2 moderate, 0.2-0.3 severe, >=0.3-0.4 extreme.
+# Agri mapping (four UI classes): literature 0 / 0.1 / 0.2 / 0.3 bins
+# shifted +0.3 because 10 m crop canopy often has NDVI 0.6-0.8 and NDMI
+# 0.2-0.4 (NDDI already ~0.2-0.5 when well watered). Copying 0.2 as
+# "severe" would paint most green fields as drought. Result:
+#   NDDI < 0.3           normal
+#   0.3 <= NDDI < 0.4    mild
+#   0.4 <= NDDI < 0.5    moderate
+#   NDDI >= 0.5          severe (Gu-like high NDDI; previous NDDI severe)
+# Loose NDMI OR shortcuts (ndmi < 0.1 / 0 / -0.2) over-flag healthy canopy.
+NDDI_MILD_MIN = 0.3
+NDDI_MODERATE_MIN = 0.4
+NDDI_SEVERE_MIN = 0.5
+NDMI_FALLBACK_SEVERE = -0.2
+
 # Legacy S2 grid pixel tuple: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
 # Mirrors apps/web/src/lib/agri-heatmap.ts S2_VALUE_INDEX.
 S2_GRID_NDMI_IDX = 4
@@ -27,27 +49,61 @@ def compute_nddi(ndvi: float, ndmi: float) -> float | None:
 
 
 def classify_drought(ndvi: float | None, ndmi: float | None) -> DroughtClass | None:
-    """Classify drought from NDVI + NDMI (same thresholds as TS heatmap)."""
-    if ndmi is None or not _finite(ndmi):
-        return None
-    if ndvi is not None and _finite(ndvi):
+    """Classify drought from NDVI + NDMI (same thresholds as TS heatmap).
+
+    NDDI-primary. NDMI is only a last-resort fallback when NDDI cannot be
+    formed, and then only ndmi < -0.2 maps to severe (not mild/moderate).
+    """
+    if ndvi is not None and _finite(ndvi) and ndmi is not None and _finite(ndmi):
         nddi = compute_nddi(float(ndvi), float(ndmi))
         if nddi is not None:
-            if nddi >= 0.5 or ndmi < -0.2:
+            if nddi >= NDDI_SEVERE_MIN:
                 return "severe"
-            if nddi >= 0.3 or ndmi < 0:
+            if nddi >= NDDI_MODERATE_MIN:
                 return "moderate"
-            if nddi >= 0.1 or ndmi < 0.1:
+            if nddi >= NDDI_MILD_MIN:
                 return "mild"
             return "normal"
-    # NDMI-only fallback
-    if ndmi < -0.2:
+    if ndmi is None or not _finite(ndmi):
+        return None
+    if ndmi < NDMI_FALLBACK_SEVERE:
         return "severe"
-    if ndmi < 0:
-        return "moderate"
-    if ndmi < 0.1:
-        return "mild"
     return "normal"
+
+
+def scene_cloud_fields(
+    stac_cloud: float | None,
+    ndvi_quality: float | None,
+    *,
+    cloud_max_pct: float = CLOUD_MAX_PCT,
+) -> tuple[float | None, bool, float | None]:
+    """Return (cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct).
+
+    When STAC scene cloud > cloud_max_pct, skip parcel cloud metrics
+    (leave parcel_cloud_cover_pct None) and flag over_30 from STAC.
+    """
+    stac: float | None = None
+    if stac_cloud is not None:
+        try:
+            stac_f = float(stac_cloud)
+        except (TypeError, ValueError):
+            stac_f = None
+        if stac_f is not None and _finite(stac_f):
+            stac = stac_f
+    if stac is not None and stac > cloud_max_pct:
+        return stac, True, None
+
+    parcel: float | None = None
+    if ndvi_quality is not None:
+        try:
+            qf = float(ndvi_quality)
+        except (TypeError, ValueError):
+            qf = None
+        else:
+            if _finite(qf):
+                parcel = max(0.0, min(100.0, (1.0 - qf) * 100.0))
+    over = bool(parcel is not None and parcel > cloud_max_pct)
+    return stac, over, parcel
 
 
 def classify_flood(vv_db: float | None, vh_db: float | None) -> FloodClass | None:

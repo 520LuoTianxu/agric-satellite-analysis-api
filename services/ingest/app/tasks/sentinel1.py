@@ -10,7 +10,6 @@ unless ``WRITE_INDEX_COGS=1``. Classic (non-agri) fields still write COGs.
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import time
@@ -35,7 +34,14 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
-from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
+from app.core.index_cogs import write_index_cogs_enabled
+from app.core.s1_stac import (
+    s1_gdal_env,
+    s1_has_aws_credentials,
+    s1_missing_credentials_hint,
+    s1_open_path,
+    stac_asset_href,
+)
 from app.core.storage import get_storage
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
@@ -58,19 +64,6 @@ STAC_S1_COLLECTION = "sentinel-1-grd"
 # Full LUT calibration is not applied; values are approximate but flood-usable.
 _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
-# Thread-local GDAL/AWS options for public sentinel-s1-l1c. Do not mutate
-# process-wide os.environ (that would serialize VV/VH and race OSS uploads).
-_S1_PUBLIC_AWS_ENV = {
-    "AWS_NO_SIGN_REQUEST": "YES",
-    "AWS_VIRTUAL_HOSTING": "TRUE",
-    "AWS_HTTPS": "YES",
-    "AWS_REGION": "eu-central-1",
-    "AWS_DEFAULT_REGION": "eu-central-1",
-    "AWS_S3_ENDPOINT": "s3.eu-central-1.amazonaws.com",
-    "AWS_ACCESS_KEY_ID": "",
-    "AWS_SECRET_ACCESS_KEY": "",
-    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-}
 
 UPSERT_S1_SQL = """
 INSERT INTO agri.parcel_scene_products (
@@ -136,21 +129,33 @@ def search_s1_scenes(
         max_items=200,
     )
     items = list(search.items())
+    skipped_no_vvvh = 0
     logger.info(
         "s1_stac_search_results",
         count=len(items),
         date_from=str(date_from),
         date_to=str(date_to),
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
+        has_aws_credentials=s1_has_aws_credentials(),
     )
     if not items:
         return []
 
     weekly: dict[str, Any] = {}
     for item in items:
-        vv = item.assets.get("vv")
-        vh = item.assets.get("vh")
-        if not vv or not vh:
+        assets = item.assets or {}
+        vv = assets.get("vv") or assets.get("VV")
+        vh = assets.get("vh") or assets.get("VH")
+        vv_href = stac_asset_href(vv)
+        vh_href = stac_asset_href(vh)
+        if not vv_href or not vh_href:
+            skipped_no_vvvh += 1
+            logger.info(
+                "s1_scene_skipped",
+                reason="missing_vv_vh_assets",
+                scene_id=item.id,
+                asset_keys=sorted(assets.keys()),
+            )
             continue
         item_date = item.datetime.date() if item.datetime else date_from
         week_key = item_date.isocalendar()[:2]
@@ -171,9 +176,15 @@ def search_s1_scenes(
                 "item": item,
                 "date": item_date,
                 "score": score,
-                "vv_href": vv.href,
-                "vh_href": vh.href,
+                "vv_href": vv_href,
+                "vh_href": vh_href,
             }
+    if skipped_no_vvvh:
+        logger.info(
+            "s1_stac_skipped_no_vvvh",
+            skipped=skipped_no_vvvh,
+            kept_weeks=len(weekly),
+        )
 
     scenes = []
     for week_str in sorted(weekly.keys()):
@@ -198,11 +209,9 @@ def _read_band_windowed_db(
     """
     from rasterio.vrt import WarpedVRT
 
-    s3_path = href
-    if href.startswith("s3://"):
-        s3_path = href.replace("s3://", "/vsis3/", 1)
+    s3_path = s1_open_path(href)
     dst = np.zeros(target_shape, dtype=np.float32)
-    with rasterio.Env(**_S1_PUBLIC_AWS_ENV):
+    with rasterio.Env(**s1_gdal_env()):
         with rasterio.open(s3_path) as src:
             # Always warp via VRT so GCP-only products work
             with WarpedVRT(
@@ -213,6 +222,12 @@ def _read_band_windowed_db(
                     *bounds, transform=vrt.transform
                 ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
                 if window.width <= 0 or window.height <= 0:
+                    logger.info(
+                        "s1_scene_skipped",
+                        reason="empty_vrt_window",
+                        href=href[:160],
+                        bounds=list(bounds),
+                    )
                     return dst  # all-nan after dn_to_db of zeros→nan path
                 window = window.round_offsets().round_lengths()
                 data = vrt.read(1, window=window, boundless=False)
@@ -438,6 +453,24 @@ def _upsert_agri_s1(
     return json_url
 
 
+def _maybe_s1_progress(session, job, step: str, details: dict | None = None, *, complete: bool = False) -> None:
+    """Job progress is optional so missing Job rows cannot abort OSS+MQ."""
+    if job is None:
+        return
+    try:
+        if complete:
+            complete_step(session, job, step, details)
+        else:
+            update_job_progress(session, job, step, details)
+    except Exception as e:
+        logger.warning(
+            "s1_job_progress_failed",
+            step=step,
+            complete=complete,
+            error=str(e),
+        )
+
+
 def _process_one_s1_scene(
     *,
     job_id: str,
@@ -458,42 +491,68 @@ def _process_one_s1_scene(
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> bool:
-    """Download S1 bands, optionally write COGs, upsert agri lonlat. Own DB session."""
+    """Download S1 bands, optionally write COGs, publish agri lonlat OSS+MQ.
+
+    Returns True only when a product was published (OSS+MQ) or classic COGs
+    were written. Empty samples / missing agri meta / Job-only races do not
+    count as processed.
+    """
     from app.models.tables import Job, RasterLayer
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     session = get_db_session()
+    scene_id = scene.get("id")
+    published = False
     try:
         job = session.get(Job, uuid.UUID(job_id))
         if job is None:
-            logger.error("job_not_found_in_s1_scene_worker", job_id=job_id)
-            return False
+            logger.warning(
+                "s1_job_missing_progress_only",
+                job_id=job_id,
+                scene_id=scene_id,
+            )
 
-        update_job_progress(
+        _maybe_s1_progress(
             session,
             job,
             "download_bands",
             {
                 "scene": idx + 1,
                 "total_scenes": total_scenes,
-                "scene_id": scene["id"],
+                "scene_id": scene_id,
             },
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
-        pol = run_parallel_band_jobs(
-            {"vv": scene["vv_href"], "vh": scene["vh_href"]},
-            lambda _key, href: _read_band_windowed_db(
-                href, bounds, target_shape, target_transform
-            ),
-            scene_workers=scene_workers,
-        )
+        try:
+            pol = run_parallel_band_jobs(
+                {"vv": scene["vv_href"], "vh": scene["vh_href"]},
+                lambda _key, href: _read_band_windowed_db(
+                    href, bounds, target_shape, target_transform
+                ),
+                scene_workers=scene_workers,
+            )
+        except Exception as e:
+            err = str(e)
+            extra: dict[str, Any] = {}
+            low = err.lower()
+            if "403" in err or "access denied" in low or "forbidden" in low:
+                extra["hint"] = s1_missing_credentials_hint()
+                extra["has_aws_credentials"] = s1_has_aws_credentials()
+            logger.error(
+                "s1_scene_skipped",
+                reason="band_read_failed",
+                scene_id=scene_id,
+                error=err,
+                **extra,
+            )
+            return False
         vv = pol["vv"]
         vh = pol["vh"]
         vv[~field_mask] = np.nan
         vh[~field_mask] = np.nan
         download_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(session, job, "download_bands")
+        _maybe_s1_progress(session, job, "download_bands", complete=True)
 
         is_agri = agri_meta is not None
         write_cogs = write_index_cogs_enabled(is_agri=is_agri)
@@ -504,7 +563,7 @@ def _process_one_s1_scene(
 
         write_cog_ms = 0
         if write_cogs:
-            update_job_progress(session, job, "write_cog")
+            _maybe_s1_progress(session, job, "write_cog")
             t0 = time.perf_counter()
             vv_uri = _write_index_cog(
                 vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
@@ -513,7 +572,7 @@ def _process_one_s1_scene(
                 vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
             )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
-            complete_step(session, job, "write_cog")
+            _maybe_s1_progress(session, job, "write_cog", complete=True)
             logger.info(
                 "cog_uploaded",
                 object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
@@ -560,6 +619,7 @@ def _process_one_s1_scene(
                 )
                 session.execute(stmt)
             session.commit()
+            published = True
         else:
             logger.info(
                 "cog_upload_skipped",
@@ -570,10 +630,28 @@ def _process_one_s1_scene(
 
         write_lonlat_ms = 0
         pixels_n = 0
-        if agri_meta is not None:
+        if agri_meta is None:
+            if not published:
+                logger.info(
+                    "s1_scene_skipped",
+                    reason="agri_meta_missing",
+                    scene_id=scene_id,
+                    date=str(scene.get("date")),
+                    field_id=field_id_str,
+                )
+        else:
             t0 = time.perf_counter()
             pixels = _sample_s1_lonlat(field_geom_geojson, vv, vh, target_transform)
-            if pixels:
+            if not pixels:
+                logger.info(
+                    "s1_scene_skipped",
+                    reason="empty_pixels",
+                    scene_id=scene_id,
+                    date=str(scene.get("date")),
+                    land_id=agri_meta.get("land_id"),
+                    finite_vv=int(np.isfinite(vv).sum()),
+                )
+            else:
                 pixels_n = len(pixels)
                 json_url = _upsert_agri_s1(
                     session,
@@ -586,6 +664,7 @@ def _process_one_s1_scene(
                     vh_stats,
                     mq_task_id=mq_task_id,
                 )
+                published = True
                 logger.info(
                     "lonlat_upserted",
                     land_id=agri_meta.get("land_id"),
@@ -599,7 +678,7 @@ def _process_one_s1_scene(
             "scene_timing",
             sensor="S1",
             job_id=job_id,
-            scene_id=scene.get("id"),
+            scene_id=scene_id,
             date=str(scene.get("date")),
             download_ms=download_ms,
             stats_ms=stats_ms,
@@ -607,10 +686,16 @@ def _process_one_s1_scene(
             write_lonlat_ms=write_lonlat_ms,
             total_ms=int((time.perf_counter() - t_scene) * 1000),
             pixels=pixels_n,
+            published=published,
         )
-        return True
+        return published
     except Exception as e:
-        logger.error("s1_scene_failed", scene_id=scene.get("id"), error=str(e))
+        logger.error(
+            "s1_scene_failed",
+            scene_id=scene_id,
+            error=str(e),
+            has_aws_credentials=s1_has_aws_credentials(),
+        )
         try:
             session.rollback()
         except Exception:
@@ -745,6 +830,17 @@ def process_s1_backfill(self, job_id: str) -> dict:
         force = bool(params.get("force") or False)
         skipped_existing = 0
         agri_meta = _resolve_agri_meta(session, field)
+        if agri_meta is None:
+            logger.warning(
+                "s1_agri_meta_unresolved",
+                field_id=field_id_str,
+                tags=field.tags_json,
+            )
+        if not s1_has_aws_credentials():
+            logger.warning(
+                "s1_aws_credentials_missing",
+                hint=s1_missing_credentials_hint(),
+            )
         if not force:
             if agri_meta is not None:
                 existing = existing_agri_scene_dates(
@@ -851,13 +947,14 @@ def process_s1_backfill(self, job_id: str) -> dict:
             session,
             job,
             "process_scenes",
-            {"layers_created": processed, "workers": workers},
+            {"layers_created": processed, "scenes_published": processed, "workers": workers},
         )
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
         progress = job.progress_json or {}
         progress["current_step"] = "complete"
         progress["layers_created"] = processed
+        progress["scenes_published"] = processed
         progress["total_scenes"] = len(scenes)
         progress["scene_workers"] = workers
         job.progress_json = progress

@@ -24,6 +24,7 @@ from shapely.geometry import mapping
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.agri_classify import scene_cloud_fields
 from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
@@ -280,16 +281,6 @@ def emit_optical_lonlat(
     cire_avg, cire_min, cire_max = _avg_triple("CIre")
     mndwi_avg, mndwi_min, mndwi_max = _avg_triple("MNDWI")
 
-    parcel_cloud = None
-    cloud_over_30 = False
-    if ndvi_quality is not None:
-        try:
-            qf = float(ndvi_quality)
-            parcel_cloud = _round6(max(0.0, min(100.0, (1.0 - qf) * 100.0)))
-            cloud_over_30 = qf < 0.05
-        except (TypeError, ValueError):
-            pass
-
     date_str = (
         scene["date"].isoformat()
         if isinstance(scene["date"], date)
@@ -297,11 +288,21 @@ def emit_optical_lonlat(
     )
     # Stable id so new runs update rows previously written by the OSS COG bridge.
     scene_id = f"stac_bridge_{date_str}_S2"
-    cloud = scene.get("cloud_cover")
-    try:
-        cloud_f = float(cloud) if cloud is not None else None
-    except (TypeError, ValueError):
-        cloud_f = None
+    cloud_f, cloud_over_30, parcel_cloud_raw = scene_cloud_fields(
+        scene.get("cloud_cover"), ndvi_quality
+    )
+    parcel_cloud = (
+        _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
+    )
+    if parcel_cloud is None and cloud_over_30:
+        logger.info(
+            "agri_lonlat_skip_parcel_cloud",
+            field_id=field_id_str,
+            date=date_str,
+            scene_id=scene.get("id"),
+            stac_cloud=cloud_f,
+            reason="stac_cloud_over_30",
+        )
 
     pixel_data = {
         "format": "lonlat_v1",
