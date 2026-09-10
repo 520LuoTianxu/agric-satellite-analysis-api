@@ -27,6 +27,8 @@ from app.tasks.pipeline import (
     search_scenes,
     compute_target_grid,
     process_scene,
+    collect_existing_scene_dates,
+    filter_scenes_skip_existing,
 )
 
 logger = structlog.get_logger()
@@ -76,7 +78,35 @@ def process_ndvi(self, job_id: str) -> dict:
         # Step 1: Scene Search
         update_job_progress(session, job, "scene_search")
         scenes = search_scenes(field_geom_geojson, date_from, date_to, index_def)
-        complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        force = bool(params.get("force") or False)
+        if not force:
+            existing = collect_existing_scene_dates(
+                session,
+                field,
+                layer_type=index_def.label,
+                satellite="S2",
+                agri_sensor="S2",
+            )
+            before = len(scenes)
+            scenes = filter_scenes_skip_existing(
+                scenes,
+                existing,
+                force=False,
+                field_id=field_id_str,
+                index=index_def.key,
+            )
+            complete_step(
+                session,
+                job,
+                "scene_search",
+                {
+                    "scene_count": before,
+                    "scenes_after_dedup": len(scenes),
+                    "skipped_existing": before - len(scenes),
+                },
+            )
+        else:
+            complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
         if not scenes:
             job.status = "completed"

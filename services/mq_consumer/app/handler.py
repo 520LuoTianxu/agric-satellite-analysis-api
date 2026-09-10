@@ -74,7 +74,7 @@ def _dispatch_satellite_analysis(
 ) -> dict[str, Any]:
     """Fire-and-forget: index backfill + optional agri bridge; bridge publishes MQ result."""
     extras = dict(task.extras or {})
-    months = int(extras.get("months") or 6)
+    months = int(extras.get("months") or 60)
     force = bool(extras.get("force") or False)
     mode = str(extras.get("mode") or "full")
     allow_agri = bool(extras.get("allow_agri") or False)

@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     weather_heat_stress_threshold: float = 32.0
 
     # Index Backfill
-    index_backfill_months: int = 24
+    index_backfill_months: int = 60
     index_backfill_chunk_days: int = 90
     index_weekly_batch_size: int = 50
 

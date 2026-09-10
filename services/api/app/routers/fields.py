@@ -470,8 +470,8 @@ async def backfill_field_indices(
             detail=f"Backfill already in progress ({len(active_count)} jobs pending/running).",
         )
 
-    months = body.months if body else 24
-    force = body.force if body else True
+    months = body.months if body else 60
+    force = body.force if body else False
 
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
@@ -693,7 +693,7 @@ async def backfill_all_fields(
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger backfill for ALL active fields (owner only, one-time migration)."""
-    months = body.months if body else 24
+    months = body.months if body else 60
 
     from app.celery_client import send_task
 

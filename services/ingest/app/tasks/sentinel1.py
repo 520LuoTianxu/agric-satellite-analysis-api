@@ -35,8 +35,10 @@ from app.core.storage import get_storage, restore_gdal_env
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
     RETRY_DELAYS,
+    collect_existing_scene_dates,
     complete_step,
     compute_zonal_stats,
+    filter_scenes_skip_existing,
     get_db_session,
     update_job_progress,
 )
@@ -63,7 +65,7 @@ INSERT INTO agri.parcel_scene_products (
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, 'S1', %(scene_id)s, %(land_name)s,
   NULL, NULL, NULL,
-  NULL, %(pixel_count)s, %(generated_at_shanghai)s,
+  %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
   %(pixel_data_url)s,
   %(vv_avg)s, %(vv_min)s, %(vv_max)s,
   %(vh_avg)s, %(vh_min)s, %(vh_max)s,
@@ -72,6 +74,7 @@ INSERT INTO agri.parcel_scene_products (
 ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   tile_id = EXCLUDED.tile_id,
   land_name = EXCLUDED.land_name,
+  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agri.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   pixel_data_url = EXCLUDED.pixel_data_url,
@@ -349,7 +352,11 @@ def _upsert_agri_s1(
     pixels: list,
     vv_stats: dict,
     vh_stats: dict,
-) -> None:
+) -> str | None:
+    """Upsert S1 lonlat row and upload DB-ready JSON to OSS (same path as S2).
+
+    Returns public JSON URL when upload succeeds, else None.
+    """
     import psycopg2
 
     # Use raw psycopg2 for JSONB upsert consistency with S2 bridge
@@ -358,18 +365,70 @@ def _upsert_agri_s1(
         raise RuntimeError("DATABASE_URL_SYNC required for S1 agri upsert")
     if url.startswith("postgresql+"):
         url = "postgresql://" + url.split("://", 1)[1]
+    date_str = scene_date.isoformat()
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
+    json_oss_key = None
+    json_url = None
+    try:
+        from openfarm_common.mq_results import (
+            scene_json_oss_key,
+            upload_scene_product_json,
+        )
+
+        json_oss_key = scene_json_oss_key(meta["land_id"], date_str, "S1")
+        product = {
+            "land_id": meta["land_id"],
+            "tile_id": meta["tile_id"],
+            "date": date_str,
+            "sensor": "S1",
+            "scene_id": scene_id,
+            "land_name": meta["land_name"],
+            "cloud_cover": None,
+            "cloud_cover_over_30": None,
+            "parcel_cloud_cover_pct": None,
+            "pixel_count": len(pixels),
+            "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
+                "%Y-%m-%d %H:%M:%S%z"
+            ),
+            "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
+            "json_oss_key": json_oss_key,
+            "vv_avg": vv_stats.get("mean"),
+            "vv_min": vv_stats.get("min"),
+            "vv_max": vv_stats.get("max"),
+            "vh_avg": vh_stats.get("mean"),
+            "vh_min": vh_stats.get("min"),
+            "vh_max": vh_stats.get("max"),
+            "pixel_data": pixel_data,
+        }
+        json_oss_key, json_url = upload_scene_product_json(
+            land_id=meta["land_id"],
+            date_str=date_str,
+            sensor="S1",
+            product=product,
+        )
+        product["json_url"] = json_url
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "s1_scene_json_upload_failed",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            error=str(exc),
+        )
+        json_oss_key = None
+        json_url = None
+
     params = {
         "land_id": meta["land_id"],
         "tile_id": meta["tile_id"],
-        "date": scene_date.isoformat(),
+        "date": date_str,
         "scene_id": scene_id,
         "land_name": meta["land_name"],
+        "json_oss_key": json_oss_key,
         "pixel_count": len(pixels),
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"
         ),
-        "pixel_data_url": f"stac-s1://field/{field_id}/{scene_date.isoformat()}",
+        "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
         "vv_avg": vv_stats.get("mean"),
         "vv_min": vv_stats.get("min"),
         "vv_max": vv_stats.get("max"),
@@ -385,6 +444,7 @@ def _upsert_agri_s1(
         conn.commit()
     finally:
         conn.close()
+    return json_url
 
 
 @celery_app.task(
@@ -428,13 +488,48 @@ def process_s1_backfill(self, job_id: str) -> dict:
 
         update_job_progress(session, job, "scene_search")
         scenes = search_s1_scenes(field_geom_geojson, date_from, date_to)
-        complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        force = bool(params.get("force") or False)
+        skipped_existing = 0
+        if not force:
+            existing = collect_existing_scene_dates(
+                session,
+                field,
+                layer_type="VV",
+                satellite="S1",
+                agri_sensor="S1",
+            )
+            before = len(scenes)
+            scenes = filter_scenes_skip_existing(
+                scenes,
+                existing,
+                force=False,
+                field_id=field_id_str,
+                index="s1",
+            )
+            skipped_existing = before - len(scenes)
+            complete_step(
+                session,
+                job,
+                "scene_search",
+                {
+                    "scene_count": before,
+                    "scenes_after_dedup": len(scenes),
+                    "skipped_existing": skipped_existing,
+                },
+            )
+        else:
+            complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
         if not scenes:
             job.status = "completed"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
-            return {"job_id": job_id, "status": "completed", "scenes": 0}
+            return {
+                "job_id": job_id,
+                "status": "completed",
+                "scenes": 0,
+                "skipped_existing": skipped_existing,
+            }
 
         minx, miny, maxx, maxy = field_geom.bounds
         buf = 0.001
@@ -568,6 +663,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
             "status": "completed",
             "scenes": len(scenes),
             "processed": processed,
+            "skipped_existing": skipped_existing,
             "backend": get_storage().backend,
         }
     except Exception as e:
@@ -606,8 +702,7 @@ def backfill_s1_for_field(
     force: bool = False,
 ) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
-    from app.models.tables import Field, Job, RasterLayer
-    from sqlalchemy import select
+    from app.models.tables import Field, Job
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
@@ -624,18 +719,8 @@ def backfill_s1_for_field(
         end_date = date.today()
         start_date = end_date - timedelta(days=months * 30)
 
-        existing = set(
-            session.execute(
-                select(RasterLayer.date).where(
-                    RasterLayer.field_id == field.id,
-                    RasterLayer.satellite == "S1",
-                    RasterLayer.layer_type == "VV",
-                )
-            )
-            .scalars()
-            .all()
-        )
-
+        # Always dispatch chunks; process_s1_backfill skips dates already present
+        # unless force=True (coarse chunk skip left gaps unfilled).
         chunks: list[tuple[date, date]] = []
         cursor = start_date
         while cursor < end_date:
@@ -645,8 +730,6 @@ def backfill_s1_for_field(
 
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-            if not force and any(chunk_start <= d <= chunk_end for d in existing if d):
-                continue
             job = Job(
                 org_id=field.org_id,
                 field_id=field.id,
@@ -657,6 +740,7 @@ def backfill_s1_for_field(
                     "date_to": chunk_end.isoformat(),
                     "is_backfill": True,
                     "sensor": "S1",
+                    "force": bool(force),
                 },
                 created_by=field.created_by,
             )

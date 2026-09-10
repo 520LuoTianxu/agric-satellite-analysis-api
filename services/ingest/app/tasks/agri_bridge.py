@@ -37,6 +37,7 @@ def _publish_mq_result(
     land_id: str | None = None,
     error: str | None = None,
     extras: dict | None = None,
+    oss_urls: dict | None = None,
 ) -> None:
     """Best-effort CloudAMQP ResultMessage publish (outer scheduling bus)."""
     try:
@@ -49,6 +50,9 @@ def _publish_mq_result(
             land_id=land_id,
             error=error,
             extras=extras,
+            oss_urls=oss_urls,
+            collect_parcel_urls=True,
+            upload_summary_if_empty=not bool(oss_urls),
         )
     except Exception as e:
         logger.warning(
@@ -90,7 +94,12 @@ def bridge_field_stac_to_agri_task(
                 status="success",
                 field_id=field_id,
                 land_id=result.get("land_id") or land_id,
-                extras={"upserted": result.get("upserted"), "source": "bridge_field"},
+                extras={
+                    "upserted": result.get("upserted"),
+                    "source": "bridge_field",
+                    "oss_key_count": len(result.get("oss_urls") or {}),
+                },
+                oss_urls=result.get("oss_urls") or None,
             )
         return result
     except Exception as e:
@@ -115,8 +124,10 @@ def bridge_field_stac_to_agri_task(
     bind=True,
     max_retries=90,
     default_retry_delay=60,
-    time_limit=120,
-    soft_time_limit=90,
+    # Exists-probe loops over many COG keys routinely exceed 90s; keep retries
+    # for unfinished backfill jobs but allow a longer soft window per attempt.
+    time_limit=720,
+    soft_time_limit=600,
 )
 def bridge_after_backfill(
     self,
@@ -212,7 +223,9 @@ def bridge_after_backfill(
                 extras={
                     "upserted": result.get("upserted"),
                     "source": "bridge_after_backfill",
+                    "oss_key_count": len(result.get("oss_urls") or {}),
                 },
+                oss_urls=result.get("oss_urls") or None,
             )
         return result
     except Exception as e:
