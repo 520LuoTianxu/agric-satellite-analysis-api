@@ -99,6 +99,9 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
@@ -146,6 +149,9 @@ services:
       SOIL_FETCH_TIMEOUT_SECONDS: ${SOIL_FETCH_TIMEOUT_SECONDS}
       SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
@@ -288,6 +294,66 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # ── CloudAMQP outer bus: task consumer (profile: consumer) ─────────
+  #   docker compose --profile consumer up -d mq_consumer
+  mq_consumer:
+    profiles: ["consumer", "mq"]
+    build:
+      context: .
+      dockerfile: services/mq_consumer/Dockerfile
+    environment:
+      CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  # ── CloudAMQP outer bus: result writer (profile: producer) ─────────
+  #   docker compose --profile producer up -d mq_result_writer
+  mq_result_writer:
+    profiles: ["producer", "mq"]
+    build:
+      context: .
+      dockerfile: services/mq_result_writer/Dockerfile
+    environment:
+      CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    depends_on:
+      db:
+        condition: service_healthy
+
 
 volumes:
   pgdata:

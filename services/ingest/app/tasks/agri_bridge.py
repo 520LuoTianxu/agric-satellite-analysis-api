@@ -29,6 +29,35 @@ def _dispatch_agri_alerts(field_id: str, land_id: str | None = None) -> None:
         )
 
 
+def _publish_mq_result(
+    mq_task_id: str,
+    *,
+    status: str,
+    field_id: str | None = None,
+    land_id: str | None = None,
+    error: str | None = None,
+    extras: dict | None = None,
+) -> None:
+    """Best-effort CloudAMQP ResultMessage publish (outer scheduling bus)."""
+    try:
+        from openfarm_common.mq_results import publish_task_result
+
+        publish_task_result(
+            task_id=mq_task_id,
+            status=status,
+            field_id=field_id,
+            land_id=land_id,
+            error=error,
+            extras=extras,
+        )
+    except Exception as e:
+        logger.warning(
+            "mq_result_publish_failed",
+            mq_task_id=mq_task_id,
+            error=str(e),
+        )
+
+
 @celery_app.task(
     name="app.tasks.agri_bridge.bridge_field_stac_to_agri",
     bind=True,
@@ -40,6 +69,7 @@ def bridge_field_stac_to_agri_task(
     self,
     field_id: str,
     land_id: str | None = None,
+    mq_task_id: str | None = None,
 ) -> dict:
     """Sample active-store (OSS) COGs for field and upsert agri lonlat_v1."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import bridge_field_stac_to_agri
@@ -54,6 +84,14 @@ def bridge_field_stac_to_agri_task(
             skipped=result.get("skipped"),
         )
         _dispatch_agri_alerts(field_id, land_id=result.get("land_id") or land_id)
+        if mq_task_id:
+            _publish_mq_result(
+                mq_task_id,
+                status="success",
+                field_id=field_id,
+                land_id=result.get("land_id") or land_id,
+                extras={"upserted": result.get("upserted"), "source": "bridge_field"},
+            )
         return result
     except Exception as e:
         logger.error(
@@ -61,6 +99,14 @@ def bridge_field_stac_to_agri_task(
             field_id=field_id,
             error=str(e),
         )
+        if mq_task_id:
+            _publish_mq_result(
+                mq_task_id,
+                status="failed",
+                field_id=field_id,
+                land_id=land_id,
+                error=str(e)[:500],
+            )
         raise
 
 
@@ -77,6 +123,7 @@ def bridge_after_backfill(
     field_id: str,
     land_id: str | None = None,
     bridge_job_id: str | None = None,
+    mq_task_id: str | None = None,
 ) -> dict:
     """Wait until index backfill jobs finish, then bridge COGs → agri lonlat_v1.
 
@@ -152,8 +199,21 @@ def bridge_after_backfill(
                 bridge_job.finished_at = datetime.now(timezone.utc)
                 params = dict(bridge_job.params_json or {})
                 params["upserted"] = result.get("upserted")
+                if mq_task_id:
+                    params["mq_task_id"] = mq_task_id
                 bridge_job.params_json = params
                 session.commit()
+        if mq_task_id:
+            _publish_mq_result(
+                mq_task_id,
+                status="success",
+                field_id=field_id,
+                land_id=land_id or result.get("land_id"),
+                extras={
+                    "upserted": result.get("upserted"),
+                    "source": "bridge_after_backfill",
+                },
+            )
         return result
     except Exception as e:
         # Don't mark failed on retry signals
@@ -171,6 +231,14 @@ def bridge_after_backfill(
                     session.commit()
             except Exception:
                 session.rollback()
+        if mq_task_id:
+            _publish_mq_result(
+                mq_task_id,
+                status="failed",
+                field_id=field_id,
+                land_id=land_id,
+                error=str(e)[:500],
+            )
         raise
     finally:
         session.close()

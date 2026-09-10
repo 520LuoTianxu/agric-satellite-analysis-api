@@ -37,6 +37,11 @@ class CommonSettings(BaseSettings):
     openfarm_scratch_dir: str = "/data/scratch"
     openfarm_storage_upload_timeout: float = 900.0
 
+    # CloudAMQP outer task bus (never commit real URL)
+    cloudamqp_url: str = ""
+    cloudamqp_task_queue: str = "test_queue"
+    cloudamqp_result_queue: str = "result_queue"
+
     class Config:
         env_file = ".env"
         extra = "ignore"
