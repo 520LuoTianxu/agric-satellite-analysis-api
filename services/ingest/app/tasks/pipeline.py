@@ -70,12 +70,14 @@ def get_minio_client():
     warnings.warn(
         "get_minio_client is deprecated; use app.core.storage.get_storage()",
         DeprecationWarning,
-        stacklevel=2)
+        stacklevel=2,
+    )
     return Minio(
         settings.minio_endpoint,
         access_key=settings.minio_access_key,
         secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure)
+        secure=settings.minio_secure,
+    )
 
 
 # Deprecated alias kept for callers that still import MINIO_BUCKET.
@@ -136,16 +138,14 @@ def complete_step(session, job, step: str, details: dict | None = None):
 
 
 def existing_layer_dates(
-    session,
-    field_id,
-    layer_type: str,
-    satellite: str | None = None) -> set[date]:
+    session, field_id, layer_type: str, satellite: str | None = None
+) -> set[date]:
     """Dates already present in raster_layers for this field + layer_type."""
     from app.models.tables import RasterLayer
 
     q = select(RasterLayer.date).where(
-        RasterLayer.field_id == field_id,
-        RasterLayer.layer_type == layer_type)
+        RasterLayer.field_id == field_id, RasterLayer.layer_type == layer_type
+    )
     if satellite is not None:
         q = q.where(RasterLayer.satellite == satellite)
     rows = session.execute(q).scalars().all()
@@ -165,9 +165,10 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
               AND sensor = :sensor
             """
         ),
-        {"land_id": str(land_id), "sensor": sensor}).fetchall()
+        {"land_id": str(land_id), "sensor": sensor},
+    ).fetchall()
     out: set[date] = set()
-    for (d) in rows:
+    for d in rows:
         if d is None:
             continue
         if isinstance(d, date):
@@ -180,16 +181,10 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
 
 
 def collect_existing_scene_dates(
-    session,
-    field,
-    *,
-    layer_type: str,
-    satellite: str,
-    agri_sensor: str | None = None) -> set[date]:
+    session, field, *, layer_type: str, satellite: str, agri_sensor: str | None = None
+) -> set[date]:
     """Union of raster_layers dates and (for agri fields) parcel_scene_products dates."""
-    existing = existing_layer_dates(
-        session, field.id, layer_type, satellite=satellite
-    )
+    existing = existing_layer_dates(session, field.id, layer_type, satellite=satellite)
     sensor = agri_sensor or satellite
     try:
         from app.core.agri_tags import parse_agri_land_id
@@ -205,7 +200,8 @@ def collect_existing_scene_dates(
                 "agri_existing_dates_failed",
                 land_id=land_id,
                 sensor=sensor,
-                error=str(e))
+                error=str(e),
+            )
     return existing
 
 
@@ -215,7 +211,8 @@ def filter_scenes_skip_existing(
     *,
     force: bool,
     field_id: str | None = None,
-    index: str | None = None) -> list[dict]:
+    index: str | None = None,
+) -> list[dict]:
     """Drop scenes whose date is already present unless force=True."""
     if force or not existing or not scenes:
         return scenes
@@ -234,33 +231,64 @@ def filter_scenes_skip_existing(
             index=index,
             skipped=skipped,
             remaining=len(kept),
-            existing_count=len(existing))
+            existing_count=len(existing),
+        )
     return kept
 
 
 # ── STAC scene search ────────────────────────────────────────────────
 
 
-def search_scenes(
+def _resolve_band_hrefs(item, index_defs: list[IndexDef]) -> dict[str, str] | None:
+    """Resolve unique band HREFs for one STAC item across index defs.
+
+    Returns None when any required band is missing.
+    """
+    band_hrefs: dict[str, str | None] = {}
+    for index_def in index_defs:
+        for band_key in index_def.bands:
+            if band_key in band_hrefs:
+                continue
+            href = None
+            for asset_name in index_def.stac_asset_map.get(band_key, (band_key,)):
+                asset = item.assets.get(asset_name)
+                if asset:
+                    href = asset.href
+                    break
+            band_hrefs[band_key] = href
+    if not all(band_hrefs.values()):
+        return None
+    return {k: v for k, v in band_hrefs.items() if v is not None}
+
+
+def search_scenes_for_defs(
     field_geom_geojson: dict,
     date_from: date,
     date_to: date,
-    index_def: IndexDef) -> list[dict]:
-    """Search Element84 STAC and resolve per-band HREFs for the given index."""
+    index_defs: list[IndexDef],
+    *,
+    index_label: str | None = None,
+) -> list[dict]:
+    """Search Element84 STAC and resolve HREFs for the union of index bands."""
+    if not index_defs:
+        return []
+    label = index_label or ",".join(d.key for d in index_defs)
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
         query={"eo:cloud_cover": {"lt": MAX_CLOUD_COVER}},
-        max_items=100)
+        max_items=100,
+    )
     items = list(search.items())
     logger.info(
         "stac_search_results",
         count=len(items),
-        index=index_def.key,
+        index=label,
         date_from=str(date_from),
-        date_to=str(date_to))
+        date_to=str(date_to),
+    )
     if not items:
         return []
 
@@ -278,20 +306,8 @@ def search_scenes(
     for week_str in sorted(weekly.keys()):
         entry = weekly[week_str]
         item = entry["item"]
-
-        # Resolve band HREFs using the index's stac_asset_map
-        band_hrefs: dict[str, str | None] = {}
-        for band_key in index_def.bands:
-            href = None
-            for asset_name in index_def.stac_asset_map.get(band_key, (band_key)):
-                asset = item.assets.get(asset_name)
-                if asset:
-                    href = asset.href
-                    break
-            band_hrefs[band_key] = href
-
-        # Only include scene if all required bands resolved
-        if all(band_hrefs.values()):
+        band_hrefs = _resolve_band_hrefs(item, index_defs)
+        if band_hrefs:
             scenes.append(
                 {
                     "id": item.id,
@@ -301,14 +317,18 @@ def search_scenes(
                 }
             )
         else:
-            missing = [k for k, v in band_hrefs.items() if v is None]
-            logger.warning(
-                "missing_bands",
-                scene_id=item.id,
-                index=index_def.key,
-                missing_bands=missing)
+            logger.warning("missing_bands", scene_id=item.id, index=label)
 
     return scenes
+
+
+def search_scenes(
+    field_geom_geojson: dict, date_from: date, date_to: date, index_def: IndexDef
+) -> list[dict]:
+    """Search Element84 STAC and resolve per-band HREFs for the given index."""
+    return search_scenes_for_defs(
+        field_geom_geojson, date_from, date_to, [index_def], index_label=index_def.key
+    )
 
 
 # ── Band reading ─────────────────────────────────────────────────────
@@ -321,9 +341,7 @@ def read_band_windowed(
     with rasterio.Env():
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
-            window = rasterio.windows.from_bounds(
-                *src_bounds, transform=src.transform
-            )
+            window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
             data = src.read(1, window=window, boundless=True, fill_value=0)
 
             dst = np.zeros(target_shape, dtype=np.float32)
@@ -334,7 +352,8 @@ def read_band_windowed(
                 src_crs=src.crs,
                 dst_transform=target_transform,
                 dst_crs="EPSG:4326",
-                resampling=Resampling.bilinear)
+                resampling=Resampling.bilinear,
+            )
             return dst
 
 
@@ -348,7 +367,8 @@ def write_cog(
     org_id: str,
     field_id: str,
     scene_date: date,
-    index_key: str) -> str:
+    index_key: str,
+) -> str:
     """Write an index array as COG to object storage. Returns the ``cog_uri``."""
     object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{index_key}.tif"
     src_fd, tmp_src_path = tempfile.mkstemp(suffix="_src.tif")
@@ -439,7 +459,8 @@ def _get_weather_context(session, field_id, alert_date: date) -> dict | None:
             .where(
                 WeatherDaily.field_id == field_id,
                 WeatherDaily.date >= start,
-                WeatherDaily.date <= alert_date)
+                WeatherDaily.date <= alert_date,
+            )
             .order_by(WeatherDaily.date.desc())
         )
         .scalars()
@@ -474,7 +495,8 @@ def run_alerts(
     scene_date: date,
     stats: dict,
     historical_means: list[float],
-    index_def: IndexDef):
+    index_def: IndexDef,
+):
     """Evaluate threshold and drop alert rules for any index type."""
     from app.models.tables import Alert
 
@@ -493,7 +515,6 @@ def run_alerts(
         severity = "high" if current_mean < alert_cfg.threshold_high else "medium"
         session.add(
             Alert(
-
                 field_id=field_id,
                 date=scene_date,
                 severity=severity,
@@ -505,7 +526,8 @@ def run_alerts(
                 ),
                 status="open",
                 index_type=index_def.key,
-                weather_context=weather_ctx)
+                weather_context=weather_ctx,
+            )
         )
 
     # drop rule
@@ -520,7 +542,6 @@ def run_alerts(
                 )
                 session.add(
                     Alert(
-
                         field_id=field_id,
                         date=scene_date,
                         severity=severity,
@@ -536,7 +557,8 @@ def run_alerts(
                         ),
                         status="open",
                         index_type=index_def.key,
-                        weather_context=weather_ctx)
+                        weather_context=weather_ctx,
+                    )
                 )
     session.commit()
 
@@ -564,10 +586,8 @@ def compute_target_grid(field_bounds: tuple, field_geom):
     target_transform = from_bounds(minx, miny, maxx, maxy, width, height)
     target_shape = (height, width)
     field_mask = geometry_mask(
-        [field_geom],
-        out_shape=target_shape,
-        transform=target_transform,
-        invert=True)
+        [field_geom], out_shape=target_shape, transform=target_transform, invert=True
+    )
     return target_transform, target_shape, field_mask, (minx, miny, maxx, maxy)
 
 
@@ -590,25 +610,37 @@ def process_scene(
     date_from: date,
     date_to: date,
     historical_means: list[float],
-    extra_params: dict | None = None):
-    """Download bands, compute index, write COG, stats, alerts for one scene.
+    extra_params: dict | None = None,
+):
+    """Download bands, compute index, optionally write COG, stats, alerts.
+
+    Agri / ``WRITE_INDEX_COGS=0`` skips COG upload and raster_layers. Agri
+    lonlat is emitted by ``app.tasks.agri_lonlat`` (all optical indices in
+    one pass), not here.
 
     Returns the stats dict on success, ``None`` on failure.
     """
-    from app.models.tables import RasterLayer, FieldStat
+    from app.models.tables import RasterLayer, FieldStat, Field
+
+    from app.core.agri_tags import is_agri_tagged
+    from app.core.index_cogs import write_index_cogs_enabled
 
     scene_id = scene["id"]
     scene_date = scene["date"]
     band_hrefs = scene["band_hrefs"]
     index_key = index_def.key
     compute_step = f"compute_{index_key}"
+    field_row = session.get(Field, job.field_id)
+    is_agri = bool(field_row and is_agri_tagged(field_row.tags_json))
+    write_cogs = write_index_cogs_enabled(is_agri=is_agri)
 
     # -- download bands --
     update_job_progress(
         session,
         job,
         "download_bands",
-        {"scene": scene_idx + 1, "total_scenes": total_scenes, "scene_id": scene_id})
+        {"scene": scene_idx + 1, "total_scenes": total_scenes, "scene_id": scene_id},
+    )
     bands: dict[str, np.ndarray] = {}
     for band_key, href in band_hrefs.items():
         bands[band_key] = read_band_windowed(
@@ -624,17 +656,27 @@ def process_scene(
     index_data[~field_mask] = np.nan
     complete_step(session, job, compute_step)
 
-    # -- write COG --
-    update_job_progress(session, job, "write_cog")
-    cog_uri = write_cog(
-        index_data,
-        target_transform,
-        "EPSG:4326",
-        org_id_str,
-        field_id_str,
-        scene_date,
-        index_key)
-    complete_step(session, job, "write_cog")
+    # -- write COG (classic OpenFarm / explicit WRITE_INDEX_COGS=1 only) --
+    cog_uri = None
+    if write_cogs:
+        update_job_progress(session, job, "write_cog")
+        cog_uri = write_cog(
+            index_data,
+            target_transform,
+            "EPSG:4326",
+            org_id_str,
+            field_id_str,
+            scene_date,
+            index_key,
+        )
+        complete_step(session, job, "write_cog")
+    else:
+        logger.info(
+            "cog_upload_skipped",
+            object_key=f"cogs/{org_id_str}/{field_id_str}/{scene_date.isoformat()}/{index_key}.tif",
+            index=index_key,
+            is_agri=is_agri,
+        )
 
     # -- compute stats --
     update_job_progress(session, job, "compute_stats")
@@ -643,77 +685,78 @@ def process_scene(
     data_min = float(np.nanmin(valid)) if len(valid) > 0 else None
     data_max = float(np.nanmax(valid)) if len(valid) > 0 else None
 
-    # -- upsert RasterLayer (field_id + date + layer_type) --
-    layer_values = dict(
-
-        field_id=job.field_id,
-        layer_type=index_def.label,
-        satellite="S2",
-        date=scene_date,
-        cog_uri=cog_uri,
-        min=data_min,
-        max=data_max,
-        params_json={
-            "date_from": str(date_from),
-            "date_to": str(date_to),
-            "cloud_cover": scene["cloud_cover"],
-            **kwargs,
-        },
-        provenance_json={
-            "scene_id": scene_id,
-            "bands": band_hrefs,
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-            "pipeline_version": "2.0.0",
-        })
-    stmt = (
-        pg_insert(RasterLayer)
-        .values(**layer_values)
-        .on_conflict_do_update(
-            constraint="uq_raster_field_date_type",
-            set_={
-                "cog_uri": cog_uri,
-                "min": data_min,
-                "max": data_max,
-                "params_json": layer_values["params_json"],
-                "provenance_json": layer_values["provenance_json"],
-            })
-        .returning(RasterLayer.id)
-    )
-    layer_id = session.execute(stmt).scalar_one()
-    session.flush()
-
-    # -- upsert FieldStat (via layer_id which is now stable) --
-    existing_stat = session.execute(
-        select(FieldStat.id).where(
-            FieldStat.field_id == job.field_id,
-            FieldStat.date == scene_date,
-            FieldStat.layer_id == layer_id)
-    ).scalar_one_or_none()
-
-    stat_values = dict(
-        mean=stats["mean"],
-        median=stats["median"],
-        min=stats["min"],
-        max=stats["max"],
-        p10=stats["p10"],
-        p90=stats["p90"],
-        stddev=stats["stddev"],
-        quality_score=stats["quality_score"])
-    if existing_stat:
-        session.execute(
-            FieldStat.__table__.update()
-            .where(FieldStat.id == existing_stat)
-            .values(**stat_values)
-        )
-    else:
-        field_stat = FieldStat(
-
+    if write_cogs and cog_uri:
+        # -- upsert RasterLayer (field_id + date + layer_type) --
+        layer_values = dict(
             field_id=job.field_id,
-            layer_id=layer_id,
+            layer_type=index_def.label,
+            satellite="S2",
             date=scene_date,
-            **stat_values)
-        session.add(field_stat)
-    session.commit()
+            cog_uri=cog_uri,
+            min=data_min,
+            max=data_max,
+            params_json={
+                "date_from": str(date_from),
+                "date_to": str(date_to),
+                "cloud_cover": scene["cloud_cover"],
+                **kwargs,
+            },
+            provenance_json={
+                "scene_id": scene_id,
+                "bands": band_hrefs,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "pipeline_version": "2.0.0",
+            },
+        )
+        stmt = (
+            pg_insert(RasterLayer)
+            .values(**layer_values)
+            .on_conflict_do_update(
+                constraint="uq_raster_field_date_type",
+                set_={
+                    "cog_uri": cog_uri,
+                    "min": data_min,
+                    "max": data_max,
+                    "params_json": layer_values["params_json"],
+                    "provenance_json": layer_values["provenance_json"],
+                },
+            )
+            .returning(RasterLayer.id)
+        )
+        layer_id = session.execute(stmt).scalar_one()
+        session.flush()
+
+        # -- upsert FieldStat (via layer_id which is now stable) --
+        existing_stat = session.execute(
+            select(FieldStat.id).where(
+                FieldStat.field_id == job.field_id,
+                FieldStat.date == scene_date,
+                FieldStat.layer_id == layer_id,
+            )
+        ).scalar_one_or_none()
+
+        stat_values = dict(
+            mean=stats["mean"],
+            median=stats["median"],
+            min=stats["min"],
+            max=stats["max"],
+            p10=stats["p10"],
+            p90=stats["p90"],
+            stddev=stats["stddev"],
+            quality_score=stats["quality_score"],
+        )
+        if existing_stat:
+            session.execute(
+                FieldStat.__table__.update()
+                .where(FieldStat.id == existing_stat)
+                .values(**stat_values)
+            )
+        else:
+            field_stat = FieldStat(
+                field_id=job.field_id, layer_id=layer_id, date=scene_date, **stat_values
+            )
+            session.add(field_stat)
+        session.commit()
     complete_step(session, job, "compute_stats")
 
     # -- run alerts (skip for backfill jobs to avoid flooding) --
@@ -721,14 +764,10 @@ def process_scene(
     update_job_progress(session, job, "run_alerts")
     if stats["mean"] is not None:
         historical_means.append(stats["mean"])
-    if not is_backfill:
+    if not is_backfill and not is_agri:
         run_alerts(
-            session,
-            job.field_id,
-            scene_date,
-            stats,
-            historical_means,
-            index_def)
+            session, job.field_id, scene_date, stats, historical_means, index_def
+        )
     complete_step(session, job, "run_alerts")
 
     logger.info(
@@ -736,7 +775,8 @@ def process_scene(
         scene_id=scene_id,
         index=index_key,
         date=str(scene_date),
-        mean=stats["mean"])
+        mean=stats["mean"],
+    )
     return stats
 
 
@@ -754,7 +794,8 @@ def process_scenes_parallel(
     date_from: date,
     date_to: date,
     historical_means: list[float],
-    extra_params: dict | None = None) -> int:
+    extra_params: dict | None = None,
+) -> int:
     """Download and process scenes concurrently. Returns layers_created.
 
     Each worker opens its own SQLAlchemy session (Session is not thread-safe).
@@ -776,7 +817,8 @@ def process_scenes_parallel(
         job_id=job_id,
         index=index_def.key,
         scenes=total,
-        workers=workers)
+        workers=workers,
+    )
 
     def _one(scene: dict, scene_idx: int):
         session = get_db_session()
@@ -801,13 +843,15 @@ def process_scenes_parallel(
                 date_from=date_from,
                 date_to=date_to,
                 historical_means=list(hist_snapshot),
-                extra_params=extra)
+                extra_params=extra,
+            )
         except Exception as e:
             logger.error(
                 "scene_processing_error",
                 scene_id=scene.get("id"),
                 index=index_def.key,
-                error=str(e))
+                error=str(e),
+            )
             try:
                 session.rollback()
             except Exception:
@@ -818,9 +862,7 @@ def process_scenes_parallel(
 
     layers_created = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_one, scene, i): scene for i, scene in enumerate(scenes)
-        }
+        futures = {pool.submit(_one, scene, i): scene for i, scene in enumerate(scenes)}
         for fut in as_completed(futures):
             scene = futures[fut]
             try:
@@ -830,7 +872,8 @@ def process_scenes_parallel(
                     "scene_processing_error",
                     scene_id=scene.get("id"),
                     index=index_def.key,
-                    error=str(e))
+                    error=str(e),
+                )
                 continue
             if result is not None:
                 layers_created += 1
@@ -841,5 +884,6 @@ def process_scenes_parallel(
         index=index_def.key,
         layers_created=layers_created,
         total_scenes=total,
-        workers=workers)
+        workers=workers,
+    )
     return layers_created

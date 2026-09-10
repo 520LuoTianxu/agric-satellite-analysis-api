@@ -33,6 +33,17 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s packages/openfarm_common/tests -v
 
+  ingest:
+    name: Ingest - index COG flag tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests (no extra deps)
+        run: PYTHONPATH=services/ingest python -m unittest discover -s services/ingest/tests -v
+
   web:
     name: Web - lint & type-check
     runs-on: ubuntu-latest

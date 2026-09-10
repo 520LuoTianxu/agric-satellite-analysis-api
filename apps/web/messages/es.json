@@ -455,7 +455,7 @@
             "failed": "Error al iniciar la actualización de teledetección",
             "inProgressTitle": "La actualización de teledetección ya está en curso",
             "agriStarted": "Backfill STAC iniciado; los resultados se puentean al panel agri.",
-            "progressBridge": "Escribiendo agri lonlat…",
+            "progressBridge": "Confirmando que agri lonlat está escrito…",
             "progressCounts": "Completado {done}/{total} (en curso {running}, en cola {pending})",
             "progressBanner": "Obteniendo teledetección… {message}"
         },
@@ -869,7 +869,7 @@
         "showHeatmap": "Mostrar mapa de calor",
         "rendering": " · renderizando…",
         "refreshRs": "Volver a obtener teledetección",
-        "refreshRsTitle": "Actualizar COGs vía STAC y puente a agri lonlat_v1",
+        "refreshRsTitle": "Descargar bandas, calcular índices y escribir agri lonlat_v1 (sin TIF de índice)",
         "refreshStarted": "Actualización de teledetección iniciada",
         "refreshFailed": "Error al iniciar la actualización de teledetección",
         "refreshInProgress": "Actualización de teledetección en curso…",
@@ -880,7 +880,7 @@
         "meanMeta": " · media≈{mean}",
         "cloudCover": "nubes {percent}%",
         "refreshComplete": "Actualización de teledetección completa; escenas recargadas",
-        "progressBridge": "Escribiendo agri lonlat…",
+        "progressBridge": "Confirmando que agri lonlat está escrito…",
         "progressCounts": "Completado {done}/{total} (en curso {running}, en cola {pending})"
     },
     "landReportTab": {

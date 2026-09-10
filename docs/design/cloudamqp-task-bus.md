@@ -17,7 +17,7 @@
 原则：
 
 - **天气 / 土壤**：结果 JSON **inline** 放进 `ResultMessage.payload`（或别名 `data`），由 `mq_result_writer` 写入业务表。体积须安全低于 CloudAMQP 实用上限（约 **100KB**）；超限则上传 OSS 并把 key/url 放进 `oss_urls`，payload 仅留 stub。
-- **遥感**：download/compute → 生成 **DB-ready lonlat_v1 JSON** → **上传 OSS** → `ResultMessage.oss_urls` → producer/`mq_result_writer` **拉取 OSS JSON** 写入 `agri.parcel_scene_products`。**不要**把 ListObjects + 晚采样当作主路径。
+- **遥感**：download/compute → 生成 **DB-ready lonlat_v1 JSON**（agri 主路径直接 upsert `parcel_scene_products`）→ 可选上传紧凑 scene JSON → `ResultMessage.oss_urls`。**不要**把 ListObjects / HEAD `ndvi.tif` + 晚采样当作主路径。
 
 **UI 仍调用原 REST**；服务端 `publish_api_task`（`services/api/app/mq_publish.py`），由 `mq_consumer` 再 `send_task` 到现有 Celery。默认 **无 Celery 直发回退**（缺 `CLOUDAMQP_URL` → 503）；仅本地可设 `MQ_FALLBACK_CELERY=1`。
 
@@ -84,7 +84,7 @@ Process host: mq_result_writer
 
 | type | extras（常用） | Celery 派发 | ResultMessage |
 |------|----------------|-------------|---------------|
-| `satellite_analysis` | `months`（默认 **60**）、`force`（默认 **false**，补缺）、`allow_agri`, `sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | `backfill_indices_for_field`；可选 bridge | bridge 完成后：`oss_urls`（scene JSON） |
+| `satellite_analysis` | `months`（默认 **60**）、`force`（默认 **false**，补缺）、`allow_agri`, `sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | agri：`backfill_indices_for_field` → `agri_lonlat` + S1（无指数 TIF）；可选 wait 发布 | wait 完成后：`oss_urls`（scene JSON，若已上传） |
 | `agri_bridge` | `mode=bridge_only` | `bridge_field_stac_to_agri` | `oss_urls` |
 | `weather_backfill` | `days?: int` | `backfill_weather_for_field(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
 | `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
@@ -176,8 +176,9 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 | `services/api/app/mq_publish.py` | API 侧 publish → download 队列 |
 | `services/mq_consumer/` | download 队列消费者 |
 | `services/mq_result_writer/` | process 队列写库（mq_task_results + weather/soil/scene） |
-| `services/ingest/app/tasks/bridge_stac_cogs_to_agri_lonlat.py` | 每景上传 JSON + `json_oss_key` |
-| `services/ingest/app/tasks/agri_bridge.py` | 完成后发布带 `oss_urls` 的 Result |
+| `services/ingest/app/tasks/agri_lonlat.py` | agri 光学：波段→指数内存计算→lonlat_v1 upsert（不上传指数 TIF） |
+| `services/ingest/app/tasks/bridge_stac_cogs_to_agri_lonlat.py` | 遗留：已有 OSS 指数 TIF 的一次性扫描采样 |
+| `services/ingest/app/tasks/agri_bridge.py` | `bridge_after_backfill` 等待计算完成后发布 Result（不再 HEAD TIF） |
 | `services/ingest/app/tasks/weather.py` / `soil.py` | 完成后发布 inline payload |
 | `services/ingest/app/tasks/assessment_report.py` | PDF 上传后发布 `oss_urls` + `payload.kind=assessment_report` |
 | `services/api/app/routers/assessment.py` | REST → `publish_api_task(assessment_report)` |
@@ -185,7 +186,7 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 
 ## 8. 已知限制 / Follow-ups
 
-1. Full `satellite_analysis`（带 bridge）结果在 **bridge 完成** 后发布，耗时可能很长。  
+1. Full `satellite_analysis` 结果在光学/雷达 lonlat 任务完成后由 wait 任务发布，耗时仍可能很长（下载+计算），但不再做 OSS TIF exists 扫描。  
 2. `field_bootstrap` 仅保证「已入队」结果；子任务失败看 Celery / Job / 各自 Result。  
 3. 365 天天气行可能超过 100KB → 自动 OSS fallback；短窗口（如 30 天）优先 inline。  
 4. Celery 与 writer 双写同一库时依赖 upsert 幂等（天气/土壤尤甚；长期应以 process writer 为源）。  

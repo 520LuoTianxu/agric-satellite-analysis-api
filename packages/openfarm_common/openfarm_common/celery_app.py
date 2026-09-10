@@ -20,6 +20,7 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "app.tasks.ndvi.*": {"queue": "ingest"},
     "app.tasks.indices.*": {"queue": "ingest"},
     "app.tasks.agri_bridge.*": {"queue": "ingest"},
+    "app.tasks.agri_lonlat.*": {"queue": "ingest"},
     "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": "ingest"},
     "app.tasks.backfill.*": {"queue": "ingest"},
     "app.tasks.agri_alerts.*": {"queue": "ingest"},

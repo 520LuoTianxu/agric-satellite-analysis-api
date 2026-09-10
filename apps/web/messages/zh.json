@@ -455,7 +455,7 @@
       "failed": "启动遥感数据拉取失败",
       "inProgressTitle": "遥感数据拉取已在进行中",
       "agriStarted": "已启动 STAC 遥感回填，完成后将桥接到 agri 指数面板。",
-      "progressBridge": "正在写入 agri lonlat…",
+      "progressBridge": "正在确认 agri lonlat 已写入…",
       "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）",
       "progressBanner": "正在拉取遥感数据… {message}"
     },
@@ -869,7 +869,7 @@
     "showHeatmap": "显示色斑图",
     "rendering": " · 渲染中…",
     "refreshRs": "重新拉取遥感数据",
-    "refreshRsTitle": "通过 STAC 拉取光学+雷达到 OSS 并桥接到 agri lonlat_v1",
+    "refreshRsTitle": "下载波段、计算指数并直接写入 agri lonlat_v1（不上传指数 TIF）",
     "refreshStarted": "已开始重新拉取遥感数据",
     "refreshFailed": "启动遥感数据拉取失败",
     "refreshInProgress": "遥感数据拉取进行中…",
@@ -880,7 +880,7 @@
     "meanMeta": " · 均≈{mean}",
     "cloudCover": "云量 {percent}%",
     "refreshComplete": "遥感数据拉取完成，已刷新场景",
-    "progressBridge": "正在写入 agri lonlat…",
+    "progressBridge": "正在确认 agri lonlat 已写入…",
     "progressCounts": "已完成 {done}/{total}（进行中 {running}，排队 {pending}）"
   },
   "landReportTab": {

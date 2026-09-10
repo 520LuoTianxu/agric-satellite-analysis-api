@@ -49,7 +49,7 @@ OpenFarm is an open, modular field intelligence platform built on a **3-layer st
 - Redis socket timeouts, TCP keepalive, and `retry_on_timeout` are on by default so a stale remote broker session cannot block the consumer loop. Override with `CELERY_REDIS_*` / `CELERY_BROKER_*`.
 - Tasks in `services/ingest/app/tasks/` and `services/storage/app/tasks/` - API dispatches by stable task name
 - Celery workers use sync SQLAlchemy sessions (`core/database_sync.py` / `openfarm_common.database_sync`), not async
-- Vegetation pipeline: STAC search → download bands → compute index (NDVI/EVI/SAVI/NDWI) → write COG to MinIO → zonal stats → alert evaluation
+- Vegetation pipeline (classic): STAC search → download bands → compute index → write COG → zonal stats → alerts. Agri-tagged fields: STAC bands → compute optical indices in memory → `lonlat_v1` upsert (`parcel_scene_products`); no index TIF unless `WRITE_INDEX_COGS=1`.
 - Soil pipeline: SoilGrids WCS (global) or POLARIS S3 (US) → 10 properties × 6 depths → texture classification → risk scoring → field summary
 - Weather pipeline: Open-Meteo API → 18 variables + 5 derived indices (GDD, ET₀, water balance, drought) → daily upsert
 - Job progress tracked via `jobs.progress_json` JSONB column with per-step status updates
