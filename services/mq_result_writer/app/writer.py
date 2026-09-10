@@ -88,6 +88,8 @@ INSERT INTO agri.parcel_scene_products (
   ndre_avg, ndre_min, ndre_max,
   cire_avg, cire_min, cire_max,
   mndwi_avg, mndwi_min, mndwi_max,
+  vv_avg, vv_min, vv_max,
+  vh_avg, vh_min, vh_max,
   pixel_data
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
@@ -100,6 +102,8 @@ INSERT INTO agri.parcel_scene_products (
   %(ndre_avg)s, %(ndre_min)s, %(ndre_max)s,
   %(cire_avg)s, %(cire_min)s, %(cire_max)s,
   %(mndwi_avg)s, %(mndwi_min)s, %(mndwi_max)s,
+  %(vv_avg)s, %(vv_min)s, %(vv_max)s,
+  %(vh_avg)s, %(vh_min)s, %(vh_max)s,
   %(pixel_data)s::jsonb
 )
 ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
@@ -130,6 +134,12 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   mndwi_avg = EXCLUDED.mndwi_avg,
   mndwi_min = EXCLUDED.mndwi_min,
   mndwi_max = EXCLUDED.mndwi_max,
+  vv_avg = COALESCE(EXCLUDED.vv_avg, agri.parcel_scene_products.vv_avg),
+  vv_min = COALESCE(EXCLUDED.vv_min, agri.parcel_scene_products.vv_min),
+  vv_max = COALESCE(EXCLUDED.vv_max, agri.parcel_scene_products.vv_max),
+  vh_avg = COALESCE(EXCLUDED.vh_avg, agri.parcel_scene_products.vh_avg),
+  vh_min = COALESCE(EXCLUDED.vh_min, agri.parcel_scene_products.vh_min),
+  vh_max = COALESCE(EXCLUDED.vh_max, agri.parcel_scene_products.vh_max),
   pixel_data = EXCLUDED.pixel_data,
   ingested_at = now()
 """
@@ -263,6 +273,12 @@ def apply_parcel_scene_product(
         "mndwi_avg": obj.get("mndwi_avg"),
         "mndwi_min": obj.get("mndwi_min"),
         "mndwi_max": obj.get("mndwi_max"),
+        "vv_avg": obj.get("vv_avg"),
+        "vv_min": obj.get("vv_min"),
+        "vv_max": obj.get("vv_max"),
+        "vh_avg": obj.get("vh_avg"),
+        "vh_min": obj.get("vh_min"),
+        "vh_max": obj.get("vh_max"),
         "pixel_data": pixel_data_str,
     }
     session = SyncSession()
