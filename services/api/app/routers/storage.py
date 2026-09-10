@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.core.logging import logger
 from app.core.storage import get_storage, parcel_product_prefix
 from app.tasks.storage_tasks import put_bytes_via_storage
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 
 router = APIRouter()
 
@@ -39,8 +39,7 @@ class PullParcelProductsBody(BaseModel):
 
 @router.get("/storage/backend")
 async def storage_backend_info(
-    ctx: Annotated[OrgContext, Depends(_reader)],
-):
+    ctx: Annotated[OrgContext, Depends(_reader)]):
     """Return active storage backend metadata."""
     storage = get_storage()
     return {
@@ -55,8 +54,7 @@ async def list_storage_objects(
     ctx: Annotated[OrgContext, Depends(_reader)],
     prefix: str | None = Query(default=None),
     suffix: str = Query(default=""),
-    limit: int = Query(default=100, ge=0, le=5000),
-):
+    limit: int = Query(default=100, ge=0, le=5000)):
     """List object keys under a prefix."""
     storage = get_storage()
     if prefix is None:
@@ -76,8 +74,7 @@ async def list_storage_objects(
 async def get_storage_object(
     ctx: Annotated[OrgContext, Depends(_reader)],
     key: str = Query(...),
-    download: int = Query(default=0),
-):
+    download: int = Query(default=0)):
     """Return object metadata, optionally streaming the body as an attachment."""
     if not key:
         raise HTTPException(status_code=400, detail="key is required")
@@ -104,16 +101,14 @@ async def get_storage_object(
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Storage-Key": key,
-        },
-    )
+        })
 
 
 @router.put("/storage/object")
 async def put_storage_object(
     request: Request,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    key: str = Query(...),
-):
+    key: str = Query(...)):
     """Upload raw request body to an allowed key prefix."""
     if not _allowed_key(key):
         raise HTTPException(
@@ -121,8 +116,7 @@ async def put_storage_object(
             detail=(
                 "key must be under photos/, cogs/, or the configured parcel "
                 f"prefix ({parcel_product_prefix()!r})"
-            ),
-        )
+            ))
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
@@ -132,9 +126,8 @@ async def put_storage_object(
         "storage_put_object",
         key=key,
         bytes=len(body),
-        org_id=str(ctx.org_id),
-        backend=result["backend"],
-    )
+
+        backend=result["backend"])
     return {
         "ok": True,
         "key": key,
@@ -146,8 +139,7 @@ async def put_storage_object(
 @router.post("/storage/parcel-products/pull")
 async def pull_parcel_products(
     ctx: Annotated[OrgContext, Depends(_reader)],
-    body: PullParcelProductsBody | None = None,
-):
+    body: PullParcelProductsBody | None = None):
     """Pull parcel-product JSON from the fixed OSS/MinIO prefix (summary only).
 
     Fetches each object via get_bytes but does **not** dump payloads in the
@@ -190,12 +182,11 @@ async def pull_parcel_products(
 
     logger.info(
         "parcel_products_pull",
-        org_id=str(ctx.org_id),
+
         listed=len(keys),
         ok=ok,
         failed=failed,
-        backend=storage.backend,
-    )
+        backend=storage.backend)
     return {
         "backend": storage.backend,
         "bucket": storage.bucket,
@@ -212,8 +203,7 @@ async def pull_parcel_products(
 @router.post("/storage/parcel-products/put")
 async def put_parcel_product(
     request: Request,
-    ctx: Annotated[OrgContext, Depends(_writer)],
-):
+    ctx: Annotated[OrgContext, Depends(_writer)]):
     """Write a parcel-product object under the configured parcel prefix only.
 
     Accepts either:
@@ -267,17 +257,15 @@ async def put_parcel_product(
     if not prefix or not object_key.startswith(prefix):
         raise HTTPException(
             status_code=400,
-            detail=f"key must start with parcel prefix {prefix!r}",
-        )
+            detail=f"key must start with parcel prefix {prefix!r}")
 
     result = put_bytes_via_storage(object_key, raw, content_type="application/json")
     logger.info(
         "parcel_product_put",
         key=object_key,
         bytes=len(raw),
-        org_id=str(ctx.org_id),
-        backend=result["backend"],
-    )
+
+        backend=result["backend"])
     return {
         "ok": True,
         "key": object_key,

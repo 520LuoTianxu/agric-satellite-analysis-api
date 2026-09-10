@@ -8,8 +8,7 @@ from openfarm_common.storage_client import (
     SCRATCH_DIR,
     put_bytes_via_storage,
     scratch_workdir,
-    upload_file_via_storage,
-)
+    upload_file_via_storage)
 
 __all__ = [
     "upload_file_via_storage",

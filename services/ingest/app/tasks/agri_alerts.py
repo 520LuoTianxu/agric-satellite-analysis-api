@@ -44,7 +44,7 @@ def _load_field_meta(session, field_id: str) -> dict[str, Any] | None:
     land_id = parse_agri_land_id(field.tags_json)
     return {
         "field_id": field.id,
-        "org_id": field.org_id,
+
         "land_id": land_id,
         "tags": field.tags_json,
     }
@@ -63,8 +63,7 @@ def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
             ORDER BY date ASC
             """
             ),
-            {"lid": str(land_id)},
-        )
+            {"lid": str(land_id)})
         .mappings()
         .all()
     )
@@ -89,8 +88,7 @@ def _pick_eval_scene(
     series: list[dict[str, Any]],
     *,
     scene_date: date | None,
-    avg_col: str,
-) -> dict[str, Any] | None:
+    avg_col: str) -> dict[str, Any] | None:
     usable = [
         s
         for s in series
@@ -119,8 +117,7 @@ def _delete_open_rs_alerts(session, field_id, index_keys: list[str]) -> int:
         select(Alert).where(
             Alert.field_id == field_id,
             Alert.status == "open",
-            Alert.rule_name.in_(rule_names),
-        )
+            Alert.rule_name.in_(rule_names))
     )
     rows = result.scalars().all()
     for row in rows:
@@ -140,15 +137,13 @@ def _existing_alert_keys(session, field_id) -> set[tuple[date, str]]:
 def _emit_rules(
     session,
     *,
-    org_id,
     field_id,
     scene_date: date,
     current_mean: float,
     historical_means: list[float],
     index_def: IndexDef,
     weather_ctx: dict | None,
-    existing: set[tuple[date, str]],
-) -> int:
+    existing: set[tuple[date, str]]) -> int:
     from app.models.tables import Alert
 
     created = 0
@@ -161,7 +156,7 @@ def _emit_rules(
             severity = "high" if current_mean < alert_cfg.threshold_high else "medium"
             session.add(
                 Alert(
-                    org_id=org_id,
+
                     field_id=field_id,
                     date=scene_date,
                     severity=severity,
@@ -176,8 +171,7 @@ def _emit_rules(
                     ),
                     status="open",
                     index_type=index_def.key,
-                    weather_context=weather_ctx,
-                )
+                    weather_context=weather_ctx)
             )
             existing.add((scene_date, rule))
             created += 1
@@ -199,7 +193,7 @@ def _emit_rules(
                     )
                     session.add(
                         Alert(
-                            org_id=org_id,
+
                             field_id=field_id,
                             date=scene_date,
                             severity=severity,
@@ -216,8 +210,7 @@ def _emit_rules(
                             ),
                             status="open",
                             index_type=index_def.key,
-                            weather_context=weather_ctx,
-                        )
+                            weather_context=weather_ctx)
                     )
                     existing.add((scene_date, rule))
                     created += 1
@@ -230,8 +223,7 @@ def evaluate_agri_rs_alerts_for_field(
     land_id: str | None = None,
     scene_date: date | str | None = None,
     index_keys: list[str] | None = None,
-    replace_open: bool = True,
-) -> dict[str, Any]:
+    replace_open: bool = True) -> dict[str, Any]:
     """Evaluate threshold/drop alerts from agri S2 averages.
 
     Default behaviour (refresh / post-bridge): replace open optical RS alerts and
@@ -307,15 +299,14 @@ def evaluate_agri_rs_alerts_for_field(
             weather_ctx = _get_weather_context(session, meta["field_id"], sd)
             n = _emit_rules(
                 session,
-                org_id=meta["org_id"],
+
                 field_id=meta["field_id"],
                 scene_date=sd,
                 current_mean=mean,
                 historical_means=hist,
                 index_def=index_def,
                 weather_ctx=weather_ctx,
-                existing=existing,
-            )
+                existing=existing)
             created += n
             evaluated.append(
                 {
@@ -340,8 +331,7 @@ def evaluate_agri_rs_alerts_for_field(
             "agri_rs_alerts_evaluated",
             **{
                 k: result[k] for k in ("field_id", "land_id", "created", "removed_open")
-            },
-        )
+            })
         return result
     except Exception:
         session.rollback()
@@ -355,27 +345,23 @@ def evaluate_agri_rs_alerts_for_field(
     bind=True,
     max_retries=2,
     time_limit=300,
-    soft_time_limit=240,
-)
+    soft_time_limit=240)
 def evaluate_agri_alerts_for_field(
     self,
     field_id: str,
     land_id: str | None = None,
     scene_date: str | None = None,
-    replace_open: bool = True,
-) -> dict:
+    replace_open: bool = True) -> dict:
     """Celery entry: agri lonlat → openfarm alerts."""
     try:
         return evaluate_agri_rs_alerts_for_field(
             field_id,
             land_id=land_id,
             scene_date=scene_date,
-            replace_open=replace_open,
-        )
+            replace_open=replace_open)
     except Exception as e:
         logger.error(
             "agri_rs_alerts_failed",
             field_id=field_id,
-            error=str(e),
-        )
+            error=str(e))
         raise

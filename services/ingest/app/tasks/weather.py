@@ -95,8 +95,7 @@ def _fetch_open_meteo(
     start_date: date,
     end_date: date,
     *,
-    use_archive: bool = False,
-) -> dict:
+    use_archive: bool = False) -> dict:
     """Fetch weather data from Open-Meteo API (synchronous for Celery).
 
     Requests daily variables natively and hourly variables (soil, VPD, cloud)
@@ -160,13 +159,11 @@ def _fetch_open_meteo(
     name="app.tasks.weather.fetch_weather_for_field",
     bind=True,
     max_retries=3,
-    default_retry_delay=60,
-)
+    default_retry_delay=60)
 def fetch_weather_for_field(
     self,
     field_id: str,
-    backfill_days: int = 0,
-) -> dict:
+    backfill_days: int = 0) -> dict:
     """Fetch weather data from Open-Meteo for a single field.
 
     Args:
@@ -212,8 +209,7 @@ def fetch_weather_for_field(
             lon=lon,
             start=start_date.isoformat(),
             end=end_date.isoformat(),
-            archive=use_archive,
-        )
+            archive=use_archive)
 
         data = _fetch_open_meteo(
             lat, lon, start_date, end_date, use_archive=use_archive
@@ -229,8 +225,7 @@ def fetch_weather_for_field(
             select(WeatherDaily.gdd_cumulative, WeatherDaily.date)
             .where(
                 WeatherDaily.field_id == uuid.UUID(field_id),
-                WeatherDaily.gdd_cumulative.isnot(None),
-            )
+                WeatherDaily.gdd_cumulative.isnot(None))
             .order_by(WeatherDaily.date.desc())
             .limit(1)
         ).first()
@@ -246,7 +241,7 @@ def fetch_weather_for_field(
             # Extract raw variables from API response
             record: dict = {
                 "field_id": uuid.UUID(field_id),
-                "org_id": field.org_id,
+
                 "date": row_date,
                 "latitude": Decimal(str(round(lat, 8))),
                 "longitude": Decimal(str(round(lon, 8))),
@@ -285,8 +280,7 @@ def fetch_weather_for_field(
             stmt = pg_insert(WeatherDaily).values(**record)
             stmt = stmt.on_conflict_do_update(
                 constraint="uq_weather_field_date",
-                set_={k: v for k, v in record.items() if k not in ("field_id", "date")},
-            )
+                set_={k: v for k, v in record.items() if k not in ("field_id", "date")})
             session.execute(stmt)
             rows_upserted += 1
 
@@ -298,8 +292,7 @@ def fetch_weather_for_field(
         logger.info(
             "weather_fetch_complete",
             field_id=field_id,
-            rows_upserted=rows_upserted,
-        )
+            rows_upserted=rows_upserted)
         return {
             "field_id": field_id,
             "rows_upserted": rows_upserted,
@@ -311,8 +304,7 @@ def fetch_weather_for_field(
             "weather_api_error",
             field_id=field_id,
             status=e.response.status_code,
-            detail=str(e),
-        )
+            detail=str(e))
         session.rollback()
         raise self.retry(exc=e, countdown=60 * (2**self.request.retries))
 
@@ -321,8 +313,7 @@ def fetch_weather_for_field(
             "weather_fetch_error",
             field_id=field_id,
             error=str(e),
-            exc_info=True,
-        )
+            exc_info=True)
         session.rollback()
         return {
             "field_id": field_id,
@@ -370,8 +361,7 @@ def _update_water_balance(session, field_id: str) -> None:
             ) sub
             WHERE w.id = sub.id
         """),
-        {"field_id": fid, "cutoff": cutoff},
-    )
+        {"field_id": fid, "cutoff": cutoff})
     session.commit()
 
 
@@ -409,8 +399,7 @@ def schedule_daily_weather_fetch() -> dict:
         logger.info(
             "weather_schedule_dispatched",
             fields=len(field_ids),
-            batches=len(batches),
-        )
+            batches=len(batches))
         return {"fields": len(field_ids), "batches": len(batches)}
 
     finally:
@@ -435,8 +424,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
                 .where(
                     WeatherDaily.field_id == uuid.UUID(field_id),
                     WeatherDaily.date >= start,
-                    WeatherDaily.date <= end,
-                )
+                    WeatherDaily.date <= end)
                 .order_by(WeatherDaily.date.asc())
             )
             .scalars()
@@ -447,7 +435,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
             out_rows.append(
                 {
                     "field_id": str(r.field_id),
-                    "org_id": str(r.org_id),
+
                     "date": r.date.isoformat(),
                     "latitude": float(r.latitude) if r.latitude is not None else None,
                     "longitude": float(r.longitude)
@@ -495,8 +483,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
 def backfill_weather_for_field(
     field_id: str,
     days: int | None = None,
-    mq_task_id: str | None = None,
-) -> dict:
+    mq_task_id: str | None = None) -> dict:
     """Trigger a historical weather backfill for a field.
 
     Called on field creation or manually via API / CloudAMQP weather_backfill.
@@ -507,8 +494,7 @@ def backfill_weather_for_field(
         "weather_backfill_start",
         field_id=field_id,
         days=backfill,
-        mq_task_id=mq_task_id,
-    )
+        mq_task_id=mq_task_id)
     try:
         result = fetch_weather_for_field(field_id, backfill_days=backfill)
         if mq_task_id:
@@ -518,8 +504,7 @@ def backfill_weather_for_field(
                 status = "success"
                 if isinstance(result, dict) and result.get("status") in (
                     "error",
-                    "failed",
-                ):
+                    "failed"):
                     status = "failed"
                 payload = None
                 if status == "success":
@@ -544,15 +529,13 @@ def backfill_weather_for_field(
                     },
                     payload=payload,
                     collect_parcel_urls=False,
-                    upload_summary_if_empty=False,
-                )
+                    upload_summary_if_empty=False)
             except Exception as e:
                 logger.warning(
                     "weather_mq_result_publish_failed",
                     field_id=field_id,
                     mq_task_id=mq_task_id,
-                    error=str(e),
-                )
+                    error=str(e))
         return result
     except Exception as e:
         if mq_task_id:
@@ -566,8 +549,7 @@ def backfill_weather_for_field(
                     error=str(e)[:500],
                     extras={"source": "weather_backfill", "days": backfill},
                     collect_parcel_urls=False,
-                    upload_summary_if_empty=False,
-                )
+                    upload_summary_if_empty=False)
             except Exception:
                 pass
         raise

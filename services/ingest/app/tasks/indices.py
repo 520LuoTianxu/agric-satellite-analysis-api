@@ -133,8 +133,7 @@ _register(
         stac_asset_map={
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        },
-    )
+        })
 )
 
 _register(
@@ -151,8 +150,7 @@ _register(
             "B02": ("blue", "B02"),
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        },
-    )
+        })
 )
 
 _register(
@@ -167,8 +165,7 @@ _register(
         stac_asset_map={
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        },
-    )
+        })
 )
 
 _register(
@@ -183,8 +180,7 @@ _register(
         stac_asset_map={
             "B03": ("green", "B03"),
             "B08": ("nir", "B08"),
-        },
-    )
+        })
 )
 
 _register(
@@ -199,8 +195,7 @@ _register(
         stac_asset_map={
             "B08": ("nir", "B08"),
             "B11": ("swir16", "B11"),
-        },
-    )
+        })
 )
 
 _register(
@@ -215,8 +210,7 @@ _register(
         stac_asset_map={
             "B05": ("rededge1", "B05"),
             "B08": ("nir", "B08"),
-        },
-    )
+        })
 )
 
 _register(
@@ -231,8 +225,7 @@ _register(
         stac_asset_map={
             "B05": ("rededge1", "B05"),
             "B07": ("rededge3", "B07"),
-        },
-    )
+        })
 )
 
 _register(
@@ -247,8 +240,7 @@ _register(
         stac_asset_map={
             "B03": ("green", "B03"),
             "B11": ("swir16", "B11"),
-        },
-    )
+        })
 )
 
 

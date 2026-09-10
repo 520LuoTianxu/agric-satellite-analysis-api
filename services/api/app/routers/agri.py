@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.storage import get_parcel_product_storage
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 from app.schemas.agri import (
     AgriStatsOut,
     AgriTableCount,
@@ -26,8 +26,7 @@ from app.schemas.agri import (
     ProjectAreaLandOut,
     ProjectAreaOut,
     SceneProductOut,
-    SensorSceneSummary,
-)
+    SensorSceneSummary)
 from app.schemas.common import PaginatedResponse
 
 router = APIRouter(prefix="/agri", tags=["agri"])
@@ -63,8 +62,7 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         elif k in (
             "boundary_geojson",
             "source_properties",
-            "pixel_data",
-        ) and isinstance(v, str):
+            "pixel_data") and isinstance(v, str):
             try:
                 d[k] = json.loads(v)
             except json.JSONDecodeError:
@@ -172,8 +170,7 @@ def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
     if not pixels:
         logger.warning(
             "OSS JSON %s has no lon/lat pixels; returning media URLs only",
-            json_oss_key,
-        )
+            json_oss_key)
         return {"pixels_lonlat": None, "pixel_count": None, **media}
     return {
         "pixels_lonlat": pixels,
@@ -208,16 +205,14 @@ async def _agri_ready(db: AsyncSession) -> None:
     if q.scalar() is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="agri schema not installed; run: make agri-seed (see scripts/agri_seed/README.md)",
-        )
+            detail="agri schema not installed; run: make agri-seed (see scripts/agri_seed/README.md)")
 
 
 @router.get("/stats", response_model=AgriStatsOut)
 @router.get("/admin/import-status", response_model=AgriStatsOut)
 async def agri_stats(
     ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     """Read-only row counts for agri tables (import health check)."""
     await _agri_ready(db)
     tables = [
@@ -239,8 +234,7 @@ async def agri_stats(
             "parcel_scene_products seed dump is a 1000-row sample; "
             "other tables are full export. Primary APIs are under /v1/agri/*; "
             "/v1/farms and /v1/fields are legacy in this fork."
-        ),
-    )
+        ))
 
 
 @router.get("/project-areas", response_model=PaginatedResponse[ProjectAreaOut])
@@ -253,8 +247,7 @@ async def list_project_areas(
     city: str | None = Query(None),
     county: str | None = Query(None),
     q: str | None = Query(None, description="Search tile_id / project_key / names"),
-    include_boundary: int = Query(0, ge=0, le=1),
-):
+    include_boundary: int = Query(0, ge=0, le=1)):
     """List 项目区 tiles (virtual_project_areas)."""
     await _agri_ready(db)
     where = ["TRUE"]
@@ -283,8 +276,7 @@ async def list_project_areas(
     total = (
         await db.execute(
             text(f"SELECT count(*) FROM agri.virtual_project_areas WHERE {wh}"),
-            params,
-        )
+            params)
     ).scalar() or 0
 
     boundary_expr = (
@@ -306,8 +298,7 @@ async def list_project_areas(
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
-        )
+            params)
     ).fetchall()
 
     items = [ProjectAreaOut.model_validate(_row_to_dict(r)) for r in rows]
@@ -318,8 +309,7 @@ async def list_project_areas(
 async def get_project_area(
     tile_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     await _agri_ready(db)
     row = (
         await db.execute(
@@ -332,8 +322,7 @@ async def get_project_area(
                 WHERE a.tile_id = :tile_id
                 """
             ),
-            {"tile_id": tile_id},
-        )
+            {"tile_id": tile_id})
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Project area (tile) not found")
@@ -342,21 +331,18 @@ async def get_project_area(
 
 @router.get(
     "/project-areas/{tile_id}/lands",
-    response_model=PaginatedResponse[ProjectAreaLandOut],
-)
+    response_model=PaginatedResponse[ProjectAreaLandOut])
 async def list_project_area_lands(
     tile_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     await _agri_ready(db)
     exists = (
         await db.execute(
             text("SELECT 1 FROM agri.virtual_project_areas WHERE tile_id = :tile_id"),
-            {"tile_id": tile_id},
-        )
+            {"tile_id": tile_id})
     ).scalar()
     if not exists:
         raise HTTPException(status_code=404, detail="Project area (tile) not found")
@@ -367,8 +353,7 @@ async def list_project_area_lands(
             text(
                 "SELECT count(*) FROM agri.virtual_project_area_lands WHERE tile_id = :tile_id"
             ),
-            params,
-        )
+            params)
     ).scalar() or 0
     rows = (
         await db.execute(
@@ -386,8 +371,7 @@ async def list_project_area_lands(
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
-        )
+            params)
     ).fetchall()
     items = [ProjectAreaLandOut.model_validate(_row_to_dict(r)) for r in rows]
     return PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
@@ -397,14 +381,12 @@ async def list_project_area_lands(
 async def get_land(
     land_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     await _agri_ready(db)
     row = (
         await db.execute(
             text("SELECT * FROM agri.land_parcels WHERE land_id = :land_id"),
-            {"land_id": land_id},
-        )
+            {"land_id": land_id})
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Land parcel not found")
@@ -413,8 +395,7 @@ async def get_land(
 
 @router.get(
     "/lands/{land_id}/scenes",
-    response_model=PaginatedResponse[SceneProductOut],
-)
+    response_model=PaginatedResponse[SceneProductOut])
 async def list_land_scenes(
     land_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
@@ -429,18 +410,15 @@ async def list_land_scenes(
         description=(
             "If 1, prefer DB lonlat_v1 pixels (pixels_source=db_lonlat); "
             "else try OSS via json_oss_key; else legacy grid pixel_data (db_grid)."
-        ),
-    ),
+        )),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
+    offset: int = Query(0, ge=0)):
     """S1/S2 time series for a 地块. Returns index averages for growth curves."""
     await _agri_ready(db)
     exists = (
         await db.execute(
             text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
-            {"land_id": land_id},
-        )
+            {"land_id": land_id})
     ).scalar()
     if not exists:
         raise HTTPException(status_code=404, detail="Land parcel not found")
@@ -465,8 +443,7 @@ async def list_land_scenes(
     total = (
         await db.execute(
             text(f"SELECT count(*) FROM agri.parcel_scene_products WHERE {wh}"),
-            params,
-        )
+            params)
     ).scalar() or 0
 
     cols = _SCENE_COLS + (", pixel_data" if include_pixels else "")
@@ -481,8 +458,7 @@ async def list_land_scenes(
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
-        )
+            params)
     ).fetchall()
     items: list[SceneProductOut] = []
     for r in rows:
@@ -543,8 +519,7 @@ async def list_land_scenes(
                         "heatmap_url",
                         "s2_heatmap_url",
                         "pixels_source",
-                    },
-                )
+                    })
                 for i in items
             ],
             "total": int(total),
@@ -558,14 +533,12 @@ async def list_land_scenes(
 async def land_scenes_summary(
     land_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     await _agri_ready(db)
     exists = (
         await db.execute(
             text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
-            {"land_id": land_id},
-        )
+            {"land_id": land_id})
     ).scalar()
     if not exists:
         raise HTTPException(status_code=404, detail="Land parcel not found")
@@ -584,8 +557,7 @@ async def land_scenes_summary(
                 ORDER BY sensor
                 """
             ),
-            {"land_id": land_id},
-        )
+            {"land_id": land_id})
     ).fetchall()
 
     sensors: list[SensorSceneSummary] = []
@@ -604,8 +576,7 @@ async def land_scenes_summary(
                     LIMIT 1
                     """
                 ),
-                {"land_id": land_id, "sensor": d["sensor"]},
-            )
+                {"land_id": land_id, "sensor": d["sensor"]})
         ).fetchone()
         latest_d = _row_to_dict(latest) if latest else {}
         sensors.append(
@@ -618,8 +589,7 @@ async def land_scenes_summary(
                 latest_ndvi_avg=latest_d.get("ndvi_avg"),
                 latest_evi_avg=latest_d.get("evi_avg"),
                 latest_vv_avg=latest_d.get("vv_avg"),
-                latest_vh_avg=latest_d.get("vh_avg"),
-            )
+                latest_vh_avg=latest_d.get("vh_avg"))
         )
 
     return LandScenesSummaryOut(land_id=land_id, total=total, sensors=sensors)

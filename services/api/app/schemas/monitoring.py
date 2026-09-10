@@ -167,7 +167,7 @@ class ScoutingOut(BaseModel):
     tags: list[str] | None = None
     photo_uri: str | None = None
     weather_snapshot: dict[str, Any] | None = None
-    created_by: uuid.UUID
+    created_by: uuid.UUID | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -249,7 +249,7 @@ class PresignedUploadOut(BaseModel):
 
 class AuditEventOut(BaseModel):
     id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None = None
     event_type: str
     metadata_json: dict[str, Any] | None = None
     created_at: datetime

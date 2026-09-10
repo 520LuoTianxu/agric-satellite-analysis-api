@@ -28,8 +28,7 @@ from app.tasks.pipeline import (
     compute_target_grid,
     process_scene,
     collect_existing_scene_dates,
-    filter_scenes_skip_existing,
-)
+    filter_scenes_skip_existing)
 
 logger = structlog.get_logger()
 
@@ -39,8 +38,7 @@ logger = structlog.get_logger()
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500,
-)
+    soft_time_limit=1500)
 def process_ndvi(self, job_id: str) -> dict:
     """Process NDVI for a field - delegates to the shared pipeline."""
     from app.models.tables import Job, Field, FieldStat
@@ -72,7 +70,7 @@ def process_ndvi(self, job_id: str) -> dict:
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
-        org_id_str = str(job.org_id)
+        org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
         field_id_str = str(job.field_id)
 
         # Step 1: Scene Search
@@ -85,16 +83,14 @@ def process_ndvi(self, job_id: str) -> dict:
                 field,
                 layer_type=index_def.label,
                 satellite="S2",
-                agri_sensor="S2",
-            )
+                agri_sensor="S2")
             before = len(scenes)
             scenes = filter_scenes_skip_existing(
                 scenes,
                 existing,
                 force=False,
                 field_id=field_id_str,
-                index=index_def.key,
-            )
+                index=index_def.key)
             complete_step(
                 session,
                 job,
@@ -103,8 +99,7 @@ def process_ndvi(self, job_id: str) -> dict:
                     "scene_count": before,
                     "scenes_after_dedup": len(scenes),
                     "skipped_existing": before - len(scenes),
-                },
-            )
+                })
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
@@ -157,16 +152,14 @@ def process_ndvi(self, job_id: str) -> dict:
                     field_id_str=field_id_str,
                     date_from=date_from,
                     date_to=date_to,
-                    historical_means=historical_means,
-                )
+                    historical_means=historical_means)
                 if result is not None:
                     layers_created += 1
             except Exception as e:
                 logger.error(
                     "scene_processing_error",
                     scene_id=scene["id"],
-                    error=str(e),
-                )
+                    error=str(e))
                 continue
 
         # Step 7: Complete

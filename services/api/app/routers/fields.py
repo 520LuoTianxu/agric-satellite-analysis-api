@@ -18,8 +18,7 @@ from fastapi import (
     Query,
     Request,
     UploadFile,
-    status,
-)
+    status)
 from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiPolygon, shape
 from shapely.validation import explain_validity
@@ -30,7 +29,7 @@ from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
 from app.core.crops import normalize_crop_key as _norm_crop
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import AuditEvent, Farm, Field, Job
 from app.schemas.farm import (
     BackfillIndicesRequest,
@@ -39,8 +38,7 @@ from app.schemas.farm import (
     FieldCreate,
     FieldImportResponse,
     FieldOut,
-    FieldUpdate,
-)
+    FieldUpdate)
 
 router = APIRouter()
 
@@ -64,7 +62,7 @@ def _field_to_out(field: Field) -> FieldOut:
     """Convert ORM Field to FieldOut with GeoJSON geometry."""
     return FieldOut(
         id=field.id,
-        org_id=field.org_id,
+
         farm_id=field.farm_id,
         name=field.name,
         geom=wkb_to_geojson(field.geom),
@@ -72,21 +70,19 @@ def _field_to_out(field: Field) -> FieldOut:
         crop_type=field.crop_type,
         season=field.season,
         tags=field.tags_json,
-        created_by=field.created_by,
+
         created_at=field.created_at,
-        updated_at=field.updated_at,
-    )
+        updated_at=field.updated_at)
 
 
 @router.post("/fields", response_model=FieldOut, status_code=status.HTTP_201_CREATED)
 async def create_field(
     body: FieldCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     # Verify farm belongs to org
     farm = await db.get(Farm, body.farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
 
     try:
@@ -112,31 +108,28 @@ async def create_field(
     area_ha = area_m2 / 10_000
 
     field = Field(
-        org_id=ctx.org_id,
+
         farm_id=body.farm_id,
         name=body.name,
         geom=from_shape(multi, srid=4326),
         area_ha=round(area_ha, 4),
         crop_type=crop_key,
         season=body.season,
-        tags_json=body.tags,
-        created_by=ctx.user.id,
-    )
+        tags_json=body.tags)
     db.add(field)
     await db.flush()
 
     # Audit event: field_created (per PRD Section 5.1)
     db.add(
         AuditEvent(
-            org_id=ctx.org_id,
-            user_id=ctx.user.id,
+
+
             event_type="field_created",
             metadata_json={
                 "field_id": str(field.id),
                 "farm_id": str(body.farm_id),
                 "name": body.name,
-            },
-        )
+            })
     )
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
 
@@ -148,13 +141,11 @@ async def create_field(
     sentinel = None
     if not agri_field:
         sentinel = Job(
-            org_id=ctx.org_id,
+
             field_id=field.id,
             type="backfill",
             status="pending",
-            params_json={"is_backfill": True, "sentinel": True},
-            created_by=ctx.user.id,
-        )
+            params_json={"is_backfill": True, "sentinel": True})
         db.add(sentinel)
         await db.flush()
 
@@ -163,8 +154,7 @@ async def create_field(
         field_id=str(field.id),
         farm_id=str(body.farm_id),
         name=body.name,
-        agri_land_id=agri_land_id,
-    )
+        agri_land_id=agri_land_id)
 
     # Commit before MQ publish so workers can find the field row
     # in the DB (prevents race condition).
@@ -182,8 +172,7 @@ async def create_field(
             "skip_index_backfill_agri_field",
             field_id=str(field.id),
             land_id=agri_land_id,
-            reason="agri-first RS via parcel_scene_products; soil/weather still enqueued",
-        )
+            reason="agri-first RS via parcel_scene_products; soil/weather still enqueued")
     elif sentinel is not None:
         bootstrap_extras["sentinel_job_id"] = str(sentinel.id)
 
@@ -191,8 +180,7 @@ async def create_field(
         type="field_bootstrap",
         field_id=str(field.id),
         land_id=str(agri_land_id) if agri_land_id else None,
-        extras=bootstrap_extras,
-    )
+        extras=bootstrap_extras)
 
     return _field_to_out(field)
 
@@ -201,10 +189,9 @@ async def create_field(
 async def get_field(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
     return _field_to_out(field)
 
@@ -214,10 +201,9 @@ async def update_field(
     field_id: uuid.UUID,
     body: FieldUpdate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
     if body.name is not None:
@@ -266,10 +252,9 @@ async def update_field(
 async def delete_field(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
+    db: Annotated[AsyncSession, Depends(get_db)]):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
     field.deleted_at = datetime.now(timezone.utc)
     await db.flush()
@@ -280,11 +265,10 @@ async def import_fields(
     file: UploadFile,
     farm_id: uuid.UUID = Query(...),
     ctx: OrgContext = Depends(_writer),
-    db: AsyncSession = Depends(get_db),
-):
+    db: AsyncSession = Depends(get_db)):
     """Bulk import fields from GeoJSON file."""
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
 
     content = await file.read()
@@ -318,15 +302,13 @@ async def import_fields(
             area_ha = round(area_m2 / 10_000, 4)
 
             field = Field(
-                org_id=ctx.org_id,
+
                 farm_id=farm_id,
                 name=name,
                 geom=from_shape(multi, srid=4326),
                 area_ha=area_ha,
                 crop_type=_norm_crop(props.get("crop_type")),
-                season=props.get("season"),
-                created_by=ctx.user.id,
-            )
+                season=props.get("season"))
             db.add(field)
             imported += 1
         except Exception as e:
@@ -352,8 +334,7 @@ def _backfill_wave_message(
     completed: int,
     failed: int,
     total: int,
-    percent: float,
-) -> str:
+    percent: float) -> str:
     """Short Chinese status string for the current backfill wave."""
     if phase == "idle":
         return "当前无进行中的遥感回填"
@@ -382,13 +363,11 @@ async def _fail_stale_backfill_jobs(db: AsyncSession, field_id: uuid.UUID) -> in
             Job.field_id == field_id,
             Job.status.in_(["pending", "running"]),
             Job.params_json["is_backfill"].as_boolean().is_(True),
-            Job.created_at < cutoff,
-        )
+            Job.created_at < cutoff)
         .values(
             status="failed",
             error=f"Stale backfill auto-cancelled after {_BACKFILL_STALE_HOURS}h",
-            finished_at=datetime.now(timezone.utc),
-        )
+            finished_at=datetime.now(timezone.utc))
     )
     return result.rowcount or 0
 
@@ -404,8 +383,7 @@ async def _wave_start_for_field(db: AsyncSession, field_id: uuid.UUID):
                 Job.field_id == field_id,
                 Job.type == "backfill",
                 Job.params_json["is_backfill"].as_boolean().is_(True),
-                Job.params_json["sentinel"].as_boolean().is_(True),
-            )
+                Job.params_json["sentinel"].as_boolean().is_(True))
             .order_by(Job.created_at.desc())
             .limit(1)
         )
@@ -425,21 +403,19 @@ _admin = require_roles("owner", "admin")
 @router.post(
     "/fields/{field_id}/backfill-indices",
     response_model=BackfillIndicesResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
+    status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit("1/minute")
 async def backfill_field_indices(
     request: Request,
     field_id: uuid.UUID,
     body: BackfillIndicesRequest | None = None,
     ctx: OrgContext = Depends(_admin),
-    db: AsyncSession = Depends(get_db),
-):
+    db: AsyncSession = Depends(get_db)):
     """Trigger historical index backfill for one field (admin/owner only)."""
     from sqlalchemy import select as sa_select
 
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
@@ -457,8 +433,7 @@ async def backfill_field_indices(
                     Job.field_id == field_id,
                     Job.status.in_(["pending", "running"]),
                     Job.params_json["is_backfill"].as_boolean().is_(True),
-                    Job.created_at >= wave_start,
-                )
+                    Job.created_at >= wave_start)
             )
         )
         .scalars()
@@ -467,15 +442,14 @@ async def backfill_field_indices(
     if active_count:
         raise HTTPException(
             status_code=409,
-            detail=f"Backfill already in progress ({len(active_count)} jobs pending/running).",
-        )
+            detail=f"Backfill already in progress ({len(active_count)} jobs pending/running).")
 
     months = body.months if body else 60
     force = body.force if body else False
 
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
-        org_id=ctx.org_id,
+
         field_id=field_id,
         type="backfill",
         status="pending",
@@ -484,9 +458,7 @@ async def backfill_field_indices(
             "sentinel": True,
             "allow_agri": is_agri,
             "force": force,
-        },
-        created_by=ctx.user.id,
-    )
+        })
     db.add(sentinel)
     await db.flush()
 
@@ -501,7 +473,7 @@ async def backfill_field_indices(
 
     if is_agri:
         bridge_job = Job(
-            org_id=ctx.org_id,
+
             field_id=field_id,
             type="agri_bridge",
             status="pending",
@@ -510,9 +482,7 @@ async def backfill_field_indices(
                 "phase": "bridge",
                 "sentinel_job_id": str(sentinel.id),
                 "land_id": str(land_id) if land_id is not None else None,
-            },
-            created_by=ctx.user.id,
-        )
+            })
         db.add(bridge_job)
         await db.flush()
         extras["with_bridge"] = True
@@ -541,25 +511,21 @@ async def backfill_field_indices(
         type="satellite_analysis",
         field_id=str(field_id),
         land_id=str(land_id) if land_id is not None else None,
-        extras=extras,
-    )
+        extras=extras)
 
     return BackfillIndicesResponse(
         field_id=field_id,
         status="dispatched",
-        message=message,
-    )
+        message=message)
 
 
 @router.get(
     "/fields/{field_id}/backfill-status",
-    response_model=BackfillStatusResponse,
-)
+    response_model=BackfillStatusResponse)
 async def get_backfill_status(
     field_id: uuid.UUID,
     ctx: OrgContext = Depends(get_org_context),
-    db: AsyncSession = Depends(get_db),
-):
+    db: AsyncSession = Depends(get_db)):
     """Check current-wave backfill progress for this field.
 
     Counts are scoped to the latest sentinel wave (or last 48h). Stale
@@ -568,7 +534,7 @@ async def get_backfill_status(
     from sqlalchemy import func, select as sa_select
 
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
     stale_n = await _fail_stale_backfill_jobs(db, field_id)
@@ -584,13 +550,11 @@ async def get_backfill_status(
                 func.count().filter(Job.status == "pending").label("pending"),
                 func.count().filter(Job.status == "running").label("running"),
                 func.count().filter(Job.status == "completed").label("completed"),
-                func.count().filter(Job.status == "failed").label("failed"),
-            ).where(
+                func.count().filter(Job.status == "failed").label("failed")).where(
                 Job.field_id == field_id,
                 Job.params_json["is_backfill"].as_boolean().is_(True),
                 Job.created_at >= wave_start,
-                Job.type.notin_(["backfill", "agri_bridge"]),
-            )
+                Job.type.notin_(["backfill", "agri_bridge"]))
         )
     ).one()
 
@@ -607,8 +571,7 @@ async def get_backfill_status(
                 Job.field_id == field_id,
                 Job.type == "agri_bridge",
                 Job.params_json["is_backfill"].as_boolean().is_(True),
-                Job.created_at >= wave_start,
-            )
+                Job.created_at >= wave_start)
             .order_by(Job.created_at.desc())
             .limit(1)
         )
@@ -665,8 +628,7 @@ async def get_backfill_status(
         completed=completed,
         failed=failed,
         total=max(total_jobs, denom),
-        percent=percent,
-    )
+        percent=percent)
 
     return BackfillStatusResponse(
         field_id=field_id,
@@ -678,20 +640,17 @@ async def get_backfill_status(
         total_jobs=max(total_jobs, denom),
         percent=round(percent, 1),
         phase=phase if has_active_flag else ("done" if phase == "done" else "idle"),
-        message=message,
-    )
+        message=message)
 
 
 @router.post(
     "/admin/backfill-all-fields",
-    status_code=status.HTTP_202_ACCEPTED,
-)
+    status_code=status.HTTP_202_ACCEPTED)
 async def backfill_all_fields(
     request: Request,
     body: BackfillIndicesRequest | None = None,
     ctx: OrgContext = Depends(require_roles("owner")),
-    db: AsyncSession = Depends(get_db),
-):
+    db: AsyncSession = Depends(get_db)):
     """Trigger backfill for ALL active fields (owner only, one-time migration)."""
     months = body.months if body else 60
 
@@ -699,8 +658,7 @@ async def backfill_all_fields(
 
     send_task(
         "app.tasks.backfill.backfill_all_existing_fields",
-        kwargs={"months": months},
-    )
+        kwargs={"months": months})
 
     return {
         "status": "dispatched",
@@ -710,13 +668,11 @@ async def backfill_all_fields(
 
 @router.post(
     "/admin/ensure-agri-soil-weather",
-    status_code=status.HTTP_202_ACCEPTED,
-)
+    status_code=status.HTTP_202_ACCEPTED)
 async def ensure_agri_soil_weather(
     ctx: OrgContext = Depends(require_roles("owner")),
     db: AsyncSession = Depends(get_db),
-    farm_id: uuid.UUID | None = Query(None, description="Optional farm filter"),
-):
+    farm_id: uuid.UUID | None = Query(None, description="Optional farm filter")):
     """Enqueue soil + weather backfill for agri-tagged fields in this org.
 
     Does not touch RS / COG backfill. Geom sync (if missing) is handled by
@@ -729,9 +685,8 @@ async def ensure_agri_soil_weather(
     from app.models.tables import SoilFieldSummary
 
     q = sa_select(Field).where(
-        Field.org_id == ctx.org_id,
-        Field.deleted_at.is_(None),
-    )
+        org_scope(None, ctx),
+        Field.deleted_at.is_(None))
     if farm_id is not None:
         q = q.where(Field.farm_id == farm_id)
 
@@ -773,8 +728,7 @@ async def ensure_agri_soil_weather(
         if need_weather:
             send_task(
                 "app.tasks.weather.backfill_weather_for_field",
-                args=[str(field.id)],
-            )
+                args=[str(field.id)])
             weather_enqueued += 1
 
         items.append(
@@ -789,11 +743,10 @@ async def ensure_agri_soil_weather(
 
     logger.info(
         "ensure_agri_soil_weather",
-        org_id=str(ctx.org_id),
+
         scanned=scanned,
         soil_enqueued=soil_enqueued,
-        weather_enqueued=weather_enqueued,
-    )
+        weather_enqueued=weather_enqueued)
     return {
         "status": "dispatched",
         "scanned": scanned,

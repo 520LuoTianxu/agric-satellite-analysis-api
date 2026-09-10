@@ -28,8 +28,7 @@ from app.models.tables import (
     Job,
     SoilFieldSummary,
     SoilLayer,
-    SoilProfile,
-)
+    SoilProfile)
 from app.worker import celery_app
 from app.core.soil_intelligence import evaluate_soil_alerts
 
@@ -181,8 +180,7 @@ def _fetch_wcs_pixel(
                     "soilgrids_wcs_error",
                     status=resp.status_code,
                     coverage=params.get("COVERAGEID"),
-                    attempt=attempt + 1,
-                )
+                    attempt=attempt + 1)
                 continue
 
             # Check if response is actually a TIFF (not an XML error)
@@ -191,8 +189,7 @@ def _fetch_wcs_pixel(
                 logger.warning(
                     "soilgrids_wcs_non_tiff",
                     content_type=content_type,
-                    coverage=params.get("COVERAGEID"),
-                )
+                    coverage=params.get("COVERAGEID"))
                 continue
 
             with rasterio.open(io.BytesIO(resp.content)) as ds:
@@ -212,8 +209,7 @@ def _fetch_wcs_pixel(
                 coverage=params.get("COVERAGEID"),
                 attempt=attempt + 1,
                 wait_s=wait,
-                error=str(exc),
-            )
+                error=str(exc))
             if attempt < max_retries - 1:
                 import time
 
@@ -221,8 +217,7 @@ def _fetch_wcs_pixel(
         except Exception:
             logger.exception(
                 "soilgrids_wcs_unexpected",
-                coverage=params.get("COVERAGEID"),
-            )
+                coverage=params.get("COVERAGEID"))
             break
 
     return None
@@ -296,8 +291,7 @@ def _fetch_polaris_s3(lat: float, lon: float) -> dict:
                         "polaris_s3_read_error",
                         property=prop_key,
                         depth=depth_label,
-                        stat=stat,
-                    )
+                        stat=stat)
 
     return results
 
@@ -532,8 +526,7 @@ def _apply_rosetta_to_layers(layers: list[dict], source: str) -> list[dict]:
             layer.get("fc_vol_pct"),
             layer.get("wp_vol_pct"),
             layer["depth_top_cm"],
-            layer["depth_bottom_cm"],
-        )
+            layer["depth_bottom_cm"])
 
     return layers
 
@@ -553,8 +546,7 @@ def _compute_layer_awc_mm(
     fc_vol_pct: float | None,
     wp_vol_pct: float | None,
     depth_top: int,
-    depth_bottom: int,
-) -> float | None:
+    depth_bottom: int) -> float | None:
     """Compute AWC in mm for a specific layer thickness."""
     awc_per_cm = _compute_awc(fc_vol_pct, wp_vol_pct)
     if awc_per_cm is None:
@@ -1008,16 +1000,14 @@ def _build_layers_from_data(data: dict, source: str) -> list[dict]:
         layer["texture_class"] = _classify_texture(
             layer.get("sand_pct"),
             layer.get("silt_pct"),
-            layer.get("clay_pct"),
-        )
+            layer.get("clay_pct"))
 
         # AWC
         layer["awc_mm"] = _compute_layer_awc_mm(
             layer.get("fc_vol_pct"),
             layer.get("wp_vol_pct"),
             d_top,
-            d_bot,
-        )
+            d_bot)
 
         layers.append(layer)
 
@@ -1051,14 +1041,12 @@ def _update_soil_job(session, job: Job | None, step: str, status: str = "running
     bind=True,
     max_retries=2,
     time_limit=300,
-    soft_time_limit=240,
-)
+    soft_time_limit=240)
 def fetch_soil_for_field(
     self,
     field_id: str,
     job_id: str | None = None,
-    mq_task_id: str | None = None,
-) -> dict:
+    mq_task_id: str | None = None) -> dict:
     """Fetch soil data for a field and store profile + layers + summary.
 
     When ``mq_task_id`` is set (CloudAMQP soil_fetch), publish ResultMessage
@@ -1072,8 +1060,7 @@ def fetch_soil_for_field(
         *,
         error: str | None = None,
         extras: dict | None = None,
-        payload: dict | None = None,
-    ) -> None:
+        payload: dict | None = None) -> None:
         if not mq_task_id:
             return
         try:
@@ -1087,15 +1074,13 @@ def fetch_soil_for_field(
                 extras={"source": "soil_fetch", **(extras or {})},
                 payload=payload,
                 collect_parcel_urls=False,
-                upload_summary_if_empty=False,
-            )
+                upload_summary_if_empty=False)
         except Exception as e:
             logger.warning(
                 "soil_mq_result_publish_failed",
                 field_id=field_id,
                 mq_task_id=mq_task_id,
-                error=str(e),
-            )
+                error=str(e))
 
     try:
         # Load optional job for progress tracking
@@ -1138,8 +1123,7 @@ def fetch_soil_for_field(
             "soil_fetch_start",
             field_id=field_id,
             lat=lat,
-            lon=lon,
-        )
+            lon=lon)
 
         source = _determine_source(lat, lon)
         resolution = 30 if source == "polaris" else 250
@@ -1165,8 +1149,7 @@ def fetch_soil_for_field(
             _publish_soil_mq(
                 "failed",
                 error=f"No soil data from {source}",
-                extras={"source_name": source},
-            )
+                extras={"source_name": source})
             return {"status": "error", "message": f"No soil data from {source}"}
 
         _update_soil_job(session, job, "data_fetch", "completed")
@@ -1213,7 +1196,7 @@ def fetch_soil_for_field(
 
         # Create new profile
         profile = SoilProfile(
-            org_id=field.org_id,
+
             field_id=field.id,
             source=source,
             source_resolution_m=resolution,
@@ -1222,8 +1205,7 @@ def fetch_soil_for_field(
                 "centroid_lat": lat,
                 "centroid_lon": lon,
                 "properties_fetched": len(converted),
-            },
-        )
+            })
         session.add(profile)
         session.flush()
 
@@ -1256,8 +1238,7 @@ def fetch_soil_for_field(
                 soc_q05=ld.get("soc_q05"),
                 soc_q95=ld.get("soc_q95"),
                 ksat_q05=ld.get("ksat_q05"),
-                ksat_q95=ld.get("ksat_q95"),
-            )
+                ksat_q95=ld.get("ksat_q95"))
             session.add(soil_layer)
         session.flush()
 
@@ -1276,8 +1257,7 @@ def fetch_soil_for_field(
             rooting_constraint=summary_data.get("rooting_constraint"),
             waterlogging_risk=summary_data.get("waterlogging_risk"),
             topsoil_soc_stock_t_ha=summary_data.get("topsoil_soc_stock_t_ha"),
-            data_quality_score=quality,
-        )
+            data_quality_score=quality)
         # Upsert: delete old summary first
         session.execute(
             delete(SoilFieldSummary).where(
@@ -1289,16 +1269,14 @@ def fetch_soil_for_field(
         # Audit event
         session.add(
             AuditEvent(
-                org_id=field.org_id,
-                user_id=field.created_by,
+
                 event_type="soil_profile_created",
                 metadata_json={
                     "field_id": field_id,
                     "source": source,
                     "resolution_m": resolution,
                     "layers": len(layer_dicts),
-                },
-            )
+                })
         )
 
         session.commit()
@@ -1310,7 +1288,7 @@ def fetch_soil_for_field(
             for candidate in alert_candidates:
                 alert = Alert(
                     field_id=field.id,
-                    org_id=field.org_id,
+
                     date=today,
                     severity=candidate.severity,
                     rule_name=candidate.rule_name,
@@ -1321,16 +1299,14 @@ def fetch_soil_for_field(
                         "trigger_value": candidate.trigger_value,
                         "threshold": candidate.threshold,
                         "layer_depth": candidate.layer_depth,
-                    },
-                )
+                    })
                 session.add(alert)
             if alert_candidates:
                 session.commit()
                 logger.info(
                     "soil_alerts_created",
                     field_id=field_id,
-                    count=len(alert_candidates),
-                )
+                    count=len(alert_candidates))
         except Exception:
             logger.warning(
                 "soil_alert_evaluation_failed", field_id=field_id, exc_info=True
@@ -1349,13 +1325,12 @@ def fetch_soil_for_field(
             field_id=field_id,
             source=source,
             layers=len(layer_dicts),
-            quality_score=quality,
-        )
+            quality_score=quality)
 
         soil_payload = {
             "kind": "soil_profile",
             "field_id": field_id,
-            "org_id": str(field.org_id),
+
             "profile": {
                 "source": source,
                 "source_resolution_m": resolution,
@@ -1375,8 +1350,7 @@ def fetch_soil_for_field(
                 "layers": len(layer_dicts),
                 "quality_score": quality,
             },
-            payload=soil_payload,
-        )
+            payload=soil_payload)
         return {
             "status": "success",
             "field_id": field_id,

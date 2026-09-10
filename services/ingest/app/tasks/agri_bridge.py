@@ -25,8 +25,7 @@ def _dispatch_agri_alerts(field_id: str, land_id: str | None = None) -> None:
         logger.warning(
             "agri_alerts_dispatch_failed",
             field_id=field_id,
-            error=str(e),
-        )
+            error=str(e))
 
 
 def _publish_mq_result(
@@ -37,8 +36,7 @@ def _publish_mq_result(
     land_id: str | None = None,
     error: str | None = None,
     extras: dict | None = None,
-    oss_urls: dict | None = None,
-) -> None:
+    oss_urls: dict | None = None) -> None:
     """Best-effort CloudAMQP ResultMessage publish (outer scheduling bus)."""
     try:
         from openfarm_common.mq_results import publish_task_result
@@ -52,14 +50,12 @@ def _publish_mq_result(
             extras=extras,
             oss_urls=oss_urls,
             collect_parcel_urls=True,
-            upload_summary_if_empty=not bool(oss_urls),
-        )
+            upload_summary_if_empty=not bool(oss_urls))
     except Exception as e:
         logger.warning(
             "mq_result_publish_failed",
             mq_task_id=mq_task_id,
-            error=str(e),
-        )
+            error=str(e))
 
 
 @celery_app.task(
@@ -67,14 +63,12 @@ def _publish_mq_result(
     bind=True,
     max_retries=2,
     time_limit=1800,
-    soft_time_limit=1500,
-)
+    soft_time_limit=1500)
 def bridge_field_stac_to_agri_task(
     self,
     field_id: str,
     land_id: str | None = None,
-    mq_task_id: str | None = None,
-) -> dict:
+    mq_task_id: str | None = None) -> dict:
     """Sample active-store (OSS) COGs for field and upsert agri lonlat_v1."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import bridge_field_stac_to_agri
 
@@ -85,8 +79,7 @@ def bridge_field_stac_to_agri_task(
             field_id=field_id,
             land_id=result.get("land_id"),
             upserted=result.get("upserted"),
-            skipped=result.get("skipped"),
-        )
+            skipped=result.get("skipped"))
         _dispatch_agri_alerts(field_id, land_id=result.get("land_id") or land_id)
         if mq_task_id:
             _publish_mq_result(
@@ -99,23 +92,20 @@ def bridge_field_stac_to_agri_task(
                     "source": "bridge_field",
                     "oss_key_count": len(result.get("oss_urls") or {}),
                 },
-                oss_urls=result.get("oss_urls") or None,
-            )
+                oss_urls=result.get("oss_urls") or None)
         return result
     except Exception as e:
         logger.error(
             "bridge_field_stac_to_agri_failed",
             field_id=field_id,
-            error=str(e),
-        )
+            error=str(e))
         if mq_task_id:
             _publish_mq_result(
                 mq_task_id,
                 status="failed",
                 field_id=field_id,
                 land_id=land_id,
-                error=str(e)[:500],
-            )
+                error=str(e)[:500])
         raise
 
 
@@ -127,15 +117,13 @@ def bridge_field_stac_to_agri_task(
     # Exists-probe loops over many COG keys routinely exceed 90s; keep retries
     # for unfinished backfill jobs but allow a longer soft window per attempt.
     time_limit=720,
-    soft_time_limit=600,
-)
+    soft_time_limit=600)
 def bridge_after_backfill(
     self,
     field_id: str,
     land_id: str | None = None,
     bridge_job_id: str | None = None,
-    mq_task_id: str | None = None,
-) -> dict:
+    mq_task_id: str | None = None) -> dict:
     """Wait until index backfill jobs finish, then bridge COGs → agri lonlat_v1.
 
     Also bridges immediately-available COGs on first attempt so existing
@@ -166,8 +154,7 @@ def bridge_after_backfill(
                 logger.warning(
                     "bridge_after_backfill_early_bridge_failed",
                     field_id=field_id,
-                    error=str(e),
-                )
+                    error=str(e))
 
         # Only wait on current-wave index jobs (not sentinel/bridge; not ancient stuck)
         wave_cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
@@ -181,8 +168,7 @@ def bridge_after_backfill(
                     Job.status.in_(["pending", "running"]),
                     Job.params_json["is_backfill"].as_boolean().is_(True),
                     Job.type.notin_(["backfill", "agri_bridge"]),
-                    Job.created_at >= wave_cutoff,
-                )
+                    Job.created_at >= wave_cutoff)
             )
             .scalars()
             .all()
@@ -192,16 +178,14 @@ def bridge_after_backfill(
                 "bridge_after_backfill_waiting",
                 field_id=field_id,
                 active=len(active),
-                retry=self.request.retries,
-            )
+                retry=self.request.retries)
             raise self.retry(countdown=60)
 
         result = bridge_field_stac_to_agri(field_id, land_id, quiet=True)
         logger.info(
             "bridge_after_backfill_complete",
             field_id=field_id,
-            upserted=result.get("upserted"),
-        )
+            upserted=result.get("upserted"))
         _dispatch_agri_alerts(field_id, land_id=land_id or result.get("land_id"))
         if bridge_job:
             bridge_job = session.get(Job, uuid.UUID(bridge_job_id))
@@ -225,8 +209,7 @@ def bridge_after_backfill(
                     "source": "bridge_after_backfill",
                     "oss_key_count": len(result.get("oss_urls") or {}),
                 },
-                oss_urls=result.get("oss_urls") or None,
-            )
+                oss_urls=result.get("oss_urls") or None)
         return result
     except Exception as e:
         # Don't mark failed on retry signals
@@ -250,8 +233,7 @@ def bridge_after_backfill(
                 status="failed",
                 field_id=field_id,
                 land_id=land_id,
-                error=str(e)[:500],
-            )
+                error=str(e)[:500])
         raise
     finally:
         session.close()

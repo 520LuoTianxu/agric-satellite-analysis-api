@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 UPSERT_WEATHER_SQL = """
 INSERT INTO weather_daily (
-  id, org_id, field_id, date, latitude, longitude,
+  id, field_id, date, latitude, longitude,
   temperature_2m_min, temperature_2m_max, temperature_2m_mean,
   precipitation_sum, et0_fao_mm,
   soil_temperature_0cm, soil_temperature_6cm,
@@ -32,7 +32,7 @@ INSERT INTO weather_daily (
   gdd_daily, gdd_cumulative, water_balance_30d_mm, drought_index,
   heat_stress_flag, source, model_used, updated_at
 ) VALUES (
-  :id, CAST(:org_id AS uuid), CAST(:field_id AS uuid), CAST(:date AS date),
+  :id, CAST(:field_id AS uuid), CAST(:date AS date),
   :latitude, :longitude,
   :temperature_2m_min, :temperature_2m_max, :temperature_2m_mean,
   :precipitation_sum, :et0_fao_mm,
@@ -306,7 +306,6 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                 continue
             params = {
                 "id": str(uuid.uuid4()),
-                "org_id": row.get("org_id"),
                 "field_id": row.get("field_id") or payload.get("field_id"),
                 "date": row.get("date"),
                 "latitude": row.get("latitude"),
@@ -337,7 +336,7 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                 "source": row.get("source") or "open-meteo",
                 "model_used": row.get("model_used"),
             }
-            if not params["field_id"] or not params["date"] or not params["org_id"]:
+            if not params["field_id"] or not params["date"]:
                 continue
             session.execute(text(UPSERT_WEATHER_SQL), params)
             n += 1
@@ -353,12 +352,11 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
 def apply_soil_payload(payload: dict[str, Any]) -> None:
     """Replace soil profile/layers/summary for field from inline payload."""
     field_id = payload.get("field_id")
-    org_id = payload.get("org_id")
     profile = payload.get("profile") or {}
     layers = payload.get("layers") or []
     summary = payload.get("summary") or {}
-    if not field_id or not org_id:
-        raise ValueError("soil_profile payload missing field_id/org_id")
+    if not field_id:
+        raise ValueError("soil_profile payload missing field_id")
 
     session = SyncSession()
     try:
@@ -395,10 +393,10 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             text(
                 """
                 INSERT INTO soil_profiles (
-                  id, org_id, field_id, source, source_resolution_m,
+                  id, field_id, source, source_resolution_m,
                   fetched_at, metadata_json
                 ) VALUES (
-                  CAST(:id AS uuid), CAST(:org_id AS uuid), CAST(:field_id AS uuid),
+                  CAST(:id AS uuid), CAST(:field_id AS uuid),
                   :source, :resolution, CAST(:fetched_at AS timestamptz),
                   CAST(:metadata AS jsonb)
                 )
@@ -406,7 +404,6 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             ),
             {
                 "id": profile_id,
-                "org_id": org_id,
                 "field_id": field_id,
                 "source": profile.get("source") or "soilgrids",
                 "resolution": profile.get("source_resolution_m"),

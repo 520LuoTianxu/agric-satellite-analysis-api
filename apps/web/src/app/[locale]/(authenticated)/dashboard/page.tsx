@@ -2,9 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { Link } from "@/i18n/navigation";
-import { useOrg } from "@/components/org-context";
-import { farmsApi, orgsApi, alertsApi } from "@/lib/api";
-import type { Farm, OrgDetail, Alert, Field } from "@/lib/api";
+import { farmsApi, alertsApi } from "@/lib/api";
+import type { Farm, Alert, Field } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -39,8 +38,6 @@ interface FarmStats {
 
 export default function DashboardPage() {
     const t = useTranslations("dashboard");
-    const { currentOrg, loading: orgLoading } = useOrg();
-    const [orgDetail, setOrgDetail] = useState<OrgDetail | null>(null);
     const [farms, setFarms] = useState<Farm[]>([]);
     const [farmStats, setFarmStats] = useState<Record<string, FarmStats>>({});
     const [openAlerts, setOpenAlerts] = useState<Alert[]>([]);
@@ -48,19 +45,16 @@ export default function DashboardPage() {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (!currentOrg) return;
-
+        
         let cancelled = false;
         (async () => {
             setLoading(true);
             try {
-                const [detail, farmRes, alertRes] = await Promise.all([
-                    orgsApi.get(currentOrg.id),
+                const [farmRes, alertRes] = await Promise.all([
                     farmsApi.list(10, 0),
                     alertsApi.list({ status: "open", limit: 10 }),
                 ]);
                 if (cancelled) return;
-                setOrgDetail(detail);
                 setFarms(farmRes.items);
                 setOpenAlerts(alertRes.items);
                 // The list is capped at 10 rows; the metric must count them all.
@@ -97,9 +91,9 @@ export default function DashboardPage() {
         })();
 
         return () => { cancelled = true; };
-    }, [currentOrg]);
+    }, []);
 
-    if (orgLoading || loading) {
+    if (loading) {
         return (
             <div className="p-6 lg:p-8 max-w-6xl mx-auto">
                 <div className="mb-8 space-y-2">
@@ -128,7 +122,7 @@ export default function DashboardPage() {
             <div className="mb-8">
                 <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
                 <p className="mt-1 text-[13px] text-muted-foreground">
-                    {t("welcomeTo", { orgName: currentOrg?.name ?? "" })}
+                    {t("welcomeTo", { orgName: "" })}
                 </p>
             </div>
 
@@ -138,18 +132,13 @@ export default function DashboardPage() {
                 <StatCard
                     icon={<Tractor className="h-5 w-5 text-primary" />}
                     label={t("farms")}
-                    value={orgDetail?.farm_count ?? 0}
+                    value={farms.length}
                 />
                 <StatCard
                     icon={<Map className="h-5 w-5 text-primary" />}
                     label={t("fields")}
-                    value={orgDetail?.field_count ?? 0}
+                    value={Object.values(farmStats).reduce((s, x) => s + x.fieldCount, 0)}
                     sublabel={t("acrossAllFarms")}
-                />
-                <StatCard
-                    icon={<Users className="h-5 w-5 text-primary" />}
-                    label={t("members")}
-                    value={orgDetail?.member_count ?? 0}
                 />
                 <StatCard
                     icon={<Bell className="h-5 w-5 text-primary" />}
@@ -201,7 +190,7 @@ export default function DashboardPage() {
                                             fieldCountLabel={(count) => t("fieldCount", { count })}
                                         />
                                     ))}
-                                    {(orgDetail?.farm_count ?? 0) > FARM_PREVIEW && (
+                                    {farms.length > FARM_PREVIEW && (
                                         <Link
                                             href="/farms"
                                             className="mt-1 inline-flex items-center gap-1 text-[13px] font-medium text-primary hover:text-primary/80"

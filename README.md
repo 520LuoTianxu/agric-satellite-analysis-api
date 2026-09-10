@@ -22,7 +22,7 @@ This repository is a fork of **[OpenFarm](https://github.com/superzero11/OpenFar
 
 本仓库第一版在 OpenFarm 全栈之上加入：
 
-- Google OAuth 登录，以及可选 Demo 登录（`ENABLE_DEMO_LOGIN`）
+- ~~Google OAuth / Demo 登录~~（OpenFarm auth 已移除，见 `services/api/AUTH_REMOVAL.md`；独立登录后续再加）
 - next-intl 简体中文（默认语言 `zh`）
 
 ---

@@ -1,23 +1,30 @@
-"""JWT authentication and RBAC dependencies."""
+"""Auth dependencies — OpenFarm login/orgs removed; anonymous bypass.
+
+Independent login will be added later. Until then every route is open:
+JWT and X-Org-Id are ignored, role checks always pass, and org scoping
+is disabled.
+"""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException, status
-from jose import JWTError, jwt
-from sqlalchemy import select
+from fastapi import Depends, Header
+from sqlalchemy import ColumnElement, true as sql_true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.database import get_db
+
+AUTH_DISABLED = True
+
+ANON_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 @dataclass
 class CurrentUser:
-    """Authenticated user extracted from JWT."""
+    """Anonymous stand-in until independent auth is added."""
 
     id: uuid.UUID
     email: str
@@ -26,44 +33,34 @@ class CurrentUser:
 
 @dataclass
 class OrgContext:
-    """Validated org context for the request."""
+    """Legacy request context; org_id is always None after auth removal."""
 
     user: CurrentUser
-    org_id: uuid.UUID
-    role: str  # owner | admin | member | viewer
+    org_id: uuid.UUID | None
+    role: str
+
+
+ANON_USER = CurrentUser(
+    id=ANON_USER_ID,
+    email="anonymous@local",
+    name="Anonymous",
+)
+
+
+def org_matches(*_args: Any, **_kwargs: Any) -> bool:
+    """Org scoping removed — all rows visible."""
+    return True
+
+
+def org_scope(_column: Any = None, _ctx: OrgContext | None = None) -> ColumnElement[bool]:
+    """Org scoping removed — no-op SQL filter."""
+    return sql_true()
 
 
 async def get_current_user(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> CurrentUser:
-    """Extract and validate JWT from Authorization header."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
-        )
-
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        payload = jwt.decode(
-            token, settings.openfarm_jwt_secret, algorithms=[settings.jwt_algorithm]
-        )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
-        )
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing subject"
-        )
-
-    return CurrentUser(
-        id=uuid.UUID(user_id),
-        email=payload.get("email", ""),
-        name=payload.get("name", ""),
-    )
+    return ANON_USER
 
 
 async def get_org_context(
@@ -71,56 +68,13 @@ async def get_org_context(
     db: Annotated[AsyncSession, Depends(get_db)],
     x_org_id: Annotated[str | None, Header(alias="X-Org-Id")] = None,
 ) -> OrgContext:
-    """Validate X-Org-Id header and check membership."""
-    if not x_org_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Org-Id header is required",
-        )
-
-    try:
-        org_uuid = uuid.UUID(x_org_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid X-Org-Id format"
-        )
-
-    # Check membership. The join to Org is what stops a soft-deleted
-    # workspace from staying fully reachable: membership rows survive the
-    # delete, so checking OrgMember alone would still let every
-    # org-scoped endpoint through.
-    from app.models.tables import Org, OrgMember
-
-    result = await db.execute(
-        select(OrgMember.role)
-        .join(Org, Org.id == OrgMember.org_id)
-        .where(
-            OrgMember.org_id == org_uuid,
-            OrgMember.user_id == user.id,
-            Org.deleted_at.is_(None),
-        )
-    )
-    row = result.scalar_one_or_none()
-
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not a member of this org"
-        )
-
-    return OrgContext(user=user, org_id=org_uuid, role=row)
+    return OrgContext(user=user, org_id=None, role="owner")
 
 
-def require_roles(*allowed_roles: str):
-    """Dependency factory - restrict endpoint to specific roles."""
-
+def require_roles(*_allowed_roles: str):
     async def _check(
         ctx: Annotated[OrgContext, Depends(get_org_context)],
     ) -> OrgContext:
-        if ctx.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role '{ctx.role}' not permitted. Required: {', '.join(allowed_roles)}",
-            )
         return ctx
 
     return _check

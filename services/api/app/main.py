@@ -62,7 +62,7 @@ app.add_middleware(
     allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Org-Id"],
+    allow_headers=["Authorization", "Content-Type"],
     max_age=3600,
 )
 

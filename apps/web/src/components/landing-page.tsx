@@ -1,9 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Link } from "@/i18n/navigation";
 import { useTranslations } from "next-intl";
-import { useSearchParams } from "next/navigation";
 import {
     Leaf,
     ArrowRight,
@@ -20,7 +18,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LanguageSwitcher } from "@/components/language-switcher";
-import { SignInModal } from "@/components/sign-in-modal";
 import { FieldOutline, FieldRaster, IMAGERY, IMAGERY_FLAT } from "@/components/marketing/scene";
 import { BUILT_WITH } from "@/components/marketing/brand-marks";
 import { FAQ_IDS } from "@/lib/faq";
@@ -165,20 +162,11 @@ function Plane({
 /*  Component                                                           */
 /* ------------------------------------------------------------------ */
 
-export function LandingPage({ isAuthenticated = false }: { isAuthenticated?: boolean }) {
+export function LandingPage({ isAuthenticated = true }: { isAuthenticated?: boolean }) {
     const t = useTranslations("landing");
     const tf = useTranslations("faq");
     const tc = useTranslations("common");
-    const searchParams = useSearchParams();
-    const [signInOpen, setSignInOpen] = useState(false);
-
-    useEffect(() => {
-        if (searchParams.get("signin") === "true" && !isAuthenticated) {
-            setSignInOpen(true);
-        }
-    }, [searchParams, isAuthenticated]);
-
-    const openApp = () => setSignInOpen(true);
+    const openApp = () => { window.location.href = "/dashboard"; };
 
     const NAV = [
         { href: "#how-it-works", label: t("navHow") },
@@ -241,8 +229,7 @@ export function LandingPage({ isAuthenticated = false }: { isAuthenticated?: boo
 
     return (
         <div className="flex min-h-screen flex-col bg-background text-foreground">
-            {!isAuthenticated && <SignInModal open={signInOpen} onOpenChange={setSignInOpen} />}
-
+            
             {/* ── Navbar ─────────────────────────────────────────── */}
             <header className="sticky top-0 z-50 border-b bg-background/90 backdrop-blur">
                 <nav className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-6 px-6">
