@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     soilgrids_wcs_base_url: str = "https://maps.isric.org/mapserv"
     polaris_s3_bucket: str = "polaris-soil-data"
     soil_fetch_timeout_seconds: int = 60
+    # Concurrent SoilGrids WCS GetCoverage calls (props × depths × quantiles).
+    soil_fetch_max_workers: int = 12
     soil_source_priority: str = "auto"  # auto | soilgrids | polaris
 
     # Email (Resend)

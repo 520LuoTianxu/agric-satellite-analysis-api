@@ -9,6 +9,7 @@ import io
 import math
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import httpx
@@ -126,6 +127,9 @@ def _fetch_soilgrids_wcs(lat: float, lon: float, buffer_m: int = 500) -> dict:
 
     Returns dict keyed by (property_name, depth_label) with values being
     dicts of {"mean": float, "Q0.05": float, "Q0.95": float}.
+
+    Requests are issued concurrently (ThreadPoolExecutor) because SoilGrids
+    needs ~180 GetCoverage calls (10 props × 6 depths × 3 quantiles).
     """
     # Transform WGS84 to Homolosine (EPSG:152160) used by SoilGrids WCS
     transformer = Transformer.from_crs("EPSG:4326", "ESRI:54052", always_xy=True)
@@ -139,13 +143,14 @@ def _fetch_soilgrids_wcs(lat: float, lon: float, buffer_m: int = 500) -> dict:
 
     results: dict = {}
     timeout = settings.soil_fetch_timeout_seconds
+    workers = max(1, int(getattr(settings, "soil_fetch_max_workers", 12) or 12))
+    wcs_url = settings.soilgrids_wcs_base_url
 
+    jobs: list[tuple[str, str, str, dict]] = []
     for prop_key, map_name in SOILGRIDS_PROPERTIES:
         for depth_label in _DEPTH_LABELS:
             for quantile in ["mean", "Q0.05", "Q0.95"]:
                 coverage_id = f"{prop_key}_{depth_label}_{quantile}"
-                wcs_url = settings.soilgrids_wcs_base_url
-
                 params = {
                     "map": f"/map/{map_name}.map",
                     "SERVICE": "WCS",
@@ -157,14 +162,49 @@ def _fetch_soilgrids_wcs(lat: float, lon: float, buffer_m: int = 500) -> dict:
                     "SUBSETY": f"Y({y_min},{y_max})",
                     "SUBSETTINGCRS": "http://www.opengis.net/def/crs/EPSG/0/152160",
                 }
+                jobs.append((prop_key, depth_label, quantile, params))
 
-                value = _fetch_wcs_pixel(wcs_url, params, timeout)
-                if value is not None:
-                    key = (prop_key, depth_label)
-                    if key not in results:
-                        results[key] = {}
-                    results[key][quantile] = value
+    logger.info(
+        "soilgrids_wcs_parallel_start",
+        requests=len(jobs),
+        workers=workers,
+        lat=lat,
+        lon=lon,
+    )
 
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(_fetch_wcs_pixel, wcs_url, params, timeout): (
+                prop_key,
+                depth_label,
+                quantile,
+            )
+            for prop_key, depth_label, quantile, params in jobs
+        }
+        for fut in as_completed(future_map):
+            prop_key, depth_label, quantile = future_map[fut]
+            try:
+                value = fut.result()
+            except Exception:
+                logger.exception(
+                    "soilgrids_wcs_future_failed",
+                    property=prop_key,
+                    depth=depth_label,
+                    quantile=quantile,
+                )
+                continue
+            if value is not None:
+                key = (prop_key, depth_label)
+                if key not in results:
+                    results[key] = {}
+                results[key][quantile] = value
+
+    logger.info(
+        "soilgrids_wcs_parallel_done",
+        requests=len(jobs),
+        filled_keys=len(results),
+        workers=workers,
+    )
     return results
 
 
@@ -1040,8 +1080,9 @@ def _update_soil_job(session, job: Job | None, step: str, status: str = "running
     name="app.tasks.soil.fetch_soil_for_field",
     bind=True,
     max_retries=2,
-    time_limit=300,
-    soft_time_limit=240)
+    # Parallel WCS is much faster, but keep headroom for DB/MQ publish.
+    time_limit=600,
+    soft_time_limit=540)
 def fetch_soil_for_field(
     self,
     field_id: str,
