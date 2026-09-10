@@ -1,4 +1,4 @@
-# Local overrides (demo login, lower Celery concurrency, port publishes).
+# Local overrides (demo login, Celery concurrency, port publishes).
 # Default object store is Aliyun OSS (STORAGE_BACKEND=oss). MinIO is NOT started
 # unless you add --profile minio. Compose with:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.local.yml up -d
@@ -11,13 +11,13 @@ services:
       celery -A app.worker worker
       -Q ingest
       --loglevel=info
-      --concurrency=1
+      --concurrency=4
   storage:
     command: >
       celery -A app.worker worker
       -Q storage
       --loglevel=info
-      --concurrency=1
+      --concurrency=4
   db:
     ports:
       - "5432:5432"
