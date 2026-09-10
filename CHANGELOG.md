@@ -7,11 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.
+- The agri time-series panel marks historical drought days on the chart and date list.
 - Agri field satellite refresh now writes color-spot data directly after computing indices. It no longer stores large index image files in object storage. Existing stored images are left as-is; new runs do not add more.
 - Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 16 per job by default), so a field backfill finishes faster without adding more Celery workers.
 - A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed
+- Sentinel-1 agri scenes can now be written after STAC search. The previous unsigned radar download could not open the requester-pays archive, so jobs often finished with zero scenes saved. Set optional S1 AWS keys on the download host if radar is still missing.
 - Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.
 - Linking satellite index products to a field after backfill no longer fails on an internal formatting error.
 

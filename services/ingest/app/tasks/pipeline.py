@@ -42,6 +42,9 @@ STAC_API_URL = os.environ.get(
     "STAC_API_URL", "https://earth-search.aws.element84.com/v1"
 )
 STAC_COLLECTION = "sentinel-2-l2a"
+# STAC eo:cloud_cover filter (scene-level). Stricter than the 30% agri
+# product skip (parcel_cloud_cover_pct / drought display). Keep search
+# conservative; emit_optical still skips parcel-cloud metrics above 30%.
 MAX_CLOUD_COVER = 20
 # GDAL environment for reading remote COGs
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")

@@ -11,15 +11,13 @@ function computeNddi(ndvi, ndmi) {
 }
 function classifyDrought(ndvi, ndmi) {
   const nddi = computeNddi(ndvi, ndmi);
-  if (nddi == null) {
-    if (ndmi < -0.2) return "severe";
-    if (ndmi < 0) return "moderate";
-    if (ndmi < 0.1) return "mild";
+  if (nddi != null) {
+    if (nddi >= 0.5) return "severe";
+    if (nddi >= 0.4) return "moderate";
+    if (nddi >= 0.3) return "mild";
     return "normal";
   }
-  if (nddi >= 0.5 || ndmi < -0.2) return "severe";
-  if (nddi >= 0.3 || ndmi < 0) return "moderate";
-  if (nddi >= 0.1 || ndmi < 0.1) return "mild";
+  if (ndmi < -0.2) return "severe";
   return "normal";
 }
 function classifyFlood(vv, vh) {

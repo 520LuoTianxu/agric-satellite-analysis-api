@@ -21,6 +21,11 @@ import {
     sensorForIndex,
     AGRI_MODE_LABELS,
     AGRI_PRIMARY_MODES,
+    DROUGHT_CLASS_STYLE,
+    DROUGHT_CLOUD_MAX_PCT,
+    droughtClassFromAvgs,
+    isDroughtDayClass,
+    type AgriDroughtClass,
     type AgriHeatIndex,
     type AgriHeatmapImage,
 } from "@/lib/agri-heatmap";
@@ -149,7 +154,7 @@ const SERIES_META: Record<
         sensor: "S2",
         avgKey: null,
         chartKey: "ndvi_avg",
-        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007；低 NDMI 为补",
+        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007；云量>30% 的日期不参与干旱",
     },
     flood: {
         label: "洪涝",
@@ -178,6 +183,7 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
     const byDate = new Map<string, number[]>();
     for (const s of scenes) {
         if (s.sensor !== meta.sensor) continue;
+        if (key === "drought" && !isLowCloud(s)) continue;
         const v = s[avgKey];
         if (typeof v !== "number" || Number.isNaN(v)) continue;
         const arr = byDate.get(s.date) ?? [];
@@ -217,16 +223,16 @@ function sceneSeriesAvg(scene: AgriSceneProduct, key: SeriesKey): number | null 
 }
 
 function isLowCloud(scene: AgriSceneProduct): boolean {
-    if (scene.cloud_cover_over_30 === false) return true;
     if (scene.cloud_cover_over_30 === true) return false;
+    if (scene.cloud_cover_over_30 === false) return true;
     if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
-        return scene.cloud_cover <= 30;
+        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
     }
     if (
         typeof scene.parcel_cloud_cover_pct === "number" &&
         Number.isFinite(scene.parcel_cloud_cover_pct)
     ) {
-        return scene.parcel_cloud_cover_pct <= 30;
+        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
     }
     return false;
 }
@@ -309,8 +315,9 @@ function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: Seri
     if (!scene || sensorForIndex(key) !== "S2") return false;
     const cloudy =
         scene.cloud_cover_over_30 === true ||
-        (typeof scene.cloud_cover === "number" && scene.cloud_cover > 30) ||
-        (typeof scene.parcel_cloud_cover_pct === "number" && scene.parcel_cloud_cover_pct > 30);
+        (typeof scene.cloud_cover === "number" && scene.cloud_cover > DROUGHT_CLOUD_MAX_PCT) ||
+        (typeof scene.parcel_cloud_cover_pct === "number" &&
+            scene.parcel_cloud_cover_pct > DROUGHT_CLOUD_MAX_PCT);
     const avg = sceneSeriesAvg(scene, key);
     const lowVeg = avg != null && avg <= 0.1;
     return cloudy || lowVeg;
@@ -633,6 +640,17 @@ export default function AgriTimeseriesPanel({
                     res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ??
                     res.items.find((s) => (s.pixel_data?.pixels?.length ?? 0) > 0) ??
                     res.items[0];
+                if (index === "drought" && scene && !isLowCloud(scene)) {
+                    cachedHeatmapRef.current = { date, index, img: null };
+                    setHeatmapMeta(null);
+                    publishHeatmap(null);
+                    if (enabledRef.current) {
+                        toast.message(t("cloudSkipDrought"), {
+                            description: `${date} · ${AGRI_MODE_LABELS[index]}`,
+                        });
+                    }
+                    return;
+                }
                 const lonlat = scene?.pixels_lonlat;
                 const grid = scene?.pixel_data;
                 if (!(lonlat?.length || grid?.pixels?.length)) {
@@ -705,7 +723,7 @@ export default function AgriTimeseriesPanel({
                 }
             }
         },
-        [landId, publishHeatmap],
+        [landId, publishHeatmap, t],
     );
     loadHeatmapRef.current = loadHeatmap;
 
@@ -826,6 +844,58 @@ export default function AgriTimeseriesPanel({
         }
         return recentDates;
     }, [recentDates, selectedDate, allDates]);
+
+    const droughtByDate = useMemo(() => {
+        const out: Record<string, AgriDroughtClass> = {};
+        for (const s of scenes) {
+            if (s.sensor !== "S2") continue;
+            if (!isLowCloud(s)) continue;
+            const cls = droughtClassFromAvgs(s.ndvi_avg, s.ndmi_avg);
+            if (cls && isDroughtDayClass(cls)) {
+                const prev = out[s.date];
+                if (!prev) {
+                    out[s.date] = cls;
+                    continue;
+                }
+                const rank: Record<AgriDroughtClass, number> = {
+                    normal: 0,
+                    mild: 1,
+                    moderate: 2,
+                    severe: 3,
+                };
+                if (rank[cls] > rank[prev]) out[s.date] = cls;
+            }
+        }
+        return out;
+    }, [scenes]);
+
+    const droughtEventMarks = useMemo(
+        () =>
+            Object.entries(droughtByDate)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([date, cls]) => ({
+                    date,
+                    label: DROUGHT_CLASS_STYLE[cls].label,
+                    level:
+                        cls === "severe"
+                            ? ("high" as const)
+                            : cls === "moderate"
+                              ? ("medium" as const)
+                              : ("low" as const),
+                })),
+        [droughtByDate],
+    );
+
+    const droughtDayCount = droughtEventMarks.length;
+    const clearS2Count = useMemo(() => {
+        const dates = new Set<string>();
+        for (const s of scenes) {
+            if (s.sensor === "S2" && isLowCloud(s) && typeof s.ndvi_avg === "number") {
+                dates.add(s.date);
+            }
+        }
+        return dates.size;
+    }, [scenes]);
 
     const cloudPctByDate = useMemo(() => {
         const sensor = sensorForIndex(series);
@@ -1152,6 +1222,9 @@ export default function AgriTimeseriesPanel({
                         {(series === "drought" || series === "flood") && (
                             <p className="text-[11px] text-muted-foreground leading-snug">
                                 {SERIES_META[series].hint}
+                                {series === "drought" && clearS2Count > 0
+                                    ? ` · ${t("droughtDaysCount", { drought: droughtDayCount, clear: clearS2Count })}`
+                                    : ""}
                             </p>
                         )}
                         {(series === "ndvi" || series === "evi" || series === "drought") && (
@@ -1198,6 +1271,11 @@ export default function AgriTimeseriesPanel({
                                     onDateSelect={(d) => selectDateExplicit(d)}
                                     height={220}
                                     indexType={chartIndexType}
+                                    eventMarks={
+                                        series === "drought" || series === "ndvi" || series === "ndmi"
+                                            ? droughtEventMarks
+                                            : undefined
+                                    }
                                 />
                             ) : (
                                 <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
@@ -1227,7 +1305,9 @@ export default function AgriTimeseriesPanel({
                                             const active = selectedDate === date;
                                             const chipCloud = active ? cloudCoverPct : cloudPctByDate[date];
                                             const chipOver30 =
-                                                typeof chipCloud === "number" && chipCloud > 30;
+                                                typeof chipCloud === "number" &&
+                                                chipCloud > DROUGHT_CLOUD_MAX_PCT;
+                                            const droughtCls = droughtByDate[date];
                                             return (
                                                 <Button
                                                     key={date}
@@ -1241,6 +1321,25 @@ export default function AgriTimeseriesPanel({
                                                     onClick={() => selectDateExplicit(date)}
                                                 >
                                                     {date.slice(5)}
+                                                    {droughtCls && (
+                                                        <span
+                                                            className={cn(
+                                                                "rounded px-0.5 text-[9px] font-medium",
+                                                                droughtCls === "severe" &&
+                                                                    "bg-danger-subtle text-sev-high",
+                                                                droughtCls === "moderate" &&
+                                                                    "bg-warning-subtle text-warning",
+                                                                droughtCls === "mild" &&
+                                                                    "bg-caution-subtle text-caution",
+                                                            )}
+                                                        >
+                                                            {droughtCls === "severe"
+                                                                ? t("droughtChip_severe")
+                                                                : droughtCls === "moderate"
+                                                                  ? t("droughtChip_moderate")
+                                                                  : t("droughtChip_mild")}
+                                                        </span>
+                                                    )}
                                                     {active && chipCloud != null && (
                                                         <span
                                                             className={cn(
@@ -1272,10 +1371,20 @@ export default function AgriTimeseriesPanel({
                                                 <SelectContent className="max-h-72">
                                                     {allDates.map((date) => {
                                                         const pct = cloudPctByDate[date];
+                                                        const droughtCls = droughtByDate[date];
+                                                        const droughtBit = droughtCls
+                                                            ? ` · ${
+                                                                  droughtCls === "severe"
+                                                                      ? t("droughtChip_severe")
+                                                                      : droughtCls === "moderate"
+                                                                        ? t("droughtChip_moderate")
+                                                                        : t("droughtChip_mild")
+                                                              }`
+                                                            : "";
                                                         const label =
                                                             pct != null
-                                                                ? `${date} · 云量 ${Math.round(pct)}%`
-                                                                : date;
+                                                                ? `${date} · ${t("cloudCover", { percent: Math.round(pct) })}${droughtBit}`
+                                                                : `${date}${droughtBit}`;
                                                         return (
                                                             <SelectItem
                                                                 key={date}

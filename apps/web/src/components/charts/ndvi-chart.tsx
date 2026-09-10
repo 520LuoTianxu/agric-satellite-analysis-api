@@ -51,6 +51,14 @@ export type GrowthStageBand = {
     color?: string;
 };
 
+export type ChartEventMark = {
+    date: string;
+    value?: number | null;
+    label: string;
+    /** high = severe, medium = moderate, low = mild */
+    level?: "high" | "medium" | "low";
+};
+
 interface NdviChartProps {
     stats: FieldStat[];
     /** Currently selected date (highlights point) */
@@ -73,6 +81,8 @@ interface NdviChartProps {
     stageBands?: GrowthStageBand[];
     /** NDVI below this in peak months → treat as likely bare / uncropped */
     bareThreshold?: number;
+    /** Timeline markers (e.g. historical drought days) */
+    eventMarks?: ChartEventMark[];
     /** Optional caption / legend note under chart is handled by parent */
 }
 
@@ -88,6 +98,7 @@ export default function NdviChart({
     peakMonths,
     stageBands,
     bareThreshold = 0.25,
+    eventMarks,
 }: NdviChartProps) {
     const config = INDEX_CONFIG[indexType];
     const seriesName = `Mean ${config.label}`;
@@ -209,6 +220,34 @@ export default function NdviChart({
             ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: "#3f6212" }, data: markAreaData }
             : undefined;
 
+        const valueByDate = new Map(stats.map((s) => [s.date, s.mean]));
+        const markPointOption =
+            eventMarks && eventMarks.length
+                ? {
+                      silent: true,
+                      symbol: "pin",
+                      symbolSize: 28,
+                      label: { show: false },
+                      data: eventMarks.map((m) => {
+                          const v =
+                              m.value != null && Number.isFinite(m.value)
+                                  ? m.value
+                                  : (valueByDate.get(m.date) ?? 0);
+                          const color =
+                              m.level === "high"
+                                  ? tokenColor("--sev-high")
+                                  : m.level === "medium"
+                                    ? tokenColor("--sev-medium")
+                                    : tokenColor("--sev-low");
+                          return {
+                              name: m.label,
+                              coord: [m.date, v],
+                              itemStyle: { color },
+                          };
+                      }),
+                  }
+                : undefined;
+
         return {
             grid: { top: hasWeather ? 36 : 18, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
             legend: hasWeather
@@ -295,6 +334,7 @@ export default function NdviChart({
                         data: [thresholdMarkLine(config.threshold, "Threshold")],
                     },
                     markArea: markAreaOption,
+                    markPoint: markPointOption,
                 },
                 // Weather overlay: daily precipitation bars on actual dates
                 ...(hasWeather
@@ -322,7 +362,7 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold]);
+    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks]);
 
     const onEvents = useMemo(
         () => ({

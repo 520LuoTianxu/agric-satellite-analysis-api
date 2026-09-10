@@ -884,6 +884,11 @@
     "pixelsMeta": " · {pixels} pixels",
     "meanMeta": " · mean≈{mean}",
     "cloudCover": "cloud {percent}%",
+    "droughtDaysCount": "{drought} drought days of {clear} clear scenes",
+    "cloudSkipDrought": "Cloud cover over 30%; drought is not computed for this date",
+    "droughtChip_mild": "mild",
+    "droughtChip_moderate": "mod",
+    "droughtChip_severe": "sev",
     "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
     "progressBridge": "Confirming agri lonlat is written…",
     "progressCounts": "Chunks {done}/{total} (running {running}, queued {pending})"
