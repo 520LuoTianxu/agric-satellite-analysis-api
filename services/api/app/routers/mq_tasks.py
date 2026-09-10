@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 from app.core.logging import logger
 
 router = APIRouter()
@@ -71,7 +71,7 @@ async def enqueue_mq_task(
         task_id=task_id,
         extras={
             **(body.extras or {}),
-            "org_id": str(ctx.org_id),
+            **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
             "enqueued_by": str(ctx.user.id),
         },
     )
@@ -82,7 +82,7 @@ async def enqueue_mq_task(
         type=body.type,
         field_id=body.field_id,
         parcel_id=body.parcel_id,
-        org_id=str(ctx.org_id),
+        org_id=str(ctx.org_id) if ctx.org_id else None,
     )
     return MqTaskEnqueued(
         task_id=task_id,

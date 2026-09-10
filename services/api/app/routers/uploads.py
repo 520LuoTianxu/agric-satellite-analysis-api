@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.logging import logger
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 from app.schemas.monitoring import PresignedUploadOut, PresignedUploadRequest
 
 router = APIRouter()
@@ -39,7 +39,8 @@ async def get_presigned_upload(
 
     # Generate unique object key
     ext = body.filename.rsplit(".", 1)[-1] if "." in body.filename else "jpg"
-    object_key = f"photos/{ctx.org_id}/{uuid.uuid4()}.{ext}"
+    org_seg = str(ctx.org_id) if ctx.org_id else "anon"
+    object_key = f"photos/{org_seg}/{uuid.uuid4()}.{ext}"
 
     url = get_storage().presigned_put(
         object_key,
@@ -47,5 +48,5 @@ async def get_presigned_upload(
         content_type=body.content_type,
     )
 
-    logger.info("presigned_upload", object_key=object_key, org_id=str(ctx.org_id))
+    logger.info("presigned_upload", object_key=object_key, org_id=org_seg)
     return PresignedUploadOut(upload_url=url, object_key=object_key)

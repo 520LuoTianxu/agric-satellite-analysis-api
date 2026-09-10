@@ -30,7 +30,7 @@ from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
 from app.core.crops import normalize_crop_key as _norm_crop
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import AuditEvent, Farm, Field, Job
 from app.schemas.farm import (
     BackfillIndicesRequest,
@@ -86,7 +86,7 @@ async def create_field(
 ):
     # Verify farm belongs to org
     farm = await db.get(Farm, body.farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
 
     try:
@@ -204,7 +204,7 @@ async def get_field(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
     return _field_to_out(field)
 
@@ -217,7 +217,7 @@ async def update_field(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     if body.name is not None:
@@ -269,7 +269,7 @@ async def delete_field(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
     field.deleted_at = datetime.now(timezone.utc)
     await db.flush()
@@ -284,7 +284,7 @@ async def import_fields(
 ):
     """Bulk import fields from GeoJSON file."""
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
 
     content = await file.read()
@@ -439,7 +439,7 @@ async def backfill_field_indices(
     from sqlalchemy import select as sa_select
 
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
@@ -568,7 +568,7 @@ async def get_backfill_status(
     from sqlalchemy import func, select as sa_select
 
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     stale_n = await _fail_stale_backfill_jobs(db, field_id)
@@ -729,7 +729,7 @@ async def ensure_agri_soil_weather(
     from app.models.tables import SoilFieldSummary
 
     q = sa_select(Field).where(
-        Field.org_id == ctx.org_id,
+        org_scope(Field.org_id, ctx),
         Field.deleted_at.is_(None),
     )
     if farm_id is not None:

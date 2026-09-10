@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.middleware.auth import OrgContext, get_org_context
+from app.middleware.auth import OrgContext, get_org_context, org_matches, org_scope
 from app.models.tables import FieldStat, RasterLayer
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import FieldStatOut, RasterLayerOut
@@ -88,7 +88,7 @@ async def list_layers(
 ):
     base = select(RasterLayer).where(
         RasterLayer.field_id == field_id,
-        RasterLayer.org_id == ctx.org_id,
+        org_scope(RasterLayer.org_id, ctx),
         RasterLayer.layer_type == type,
     )
     total = (
@@ -120,7 +120,7 @@ async def list_stats(
         .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
         .where(
             FieldStat.field_id == field_id,
-            FieldStat.org_id == ctx.org_id,
+            org_scope(FieldStat.org_id, ctx),
             RasterLayer.layer_type == type,
         )
     )
@@ -148,7 +148,7 @@ async def list_layer_types(
     result = await db.execute(
         select(distinct(RasterLayer.layer_type)).where(
             RasterLayer.field_id == field_id,
-            RasterLayer.org_id == ctx.org_id,
+            org_scope(RasterLayer.org_id, ctx),
         )
     )
     return sorted(result.scalars().all())

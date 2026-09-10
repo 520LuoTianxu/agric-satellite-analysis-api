@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Alert, Farm, Field
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import AlertOut, AlertSummaryOut, AlertUpdate
@@ -67,7 +67,7 @@ async def list_alerts(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    base = _with_context(select(Alert)).where(Alert.org_id == ctx.org_id)
+    base = _with_context(select(Alert)).where(org_scope(Alert.org_id, ctx))
     if field_id:
         base = base.where(Alert.field_id == field_id)
     if status_filter:
@@ -112,7 +112,7 @@ async def alerts_summary(
     rows = (
         await db.execute(
             select(Alert.severity, func.count())
-            .where(Alert.org_id == ctx.org_id, Alert.status == "open")
+            .where(org_scope(Alert.org_id, ctx), Alert.status == "open")
             .group_by(Alert.severity)
         )
     ).all()
@@ -134,7 +134,7 @@ async def list_field_alerts(
     offset: int = Query(0, ge=0),
 ):
     base = _with_context(select(Alert)).where(
-        Alert.org_id == ctx.org_id, Alert.field_id == field_id
+        org_scope(Alert.org_id, ctx), Alert.field_id == field_id
     )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
@@ -163,7 +163,7 @@ async def update_alert(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     alert = await db.get(Alert, alert_id)
-    if not alert or alert.org_id != ctx.org_id:
+    if not alert or not org_matches(alert.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Alert not found")
 
     if body.status not in ("open", "closed"):

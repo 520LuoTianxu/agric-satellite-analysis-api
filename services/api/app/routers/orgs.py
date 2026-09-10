@@ -14,10 +14,13 @@ from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.middleware.auth import (
+    AUTH_DISABLED,
     CurrentUser,
     OrgContext,
     get_current_user,
     get_org_context,
+    org_matches,
+    org_scope,
     require_roles,
 )
 from app.models.tables import (
@@ -59,6 +62,9 @@ async def list_orgs(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """List orgs for current user. Empty when OpenFarm auth is removed."""
+    if AUTH_DISABLED:
+        return []
     result = await db.execute(
         select(Org)
         .join(OrgMember, OrgMember.org_id == Org.id)
@@ -73,6 +79,11 @@ async def create_org(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    if AUTH_DISABLED:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="OpenFarm orgs/auth removed; independent login will be added later",
+        )
     org = Org(name=body.name, created_by=current_user.id)
     db.add(org)
     await db.flush()

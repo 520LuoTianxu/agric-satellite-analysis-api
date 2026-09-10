@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Field, ScoutingObservation, WeatherDaily
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import ScoutingCreate, ScoutingOut, ScoutingUpdate
@@ -94,7 +94,7 @@ async def list_scouting(
 ):
     base = select(ScoutingObservation).where(
         ScoutingObservation.field_id == field_id,
-        ScoutingObservation.org_id == ctx.org_id,
+        org_scope(ScoutingObservation.org_id, ctx),
     )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
@@ -122,7 +122,7 @@ async def create_scouting(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     try:
@@ -162,7 +162,7 @@ async def update_scouting(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     obs = await db.get(ScoutingObservation, obs_id)
-    if not obs or obs.org_id != ctx.org_id or obs.field_id != field_id:
+    if not obs or not org_matches(obs.org_id, ctx.org_id) or obs.field_id != field_id:
         raise HTTPException(status_code=404, detail="Scouting observation not found")
 
     if body.title is not None:
@@ -186,6 +186,6 @@ async def delete_scouting(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     obs = await db.get(ScoutingObservation, obs_id)
-    if not obs or obs.org_id != ctx.org_id or obs.field_id != field_id:
+    if not obs or not org_matches(obs.org_id, ctx.org_id) or obs.field_id != field_id:
         raise HTTPException(status_code=404, detail="Scouting observation not found")
     await db.delete(obs)

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Field, Job
 from app.schemas.monitoring import JobCreateIndex, JobCreateNDVI, JobOut
 from app.tasks.indices import INDEX_TASK_MAP
@@ -38,7 +38,7 @@ async def _create_index_job(
     from datetime import date as date_type
 
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     d_from = date_type.fromisoformat(date_from)
@@ -144,6 +144,6 @@ async def get_job(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     job = await db.get(Job, job_id)
-    if not job or job.org_id != ctx.org_id:
+    if not job or not org_matches(job.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Job not found")
     return job

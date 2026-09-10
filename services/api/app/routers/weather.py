@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Field, WeatherDaily
 from app.schemas.weather import (
     WeatherBackfillRequest,
@@ -48,7 +48,7 @@ async def _get_field_or_404(
     db: AsyncSession,
 ) -> Field:
     field = await db.get(Field, field_id)
-    if not field or field.org_id != org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, org_id):
         raise HTTPException(status_code=404, detail="Field not found")
     return field
 

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.core.logging import logger
 from app.core.storage import get_storage, parcel_product_prefix
 from app.tasks.storage_tasks import put_bytes_via_storage
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 
 router = APIRouter()
 

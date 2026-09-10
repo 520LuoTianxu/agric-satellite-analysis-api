@@ -19,7 +19,7 @@ from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import (
     Alert,
     AuditEvent,
@@ -250,7 +250,7 @@ async def list_share_links(
     result = await db.execute(
         select(ShareLink).where(
             ShareLink.field_id == field_id,
-            ShareLink.org_id == ctx.org_id,
+            org_scope(ShareLink.org_id, ctx),
             ShareLink.revoked_at.is_(None),
         )
     )
@@ -275,7 +275,7 @@ async def create_share_link(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     field = await db.get(Field, field_id)
-    if not field or field.org_id != ctx.org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Field not found")
 
     expires_at = None
@@ -322,7 +322,7 @@ async def revoke_share_link(
     result = await db.execute(
         select(ShareLink).where(
             ShareLink.field_id == field_id,
-            ShareLink.org_id == ctx.org_id,
+            org_scope(ShareLink.org_id, ctx),
             ShareLink.token == token,
         )
     )

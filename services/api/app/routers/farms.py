@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Farm, Field
 from app.schemas.common import PaginatedResponse
 from app.schemas.farm import FarmCreate, FarmOut, FarmUpdate, FieldOut
@@ -38,7 +38,7 @@ async def list_farms(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    base = select(Farm).where(Farm.org_id == ctx.org_id, _not_deleted())
+    base = select(Farm).where(org_scope(Farm.org_id, ctx), _not_deleted())
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
@@ -78,7 +78,7 @@ async def get_farm(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
     return farm
 
@@ -91,7 +91,7 @@ async def update_farm(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
 
     if body.name is not None:
@@ -115,7 +115,7 @@ async def delete_farm(
 ):
     """Soft-delete farm and cascade soft-delete all its fields."""
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
 
     now = datetime.now(timezone.utc)
@@ -141,7 +141,7 @@ async def list_farm_fields(
 ):
     # Verify farm access
     farm = await db.get(Farm, farm_id)
-    if not farm or farm.org_id != ctx.org_id or farm.deleted_at is not None:
+    if not farm or farm.deleted_at is not None or not org_matches(farm.org_id, ctx.org_id):
         raise HTTPException(status_code=404, detail="Farm not found")
 
     base = select(Field).where(Field.farm_id == farm_id, Field.deleted_at.is_(None))

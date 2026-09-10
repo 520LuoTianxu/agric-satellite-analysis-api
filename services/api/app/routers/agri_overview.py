@@ -26,7 +26,7 @@ from app.core.agri_classify import (
 )
 from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
-from app.middleware.auth import OrgContext, require_roles
+from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
 from app.schemas.agri import (
     OverviewChildOut,
     OverviewDroughtCounts,

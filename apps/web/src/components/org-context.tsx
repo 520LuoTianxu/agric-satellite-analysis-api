@@ -1,10 +1,8 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { toast } from "sonner";
 import { orgsApi, usersApi, setOrgId, getOrgId } from "@/lib/api";
 import type { Org, UserMe } from "@/lib/api";
-import { useTranslations } from "next-intl";
 
 interface OrgCtx {
     orgs: Org[];
@@ -26,8 +24,12 @@ const OrgContext = createContext<OrgCtx>({
 
 export const useOrg = () => useContext(OrgContext);
 
+/**
+ * Org/workspace provider.
+ * After OpenFarm auth removal, orgs list is empty and the app runs without
+ * a selected org (API no longer requires X-Org-Id).
+ */
 export function OrgProvider({ children }: { children: React.ReactNode }) {
-    const t = useTranslations("common");
     const [orgs, setOrgs] = useState<Org[]>([]);
     const [currentOrg, setCurrentOrg] = useState<Org | null>(null);
     const [user, setUser] = useState<UserMe | null>(null);
@@ -35,7 +37,10 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
 
     const fetchOrgs = useCallback(async () => {
         try {
-            const [orgList, me] = await Promise.all([orgsApi.list(), usersApi.me()]);
+            const [orgList, me] = await Promise.all([
+                orgsApi.list().catch(() => [] as Org[]),
+                usersApi.me().catch(() => null),
+            ]);
             setOrgs(orgList);
             setUser(me);
 
@@ -46,14 +51,18 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
             } else if (orgList.length > 0) {
                 setCurrentOrg(orgList[0]);
                 setOrgId(orgList[0].id);
+            } else {
+                setCurrentOrg(null);
             }
         } catch (err) {
-            console.error("Failed to fetch orgs:", err);
-            toast.error(t("failedLoadOrgs"));
+            console.warn("org provider: auth removed, continuing without orgs", err);
+            setOrgs([]);
+            setCurrentOrg(null);
+            setUser(null);
         } finally {
             setLoading(false);
         }
-    }, [t]);
+    }, []);
 
     useEffect(() => {
         fetchOrgs();

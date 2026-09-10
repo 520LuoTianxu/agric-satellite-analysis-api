@@ -16,7 +16,7 @@ from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.core.storage import get_storage
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
 from app.models.tables import Field, Job
 from app.schemas.monitoring import JobOut
 from pydantic import BaseModel, Field as PydanticField
@@ -37,7 +37,7 @@ _writer = require_roles("owner", "admin", "member")
 
 async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -> Field:
     field = await db.get(Field, field_id)
-    if not field or field.org_id != org_id or field.deleted_at is not None:
+    if not field or field.deleted_at is not None or not org_matches(field.org_id, org_id):
         raise HTTPException(status_code=404, detail="Field not found")
     return field
 
@@ -84,7 +84,7 @@ async def create_assessment_report(
         await db.execute(
             select(Job)
             .where(
-                Job.org_id == ctx.org_id,
+                org_scope(Job.org_id, ctx),
                 Job.field_id == field_id,
                 Job.type == "assessment_report",
                 Job.status.in_(("pending", "running")),
@@ -148,7 +148,7 @@ async def get_latest_assessment_report(
         await db.execute(
             select(Job)
             .where(
-                Job.org_id == ctx.org_id,
+                org_scope(Job.org_id, ctx),
                 Job.field_id == field_id,
                 Job.type == "assessment_report",
                 Job.status == "succeeded",
@@ -203,7 +203,7 @@ async def get_latest_assessment_meta(
         await db.execute(
             select(Job)
             .where(
-                Job.org_id == ctx.org_id,
+                org_scope(Job.org_id, ctx),
                 Job.field_id == field_id,
                 Job.type == "assessment_report",
             )

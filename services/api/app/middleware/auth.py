@@ -1,23 +1,33 @@
-"""JWT authentication and RBAC dependencies."""
+"""Auth dependencies — OpenFarm login/orgs removed; anonymous bypass.
+
+Independent login will be added later. Until then every route is open:
+JWT and X-Org-Id are ignored, role checks always pass, and org scoping
+is disabled (see org_scope / org_matches).
+"""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException, status
-from jose import JWTError, jwt
-from sqlalchemy import select
+from fastapi import Depends, Header
+from sqlalchemy import ColumnElement, true as sql_true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.database import get_db
+
+# Feature flag: OpenFarm users/orgs/auth fully bypassed.
+AUTH_DISABLED = True
+
+# Stable anonymous identity for optional created_by writes (no users row required
+# once user FKs are dropped by migration 0017).
+ANON_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 @dataclass
 class CurrentUser:
-    """Authenticated user extracted from JWT."""
+    """Authenticated user extracted from JWT (or anonymous when auth disabled)."""
 
     id: uuid.UUID
     email: str
@@ -26,17 +36,47 @@ class CurrentUser:
 
 @dataclass
 class OrgContext:
-    """Validated org context for the request."""
+    """Org context for the request (org_id is None when auth disabled)."""
 
     user: CurrentUser
-    org_id: uuid.UUID
+    org_id: uuid.UUID | None
     role: str  # owner | admin | member | viewer
+
+
+ANON_USER = CurrentUser(
+    id=ANON_USER_ID,
+    email="anonymous@local",
+    name="Anonymous",
+)
+
+
+def org_matches(row_org_id: uuid.UUID | None, ctx_org_id: uuid.UUID | None) -> bool:
+    """Return True if the row is visible under the current org scope."""
+    if AUTH_DISABLED or ctx_org_id is None:
+        return True
+    return row_org_id == ctx_org_id
+
+
+def org_scope(column: Any, ctx: OrgContext) -> ColumnElement[bool]:
+    """SQLAlchemy WHERE fragment for org scoping (no-op when auth disabled)."""
+    if AUTH_DISABLED or ctx.org_id is None:
+        return sql_true()
+    return column == ctx.org_id
 
 
 async def get_current_user(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> CurrentUser:
-    """Extract and validate JWT from Authorization header."""
+    """Return anonymous user when auth disabled; otherwise legacy JWT path."""
+    if AUTH_DISABLED:
+        return ANON_USER
+
+    # Legacy path kept for a future independent auth integration.
+    from fastapi import HTTPException, status
+    from jose import JWTError, jwt
+
+    from app.core.config import settings
+
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -71,7 +111,19 @@ async def get_org_context(
     db: Annotated[AsyncSession, Depends(get_db)],
     x_org_id: Annotated[str | None, Header(alias="X-Org-Id")] = None,
 ) -> OrgContext:
-    """Validate X-Org-Id header and check membership."""
+    """Build org context. When auth disabled, X-Org-Id is optional and ignored."""
+    if AUTH_DISABLED:
+        org_uuid: uuid.UUID | None = None
+        if x_org_id:
+            try:
+                org_uuid = uuid.UUID(x_org_id)
+            except ValueError:
+                org_uuid = None
+        # Role elevated so require_roles always passes under AUTH_DISABLED.
+        return OrgContext(user=user, org_id=org_uuid, role="owner")
+
+    from fastapi import HTTPException, status
+
     if not x_org_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -85,11 +137,8 @@ async def get_org_context(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid X-Org-Id format"
         )
 
-    # Check membership. The join to Org is what stops a soft-deleted
-    # workspace from staying fully reachable: membership rows survive the
-    # delete, so checking OrgMember alone would still let every
-    # org-scoped endpoint through.
     from app.models.tables import Org, OrgMember
+    from sqlalchemy import select
 
     result = await db.execute(
         select(OrgMember.role)
@@ -111,15 +160,22 @@ async def get_org_context(
 
 
 def require_roles(*allowed_roles: str):
-    """Dependency factory - restrict endpoint to specific roles."""
+    """Dependency factory — when auth disabled, always returns org context."""
 
     async def _check(
         ctx: Annotated[OrgContext, Depends(get_org_context)],
     ) -> OrgContext:
+        if AUTH_DISABLED:
+            return ctx
+        from fastapi import HTTPException, status
+
         if ctx.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role '{ctx.role}' not permitted. Required: {', '.join(allowed_roles)}",
+                detail=(
+                    f"Role '{ctx.role}' not permitted. "
+                    f"Required: {', '.join(allowed_roles)}"
+                ),
             )
         return ctx
 

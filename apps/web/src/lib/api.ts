@@ -1,7 +1,7 @@
 /**
  * OpenFarm API client.
  *
- * Handles JWT token lifecycle (mint / cache / re-mint) and X-Org-Id header injection.
+ * JWT / X-Org-Id are optional after OpenFarm auth removal (API AUTH_DISABLED).
  * All methods return typed responses; throws on HTTP errors.
  */
 
@@ -33,22 +33,34 @@ export function getApiBase(): string {
 let cachedToken: string | null = null;
 let tokenExpiresAt: number = 0;
 
-/** Mint (or re-use) an API JWT via the NextAuth bridge endpoint. */
-async function getToken(): Promise<string> {
+/**
+ * Mint (or re-use) an API JWT via the NextAuth bridge endpoint.
+ * After OpenFarm auth removal the API no longer requires a token; this
+ * returns null when there is no session so callers can omit Authorization.
+ */
+async function getToken(): Promise<string | null> {
     const now = Date.now();
     // Re-use if >60s remaining
     if (cachedToken && tokenExpiresAt - now > 60_000) {
         return cachedToken;
     }
 
-    const res = await fetch("/api/auth/token", { method: "POST" });
-    if (!res.ok) {
-        throw new Error("Failed to mint API token - are you signed in?");
+    try {
+        const res = await fetch("/api/auth/token", { method: "POST" });
+        if (!res.ok) {
+            cachedToken = null;
+            tokenExpiresAt = 0;
+            return null;
+        }
+        const data = await res.json();
+        cachedToken = data.token;
+        tokenExpiresAt = new Date(data.expires_at).getTime();
+        return cachedToken!;
+    } catch {
+        cachedToken = null;
+        tokenExpiresAt = 0;
+        return null;
     }
-    const data = await res.json();
-    cachedToken = data.token;
-    tokenExpiresAt = new Date(data.expires_at).getTime();
-    return cachedToken!;
 }
 
 /** Get the currently selected org ID from localStorage. */
@@ -81,10 +93,14 @@ async function apiFetch<T>(
     const { orgId, skipOrg, ...fetchOpts } = opts;
     const token = await getToken();
     const headers: Record<string, string> = {
-        Authorization: `Bearer ${token}`,
         ...(fetchOpts.headers as Record<string, string>),
     };
+    // Authorization optional — API auth bypassed (AUTH_DISABLED).
+    if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+    }
 
+    // X-Org-Id optional; API ignores missing org when auth removed.
     const org = orgId ?? getOrgId();
     if (org && !skipOrg) {
         headers["X-Org-Id"] = org;
@@ -113,9 +129,8 @@ async function apiFetch<T>(
 /** Authenticated binary/CSV download → triggers browser save. */
 async function apiDownload(path: string, fallbackName: string): Promise<void> {
     const token = await getToken();
-    const headers: Record<string, string> = {
-        Authorization: `Bearer ${token}`,
-    };
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     const org = getOrgId();
     if (org) headers["X-Org-Id"] = org;
     const res = await fetch(`${getApiBase()}${path}`, { headers });

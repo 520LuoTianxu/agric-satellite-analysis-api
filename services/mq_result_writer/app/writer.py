@@ -46,6 +46,7 @@ INSERT INTO weather_daily (
   :heat_stress_flag, :source, :model_used, now()
 )
 ON CONFLICT (field_id, date) DO UPDATE SET
+  org_id = COALESCE(EXCLUDED.org_id, weather_daily.org_id),
   latitude = EXCLUDED.latitude,
   longitude = EXCLUDED.longitude,
   temperature_2m_min = EXCLUDED.temperature_2m_min,
@@ -304,9 +305,13 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            # org_id optional after auth removal (FK dropped; column nullable).
+            # Prefer payload/row org_id when present; otherwise NULL — never
+            # invent a Demo org UUID (cross-host MQ ForeignKeyViolation root cause).
+            org_id = row.get("org_id") or payload.get("org_id") or None
             params = {
                 "id": str(uuid.uuid4()),
-                "org_id": row.get("org_id"),
+                "org_id": org_id,
                 "field_id": row.get("field_id") or payload.get("field_id"),
                 "date": row.get("date"),
                 "latitude": row.get("latitude"),
@@ -337,7 +342,7 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                 "source": row.get("source") or "open-meteo",
                 "model_used": row.get("model_used"),
             }
-            if not params["field_id"] or not params["date"] or not params["org_id"]:
+            if not params["field_id"] or not params["date"]:
                 continue
             session.execute(text(UPSERT_WEATHER_SQL), params)
             n += 1
@@ -357,8 +362,9 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
     profile = payload.get("profile") or {}
     layers = payload.get("layers") or []
     summary = payload.get("summary") or {}
-    if not field_id or not org_id:
-        raise ValueError("soil_profile payload missing field_id/org_id")
+    if not field_id:
+        raise ValueError("soil_profile payload missing field_id")
+    # org_id optional (nullable column, no FK) after auth removal
 
     session = SyncSession()
     try:
