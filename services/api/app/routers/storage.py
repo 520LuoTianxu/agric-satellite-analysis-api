@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.core.logging import logger
 from app.core.storage import get_storage, parcel_product_prefix
+from app.tasks.storage_tasks import put_bytes_via_storage
 from app.middleware.auth import OrgContext, require_roles
 
 router = APIRouter()
@@ -126,20 +127,19 @@ async def put_storage_object(
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
     content_type = request.headers.get("content-type") or "application/octet-stream"
-    storage = get_storage()
-    storage.put_bytes(key, body, content_type=content_type)
+    result = put_bytes_via_storage(key, body, content_type=content_type)
     logger.info(
         "storage_put_object",
         key=key,
         bytes=len(body),
         org_id=str(ctx.org_id),
-        backend=storage.backend,
+        backend=result["backend"],
     )
     return {
         "ok": True,
         "key": key,
         "bytes": len(body),
-        "uri": storage.uri_for(key),
+        "uri": result["uri"],
     }
 
 
@@ -270,18 +270,17 @@ async def put_parcel_product(
             detail=f"key must start with parcel prefix {prefix!r}",
         )
 
-    storage = get_storage()
-    storage.put_bytes(object_key, raw, content_type="application/json")
+    result = put_bytes_via_storage(object_key, raw, content_type="application/json")
     logger.info(
         "parcel_product_put",
         key=object_key,
         bytes=len(raw),
         org_id=str(ctx.org_id),
-        backend=storage.backend,
+        backend=result["backend"],
     )
     return {
         "ok": True,
         "key": object_key,
         "bytes": len(raw),
-        "uri": storage.uri_for(object_key),
+        "uri": result["uri"],
     }

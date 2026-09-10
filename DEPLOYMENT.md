@@ -159,8 +159,12 @@ Internal network (not exposed):
     ├── db:5432        (PostgreSQL + PostGIS)
     ├── redis:6379     (Celery broker + cache)
     ├── object storage (OSS default; optional MinIO profile)
-    └── processor      (Celery worker - NDVI pipeline)
+    ├── ingest        (Celery -Q ingest: STAC/weather/soil/compute)
+    ├── storage       (Celery -Q storage: OSS/MinIO uploads)
+    └── beat          (Celery beat schedules → ingest)
 ```
+
+Worker split (ingest download vs storage OSS upload): [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
 
 ---
 
@@ -176,7 +180,8 @@ sudo docker compose logs -f --tail 100
 
 # Specific service
 sudo docker compose logs -f api
-sudo docker compose logs -f processor
+sudo docker compose logs -f ingest
+sudo docker compose logs -f storage
 sudo docker compose logs -f web
 ```
 
@@ -328,7 +333,7 @@ find /opt/openfarm/wal-archive/ -name "*.gz" -mtime +7 -delete
 
 ```bash
 sudo docker compose restart api
-sudo docker compose restart processor
+sudo docker compose restart ingest storage beat
 ```
 
 ### Full Restart
@@ -375,6 +380,6 @@ sudo docker compose exec caddy caddy list-certificates
 | Caddy shows "connection refused" | Check DNS points to correct IP; wait for propagation |
 | SSL certificate not provisioned | Ensure ports 80/443 are open in both Oracle VCN and OS firewall |
 | API unhealthy | Check DB is ready: `docker compose logs db` |
-| NDVI jobs stuck | Check Celery worker: `docker compose logs processor` |
+| NDVI jobs stuck | Check Celery workers: `docker compose logs ingest storage` |
 | Out of disk | Clean old images: `docker system prune -a` |
 | Out of memory | Check `docker stats`; reduce Celery concurrency in prod config |

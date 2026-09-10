@@ -1,4 +1,9 @@
-"""Celery worker configuration - broker=Redis, per PRD Section 7.4."""
+"""Celery worker configuration - broker=Redis, per PRD Section 7.4.
+
+Queues:
+  - ``ingest``  — foreign-source download + raster compute (see design doc)
+  - ``storage`` — OSS/MinIO put/get helpers only
+"""
 
 from celery import Celery
 from celery.schedules import crontab
@@ -26,6 +31,24 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+    # Default all business work to ingest; storage.* routed below
+    task_default_queue="ingest",
+    task_routes={
+        "app.tasks.weather.*": {"queue": "ingest"},
+        "app.tasks.soil.*": {"queue": "ingest"},
+        "app.tasks.pipeline.*": {"queue": "ingest"},
+        "app.tasks.sentinel1.*": {"queue": "ingest"},
+        "app.tasks.vegetation.*": {"queue": "ingest"},
+        "app.tasks.ndvi.*": {"queue": "ingest"},
+        "app.tasks.indices.*": {"queue": "ingest"},
+        "app.tasks.agri_bridge.*": {"queue": "ingest"},
+        "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": "ingest"},
+        "app.tasks.backfill.*": {"queue": "ingest"},
+        "app.tasks.agri_alerts.*": {"queue": "ingest"},
+        "app.tasks.assessment_report.*": {"queue": "ingest"},
+        "app.tasks.overview_preagg.*": {"queue": "ingest"},
+        "app.tasks.storage.*": {"queue": "storage"},
+    },
     # Task discovery
     include=[
         "app.tasks.ndvi",
@@ -38,8 +61,9 @@ celery_app.conf.update(
         "app.tasks.sentinel1",
         "app.tasks.assessment_report",
         "app.tasks.overview_preagg",
+        "app.tasks.storage_tasks",
     ],
-    # Celery Beat schedule
+    # Celery Beat schedule (run via dedicated ``beat`` service or ingest -B)
     beat_schedule={
         "compute-indices-weekly": {
             "task": "app.tasks.backfill.schedule_weekly_index_compute",

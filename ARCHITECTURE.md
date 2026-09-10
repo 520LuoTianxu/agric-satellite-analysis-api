@@ -26,6 +26,14 @@ OpenFarm follows a 3-layer strategic architecture. Each layer has a distinct rol
 
 Collects, standardizes, and stores raw signals about every field. Source-agnostic, reproducible, and extensible.
 
+
+### Ingest vs storage workers
+
+Layer A download (STAC / Open-Meteo / SoilGrids) runs on the **`ingest`** Celery
+queue; object-store puts (OSS/MinIO) run on the **`storage`** queue. The FastAPI
+`api` service dispatches jobs and does not run the heavy worker. Design and
+acceptance checklist: [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
+
 ### Satellite Intelligence
 - Sentinel-2 (initial), extensible to Landsat, Planet, SAR (Sentinel-1)
 - Raster ingestion pipelines (COG/STAC compliant)

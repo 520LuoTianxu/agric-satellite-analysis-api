@@ -6,10 +6,16 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.local.yml --profile minio up -d
 
 services:
-  processor:
+  ingest:
     command: >
       celery -A app.worker worker
-      -Q default,celery
+      -Q ingest
+      --loglevel=info
+      --concurrency=1
+  storage:
+    command: >
+      celery -A app.worker worker
+      -Q storage
       --loglevel=info
       --concurrency=1
   db:

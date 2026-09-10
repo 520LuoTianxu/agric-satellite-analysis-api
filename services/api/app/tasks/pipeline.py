@@ -246,12 +246,13 @@ def write_cog(
             tmp_src_path, tmp_dst_path, output_profile, overview_level=2, quiet=True
         )
 
-        from app.core.storage import get_storage
+        from app.tasks.storage_tasks import upload_file_via_storage
 
-        storage = get_storage()
-        storage.upload_file(object_key, tmp_dst_path, content_type="image/tiff")
+        result = upload_file_via_storage(
+            object_key, tmp_dst_path, content_type="image/tiff"
+        )
         logger.info("cog_uploaded", object_key=object_key, index=index_key)
-        return storage.uri_for(object_key)
+        return result["uri"]
     finally:
         for p in [tmp_src_path, tmp_dst_path]:
             try:
