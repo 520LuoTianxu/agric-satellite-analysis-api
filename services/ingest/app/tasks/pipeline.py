@@ -8,6 +8,7 @@ COG write, zonal-stats, and alert-evaluation logic.
 from __future__ import annotations
 
 import os
+import time
 import tempfile
 import threading
 import uuid
@@ -274,6 +275,7 @@ def search_scenes_for_defs(
     if not index_defs:
         return []
     label = index_label or ",".join(d.key for d in index_defs)
+    t0 = time.perf_counter()
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_COLLECTION],
@@ -289,6 +291,7 @@ def search_scenes_for_defs(
         index=label,
         date_from=str(date_from),
         date_to=str(date_to),
+        elapsed_ms=int((time.perf_counter() - t0) * 1000),
     )
     if not items:
         return []

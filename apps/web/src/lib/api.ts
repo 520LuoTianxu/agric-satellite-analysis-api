@@ -541,11 +541,20 @@ export const fieldsApi = {
         formData.append("file", file);
         return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
     },
-    backfillIndices: (fieldId: string, months = 24, force = true) =>
-        apiFetch<{ field_id: string; status: string; message: string }>(
+    backfillIndices: (
+        fieldId: string,
+        opts: { months?: number; force?: boolean; date_from?: string; date_to?: string } = {},
+    ) => {
+        const months = opts.months ?? 24;
+        const force = opts.force ?? true;
+        const body: Record<string, unknown> = { months, force };
+        if (opts.date_from) body.date_from = opts.date_from;
+        if (opts.date_to) body.date_to = opts.date_to;
+        return apiFetch<{ field_id: string; status: string; message: string }>(
             `/fields/${fieldId}/backfill-indices`,
-            { method: "POST", body: JSON.stringify({ months, force }) },
-        ),
+            { method: "POST", body: JSON.stringify(body) },
+        );
+    },
     backfillStatus: (fieldId: string) =>
         apiFetch<BackfillStatusResponse>(
             `/fields/${fieldId}/backfill-status`,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
@@ -115,82 +116,124 @@ def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) ->
     return int(n or 0)
 
 
-def upsert_optical_lonlat_row(row: dict[str, Any]) -> str | None:
-    """Upsert S2 lonlat_v1; optionally upload compact scene JSON. Returns URL."""
-    import psycopg2
+def publish_optical_lonlat_to_oss_mq(
+    row: dict[str, Any],
+    *,
+    mq_task_id: str | None = None,
+    field_id: str | None = None,
+) -> str | None:
+    """Upload S2 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
 
-    from app.tasks.bridge_stac_cogs_to_agri_lonlat import UPSERT_SQL
+    Producer mq_result_writer pulls the OSS URL and writes agri.parcel_scene_products.
+    """
+    from openfarm_common.mq_results import (
+        publish_task_result,
+        scene_json_oss_key,
+        upload_scene_product_json,
+    )
 
     pixel_obj = row.pop("_pixel_data_obj", None)
-    json_url = None
-    if upload_scene_json_enabled():
-        try:
-            from openfarm_common.mq_results import (
-                scene_json_oss_key,
-                upload_scene_product_json,
-            )
+    t_json = time.perf_counter()
+    key = scene_json_oss_key(row["land_id"], row["date"], "S2")
+    product = {
+        "land_id": row["land_id"],
+        "tile_id": row["tile_id"],
+        "date": row["date"],
+        "sensor": "S2",
+        "scene_id": row["scene_id"],
+        "land_name": row["land_name"],
+        "cloud_cover": row["cloud_cover"],
+        "cloud_cover_over_30": row["cloud_cover_over_30"],
+        "parcel_cloud_cover_pct": row["parcel_cloud_cover_pct"],
+        "pixel_count": row["pixel_count"],
+        "generated_at_shanghai": row["generated_at_shanghai"],
+        "pixel_data_url": row["pixel_data_url"],
+        "json_oss_key": key,
+        "ndvi_avg": row["ndvi_avg"],
+        "ndvi_min": row["ndvi_min"],
+        "ndvi_max": row["ndvi_max"],
+        "evi_avg": row["evi_avg"],
+        "evi_min": row["evi_min"],
+        "evi_max": row["evi_max"],
+        "ndmi_avg": row["ndmi_avg"],
+        "ndmi_min": row["ndmi_min"],
+        "ndmi_max": row["ndmi_max"],
+        "ndre_avg": row["ndre_avg"],
+        "ndre_min": row["ndre_min"],
+        "ndre_max": row["ndre_max"],
+        "cire_avg": row["cire_avg"],
+        "cire_min": row["cire_min"],
+        "cire_max": row["cire_max"],
+        "mndwi_avg": row["mndwi_avg"],
+        "mndwi_min": row["mndwi_min"],
+        "mndwi_max": row["mndwi_max"],
+        "pixel_data": pixel_obj or json.loads(row["pixel_data"]),
+    }
+    key, json_url = upload_scene_product_json(
+        land_id=row["land_id"],
+        date_str=row["date"],
+        sensor="S2",
+        product=product,
+    )
+    json_upload_ms = int((time.perf_counter() - t_json) * 1000)
+    row["json_oss_key"] = key
 
-            key = scene_json_oss_key(row["land_id"], row["date"], "S2")
-            product = {
-                "land_id": row["land_id"],
-                "tile_id": row["tile_id"],
-                "date": row["date"],
-                "sensor": "S2",
-                "scene_id": row["scene_id"],
-                "land_name": row["land_name"],
-                "cloud_cover": row["cloud_cover"],
-                "cloud_cover_over_30": row["cloud_cover_over_30"],
-                "parcel_cloud_cover_pct": row["parcel_cloud_cover_pct"],
-                "pixel_count": row["pixel_count"],
-                "generated_at_shanghai": row["generated_at_shanghai"],
-                "pixel_data_url": row["pixel_data_url"],
-                "json_oss_key": key,
-                "ndvi_avg": row["ndvi_avg"],
-                "ndvi_min": row["ndvi_min"],
-                "ndvi_max": row["ndvi_max"],
-                "evi_avg": row["evi_avg"],
-                "evi_min": row["evi_min"],
-                "evi_max": row["evi_max"],
-                "ndmi_avg": row["ndmi_avg"],
-                "ndmi_min": row["ndmi_min"],
-                "ndmi_max": row["ndmi_max"],
-                "ndre_avg": row["ndre_avg"],
-                "ndre_min": row["ndre_min"],
-                "ndre_max": row["ndre_max"],
-                "cire_avg": row["cire_avg"],
-                "cire_min": row["cire_min"],
-                "cire_max": row["cire_max"],
-                "mndwi_avg": row["mndwi_avg"],
-                "mndwi_min": row["mndwi_min"],
-                "mndwi_max": row["mndwi_max"],
-                "pixel_data": pixel_obj or json.loads(row["pixel_data"]),
-            }
-            key, json_url = upload_scene_product_json(
-                land_id=row["land_id"],
-                date_str=row["date"],
-                sensor="S2",
-                product=product,
-            )
-            row["json_oss_key"] = key
-        except Exception as exc:
-            logger.warning(
-                "agri_scene_json_upload_failed",
-                land_id=row.get("land_id"),
-                date=row.get("date"),
-                error=str(exc),
-            )
-            row["json_oss_key"] = None
-    else:
-        row["json_oss_key"] = None
-
-    conn = psycopg2.connect(_dsn())
-    try:
-        with conn.cursor() as cur:
-            cur.execute(UPSERT_SQL, row)
-        conn.commit()
-    finally:
-        conn.close()
+    label = f"{row['date']}_S2"
+    parent = (mq_task_id or "").strip() or None
+    result_task_id = (
+        f"{parent}:{label}" if parent else f"agri-scene:{row['land_id']}:{label}"
+    )
+    t_mq = time.perf_counter()
+    publish_task_result(
+        task_id=result_task_id,
+        status="success",
+        land_id=str(row["land_id"]),
+        field_id=field_id,
+        oss_urls={label: json_url},
+        collect_parcel_urls=False,
+        upload_summary_if_empty=False,
+        extras={
+            "kind": "parcel_scene_product",
+            "sensor": "S2",
+            "date": row["date"],
+            "scene_id": row["scene_id"],
+            "parent_mq_task_id": parent,
+            "json_oss_key": key,
+        },
+    )
+    mq_publish_ms = int((time.perf_counter() - t_mq) * 1000)
+    logger.info(
+        "lonlat_write_timing",
+        land_id=row.get("land_id"),
+        date=row.get("date"),
+        sensor="S2",
+        json_upload_ms=json_upload_ms,
+        db_upsert_ms=0,
+        mq_publish_ms=mq_publish_ms,
+        uploaded_json=True,
+        path="oss_mq",
+    )
+    logger.info(
+        "lonlat_oss_mq_published",
+        land_id=row.get("land_id"),
+        date=row.get("date"),
+        sensor="S2",
+        json_url=json_url,
+        result_task_id=result_task_id,
+    )
     return json_url
+
+
+# Back-compat alias (tests / call sites may still import the old name).
+def upsert_optical_lonlat_row(
+    row: dict[str, Any],
+    *,
+    mq_task_id: str | None = None,
+    field_id: str | None = None,
+) -> str | None:
+    return publish_optical_lonlat_to_oss_mq(
+        row, mq_task_id=mq_task_id, field_id=field_id
+    )
 
 
 def emit_optical_lonlat(
@@ -202,8 +245,9 @@ def emit_optical_lonlat(
     index_arrays: dict[str, np.ndarray],
     transform,
     ndvi_quality: float | None,
+    mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Sample in-memory index arrays to lonlat_v1 and upsert. No TIF upload."""
+    """Sample lonlat_v1, upload OSS JSON, publish one MQ (PG write on producer)."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
         _round6,
         _sample_lonlat,
@@ -212,7 +256,9 @@ def emit_optical_lonlat(
 
     if "NDVI" not in index_arrays:
         return None
+    t_sample = time.perf_counter()
     pixels = _sample_lonlat(geom4326, index_arrays, transform, "EPSG:4326")
+    sample_ms = int((time.perf_counter() - t_sample) * 1000)
     if not pixels:
         logger.info(
             "agri_lonlat_no_pixels",
@@ -298,7 +344,9 @@ def emit_optical_lonlat(
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
     }
-    json_url = upsert_optical_lonlat_row(row)
+    json_url = publish_optical_lonlat_to_oss_mq(
+        row, mq_task_id=mq_task_id, field_id=field_id_str
+    )
     logger.info(
         "lonlat_upserted",
         land_id=meta["land_id"],
@@ -307,6 +355,7 @@ def emit_optical_lonlat(
         pixels=len(pixels),
         json_oss_key=row.get("json_oss_key"),
         json_url=json_url,
+        sample_ms=sample_ms,
     )
     return {
         "date": date_str,
@@ -333,6 +382,7 @@ def _process_one_optical_scene(
     field_geom_geojson: dict,
     write_cogs: bool,
     scene_workers: int = 1,
+    mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
     from app.models.tables import Job
 
@@ -353,6 +403,8 @@ def _process_one_optical_scene(
                 "scene_id": scene["id"],
             },
         )
+        t_scene = time.perf_counter()
+        t0 = time.perf_counter()
         bands = read_bands_windowed_parallel(
             scene["band_hrefs"],
             bounds,
@@ -360,9 +412,11 @@ def _process_one_optical_scene(
             target_transform,
             scene_workers=scene_workers,
         )
+        download_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "download_bands")
 
         update_job_progress(session, job, "compute_indices")
+        t0 = time.perf_counter()
         index_arrays: dict[str, np.ndarray] = {}
         for index_def in index_defs:
             needed = {b: bands[b] for b in index_def.bands if b in bands}
@@ -371,10 +425,13 @@ def _process_one_optical_scene(
             arr[~field_mask] = np.nan
             pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
             index_arrays[pix_key] = arr
+        compute_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "compute_indices")
 
+        write_cog_ms = 0
         if write_cogs:
             update_job_progress(session, job, "write_cog")
+            t0 = time.perf_counter()
             for index_def in index_defs:
                 pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
                 write_cog(
@@ -386,8 +443,10 @@ def _process_one_optical_scene(
                     scene["date"],
                     index_def.key,
                 )
+            write_cog_ms = int((time.perf_counter() - t0) * 1000)
             complete_step(session, job, "write_cog")
 
+        t0 = time.perf_counter()
         ndvi_stats = compute_zonal_stats(index_arrays["NDVI"])
         update_job_progress(session, job, "write_lonlat")
         result = emit_optical_lonlat(
@@ -398,12 +457,28 @@ def _process_one_optical_scene(
             index_arrays=index_arrays,
             transform=target_transform,
             ndvi_quality=ndvi_stats.get("quality_score"),
+            mq_task_id=mq_task_id,
         )
+        write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(
             session,
             job,
             "write_lonlat",
             {"pixels": (result or {}).get("pixels"), "date": str(scene["date"])},
+        )
+        logger.info(
+            "scene_timing",
+            sensor="S2",
+            job_id=job_id,
+            scene_id=scene.get("id"),
+            date=str(scene.get("date")),
+            download_ms=download_ms,
+            compute_ms=compute_ms,
+            write_cog_ms=write_cog_ms,
+            write_lonlat_ms=write_lonlat_ms,
+            total_ms=int((time.perf_counter() - t_scene) * 1000),
+            bands=len(scene.get("band_hrefs") or {}),
+            pixels=(result or {}).get("pixels"),
         )
         return result
     except Exception as e:
@@ -471,8 +546,12 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         field_id_str = str(job.field_id)
         write_cogs = write_index_cogs_enabled(is_agri=True)
         force = bool(params.get("force") or False)
+        mq_task_id = (params.get("mq_task_id") or None)
+        if mq_task_id is not None:
+            mq_task_id = str(mq_task_id)
 
         update_job_progress(session, job, "scene_search")
+        t_search = time.perf_counter()
         scenes = search_scenes_for_defs(
             field_geom_geojson,
             date_from,
@@ -504,6 +583,17 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             )
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        logger.info(
+            "job_phase_timing",
+            phase="scene_search",
+            sensor="S2",
+            job_id=job_id,
+            elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+            scenes=len(scenes),
+            skipped_existing=skipped_existing,
+            date_from=str(date_from),
+            date_to=str(date_to),
+        )
 
         if not scenes:
             job.status = "completed"
@@ -543,6 +633,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         )
 
         upserted = 0
+        t_process = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -562,6 +653,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                     field_geom_geojson=field_geom_geojson,
                     write_cogs=write_cogs,
                     scene_workers=workers,
+                    mq_task_id=mq_task_id,
                 ): scene
                 for idx, scene in enumerate(scenes)
             }
@@ -586,6 +678,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             layers_created=upserted,
             total_scenes=len(scenes),
             workers=workers,
+            wall_ms=int((time.perf_counter() - t_process) * 1000),
         )
 
         session.expire(job)

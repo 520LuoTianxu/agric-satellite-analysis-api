@@ -15,7 +15,8 @@ STAC (Sentinel-2 L2A / Sentinel-1 GRD)
   → download source bands (windowed to parcel)
   → compute indices in memory (NDVI, EVI, NDMI, NDRE, CIre, MNDWI; S1 VV/VH dB)
   → sample parcel geometry → lonlat_v1 pixel JSON
-  → upsert agri.parcel_scene_products
+  → upload lonlat JSON to OSS
+  → publish one MQ result per scene (producer mq_result_writer pulls OSS → upserts PG)
   → optional compact JSON object under OSS_PREFIX
 ```
 

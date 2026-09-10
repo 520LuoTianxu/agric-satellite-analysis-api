@@ -110,8 +110,12 @@ class FieldImportResponse(BaseModel):
 
 
 class BackfillIndicesRequest(BaseModel):
-    months: int = 60
+    months: int = 24
     force: bool = False
+    # Inclusive start date (YYYY-MM-DD). When set, range is date_from → today
+    # (or date_to); months is ignored for range calculation.
+    date_from: str | None = None
+    date_to: str | None = None
 
 
 class BackfillIndicesResponse(BaseModel):

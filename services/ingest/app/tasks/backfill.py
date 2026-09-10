@@ -48,6 +48,9 @@ def backfill_indices_for_field(
     allow_agri: bool = False,
     indices: list[str] | None = None,
     force: bool = False,
+    mq_task_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict:
     """Backfill vegetation indices for *field_id* over *months*.
 
@@ -102,13 +105,19 @@ def backfill_indices_for_field(
                 "land_id": land_id,
             }
 
-        end_date = date.today()
-        start_date = end_date - timedelta(days=months * 30)
+        end_date = date.fromisoformat(date_to) if date_to else date.today()
+        if date_from:
+            start_date = date.fromisoformat(date_from)
+        else:
+            start_date = end_date - timedelta(days=months * 30)
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
         chunks = _date_chunks(start_date, end_date, chunk_days)
         jobs_dispatched = 0
         stagger_seconds = 30  # seconds between chunk groups
         index_keys: list[str] = []
 
+        pending_sends: list[tuple[str, str, int]] = []
         if agri_field:
             # One optical job per date chunk: bands -> indices -> lonlat_v1.
             # Do not dispatch per-index COG workers for agri parcels.
@@ -119,6 +128,7 @@ def backfill_indices_for_field(
                     "is_backfill": True,
                     "force": bool(force),
                     "path": "agri_lonlat_direct",
+                    **({"mq_task_id": mq_task_id} if mq_task_id else {}),
                 }
                 job = Job(
                     field_id=field.id,
@@ -129,10 +139,12 @@ def backfill_indices_for_field(
                 session.add(job)
                 session.flush()
                 countdown = chunk_idx * stagger_seconds
-                celery_app.send_task(
-                    "app.tasks.agri_lonlat.process_agri_optical_lonlat",
-                    args=[str(job.id)],
-                    countdown=countdown,
+                pending_sends.append(
+                    (
+                        "app.tasks.agri_lonlat.process_agri_optical_lonlat",
+                        str(job.id),
+                        countdown,
+                    )
                 )
                 jobs_dispatched += 1
                 logger.info(
@@ -182,9 +194,7 @@ def backfill_indices_for_field(
                     session.flush()
 
                     countdown = chunk_idx * stagger_seconds
-                    celery_app.send_task(
-                        task_name, args=[str(job.id)], countdown=countdown
-                    )
+                    pending_sends.append((task_name, str(job.id), countdown))
                     jobs_dispatched += 1
 
                     logger.info(
@@ -196,13 +206,16 @@ def backfill_indices_for_field(
                         countdown=countdown,
                     )
 
-        # Mark sentinel job as completed now that real jobs are dispatched
+        # Mark sentinel job as completed now that real jobs are created
         if sentinel_job_id:
             sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
             if sentinel:
                 sentinel.status = "completed"
 
+        # Commit Job rows BEFORE Celery workers can see them (avoids Job not found).
         session.commit()
+        for task_name, job_id, countdown in pending_sends:
+            celery_app.send_task(task_name, args=[job_id], countdown=countdown)
 
         # Sentinel-1 GRD: agri writes lonlat_v1 (no index TIFs unless opt-in)
         s1_result = None
@@ -210,7 +223,12 @@ def backfill_indices_for_field(
             from app.tasks.sentinel1 import backfill_s1_for_field
 
             async_result = backfill_s1_for_field.delay(
-                field_id, months=months, force=force
+                field_id,
+                months=months,
+                force=force,
+                mq_task_id=mq_task_id,
+                date_from=start_date.isoformat(),
+                date_to=end_date.isoformat(),
             )
             s1_result = {"task_id": async_result.id, "status": "queued"}
             logger.info("s1_backfill_dispatched", field_id=field_id, result=s1_result)
