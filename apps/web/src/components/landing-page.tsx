@@ -6,7 +6,6 @@ import {
     Leaf,
     ArrowRight,
     ArrowUp,
-    Github,
     ShieldAlert,
     CloudRain,
     Sun,
@@ -248,15 +247,6 @@ export function LandingPage({ isAuthenticated = true }: { isAuthenticated?: bool
                                 {item.label}
                             </a>
                         ))}
-                        <a
-                            href={REPO}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hidden items-center gap-2 whitespace-nowrap text-[13px] transition-colors hover:text-primary sm:inline-flex"
-                        >
-                            <Github className="h-4 w-4" />
-                            {tc("github")}
-                        </a>
                         <Button size="sm" asChild>
                             {isAuthenticated ? (
                                 <Link href="/dashboard">{tc("dashboard")}</Link>

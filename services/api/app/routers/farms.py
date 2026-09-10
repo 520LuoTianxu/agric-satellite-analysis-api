@@ -36,8 +36,13 @@ async def list_farms(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0)):
-    base = select(Farm).where(org_scope(None, ctx), _not_deleted())
+    offset: int = Query(0, ge=0),
+    q: str | None = Query(None, description="ILIKE search on farm name"),
+):
+    filters = [org_scope(None, ctx), _not_deleted()]
+    if q and q.strip():
+        filters.append(Farm.name.ilike(f"%{q.strip()}%"))
+    base = select(Farm).where(*filters)
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0

@@ -9,7 +9,6 @@ import {
     Map,
     Tractor,
     Bell,
-    Settings,
     PanelLeftClose,
     PanelLeftOpen,
     Menu,
@@ -34,7 +33,6 @@ const NAV_ITEMS = [
     { href: "/overview" as const, labelKey: "overview" as const, icon: Map },
     { href: "/farms" as const, labelKey: "farms" as const, icon: Tractor },
     { href: "/alerts" as const, labelKey: "alerts" as const, icon: Bell },
-    { href: "/settings" as const, labelKey: "settings" as const, icon: Settings },
     { href: "/changelog" as const, labelKey: "changelog" as const, icon: ScrollText },
 ];
 

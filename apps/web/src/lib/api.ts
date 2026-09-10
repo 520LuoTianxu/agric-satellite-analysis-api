@@ -495,8 +495,11 @@ export interface PresignedUpload {
 // ── Farms ────────────────────────────────────────────────────────────
 
 export const farmsApi = {
-    list: (limit = 50, offset = 0) =>
-        apiFetch<Paginated<Farm>>(`/farms?limit=${limit}&offset=${offset}`),
+    list: (limit = 50, offset = 0, q?: string) => {
+        const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+        if (q && q.trim()) params.set("q", q.trim());
+        return apiFetch<Paginated<Farm>>(`/farms?${params.toString()}`);
+    },
     get: (farmId: string) => apiFetch<Farm>(`/farms/${farmId}`),
     create: (data: { name: string; country?: string; region?: string; timezone?: string }) =>
         apiFetch<Farm>("/farms", { method: "POST", body: JSON.stringify(data) }),
