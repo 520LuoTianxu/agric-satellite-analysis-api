@@ -124,8 +124,10 @@ def bridge_field_stac_to_agri_task(
     bind=True,
     max_retries=90,
     default_retry_delay=60,
-    time_limit=120,
-    soft_time_limit=90,
+    # Exists-probe loops over many COG keys routinely exceed 90s; keep retries
+    # for unfinished backfill jobs but allow a longer soft window per attempt.
+    time_limit=720,
+    soft_time_limit=600,
 )
 def bridge_after_backfill(
     self,

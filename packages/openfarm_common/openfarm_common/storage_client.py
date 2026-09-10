@@ -1,4 +1,11 @@
-"""Client helpers to dispatch uploads onto the storage Celery queue."""
+"""Client helpers to dispatch uploads onto the storage Celery queue.
+
+When invoked from inside an ingest (or any) Celery task, upload via the local
+storage backend instead of ``send_task(...).get()`` — Celery forbids joining
+another task's result from within a task (``Never call result.get() within a
+task!``). Outside a task context (e.g. API request handlers), keep the
+storage-worker path so uploads stay on the storage queue.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +50,60 @@ def _cleanup_staged(staged: Path | None, cleanup_dir: Path | None) -> None:
             pass
 
 
+def _running_in_celery_task() -> bool:
+    """True when called from inside a Celery worker task body."""
+    try:
+        from celery import current_task
+
+        return (
+            current_task is not None
+            and getattr(current_task, "request", None) is not None
+            and current_task.request.id is not None
+        )
+    except Exception:
+        return False
+
+
+def _result_payload(key: str) -> dict:
+    from openfarm_common.storage import get_storage
+
+    storage = get_storage()
+    return {
+        "key": key,
+        "public_url": storage.public_url(key),
+        "backend": storage.backend,
+        "uri": storage.uri_for(key),
+    }
+
+
+def _upload_file_direct(
+    key: str,
+    local_path: str,
+    content_type: str | None = None,
+) -> dict:
+    """Upload via the local storage backend (safe inside Celery tasks)."""
+    from openfarm_common.storage import get_storage
+
+    if not local_path or not os.path.isfile(local_path):
+        raise FileNotFoundError(f"upload path missing or not a file: {local_path!r}")
+    storage = get_storage()
+    storage.upload_file(key, local_path, content_type=content_type)
+    return _result_payload(key)
+
+
+def _put_bytes_direct(
+    key: str,
+    data: bytes,
+    content_type: str | None = None,
+) -> dict:
+    """Put bytes via the local storage backend (safe inside Celery tasks)."""
+    from openfarm_common.storage import get_storage
+
+    storage = get_storage()
+    storage.put_bytes(key, data, content_type=content_type)
+    return _result_payload(key)
+
+
 def upload_file_via_storage(
     key: str,
     local_path: str,
@@ -53,10 +114,18 @@ def upload_file_via_storage(
 ) -> dict:
     """Stage ``local_path`` on scratch (if needed) and wait for storage upload.
 
+    Inside a Celery task: upload directly via ``get_storage()`` (no cross-worker
+    ``AsyncResult.get()``). Outside a task: dispatch to the storage queue and
+    join.
+
     Scratch files are removed only after a successful upload. On timeout /
     worker death, leave the staged file for the storage worker (or later GC)
     so we do not race ``FileNotFoundError`` on the storage queue.
     """
+    if _running_in_celery_task():
+        # Direct path — no staging needed; caller owns local_path lifecycle.
+        return _upload_file_direct(key, local_path, content_type)
+
     staged: Path | None = None
     cleanup_dir: Path | None = None
     if already_on_scratch:
@@ -91,7 +160,10 @@ def put_bytes_via_storage(
     timeout: float = DEFAULT_UPLOAD_TIMEOUT,
     max_inline_bytes: int = 512_000,
 ) -> dict:
-    """Upload bytes via the storage queue."""
+    """Upload bytes via the storage queue (or directly when inside a task)."""
+    if _running_in_celery_task():
+        return _put_bytes_direct(key, data, content_type)
+
     if len(data) <= max_inline_bytes:
         async_result = celery_client.send_task(
             "app.tasks.storage.put_bytes",
