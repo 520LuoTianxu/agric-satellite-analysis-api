@@ -71,73 +71,116 @@ def _publish_mq_result(
         )
 
 
+def _resolve_job(session, job_id: str | None) -> Job | None:
+    if not job_id:
+        return None
+    try:
+        return session.get(Job, uuid.UUID(str(job_id)))
+    except (ValueError, TypeError):
+        return None
+
+
 @celery_app.task(
     name="app.tasks.assessment_report.generate_assessment_report",
     bind=True,
     max_retries=1,
     default_retry_delay=30)
 def generate_assessment_report(
-    self, job_id: str, mq_task_id: str | None = None
+    self,
+    job_id: str | None = None,
+    mq_task_id: str | None = None,
+    field_id: str | None = None,
+    crop_type: str | None = None,
+    crop_name_zh: str | None = None,
 ) -> dict:
-    """Generate land assessment PDF for a field job.
+    """Generate land assessment PDF for a field.
 
-    When ``mq_task_id`` is set (CloudAMQP assessment_report), publish a
-    ResultMessage with OSS ``public_url`` / ``object_key`` on completion.
+    Cross-host safe: ``field_id`` is the source of truth for PDF generation.
+    When ``job_id`` is present *and* a Job row exists in *this* DB, update
+    progress as before. Missing local Job is not a hard failure — still
+    generate/upload/publish ResultMessage (with ``job_id`` in payload) so the
+    process-host writer can update the API Job.
     """
     session = SyncSession()
-    field_id_str: str | None = None
+    field_id_str: str | None = str(field_id) if field_id else None
+    job_id_str: str | None = str(job_id) if job_id else None
+    job: Job | None = None
     try:
-        job = session.get(Job, uuid.UUID(job_id))
-        if not job:
-            logger.error("assessment_job_missing", job_id=job_id)
-            _publish_mq_result(
-                mq_task_id=mq_task_id,
-                status="failed",
-                field_id=None,
-                error="job not found",
-                extras={"source": "assessment_report", "job_id": job_id},
-            )
-            return {"error": "job not found"}
+        job = _resolve_job(session, job_id_str)
 
-        if not job.field_id:
-            _update_job(session, job, "failed", error="field_id required")
+        if not field_id_str and job and job.field_id:
+            field_id_str = str(job.field_id)
+
+        if not field_id_str:
+            logger.error(
+                "assessment_field_id_missing",
+                job_id=job_id_str,
+                mq_task_id=mq_task_id,
+            )
+            if job:
+                _update_job(session, job, "failed", error="field_id required")
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
                 field_id=None,
                 error="field_id required",
-                extras={"source": "assessment_report", "job_id": job_id},
+                extras={
+                    "source": "assessment_report",
+                    **({"job_id": job_id_str} if job_id_str else {}),
+                },
             )
             return {"error": "field_id required"}
 
-        field_id_str = str(job.field_id)
-        _update_job(
-            session,
-            job,
-            "running",
-            progress={"stage": "scoring", "percent": 10})
+        if job_id_str and not job:
+            # Cross-host: Job lives on API DB; download host has none.
+            logger.info(
+                "assessment_job_absent_local",
+                job_id=job_id_str,
+                field_id=field_id_str,
+                mq_task_id=mq_task_id,
+            )
 
-        result = generate_assessment_pdf(session=session, field_id=job.field_id)
+        if job:
+            _update_job(
+                session,
+                job,
+                "running",
+                progress={"stage": "scoring", "percent": 10},
+            )
+
+        result = generate_assessment_pdf(
+            session=session, field_id=uuid.UUID(field_id_str)
+        )
         pdf_path = Path(result["out_path"])
         if not pdf_path.exists():
-            _update_job(session, job, "failed", error="PDF not produced")
+            if job:
+                _update_job(session, job, "failed", error="PDF not produced")
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
                 field_id=field_id_str,
                 error="PDF not produced",
-                extras={"source": "assessment_report", "job_id": job_id},
+                extras={
+                    "source": "assessment_report",
+                    **({"job_id": job_id_str} if job_id_str else {}),
+                },
             )
             return {"error": "PDF not produced"}
 
-        _update_job(
-            session,
-            job,
-            "running",
-            progress={"stage": "uploading", "percent": 70, "score": result["score"]})
+        if job:
+            _update_job(
+                session,
+                job,
+                "running",
+                progress={
+                    "stage": "uploading",
+                    "percent": 70,
+                    "score": result["score"],
+                },
+            )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        object_key = f"reports/default/{job.field_id}/assessment-{ts}.pdf"
+        object_key = f"reports/default/{field_id_str}/assessment-{ts}.pdf"
         upload_result = upload_file_via_storage(
             object_key,
             str(pdf_path),
@@ -209,15 +252,22 @@ def generate_assessment_report(
                 "rs_flood_level": (result.get("rs") or {}).get("rs_flood_level"),
             },
         }
-        _update_job(session, job, "succeeded", progress=progress)
+        if crop_type:
+            progress["crop_type"] = crop_type
+        if crop_name_zh:
+            progress["crop_name_zh"] = crop_name_zh
+
+        if job:
+            _update_job(session, job, "succeeded", progress=progress)
         logger.info(
             "assessment_report_done",
-            job_id=job_id,
+            job_id=job_id_str,
             field_id=field_id_str,
             object_key=object_key,
             public_url=public_url,
             score=result["score"],
             mq_task_id=mq_task_id,
+            local_job_updated=bool(job),
         )
 
         oss_urls: dict[str, str] = {}
@@ -225,7 +275,6 @@ def generate_assessment_report(
             oss_urls["assessment_pdf"] = public_url
         mq_payload = {
             "kind": "assessment_report",
-            "job_id": job_id,
             "field_id": field_id_str,
             "object_key": object_key,
             "public_url": public_url,
@@ -237,22 +286,35 @@ def generate_assessment_report(
             "area_mu": result.get("area_mu"),
             "content_type": "application/pdf",
         }
+        if job_id_str:
+            mq_payload["job_id"] = job_id_str
+        if crop_type:
+            mq_payload["crop_type"] = crop_type
+        if crop_name_zh:
+            mq_payload["crop_name_zh"] = crop_name_zh
+
+        extras_out: dict = {"source": "assessment_report"}
+        if job_id_str:
+            extras_out["job_id"] = job_id_str
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="success",
             field_id=field_id_str,
             payload=mq_payload,
             oss_urls=oss_urls,
-            extras={
-                "source": "assessment_report",
-                "job_id": job_id,
-            },
+            extras=extras_out,
         )
         return progress
     except Exception as exc:
-        logger.exception("assessment_report_failed", job_id=job_id, error=str(exc))
+        logger.exception(
+            "assessment_report_failed",
+            job_id=job_id_str,
+            field_id=field_id_str,
+            error=str(exc),
+        )
         try:
-            job = session.get(Job, uuid.UUID(job_id))
+            if job is None and job_id_str:
+                job = _resolve_job(session, job_id_str)
             if job:
                 field_id_str = field_id_str or (
                     str(job.field_id) if job.field_id else None
@@ -260,12 +322,20 @@ def generate_assessment_report(
                 _update_job(session, job, "failed", error=str(exc)[:2000])
         except Exception:
             pass
+        extras_fail: dict = {"source": "assessment_report"}
+        if job_id_str:
+            extras_fail["job_id"] = job_id_str
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="failed",
             field_id=field_id_str,
             error=str(exc)[:500],
-            extras={"source": "assessment_report", "job_id": job_id},
+            extras=extras_fail,
+            payload={
+                "kind": "assessment_report",
+                "field_id": field_id_str,
+                **({"job_id": job_id_str} if job_id_str else {}),
+            },
         )
         raise
     finally:

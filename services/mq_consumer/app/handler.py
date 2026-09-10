@@ -297,22 +297,34 @@ def _dispatch_assessment_report(
     task: TaskMessage,
     field_id: str,
 ) -> dict[str, Any]:
-    """Dispatch land-assessment PDF Celery task; result published by ingest."""
+    """Dispatch land-assessment PDF Celery task; result published by ingest.
+
+    ``field_id`` is required (resolved by handle_task_message). ``job_id`` is
+    optional and forwarded so ingest can update a *local* Job when present, and
+    so ResultMessage carries job_id for the process-host writer / API DB.
+    """
     extras = dict(task.extras or {})
+    if not field_id:
+        raise ValueError("assessment_report requires field_id")
     job_id = extras.get("job_id")
-    if not job_id:
-        raise ValueError("assessment_report requires extras.job_id")
-    kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
+    kwargs: dict[str, Any] = {
+        "mq_task_id": task.task_id,
+        "field_id": str(field_id),
+    }
+    if job_id:
+        kwargs["job_id"] = str(job_id)
+    for key in ("crop_type", "crop_name_zh"):
+        if extras.get(key) is not None:
+            kwargs[key] = extras[key]
     async_result = celery_client.send_task(
         "app.tasks.assessment_report.generate_assessment_report",
-        args=[str(job_id)],
         kwargs=kwargs,
         queue="ingest",
     )
     return {
         "dispatched": ["app.tasks.assessment_report.generate_assessment_report"],
         "celery_ids": [async_result.id],
-        "job_id": str(job_id),
+        "job_id": str(job_id) if job_id else None,
         "field_id": field_id,
     }
 
