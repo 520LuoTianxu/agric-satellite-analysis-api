@@ -511,7 +511,97 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
         session.close()
 
 
-def _apply_domain_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+
+def _apply_assessment_job_progress(
+    payload: dict[str, Any],
+    *,
+    status: str = "success",
+) -> bool:
+    """Update public.jobs from assessment_report ResultMessage when job_id present."""
+    job_id = payload.get("job_id")
+    if not job_id:
+        return False
+    ok = status == "success"
+    if not ok:
+        session = SyncSession()
+        try:
+            err = payload.get("error") or "assessment_report failed"
+            row = session.execute(
+                text(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        error = :error,
+                        finished_at = COALESCE(finished_at, now()),
+                        started_at = COALESCE(started_at, now())
+                    WHERE id = CAST(:job_id AS uuid)
+                    RETURNING id::text
+                    """
+                ),
+                {"job_id": str(job_id), "error": str(err)[:2000]},
+            ).first()
+            session.commit()
+            return bool(row)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    progress = {
+        "stage": "done",
+        "percent": 100,
+        "object_key": payload.get("object_key"),
+        "public_url": payload.get("public_url"),
+        "filename": payload.get("filename"),
+        "score": payload.get("score"),
+        "grade": payload.get("grade"),
+        "light": payload.get("light"),
+        "one_liner": payload.get("one_liner"),
+        "area_mu": payload.get("area_mu"),
+        "content_type": payload.get("content_type") or "application/pdf",
+    }
+    for key in ("crop_type", "crop_name_zh"):
+        if payload.get(key) is not None:
+            progress[key] = payload[key]
+    session = SyncSession()
+    try:
+        row = session.execute(
+            text(
+                """
+                UPDATE jobs
+                SET status = 'succeeded',
+                    progress_json = CAST(:progress AS jsonb),
+                    error = NULL,
+                    finished_at = COALESCE(finished_at, now()),
+                    started_at = COALESCE(started_at, now())
+                WHERE id = CAST(:job_id AS uuid)
+                RETURNING id::text
+                """
+            ),
+            {"job_id": str(job_id), "progress": json.dumps(progress, ensure_ascii=False)},
+        ).first()
+        session.commit()
+        if row:
+            logger.info(
+                "assessment_job_updated job_id=%s object_key=%s",
+                job_id,
+                payload.get("object_key"),
+            )
+            return True
+        logger.warning("assessment_job_missing_on_writer job_id=%s", job_id)
+        return False
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _apply_domain_from_payload(
+    payload: dict[str, Any] | None,
+    *,
+    status: str = "success",
+) -> dict[str, Any]:
     stats: dict[str, Any] = {}
     if not payload or not isinstance(payload, dict):
         return stats
@@ -529,11 +619,13 @@ def _apply_domain_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]
         apply_soil_payload(payload)
         stats["soil"] = "upserted"
     elif kind == "assessment_report":
-        # PDF already on OSS; Job.progress_json holds object_key/public_url.
-        # Persist via mq_task_results only (no domain table upsert).
+        # PDF already on OSS. Cross-host: Job row lives on API/process DB —
+        # update it here from ResultMessage payload (download host may lack Job).
+        job_updated = _apply_assessment_job_progress(payload, status=status)
         stats["assessment_report"] = {
             "recorded": True,
             "job_id": payload.get("job_id"),
+            "job_updated": job_updated,
             "object_key": payload.get("object_key"),
             "public_url": payload.get("public_url"),
             "score": payload.get("score"),
@@ -577,7 +669,7 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
             "soil_profile",
         ):
             try:
-                stats = _apply_domain_from_payload(data)
+                stats = _apply_domain_from_payload(data, status=msg.status)
                 downloaded[label] = {"applied": True, **stats}
             except Exception as exc:
                 logger.exception(
@@ -605,7 +697,25 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
 
     domain_stats: dict[str, Any] = {}
     try:
-        domain_stats = _apply_domain_from_payload(msg.payload)
+        inline_payload = msg.payload
+        if (
+            isinstance(inline_payload, dict)
+            and inline_payload.get("kind") == "assessment_report"
+            and msg.status != "success"
+            and msg.error
+            and not inline_payload.get("error")
+        ):
+            inline_payload = {**inline_payload, "error": msg.error}
+        # Prefer extras.job_id when payload omitted it (cross-host failure path).
+        if (
+            isinstance(inline_payload, dict)
+            and inline_payload.get("kind") == "assessment_report"
+            and not inline_payload.get("job_id")
+            and isinstance(msg.extras, dict)
+            and msg.extras.get("job_id")
+        ):
+            inline_payload = {**inline_payload, "job_id": msg.extras.get("job_id")}
+        domain_stats = _apply_domain_from_payload(inline_payload, status=msg.status)
     except Exception as exc:
         logger.exception(
             "domain_apply_from_inline_failed task_id=%s err=%s", msg.task_id, exc

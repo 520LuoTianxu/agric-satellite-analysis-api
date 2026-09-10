@@ -62,7 +62,7 @@ Process host: mq_result_writer
 - **Process host（`mq_result_writer`）**：消费 `openfarm_process` 并 upsert 业务 DB。
 - **Weather / soil**：仍经 download 队列入队（页面点击）→ worker 拉取 → `ResultMessage`（inline payload）→ process 队列 → writer upsert。  
   **Follow-up**：ingest 天气/土壤任务目前可能仍直接写库（与 writer 双写）；以 result-writer 为单一真相源需另开小改，本轮不做大爆炸重写。
-- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report` → download → ingest 生成 PDF、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`）→ process → writer 写入 `agri.mq_task_results`。Job.progress_json 同步含 `object_key` / `public_url`；`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
+- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report`（`field_id` + `extras.job_id`）→ download → ingest **以 `field_id` 生成 PDF**（本地无 Job 不失败）、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`，`payload.job_id` 带回）→ process → writer 写入 `agri.mq_task_results` **并回写 API 机 `jobs.progress_json`**。`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
 
 ## 3. 消息约定
 
@@ -89,7 +89,7 @@ Process host: mq_result_writer
 | `weather_backfill` | `days?: int` | `backfill_weather_for_field(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
 | `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
 | `field_bootstrap` | `skip_indices?`, `sentinel_job_id?` | fan-out weather + soil +（可选）indices | consumer 轻量 `phase=bootstrap_dispatched`（子任务各自带结果） |
-| `assessment_report` | `job_id`（必填）、`crop_type?`、`crop_name_zh?` | `generate_assessment_report(..., mq_task_id=)` | **OSS** `oss_urls.assessment_pdf` + inline `payload.kind=assessment_report`（`public_url`/score/grade/filename） |
+| `assessment_report` | `job_id?`（API Job；download 机可无本地 row）、`crop_type?`、`crop_name_zh?`；**`field_id` 必填** | `generate_assessment_report(field_id=..., job_id?=..., mq_task_id=)` | **OSS** `oss_urls.assessment_pdf` + inline `payload.kind=assessment_report`（含 `job_id`/`public_url`/score/grade/filename；writer 回写 API Job） |
 
 ### ResultMessage → `CLOUDAMQP_PROCESS_QUEUE`（`openfarm_process`）
 
