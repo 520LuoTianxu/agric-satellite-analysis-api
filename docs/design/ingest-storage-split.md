@@ -91,6 +91,7 @@ task_routes = {
     "app.tasks.ndvi.*": {"queue": "ingest"},
     "app.tasks.indices.*": {"queue": "ingest"},
     "app.tasks.agri_bridge.*": {"queue": "ingest"},
+    "app.tasks.agri_lonlat.*": {"queue": "ingest"},
     "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": "ingest"},
     "app.tasks.storage.*": {"queue": "storage"},
 }

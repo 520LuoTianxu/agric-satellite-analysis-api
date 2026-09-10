@@ -348,7 +348,7 @@ def _backfill_wave_message(
     if phase == "idle":
         return "当前无进行中的遥感回填"
     if phase == "bridge":
-        return "正在写入 agri lonlat（光学+雷达）…"
+        return "正在确认 agri lonlat 已写入…"
     if phase == "done":
         return f"遥感回填已完成（{completed}/{total}）"
     # stac
@@ -508,8 +508,8 @@ async def backfill_field_indices(
             extras["land_id"] = str(land_id)
         message = (
             f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
-            "将通过 STAC 拉取 Sentinel-2 指数与 Sentinel-1 VV/VH 到 OSS，"
-            "再桥接/写入 agri lonlat_v1；完成后请刷新指数面板查看色斑。"
+            "将通过 STAC 下载波段、计算指数并直接写入 agri lonlat_v1，"
+            "不上传指数 TIF/COG。完成后请刷新指数面板查看色斑。"
             "预警将按 agri 指数重跑。"
         )
     else:

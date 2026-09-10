@@ -157,7 +157,7 @@ image overlay client-side.
 
 See **[docs/agri-first-data.md](../../docs/agri-first-data.md)** for the binding rules:
 
-- **RS** → `agri.parcel_scene_products` only (`lonlat_v1`); do not COG-backfill agri-tagged fields.
+- RS → `agri.parcel_scene_products` only (`lonlat_v1`). Agri satellite jobs write lonlat-direct (no new index COGs). The OSS TIF scanner is migration-only.
 - **Soil / weather** → public OpenFarm tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
 - Ops: `python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply`
 

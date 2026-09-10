@@ -22,11 +22,13 @@ once, then download and process scenes concurrently inside that Celery task.
 | Env | Default | Meaning |
 |---|---|---|
 | `INGEST_SCENE_MAX_WORKERS` | `16` | Thread pool size for per-scene download+process. Independent of Celery `--concurrency` (compose ingest default is 4). |
+| `WRITE_INDEX_COGS` | unset | Agri: skip index TIF/COG uploads. Classic fields: write COGs. `0` = never. `1` = always (storage-heavy). |
+| `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
 
 Raising Celery concurrency alone still leaves each job looping scenes
 serially. Scene-level threads overlap HTTP/GDAL I/O across dates in one
 chunk. Each thread opens its own SQLAlchemy session; do not share the
 parent task session across workers.
 
-Look for `scene_parallel_start` / `scene_parallel_done` in ingest logs
-(includes `workers`, `scenes`, `layers_created`).
+Look for `scene_parallel_start` / `scene_parallel_done` / `lonlat_upserted`
+in ingest logs. Agri jobs should log `cog_upload_skipped`, not `cog_uploaded`.

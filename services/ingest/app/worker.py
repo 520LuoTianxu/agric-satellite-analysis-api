@@ -9,6 +9,7 @@ INGEST_INCLUDES = [
     "app.tasks.backfill",
     "app.tasks.soil",
     "app.tasks.agri_bridge",
+    "app.tasks.agri_lonlat",
     "app.tasks.agri_alerts",
     "app.tasks.sentinel1",
     "app.tasks.assessment_report",

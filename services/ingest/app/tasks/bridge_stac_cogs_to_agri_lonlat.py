@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Bridge STAC/Celery COGs in object storage → agri.parcel_scene_products lonlat_v1.
 
+**Legacy / migration only.** The agri satellite path writes lonlat_v1 in memory
+after index compute (``app.tasks.agri_lonlat``) and does not upload index TIFs.
+Use this module when you already have ``cogs/{org_id}/{field_id}/{date}/*.tif``
+and need a one-shot convert (MQ type ``agri_bridge`` / ``mode=bridge_only``).
+
 Discovers dates under ``cogs/{org_id}/{field_id}/`` on the **configured**
 backend (``STORAGE_BACKEND=oss|minio``, default OSS) via ``exists`` probes
 (no ListObjects — many OSS bucket policies deny listing), samples the six agri
