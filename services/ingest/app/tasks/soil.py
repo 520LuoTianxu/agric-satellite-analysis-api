@@ -1053,10 +1053,44 @@ def _update_soil_job(session, job: Job | None, step: str, status: str = "running
     time_limit=300,
     soft_time_limit=240,
 )
-def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict:
-    """Fetch soil data for a field and store profile + layers + summary."""
+def fetch_soil_for_field(
+    self,
+    field_id: str,
+    job_id: str | None = None,
+    mq_task_id: str | None = None,
+) -> dict:
+    """Fetch soil data for a field and store profile + layers + summary.
+
+    When ``mq_task_id`` is set (CloudAMQP soil_fetch), publish ResultMessage
+    on terminal success/failure paths.
+    """
     session = _get_db_session()
     job: Job | None = None
+
+    def _publish_soil_mq(
+        status: str, *, error: str | None = None, extras: dict | None = None
+    ) -> None:
+        if not mq_task_id:
+            return
+        try:
+            from openfarm_common.mq_results import publish_task_result
+
+            publish_task_result(
+                task_id=mq_task_id,
+                status=status,
+                field_id=field_id,
+                error=error,
+                extras={"source": "soil_fetch", **(extras or {})},
+                upload_summary_if_empty=status == "success",
+            )
+        except Exception as e:
+            logger.warning(
+                "soil_mq_result_publish_failed",
+                field_id=field_id,
+                mq_task_id=mq_task_id,
+                error=str(e),
+            )
+
     try:
         # Load optional job for progress tracking
         if job_id:
@@ -1074,6 +1108,7 @@ def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict
                 job.error = "Field not found"
                 job.finished_at = datetime.now(timezone.utc)
                 session.commit()
+            _publish_soil_mq("failed", error="Field not found")
             return {"status": "error", "message": "Field not found"}
 
         if field.deleted_at is not None:
@@ -1083,6 +1118,7 @@ def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict
                 job.error = "Field deleted"
                 job.finished_at = datetime.now(timezone.utc)
                 session.commit()
+            _publish_soil_mq("failed", error="Field deleted")
             return {"status": "skipped", "message": "Field deleted"}
 
         # Step 1: Determine source
@@ -1120,6 +1156,11 @@ def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict
                 job.error = f"No soil data available from {source}"
                 job.finished_at = datetime.now(timezone.utc)
                 session.commit()
+            _publish_soil_mq(
+                "failed",
+                error=f"No soil data from {source}",
+                extras={"source_name": source},
+            )
             return {"status": "error", "message": f"No soil data from {source}"}
 
         _update_soil_job(session, job, "data_fetch", "completed")
@@ -1305,6 +1346,14 @@ def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict
             quality_score=quality,
         )
 
+        _publish_soil_mq(
+            "success",
+            extras={
+                "source_name": source,
+                "layers": len(layer_dicts),
+                "quality_score": quality,
+            },
+        )
         return {
             "status": "success",
             "field_id": field_id,
@@ -1315,6 +1364,7 @@ def fetch_soil_for_field(self, field_id: str, job_id: str | None = None) -> dict
     except Exception as exc:
         session.rollback()
         logger.exception("soil_fetch_error", field_id=field_id)
+        _publish_soil_mq("failed", error=str(exc)[:500])
         if job_id:
             try:
                 job = session.get(Job, uuid.UUID(job_id))

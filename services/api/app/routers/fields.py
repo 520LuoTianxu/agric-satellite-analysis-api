@@ -166,29 +166,33 @@ async def create_field(
         agri_land_id=agri_land_id,
     )
 
-    # Commit before dispatching Celery tasks so workers can find the
-    # field row in the DB (prevents race condition).
+    # Commit before MQ publish so workers can find the field row
+    # in the DB (prevents race condition).
     await db.commit()
 
-    # Soil + weather always bind via fields.id (including agri-tagged parcels).
-    from app.celery_client import send_task
+    # First-time provision via CloudAMQP field_bootstrap (consumer fans out Celery).
+    from app.mq_publish import publish_api_task
 
-    send_task("app.tasks.weather.backfill_weather_for_field", args=[str(field.id)])
-    send_task("app.tasks.soil.fetch_soil_for_field", args=[str(field.id)])
-
+    bootstrap_extras: dict[str, Any] = {}
     if agri_field:
+        bootstrap_extras["skip_indices"] = True
+        if agri_land_id:
+            bootstrap_extras["land_id"] = str(agri_land_id)
         logger.info(
             "skip_index_backfill_agri_field",
             field_id=str(field.id),
             land_id=agri_land_id,
             reason="agri-first RS via parcel_scene_products; soil/weather still enqueued",
         )
-    else:
-        send_task(
-            "app.tasks.backfill.backfill_indices_for_field",
-            args=[str(field.id)],
-            kwargs={"sentinel_job_id": str(sentinel.id)},
-        )
+    elif sentinel is not None:
+        bootstrap_extras["sentinel_job_id"] = str(sentinel.id)
+
+    publish_api_task(
+        type="field_bootstrap",
+        field_id=str(field.id),
+        land_id=str(agri_land_id) if agri_land_id else None,
+        extras=bootstrap_extras,
+    )
 
     return _field_to_out(field)
 
@@ -486,18 +490,14 @@ async def backfill_field_indices(
     db.add(sentinel)
     await db.flush()
 
-    from app.celery_client import send_task
-
-    send_task(
-        "app.tasks.backfill.backfill_indices_for_field",
-        args=[str(field_id)],
-        kwargs={
-            "months": months,
-            "sentinel_job_id": str(sentinel.id),
-            "allow_agri": is_agri,
-            "force": force,
-        },
-    )
+    extras: dict[str, Any] = {
+        "months": months,
+        "sentinel_job_id": str(sentinel.id),
+        "allow_agri": is_agri,
+        "force": force,
+        "with_bridge": False,
+        "dispatch_alerts": False,
+    }
 
     if is_agri:
         bridge_job = Job(
@@ -515,28 +515,11 @@ async def backfill_field_indices(
         )
         db.add(bridge_job)
         await db.flush()
-
-        send_task(
-            "app.tasks.agri_bridge.bridge_after_backfill",
-            args=[str(field_id)],
-            kwargs={
-                "land_id": str(land_id) if land_id is not None else None,
-                "bridge_job_id": str(bridge_job.id),
-            },
-        )
-        # Re-run RS alerts from existing agri lonlat immediately; bridge will
-        # dispatch again after upsert so new scenes are covered.
-        try:
-            send_task(
-                "app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
-                args=[str(field_id)],
-                kwargs={
-                    "land_id": str(land_id) if land_id is not None else None,
-                    "replace_open": True,
-                },
-            )
-        except Exception:
-            pass
+        extras["with_bridge"] = True
+        extras["bridge_job_id"] = str(bridge_job.id)
+        extras["dispatch_alerts"] = True
+        if land_id is not None:
+            extras["land_id"] = str(land_id)
         message = (
             f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
             "将通过 STAC 拉取 Sentinel-2 指数与 Sentinel-1 VV/VH 到 OSS，"
@@ -548,6 +531,18 @@ async def backfill_field_indices(
             f"Backfill of {months} months started. "
             "Data will appear over the next few hours."
         )
+
+    # Commit Job sentinels before MQ so workers/status see them.
+    await db.commit()
+
+    from app.mq_publish import publish_api_task
+
+    publish_api_task(
+        type="satellite_analysis",
+        field_id=str(field_id),
+        land_id=str(land_id) if land_id is not None else None,
+        extras=extras,
+    )
 
     return BackfillIndicesResponse(
         field_id=field_id,

@@ -102,6 +102,7 @@ services:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
       CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      MQ_FALLBACK_CELERY: ${MQ_FALLBACK_CELERY:-0}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
