@@ -57,7 +57,7 @@ def _fallback_celery(
             args.append(str(job_id))
         send_task("app.tasks.soil.fetch_soil_for_field", args=args)
     elif type == "satellite_analysis":
-        months = int(extras.get("months") or 60)
+        months = int(extras.get("months") or 24)
         force = bool(extras.get("force") or False)
         allow_agri = bool(extras.get("allow_agri") or False)
         sentinel_job_id = extras.get("sentinel_job_id")
@@ -68,6 +68,10 @@ def _fallback_celery(
         }
         if sentinel_job_id:
             kwargs["sentinel_job_id"] = str(sentinel_job_id)
+        if extras.get("date_from"):
+            kwargs["date_from"] = str(extras["date_from"])[:10]
+        if extras.get("date_to"):
+            kwargs["date_to"] = str(extras["date_to"])[:10]
         send_task(
             "app.tasks.backfill.backfill_indices_for_field",
             args=[fid],

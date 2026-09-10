@@ -132,9 +132,19 @@ def run_parallel_band_jobs(
         thread = threading.current_thread().name
         _band_log("band_read_start", band=str(key), thread=thread)
         t0 = time.perf_counter()
+        wait_ms = 0
+        read_ms = 0
         try:
-            with _gdal_band_limit():
+            sem = _gdal_band_limit()
+            t_wait = time.perf_counter()
+            sem.acquire()
+            wait_ms = int((time.perf_counter() - t_wait) * 1000)
+            try:
+                t_read = time.perf_counter()
                 return fn(key, value)
+            finally:
+                read_ms = int((time.perf_counter() - t_read) * 1000)
+                sem.release()
         finally:
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             _band_log(
@@ -142,6 +152,8 @@ def run_parallel_band_jobs(
                 band=str(key),
                 thread=thread,
                 elapsed_ms=elapsed_ms,
+                wait_ms=wait_ms,
+                read_ms=read_ms,
             )
 
     t0 = time.perf_counter()

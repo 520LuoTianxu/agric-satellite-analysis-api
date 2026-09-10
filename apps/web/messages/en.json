@@ -456,7 +456,7 @@
       "inProgressTitle": "Remote-sensing refresh already in progress",
       "agriStarted": "STAC backfill started; results will bridge into the agri index panel.",
       "progressBridge": "Confirming agri lonlat is written…",
-      "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})",
+      "progressCounts": "Chunks {done}/{total} (running {running}, queued {pending})",
       "progressBanner": "Fetching remote sensing… {message}"
     },
     "jobFailed": "Job failed",
@@ -870,6 +870,11 @@
     "rendering": " · rendering…",
     "refreshRs": "Re-fetch remote sensing",
     "refreshRsTitle": "Download bands, compute indices, write agri lonlat_v1 (no index TIF upload)",
+    "refreshRsDateTitle": "Choose start date",
+    "refreshRsDateDesc": "Pull optical + radar from this date through today (~90-day shards). Progress counts shards, not scenes.",
+    "refreshRsDateFrom": "Start date",
+    "refreshRsDateConfirm": "Start",
+    "refreshRsDateCancel": "Cancel",
     "refreshStarted": "Remote-sensing refresh started",
     "refreshFailed": "Failed to start remote-sensing refresh",
     "refreshInProgress": "Remote-sensing refresh in progress…",
@@ -881,7 +886,7 @@
     "cloudCover": "cloud {percent}%",
     "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
     "progressBridge": "Confirming agri lonlat is written…",
-    "progressCounts": "Completed {done}/{total} (running {running}, queued {pending})"
+    "progressCounts": "Chunks {done}/{total} (running {running}, queued {pending})"
   },
   "landReportTab": {
     "title": "Land assessment report",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -126,6 +127,7 @@ def search_s1_scenes(
     field_geom_geojson: dict, date_from: date, date_to: date
 ) -> list[dict]:
     """Search sentinel-1-grd; keep lowest-id scene per ISO week (IW DV preferred)."""
+    t0 = time.perf_counter()
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_S1_COLLECTION],
@@ -139,6 +141,7 @@ def search_s1_scenes(
         count=len(items),
         date_from=str(date_from),
         date_to=str(date_to),
+        elapsed_ms=int((time.perf_counter() - t0) * 1000),
     )
     if not items:
         return []
@@ -336,96 +339,102 @@ def _upsert_agri_s1(
     pixels: list,
     vv_stats: dict,
     vh_stats: dict,
+    mq_task_id: str | None = None,
 ) -> str | None:
-    """Upsert S1 lonlat row and upload DB-ready JSON to OSS (same path as S2).
+    """Upload S1 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
 
-    Returns public JSON URL when upload succeeds, else None.
+    Returns public JSON URL when upload+publish succeed.
     """
-    import psycopg2
-
-    # Use raw psycopg2 for JSONB upsert consistency with S2 bridge
-    url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL_SYNC required for S1 agri upsert")
-    if url.startswith("postgresql+"):
-        url = "postgresql://" + url.split("://", 1)[1]
     date_str = scene_date.isoformat()
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
     json_oss_key = None
     json_url = None
-    if upload_scene_json_enabled():
-        try:
-            from openfarm_common.mq_results import (
-                scene_json_oss_key,
-                upload_scene_product_json,
-            )
+    json_upload_ms = 0
+    from openfarm_common.mq_results import (
+        scene_json_oss_key,
+        upload_scene_product_json,
+    )
 
-            json_oss_key = scene_json_oss_key(meta["land_id"], date_str, "S1")
-            product = {
-                "land_id": meta["land_id"],
-                "tile_id": meta["tile_id"],
-                "date": date_str,
-                "sensor": "S1",
-                "scene_id": scene_id,
-                "land_name": meta["land_name"],
-                "cloud_cover": None,
-                "cloud_cover_over_30": None,
-                "parcel_cloud_cover_pct": None,
-                "pixel_count": len(pixels),
-                "generated_at_shanghai": datetime.now(
-                    ZoneInfo("Asia/Shanghai")
-                ).strftime("%Y-%m-%d %H:%M:%S%z"),
-                "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
-                "json_oss_key": json_oss_key,
-                "vv_avg": vv_stats.get("mean"),
-                "vv_min": vv_stats.get("min"),
-                "vv_max": vv_stats.get("max"),
-                "vh_avg": vh_stats.get("mean"),
-                "vh_min": vh_stats.get("min"),
-                "vh_max": vh_stats.get("max"),
-                "pixel_data": pixel_data,
-            }
-            json_oss_key, json_url = upload_scene_product_json(
-                land_id=meta["land_id"], date_str=date_str, sensor="S1", product=product
-            )
-            product["json_url"] = json_url
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "s1_scene_json_upload_failed",
-                land_id=meta.get("land_id"),
-                date=date_str,
-                error=str(exc),
-            )
-            json_oss_key = None
-            json_url = None
-
-    params = {
+    t_json = time.perf_counter()
+    json_oss_key = scene_json_oss_key(meta["land_id"], date_str, "S1")
+    product = {
         "land_id": meta["land_id"],
         "tile_id": meta["tile_id"],
         "date": date_str,
+        "sensor": "S1",
         "scene_id": scene_id,
         "land_name": meta["land_name"],
-        "json_oss_key": json_oss_key,
+        "cloud_cover": None,
+        "cloud_cover_over_30": None,
+        "parcel_cloud_cover_pct": None,
         "pixel_count": len(pixels),
-        "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
-            "%Y-%m-%d %H:%M:%S%z"
-        ),
+        "generated_at_shanghai": datetime.now(
+            ZoneInfo("Asia/Shanghai")
+        ).strftime("%Y-%m-%d %H:%M:%S%z"),
         "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
+        "json_oss_key": json_oss_key,
         "vv_avg": vv_stats.get("mean"),
         "vv_min": vv_stats.get("min"),
         "vv_max": vv_stats.get("max"),
         "vh_avg": vh_stats.get("mean"),
         "vh_min": vh_stats.get("min"),
         "vh_max": vh_stats.get("max"),
-        "pixel_data": json.dumps(pixel_data, separators=(",", ":")),
+        "pixel_data": pixel_data,
     }
-    conn = psycopg2.connect(url)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(UPSERT_S1_SQL, params)
-        conn.commit()
-    finally:
-        conn.close()
+    json_oss_key, json_url = upload_scene_product_json(
+        land_id=meta["land_id"], date_str=date_str, sensor="S1", product=product
+    )
+    json_upload_ms = int((time.perf_counter() - t_json) * 1000)
+    product["json_url"] = json_url
+
+    if not json_url or not json_oss_key:
+        raise RuntimeError("S1 agri path requires OSS scene JSON upload before MQ publish")
+
+    from openfarm_common.mq_results import publish_task_result
+
+    label = f"{date_str}_S1"
+    parent = (mq_task_id or "").strip() or None
+    result_task_id = (
+        f"{parent}:{label}" if parent else f"agri-scene:{meta['land_id']}:{label}"
+    )
+    t_mq = time.perf_counter()
+    publish_task_result(
+        task_id=result_task_id,
+        status="success",
+        land_id=str(meta["land_id"]),
+        field_id=str(field_id) if field_id else None,
+        oss_urls={label: json_url},
+        collect_parcel_urls=False,
+        upload_summary_if_empty=False,
+        extras={
+            "kind": "parcel_scene_product",
+            "sensor": "S1",
+            "date": date_str,
+            "scene_id": scene_id,
+            "parent_mq_task_id": parent,
+            "json_oss_key": json_oss_key,
+        },
+    )
+    mq_publish_ms = int((time.perf_counter() - t_mq) * 1000)
+    logger.info(
+        "lonlat_write_timing",
+        land_id=meta.get("land_id"),
+        date=date_str,
+        sensor="S1",
+        json_upload_ms=json_upload_ms,
+        db_upsert_ms=0,
+        mq_publish_ms=mq_publish_ms,
+        uploaded_json=True,
+        path="oss_mq",
+    )
+    logger.info(
+        "lonlat_oss_mq_published",
+        land_id=meta.get("land_id"),
+        date=date_str,
+        sensor="S1",
+        json_url=json_url,
+        result_task_id=result_task_id,
+    )
     return json_url
 
 
@@ -447,6 +456,7 @@ def _process_one_s1_scene(
     agri_meta: dict | None,
     field_geom_geojson: dict,
     scene_workers: int = 1,
+    mq_task_id: str | None = None,
 ) -> bool:
     """Download S1 bands, optionally write COGs, upsert agri lonlat. Own DB session."""
     from app.models.tables import Job, RasterLayer
@@ -469,6 +479,8 @@ def _process_one_s1_scene(
                 "scene_id": scene["id"],
             },
         )
+        t_scene = time.perf_counter()
+        t0 = time.perf_counter()
         pol = run_parallel_band_jobs(
             {"vv": scene["vv_href"], "vh": scene["vh_href"]},
             lambda _key, href: _read_band_windowed_db(
@@ -480,21 +492,27 @@ def _process_one_s1_scene(
         vh = pol["vh"]
         vv[~field_mask] = np.nan
         vh[~field_mask] = np.nan
+        download_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "download_bands")
 
         is_agri = agri_meta is not None
         write_cogs = write_index_cogs_enabled(is_agri=is_agri)
+        t0 = time.perf_counter()
         vv_stats = compute_zonal_stats(vv)
         vh_stats = compute_zonal_stats(vh)
+        stats_ms = int((time.perf_counter() - t0) * 1000)
 
+        write_cog_ms = 0
         if write_cogs:
             update_job_progress(session, job, "write_cog")
+            t0 = time.perf_counter()
             vv_uri = _write_index_cog(
                 vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
             )
             vh_uri = _write_index_cog(
                 vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
             )
+            write_cog_ms = int((time.perf_counter() - t0) * 1000)
             complete_step(session, job, "write_cog")
             logger.info(
                 "cog_uploaded",
@@ -550,9 +568,13 @@ def _process_one_s1_scene(
                 is_agri=is_agri,
             )
 
+        write_lonlat_ms = 0
+        pixels_n = 0
         if agri_meta is not None:
+            t0 = time.perf_counter()
             pixels = _sample_s1_lonlat(field_geom_geojson, vv, vh, target_transform)
             if pixels:
+                pixels_n = len(pixels)
                 json_url = _upsert_agri_s1(
                     session,
                     agri_meta,
@@ -562,6 +584,7 @@ def _process_one_s1_scene(
                     pixels,
                     vv_stats,
                     vh_stats,
+                    mq_task_id=mq_task_id,
                 )
                 logger.info(
                     "lonlat_upserted",
@@ -571,6 +594,20 @@ def _process_one_s1_scene(
                     pixels=len(pixels),
                     json_url=json_url,
                 )
+            write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            "scene_timing",
+            sensor="S1",
+            job_id=job_id,
+            scene_id=scene.get("id"),
+            date=str(scene.get("date")),
+            download_ms=download_ms,
+            stats_ms=stats_ms,
+            write_cog_ms=write_cog_ms,
+            write_lonlat_ms=write_lonlat_ms,
+            total_ms=int((time.perf_counter() - t_scene) * 1000),
+            pixels=pixels_n,
+        )
         return True
     except Exception as e:
         logger.error("s1_scene_failed", scene_id=scene.get("id"), error=str(e))
@@ -598,6 +635,7 @@ def _process_s1_scenes_parallel(
     date_to: date,
     agri_meta: dict | None,
     field_geom_geojson: dict,
+    mq_task_id: str | None = None,
 ) -> int:
     """Process S1 scenes concurrently. Returns the processed count."""
     total = len(scenes)
@@ -614,6 +652,7 @@ def _process_s1_scenes_parallel(
     )
 
     processed = 0
+    t_process = time.perf_counter()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(
@@ -634,6 +673,7 @@ def _process_s1_scenes_parallel(
                 agri_meta=agri_meta,
                 field_geom_geojson=field_geom_geojson,
                 scene_workers=workers,
+                mq_task_id=mq_task_id,
             ): scene
             for idx, scene in enumerate(scenes)
         }
@@ -691,12 +731,16 @@ def process_s1_backfill(self, job_id: str) -> dict:
         field_geom = to_shape(field.geom)
         field_geom_geojson = mapping(field_geom)
         params = job.params_json or {}
+        mq_task_id = params.get("mq_task_id")
+        if mq_task_id is not None:
+            mq_task_id = str(mq_task_id)
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
         org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
         field_id_str = str(job.field_id)
 
         update_job_progress(session, job, "scene_search")
+        t_search = time.perf_counter()
         scenes = search_s1_scenes(field_geom_geojson, date_from, date_to)
         force = bool(params.get("force") or False)
         skipped_existing = 0
@@ -727,6 +771,17 @@ def process_s1_backfill(self, job_id: str) -> dict:
             )
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        logger.info(
+            "job_phase_timing",
+            phase="scene_search",
+            sensor="S1",
+            job_id=job_id,
+            elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+            scenes=len(scenes),
+            skipped_existing=skipped_existing,
+            date_from=str(date_from),
+            date_to=str(date_to),
+        )
 
         if not scenes:
             job.status = "completed"
@@ -781,6 +836,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
             date_to=date_to,
             agri_meta=agri_meta,
             field_geom_geojson=field_geom_geojson,
+            mq_task_id=mq_task_id,
         )
 
         session.expire(job)
@@ -845,7 +901,13 @@ def process_s1_backfill(self, job_id: str) -> dict:
     soft_time_limit=90,
 )
 def backfill_s1_for_field(
-    self, field_id: str, months: int | None = None, force: bool = False
+    self,
+    field_id: str,
+    months: int | None = None,
+    force: bool = False,
+    mq_task_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
     from app.models.tables import Field, Job
@@ -862,8 +924,13 @@ def backfill_s1_for_field(
                 "detail": "Field not found",
             }
 
-        end_date = date.today()
-        start_date = end_date - timedelta(days=months * 30)
+        end_date = date.fromisoformat(date_to) if date_to else date.today()
+        if date_from:
+            start_date = date.fromisoformat(date_from)
+        else:
+            start_date = end_date - timedelta(days=months * 30)
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
 
         # Always dispatch chunks; process_s1_backfill skips dates already present
         # unless force=True (coarse chunk skip left gaps unfilled).
@@ -874,6 +941,7 @@ def backfill_s1_for_field(
             chunks.append((cursor, chunk_end))
             cursor = chunk_end + timedelta(days=1)
 
+        pending_sends: list[tuple[str, int]] = []
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
             job = Job(
@@ -886,24 +954,29 @@ def backfill_s1_for_field(
                     "is_backfill": True,
                     "sensor": "S1",
                     "force": bool(force),
+                    **({"mq_task_id": mq_task_id} if mq_task_id else {}),
                 },
             )
             session.add(job)
             session.flush()
-            celery_app.send_task(
-                "app.tasks.sentinel1.process_s1_backfill",
-                args=[str(job.id)],
-                countdown=chunk_idx * 30,
-            )
+            pending_sends.append((str(job.id), chunk_idx * 30))
             dispatched += 1
 
         session.commit()
+        for job_id, countdown in pending_sends:
+            celery_app.send_task(
+                "app.tasks.sentinel1.process_s1_backfill",
+                args=[job_id],
+                countdown=countdown,
+            )
         return {
             "field_id": field_id,
             "status": "dispatched",
             "jobs": dispatched,
             "months": months,
             "force": force,
+            "date_from": start_date.isoformat(),
+            "date_to": end_date.isoformat(),
         }
     except Exception as e:
         session.rollback()

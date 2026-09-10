@@ -350,14 +350,15 @@ def _backfill_wave_message(
     if phase == "bridge":
         return "正在确认 agri lonlat 已写入…"
     if phase == "done":
-        return f"遥感回填已完成（{completed}/{total}）"
+        return f"遥感回填已完成（分片任务 {completed}/{total}）"
     # stac
     done = completed
     return (
-        f"正在拉取光学+雷达遥感数据… 已完成 {done}/{max(total, done + pending + running)}"
+        f"正在拉取光学+雷达遥感数据… 分片任务 {done}/{max(total, done + pending + running)}"
         f"（进行中 {running}，排队 {pending}"
         + (f"，失败 {failed}" if failed else "")
         + f"，约 {percent:.0f}%）"
+        "；分母是日期分片任务数，不是卫星景数"
     )
 
 
@@ -460,8 +461,14 @@ async def backfill_field_indices(
             detail=f"Backfill already in progress ({len(active_count)} jobs pending/running).",
         )
 
-    months = body.months if body else 60
+    months = body.months if body else 24
     force = body.force if body else False
+    date_from = (body.date_from if body else None) or None
+    date_to = (body.date_to if body else None) or None
+    if date_from:
+        date_from = str(date_from).strip()[:10] or None
+    if date_to:
+        date_to = str(date_to).strip()[:10] or None
 
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
@@ -473,6 +480,8 @@ async def backfill_field_indices(
             "sentinel": True,
             "allow_agri": is_agri,
             "force": force,
+            **({"date_from": date_from} if date_from else {}),
+            **({"date_to": date_to} if date_to else {}),
         },
     )
     db.add(sentinel)
@@ -486,6 +495,10 @@ async def backfill_field_indices(
         "with_bridge": False,
         "dispatch_alerts": False,
     }
+    if date_from:
+        extras["date_from"] = date_from
+    if date_to:
+        extras["date_to"] = date_to
 
     if is_agri:
         bridge_job = Job(
@@ -506,9 +519,13 @@ async def backfill_field_indices(
         extras["dispatch_alerts"] = True
         if land_id is not None:
             extras["land_id"] = str(land_id)
+        if date_from:
+            range_desc = f"{date_from} → {date_to or '今天'}"
+        else:
+            range_desc = f"近 {months} 个月"
         message = (
-            f"已启动 {months} 个月遥感回填（光学+雷达，agri 地块）。"
-            "将通过 STAC 下载波段、计算指数并直接写入 agri lonlat_v1，"
+            f"已启动遥感回填（{range_desc}，光学+雷达，agri 地块）。"
+            "将通过 STAC 下载波段、计算指数；景结果上传 OSS 并由结果队列写入 agri lonlat_v1，"
             "不上传指数 TIF/COG。完成后请刷新指数面板查看色斑。"
             "预警将按 agri 指数重跑。"
         )

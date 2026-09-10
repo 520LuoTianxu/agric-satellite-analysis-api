@@ -75,7 +75,7 @@ def _dispatch_satellite_analysis(
 ) -> dict[str, Any]:
     """Fire-and-forget: agri lonlat-direct backfill (or classic COG) + wait publisher."""
     extras = dict(task.extras or {})
-    months = int(extras.get("months") or 60)
+    months = int(extras.get("months") or 24)
     force = bool(extras.get("force") or False)
     mode = str(extras.get("mode") or "full")
     allow_agri = bool(extras.get("allow_agri") or False)
@@ -111,7 +111,12 @@ def _dispatch_satellite_analysis(
         "months": months,
         "allow_agri": allow_agri,
         "force": force,
+        "mq_task_id": task.task_id,
     }
+    if extras.get("date_from"):
+        backfill_kwargs["date_from"] = str(extras["date_from"])[:10]
+    if extras.get("date_to"):
+        backfill_kwargs["date_to"] = str(extras["date_to"])[:10]
     if sentinel_job_id:
         backfill_kwargs["sentinel_job_id"] = str(sentinel_job_id)
 

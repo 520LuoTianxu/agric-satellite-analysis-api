@@ -28,6 +28,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
     Select,
     SelectContent,
     SelectItem,
@@ -328,6 +338,12 @@ export interface AgriTimeseriesPanelProps {
     enabled?: boolean;
 }
 
+function defaultRsDateFrom(): string {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 24);
+    return d.toISOString().slice(0, 10);
+}
+
 export default function AgriTimeseriesPanel({
     fieldId,
     fieldTags,
@@ -343,6 +359,8 @@ export default function AgriTimeseriesPanel({
     const landId = useMemo(() => parseAgriLandId(fieldTags), [fieldTags]);
     const [backfilling, setBackfilling] = useState(false);
     const [backfillActive, setBackfillActive] = useState(false);
+    const [refreshDateOpen, setRefreshDateOpen] = useState(false);
+    const [refreshDateFrom, setRefreshDateFrom] = useState(defaultRsDateFrom);
     const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -523,10 +541,21 @@ export default function AgriTimeseriesPanel({
         };
     }, [fieldId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    const openRefreshRsDialog = () => {
+        setRefreshDateFrom(defaultRsDateFrom());
+        setRefreshDateOpen(true);
+    };
+
     const handleRefreshRs = async () => {
+        setRefreshDateOpen(false);
         setBackfilling(true);
         try {
-            await fieldsApi.backfillIndices(fieldId);
+            const today = new Date().toISOString().slice(0, 10);
+            await fieldsApi.backfillIndices(fieldId, {
+                force: true,
+                date_from: refreshDateFrom,
+                date_to: today,
+            });
             setBackfillActive(true);
             setBackfillProgress((prev) =>
                 prev
@@ -930,7 +959,7 @@ export default function AgriTimeseriesPanel({
                             size="sm"
                             variant="default"
                             className="h-7 text-xs gap-1.5"
-                            onClick={handleRefreshRs}
+                            onClick={openRefreshRsDialog}
                             disabled={backfilling || backfillActive}
                             title={backfillActive ? t("refreshInProgress") : t("refreshRsTitle")}
                         >
@@ -954,6 +983,32 @@ export default function AgriTimeseriesPanel({
                 </div>
             </CardHeader>
             <CardContent className="px-3.5 pb-3.5 pt-0 space-y-3">
+                <Dialog open={refreshDateOpen} onOpenChange={setRefreshDateOpen}>
+                    <DialogContent className="sm:max-w-md">
+                        <DialogHeader>
+                            <DialogTitle>{t("refreshRsDateTitle")}</DialogTitle>
+                            <DialogDescription>{t("refreshRsDateDesc")}</DialogDescription>
+                        </DialogHeader>
+                        <div className="grid gap-2 py-2">
+                            <Label htmlFor="rs-date-from">{t("refreshRsDateFrom")}</Label>
+                            <Input
+                                id="rs-date-from"
+                                type="date"
+                                value={refreshDateFrom}
+                                max={new Date().toISOString().slice(0, 10)}
+                                onChange={(e) => setRefreshDateFrom(e.target.value)}
+                            />
+                        </div>
+                        <DialogFooter className="gap-2 sm:gap-0">
+                            <Button type="button" variant="outline" onClick={() => setRefreshDateOpen(false)}>
+                                {t("refreshRsDateCancel")}
+                            </Button>
+                            <Button type="button" onClick={handleRefreshRs} disabled={!refreshDateFrom || backfilling}>
+                                {t("refreshRsDateConfirm")}
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
                 {backfillActive && (
                     <div className="rounded-md border border-info/30 bg-info-subtle/60 px-2.5 py-2 space-y-1.5">
                         <p className="text-[11px] text-info flex items-center gap-1.5 font-medium">
