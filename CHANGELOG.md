@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Agri field satellite refresh now writes color-spot data directly after computing indices. It no longer stores large index image files in object storage. Existing stored images are left as-is; new runs do not add more.
 - Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 16 per job by default), so a field backfill finishes faster without adding more Celery workers.
+- A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed
 - Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.

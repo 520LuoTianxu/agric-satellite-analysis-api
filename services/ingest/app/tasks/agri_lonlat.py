@@ -23,6 +23,7 @@ from shapely.geometry import mapping
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
 from app.tasks.indices import get_index
@@ -34,7 +35,7 @@ from app.tasks.pipeline import (
     existing_agri_scene_dates,
     filter_scenes_skip_existing,
     get_db_session,
-    read_band_windowed,
+    read_bands_windowed_parallel,
     search_scenes_for_defs,
     update_job_progress,
     write_cog,
@@ -331,6 +332,7 @@ def _process_one_optical_scene(
     agri_meta: dict[str, Any],
     field_geom_geojson: dict,
     write_cogs: bool,
+    scene_workers: int = 1,
 ) -> dict[str, Any] | None:
     from app.models.tables import Job
 
@@ -351,11 +353,13 @@ def _process_one_optical_scene(
                 "scene_id": scene["id"],
             },
         )
-        bands: dict[str, np.ndarray] = {}
-        for band_key, href in scene["band_hrefs"].items():
-            bands[band_key] = read_band_windowed(
-                href, bounds, target_shape, target_transform
-            )
+        bands = read_bands_windowed_parallel(
+            scene["band_hrefs"],
+            bounds,
+            target_shape,
+            target_transform,
+            scene_workers=scene_workers,
+        )
         complete_step(session, job, "download_bands")
 
         update_job_progress(session, job, "compute_indices")
@@ -523,6 +527,14 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             field_geom.bounds, field_geom
         )
         workers = min(scene_max_workers(), len(scenes))
+        logger.info(
+            "scene_parallel_start",
+            job_id=job_id,
+            index="agri_optical",
+            scenes=len(scenes),
+            workers=workers,
+            band_gdal_cap=band_max_workers(),
+        )
         update_job_progress(
             session,
             job,
@@ -549,6 +561,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                     agri_meta=agri_meta,
                     field_geom_geojson=field_geom_geojson,
                     write_cogs=write_cogs,
+                    scene_workers=workers,
                 ): scene
                 for idx, scene in enumerate(scenes)
             }
@@ -565,6 +578,15 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                     continue
                 if result is not None:
                     upserted += 1
+
+        logger.info(
+            "scene_parallel_done",
+            job_id=job_id,
+            index="agri_optical",
+            layers_created=upserted,
+            total_scenes=len(scenes),
+            workers=workers,
+        )
 
         session.expire(job)
         job = session.get(Job, uuid.UUID(job_id))

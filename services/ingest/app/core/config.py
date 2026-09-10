@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Celery --concurrency is separate (typically 4); this speeds the per-job
     # serial scene loop. Each thread opens its own DB session.
     ingest_scene_max_workers: int = 16
+    # Process-wide cap on concurrent windowed band reads (GDAL/rasterio).
+    # Nested under the scene pool; see app.core.band_parallel.
+    ingest_band_max_workers: int = 16
     soil_source_priority: str = "auto"  # auto | soilgrids | polaris
 
     # Email (Resend)
