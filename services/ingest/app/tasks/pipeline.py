@@ -29,6 +29,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
+from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
 from app.tasks.indices import IndexDef
 
@@ -48,8 +49,8 @@ os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
 os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "YES")
 os.environ.setdefault("VSI_CACHE", "TRUE")
 os.environ.setdefault("VSI_CACHE_SIZE", "5000000")
-# Scene threads each open their own datasets; keep GDAL's internal pool at 1
-# so 16-way scene parallelism does not spawn nested thread storms.
+# Scene and band threads each open their own datasets; keep GDAL's internal
+# pool at 1 so scene x band parallelism does not spawn nested GDAL storms.
 os.environ.setdefault("GDAL_NUM_THREADS", "1")
 
 # Serialize job.progress_json updates. SQLAlchemy Session and the Job row
@@ -337,7 +338,11 @@ def search_scenes(
 def read_band_windowed(
     href: str, bounds: tuple, target_shape: tuple, target_transform
 ) -> np.ndarray:
-    """Read a band from a remote COG, windowed to field extent."""
+    """Read a band from a remote COG, windowed to field extent.
+
+    Caller must treat this as one GDAL dataset open. Band workers each call
+    this under their own ``rasterio.Env()`` (this function opens one).
+    """
     with rasterio.Env():
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
@@ -355,6 +360,22 @@ def read_band_windowed(
                 resampling=Resampling.bilinear,
             )
             return dst
+
+
+def read_bands_windowed_parallel(
+    band_hrefs: dict[str, str],
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    *,
+    scene_workers: int = 1,
+) -> dict[str, np.ndarray]:
+    """Windowed COG reads for one scene, overlapped across bands."""
+
+    def _one(_band_key: str, href: str) -> np.ndarray:
+        return read_band_windowed(href, bounds, target_shape, target_transform)
+
+    return run_parallel_band_jobs(band_hrefs, _one, scene_workers=scene_workers)
 
 
 # ── COG writing ──────────────────────────────────────────────────────
@@ -611,12 +632,16 @@ def process_scene(
     date_to: date,
     historical_means: list[float],
     extra_params: dict | None = None,
+    scene_workers: int = 1,
 ):
     """Download bands, compute index, optionally write COG, stats, alerts.
 
     Agri / ``WRITE_INDEX_COGS=0`` skips COG upload and raster_layers. Agri
     lonlat is emitted by ``app.tasks.agri_lonlat`` (all optical indices in
     one pass), not here.
+
+    ``scene_workers`` is the parent scene-pool size so band ThreadPool size
+    can be nested-capped (see ``app.core.band_parallel``).
 
     Returns the stats dict on success, ``None`` on failure.
     """
@@ -641,11 +666,13 @@ def process_scene(
         "download_bands",
         {"scene": scene_idx + 1, "total_scenes": total_scenes, "scene_id": scene_id},
     )
-    bands: dict[str, np.ndarray] = {}
-    for band_key, href in band_hrefs.items():
-        bands[band_key] = read_band_windowed(
-            href, bounds, target_shape, target_transform
-        )
+    bands = read_bands_windowed_parallel(
+        band_hrefs,
+        bounds,
+        target_shape,
+        target_transform,
+        scene_workers=scene_workers,
+    )
     complete_step(session, job, "download_bands")
 
     # -- compute index --
@@ -818,6 +845,7 @@ def process_scenes_parallel(
         index=index_def.key,
         scenes=total,
         workers=workers,
+        band_gdal_cap=band_max_workers(),
     )
 
     def _one(scene: dict, scene_idx: int):
@@ -844,6 +872,7 @@ def process_scenes_parallel(
                 date_to=date_to,
                 historical_means=list(hist_snapshot),
                 extra_params=extra,
+                scene_workers=workers,
             )
         except Exception as e:
             logger.error(

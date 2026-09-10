@@ -34,7 +34,7 @@ jobs:
         run: python -m unittest discover -s packages/openfarm_common/tests -v
 
   ingest:
-    name: Ingest - index COG flag tests
+    name: Ingest - unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

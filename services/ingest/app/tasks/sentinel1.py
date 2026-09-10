@@ -13,10 +13,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -34,9 +32,10 @@ from rio_cogeo.profiles import cog_profiles
 from shapely.geometry import mapping
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
-from app.core.storage import get_storage, restore_gdal_env
+from app.core.storage import get_storage
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
     RETRY_DELAYS,
@@ -58,8 +57,19 @@ STAC_S1_COLLECTION = "sentinel-1-grd"
 # Full LUT calibration is not applied; values are approximate but flood-usable.
 _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
-# os.environ mutation in _gdal_public_aws is process-wide; serialize reads.
-_gdal_public_aws_lock = threading.Lock()
+# Thread-local GDAL/AWS options for public sentinel-s1-l1c. Do not mutate
+# process-wide os.environ (that would serialize VV/VH and race OSS uploads).
+_S1_PUBLIC_AWS_ENV = {
+    "AWS_NO_SIGN_REQUEST": "YES",
+    "AWS_VIRTUAL_HOSTING": "TRUE",
+    "AWS_HTTPS": "YES",
+    "AWS_REGION": "eu-central-1",
+    "AWS_DEFAULT_REGION": "eu-central-1",
+    "AWS_S3_ENDPOINT": "s3.eu-central-1.amazonaws.com",
+    "AWS_ACCESS_KEY_ID": "",
+    "AWS_SECRET_ACCESS_KEY": "",
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+}
 
 UPSERT_S1_SQL = """
 INSERT INTO agri.parcel_scene_products (
@@ -95,34 +105,6 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   pixel_data = EXCLUDED.pixel_data,
   ingested_at = now()
 """
-
-
-@contextmanager
-def _gdal_public_aws():
-    """Read public AWS Open Data (sentinel-s1-l1c) without OSS endpoint."""
-    keys = (
-        "AWS_S3_ENDPOINT",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_VIRTUAL_HOSTING",
-        "AWS_HTTPS",
-        "AWS_NO_SIGN_REQUEST",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    )
-    previous = {k: os.environ[k] for k in keys if k in os.environ}
-    os.environ.pop("AWS_S3_ENDPOINT", None)
-    os.environ.pop("AWS_ACCESS_KEY_ID", None)
-    os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-    os.environ["AWS_NO_SIGN_REQUEST"] = "YES"
-    os.environ["AWS_VIRTUAL_HOSTING"] = "TRUE"
-    os.environ["AWS_HTTPS"] = "YES"
-    os.environ["AWS_REGION"] = "eu-central-1"
-    os.environ["AWS_DEFAULT_REGION"] = "eu-central-1"
-    try:
-        yield
-    finally:
-        restore_gdal_env(previous, keys)
 
 
 def _round6(v: float) -> float:
@@ -217,31 +199,30 @@ def _read_band_windowed_db(
     if href.startswith("s3://"):
         s3_path = href.replace("s3://", "/vsis3/", 1)
     dst = np.zeros(target_shape, dtype=np.float32)
-    with _gdal_public_aws_lock:
-        with _gdal_public_aws():
-            with rasterio.open(s3_path) as src:
-                # Always warp via VRT so GCP-only products work
-                with WarpedVRT(
-                    src, crs="EPSG:4326", resampling=Resampling.bilinear
-                ) as vrt:
-                    # WarpedVRT forbids boundless reads — clip window to VRT extent
-                    window = rasterio.windows.from_bounds(
-                        *bounds, transform=vrt.transform
-                    ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
-                    if window.width <= 0 or window.height <= 0:
-                        return dst  # all-nan after dn_to_db of zeros→nan path
-                    window = window.round_offsets().round_lengths()
-                    data = vrt.read(1, window=window, boundless=False)
-                    src_transform = rasterio.windows.transform(window, vrt.transform)
-                    reproject(
-                        source=data.astype(np.float32),
-                        destination=dst,
-                        src_transform=src_transform,
-                        src_crs="EPSG:4326",
-                        dst_transform=target_transform,
-                        dst_crs="EPSG:4326",
-                        resampling=Resampling.bilinear,
-                    )
+    with rasterio.Env(**_S1_PUBLIC_AWS_ENV):
+        with rasterio.open(s3_path) as src:
+            # Always warp via VRT so GCP-only products work
+            with WarpedVRT(
+                src, crs="EPSG:4326", resampling=Resampling.bilinear
+            ) as vrt:
+                # WarpedVRT forbids boundless reads — clip window to VRT extent
+                window = rasterio.windows.from_bounds(
+                    *bounds, transform=vrt.transform
+                ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
+                if window.width <= 0 or window.height <= 0:
+                    return dst  # all-nan after dn_to_db of zeros→nan path
+                window = window.round_offsets().round_lengths()
+                data = vrt.read(1, window=window, boundless=False)
+                src_transform = rasterio.windows.transform(window, vrt.transform)
+                reproject(
+                    source=data.astype(np.float32),
+                    destination=dst,
+                    src_transform=src_transform,
+                    src_crs="EPSG:4326",
+                    dst_transform=target_transform,
+                    dst_crs="EPSG:4326",
+                    resampling=Resampling.bilinear,
+                )
     return _dn_to_db(dst)
 
 
@@ -465,6 +446,7 @@ def _process_one_s1_scene(
     date_to: date,
     agri_meta: dict | None,
     field_geom_geojson: dict,
+    scene_workers: int = 1,
 ) -> bool:
     """Download S1 bands, optionally write COGs, upsert agri lonlat. Own DB session."""
     from app.models.tables import Job, RasterLayer
@@ -487,12 +469,15 @@ def _process_one_s1_scene(
                 "scene_id": scene["id"],
             },
         )
-        vv = _read_band_windowed_db(
-            scene["vv_href"], bounds, target_shape, target_transform
+        pol = run_parallel_band_jobs(
+            {"vv": scene["vv_href"], "vh": scene["vh_href"]},
+            lambda _key, href: _read_band_windowed_db(
+                href, bounds, target_shape, target_transform
+            ),
+            scene_workers=scene_workers,
         )
-        vh = _read_band_windowed_db(
-            scene["vh_href"], bounds, target_shape, target_transform
-        )
+        vv = pol["vv"]
+        vh = pol["vh"]
         vv[~field_mask] = np.nan
         vh[~field_mask] = np.nan
         complete_step(session, job, "download_bands")
@@ -620,7 +605,12 @@ def _process_s1_scenes_parallel(
         return 0
     workers = min(scene_max_workers(), total)
     logger.info(
-        "scene_parallel_start", job_id=job_id, index="s1", scenes=total, workers=workers
+        "scene_parallel_start",
+        job_id=job_id,
+        index="s1",
+        scenes=total,
+        workers=workers,
+        band_gdal_cap=band_max_workers(),
     )
 
     processed = 0
@@ -643,6 +633,7 @@ def _process_s1_scenes_parallel(
                 date_to=date_to,
                 agri_meta=agri_meta,
                 field_geom_geojson=field_geom_geojson,
+                scene_workers=workers,
             ): scene
             for idx, scene in enumerate(scenes)
         }
