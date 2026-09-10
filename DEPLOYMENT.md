@@ -166,6 +166,8 @@ Internal network (not exposed):
 
 Worker split (ingest download vs storage OSS upload): [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
 
+**物理拆包已落地**：`packages/openfarm_common` + `services/ingest` / `services/storage` 独立 Dockerfile；compose `build.context` 为仓库根目录。storage 镜像不含 GDAL。
+
 ---
 
 ## Maintenance

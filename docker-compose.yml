@@ -74,8 +74,8 @@ services:
   # ── FastAPI (API service) ──────────────────────────────────────────
   api:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/api/Dockerfile
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
@@ -119,8 +119,8 @@ services:
   # Replaces legacy ``processor``. Queue: ingest. See docs/design/ingest-storage-split.md
   ingest:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/ingest/Dockerfile
     command: >
       celery -A app.worker worker
       -Q ingest
@@ -168,8 +168,8 @@ services:
   # ── Celery storage (OSS/MinIO uploads only) ───────────────────────
   storage:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/storage/Dockerfile
     command: >
       celery -A app.worker worker
       -Q storage
@@ -189,9 +189,6 @@ services:
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
       OPENFARM_SCRATCH_DIR: /data/scratch
-      # Celery app imports settings that expect DB URLs; not used by storage tasks
-      DATABASE_URL: ${DATABASE_URL}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
     volumes:
       - scratch:/data/scratch
     depends_on:
@@ -211,8 +208,8 @@ services:
   # ── Celery Beat (schedules → ingest queue) ────────────────────────
   beat:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/api/Dockerfile
     command: >
       celery -A app.worker beat
       --loglevel=info

@@ -1,6 +1,6 @@
 # 国外数据下载与 OSS 上传服务拆分设计
 
-> 状态：已定稿，按「一次改到位」落地  
+> 状态：已定稿；**物理拆包已落地**（openfarm_common + 独立 ingest/storage 镜像）  
 > 关联仓库：`agric-satellite-analysis`  
 > 日期：2026-09-10
 
@@ -130,20 +130,21 @@ API 现有 `routers/storage.py`（presign、客户端直传）保留在 **api**�
 ## 5. 代码布局（monorepo）
 
 ```
+packages/
+  openfarm_common/     # settings, ObjectStorage, celery factory, storage_client
 services/
-  api/                 # FastAPI + 轻量 beat（或独立 beat）
+  api/                 # FastAPI + beat client（send_task，不含重任务模块）
   ingest/
-    Dockerfile
-    app/
-      worker.py        # Celery app，include 迁入的 tasks
-      tasks/           # weather, soil, pipeline, sentinel1, ...
-      core/            # 配置子集：STAC、Soil、DB sync、无 OSS AK
-  storage/
-    Dockerfile
+    Dockerfile         # GDAL/STAC；build context = repo root
     app/
       worker.py
-      tasks/storage.py
-      core/storage.py  # 从 api 抽出的 ObjectStorage
+      tasks/           # weather, soil, pipeline, sentinel1, ...（从 api git mv）
+      models/ core/ reports/  # ingest 自有副本（或经 common 再导出）
+  storage/
+    Dockerfile         # python slim，无 GDAL；build context = repo root
+    app/
+      worker.py
+      tasks/storage_tasks.py   # app.tasks.storage.*
 ```
 
 **共享策略（本轮）**

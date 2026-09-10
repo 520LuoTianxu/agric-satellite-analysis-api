@@ -1,0 +1,22 @@
+[project]
+name = "openfarm-common"
+version = "0.1.0"
+description = "Shared settings, object storage, and Celery helpers for OpenFarm workers"
+requires-python = ">=3.11"
+dependencies = [
+    "celery[redis]>=5.4.0",
+    "redis>=5.0.0",
+    "pydantic-settings>=2.0.0",
+    "oss2>=2.18.0",
+    "minio>=7.2.0",
+    "structlog>=24.0.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["openfarm_common*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

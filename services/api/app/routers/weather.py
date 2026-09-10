@@ -204,9 +204,13 @@ async def trigger_weather_backfill(
     if body.days < 1 or body.days > 365:
         raise HTTPException(status_code=400, detail="days must be between 1 and 365")
 
-    from app.tasks.weather import backfill_weather_for_field
+    from app.celery_client import send_task
 
-    backfill_weather_for_field.delay(str(field_id), days=body.days)
+    send_task(
+        "app.tasks.weather.backfill_weather_for_field",
+        args=[str(field_id)],
+        kwargs={"days": body.days},
+    )
 
     logger.info(
         "weather_backfill_triggered",

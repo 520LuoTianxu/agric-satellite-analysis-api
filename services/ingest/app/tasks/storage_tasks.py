@@ -1,4 +1,7 @@
-"""Client helpers for the storage queue (tasks run in services/storage)."""
+"""Client helpers for dispatching uploads to the storage queue.
+
+Actual Celery task bodies live in ``services/storage``.
+"""
 
 from openfarm_common.storage_client import (
     DEFAULT_UPLOAD_TIMEOUT,

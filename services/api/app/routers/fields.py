@@ -171,11 +171,10 @@ async def create_field(
     await db.commit()
 
     # Soil + weather always bind via fields.id (including agri-tagged parcels).
-    from app.tasks.weather import backfill_weather_for_field
-    from app.tasks.soil import fetch_soil_for_field
+    from app.celery_client import send_task
 
-    backfill_weather_for_field.delay(str(field.id))
-    fetch_soil_for_field.delay(str(field.id))
+    send_task("app.tasks.weather.backfill_weather_for_field", args=[str(field.id)])
+    send_task("app.tasks.soil.fetch_soil_for_field", args=[str(field.id)])
 
     if agri_field:
         logger.info(
@@ -185,10 +184,10 @@ async def create_field(
             reason="agri-first RS via parcel_scene_products; soil/weather still enqueued",
         )
     else:
-        from app.tasks.backfill import backfill_indices_for_field
-
-        backfill_indices_for_field.delay(
-            str(field.id), sentinel_job_id=str(sentinel.id)
+        send_task(
+            "app.tasks.backfill.backfill_indices_for_field",
+            args=[str(field.id)],
+            kwargs={"sentinel_job_id": str(sentinel.id)},
         )
 
     return _field_to_out(field)
@@ -487,19 +486,20 @@ async def backfill_field_indices(
     db.add(sentinel)
     await db.flush()
 
-    from app.tasks.backfill import backfill_indices_for_field
+    from app.celery_client import send_task
 
-    backfill_indices_for_field.delay(
-        str(field_id),
-        months=months,
-        sentinel_job_id=str(sentinel.id),
-        allow_agri=is_agri,
-        force=force,
+    send_task(
+        "app.tasks.backfill.backfill_indices_for_field",
+        args=[str(field_id)],
+        kwargs={
+            "months": months,
+            "sentinel_job_id": str(sentinel.id),
+            "allow_agri": is_agri,
+            "force": force,
+        },
     )
 
     if is_agri:
-        from app.tasks.agri_bridge import bridge_after_backfill
-
         bridge_job = Job(
             org_id=ctx.org_id,
             field_id=field_id,
@@ -516,20 +516,24 @@ async def backfill_field_indices(
         db.add(bridge_job)
         await db.flush()
 
-        bridge_after_backfill.delay(
-            str(field_id),
-            land_id=str(land_id) if land_id is not None else None,
-            bridge_job_id=str(bridge_job.id),
+        send_task(
+            "app.tasks.agri_bridge.bridge_after_backfill",
+            args=[str(field_id)],
+            kwargs={
+                "land_id": str(land_id) if land_id is not None else None,
+                "bridge_job_id": str(bridge_job.id),
+            },
         )
         # Re-run RS alerts from existing agri lonlat immediately; bridge will
         # dispatch again after upsert so new scenes are covered.
         try:
-            from app.tasks.agri_alerts import evaluate_agri_alerts_for_field
-
-            evaluate_agri_alerts_for_field.delay(
-                str(field_id),
-                land_id=str(land_id) if land_id is not None else None,
-                replace_open=True,
+            send_task(
+                "app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
+                args=[str(field_id)],
+                kwargs={
+                    "land_id": str(land_id) if land_id is not None else None,
+                    "replace_open": True,
+                },
             )
         except Exception:
             pass
@@ -696,9 +700,12 @@ async def backfill_all_fields(
     """Trigger backfill for ALL active fields (owner only, one-time migration)."""
     months = body.months if body else 24
 
-    from app.tasks.backfill import backfill_all_existing_fields
+    from app.celery_client import send_task
 
-    backfill_all_existing_fields.delay(months=months)
+    send_task(
+        "app.tasks.backfill.backfill_all_existing_fields",
+        kwargs={"months": months},
+    )
 
     return {
         "status": "dispatched",
@@ -722,10 +729,9 @@ async def ensure_agri_soil_weather(
     """
     from sqlalchemy import select as sa_select
 
+    from app.celery_client import send_task
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
     from app.models.tables import SoilFieldSummary
-    from app.tasks.soil import fetch_soil_for_field
-    from app.tasks.weather import backfill_weather_for_field
 
     q = sa_select(Field).where(
         Field.org_id == ctx.org_id,
@@ -767,10 +773,13 @@ async def ensure_agri_soil_weather(
         need_weather = weather_exists is None
 
         if need_soil:
-            fetch_soil_for_field.delay(str(field.id))
+            send_task("app.tasks.soil.fetch_soil_for_field", args=[str(field.id)])
             soil_enqueued += 1
         if need_weather:
-            backfill_weather_for_field.delay(str(field.id))
+            send_task(
+                "app.tasks.weather.backfill_weather_for_field",
+                args=[str(field.id)],
+            )
             weather_enqueued += 1
 
         items.append(

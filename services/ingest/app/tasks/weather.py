@@ -156,7 +156,12 @@ def _fetch_open_meteo(
     return data
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+@celery_app.task(
+    name="app.tasks.weather.fetch_weather_for_field",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=60,
+)
 def fetch_weather_for_field(
     self,
     field_id: str,
@@ -370,7 +375,7 @@ def _update_water_balance(session, field_id: str) -> None:
     session.commit()
 
 
-@celery_app.task
+@celery_app.task(name="app.tasks.weather.schedule_daily_weather_fetch")
 def schedule_daily_weather_fetch() -> dict:
     """Scheduled task (Celery Beat, 08:00 UTC).
 
@@ -412,7 +417,7 @@ def schedule_daily_weather_fetch() -> dict:
         session.close()
 
 
-@celery_app.task
+@celery_app.task(name="app.tasks.weather.backfill_weather_for_field")
 def backfill_weather_for_field(field_id: str, days: int | None = None) -> dict:
     """Trigger a historical weather backfill for a field.
 

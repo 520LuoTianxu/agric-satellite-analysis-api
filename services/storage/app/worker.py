@@ -1,11 +1,9 @@
-"""Storage worker entrypoint pointer.
+"""Celery worker for the storage queue only."""
 
-Compose runs ``celery -A app.worker`` against the API image. A future physical
-split can copy ``app.core.storage`` + ``storage_tasks`` here and point
-Dockerfile CMD at this module.
-"""
+from openfarm_common.celery_app import create_celery_app
 
-raise SystemExit(
-    "Use the API image worker: celery -A app.worker worker -Q storage "
-    "(see services/storage/README.md and docs/design/ingest-storage-split.md)"
+celery_app = create_celery_app(
+    name="openfarm-storage",
+    include=["app.tasks.storage_tasks"],
+    default_queue="storage",
 )
