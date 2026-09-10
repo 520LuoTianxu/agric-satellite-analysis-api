@@ -35,7 +35,22 @@ def upload_file(
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"upload path missing or not a file: {path!r}")
     storage = get_storage()
-    storage.upload_file(key, path, content_type=content_type)
+    try:
+        storage.upload_file(key, path, content_type=content_type)
+    finally:
+        # Own cleanup of shared-scratch staging dirs so ingest can leave files
+        # until upload succeeds (avoids race when ingest workers die mid-wait).
+        scratch_root = os.environ.get("OPENFARM_SCRATCH_DIR", "/data/scratch")
+        try:
+            if path.startswith(scratch_root.rstrip("/") + "/") and os.path.isfile(path):
+                parent = os.path.dirname(path)
+                os.unlink(path)
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    pass
+        except OSError:
+            pass
     logger.info(
         "storage_task_upload_file",
         key=key,

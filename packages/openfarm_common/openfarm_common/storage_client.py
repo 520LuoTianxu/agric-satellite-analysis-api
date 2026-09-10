@@ -30,6 +30,19 @@ def scratch_workdir(prefix: str = "job") -> Path:
     return path
 
 
+def _cleanup_staged(staged: Path | None, cleanup_dir: Path | None) -> None:
+    if staged is not None:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if cleanup_dir is not None:
+        try:
+            cleanup_dir.rmdir()
+        except OSError:
+            pass
+
+
 def upload_file_via_storage(
     key: str,
     local_path: str,
@@ -38,7 +51,12 @@ def upload_file_via_storage(
     timeout: float = DEFAULT_UPLOAD_TIMEOUT,
     already_on_scratch: bool = False,
 ) -> dict:
-    """Stage ``local_path`` on scratch (if needed) and wait for storage upload."""
+    """Stage ``local_path`` on scratch (if needed) and wait for storage upload.
+
+    Scratch files are removed only after a successful upload. On timeout /
+    worker death, leave the staged file for the storage worker (or later GC)
+    so we do not race ``FileNotFoundError`` on the storage queue.
+    """
     staged: Path | None = None
     cleanup_dir: Path | None = None
     if already_on_scratch:
@@ -49,24 +67,20 @@ def upload_file_via_storage(
         shutil.copy2(local_path, staged)
         path_for_worker = str(staged)
 
+    async_result = celery_client.send_task(
+        "app.tasks.storage.upload_file",
+        args=[key, path_for_worker, content_type],
+        queue="storage",
+    )
     try:
-        async_result = celery_client.send_task(
-            "app.tasks.storage.upload_file",
-            args=[key, path_for_worker, content_type],
-            queue="storage",
-        )
-        return async_result.get(timeout=timeout)
-    finally:
-        if staged is not None:
-            try:
-                staged.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if cleanup_dir is not None:
-            try:
-                cleanup_dir.rmdir()
-            except OSError:
-                pass
+        result = async_result.get(timeout=timeout)
+    except Exception:
+        # Do not delete staged path — storage may still be running / retrying.
+        raise
+    else:
+        # Storage task also unlinks scratch paths; this is best-effort local GC.
+        _cleanup_staged(staged, cleanup_dir)
+        return result
 
 
 def put_bytes_via_storage(
@@ -88,20 +102,19 @@ def put_bytes_via_storage(
 
     work = scratch_workdir("put")
     path = work / Path(key).name
+    path.write_bytes(data)
+    async_result = celery_client.send_task(
+        "app.tasks.storage.upload_file",
+        args=[key, str(path), content_type],
+        queue="storage",
+    )
     try:
-        path.write_bytes(data)
-        async_result = celery_client.send_task(
-            "app.tasks.storage.upload_file",
-            args=[key, str(path), content_type],
-            queue="storage",
-        )
-        return async_result.get(timeout=timeout)
-    finally:
-        try:
-            path.unlink(missing_ok=True)
-            work.rmdir()
-        except OSError:
-            pass
+        result = async_result.get(timeout=timeout)
+    except Exception:
+        raise
+    else:
+        _cleanup_staged(path, work)
+        return result
 
 
 __all__ = [
