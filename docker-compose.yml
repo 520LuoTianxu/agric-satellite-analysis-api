@@ -100,8 +100,8 @@ services:
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
       MQ_FALLBACK_CELERY: ${MQ_FALLBACK_CELERY:-0}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
@@ -151,8 +151,8 @@ services:
       SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
@@ -307,8 +307,8 @@ services:
       dockerfile: services/mq_consumer/Dockerfile
     environment:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
@@ -338,8 +338,8 @@ services:
       dockerfile: services/mq_result_writer/Dockerfile
     environment:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-test_queue}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-result_queue}
+      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
+      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}

@@ -112,8 +112,8 @@ docker compose --profile mq up -d --build mq_consumer mq_result_writer api inges
 环境变量（见 `.env.example`，**勿提交真实 URL**）：
 
 - `CLOUDAMQP_URL`
-- `CLOUDAMQP_TASK_QUEUE`（默认 `test_queue`）
-- `CLOUDAMQP_RESULT_QUEUE`（默认 `result_queue`）
+- `CLOUDAMQP_TASK_QUEUE`（默认 `openfarm_tasks`）
+- `CLOUDAMQP_RESULT_QUEUE`（默认 `openfarm_results`）
 - `MQ_FALLBACK_CELERY`（可选，默认关闭；`1` 时缺 URL 直发 Celery）
 
 ## 6. 本地冒烟
