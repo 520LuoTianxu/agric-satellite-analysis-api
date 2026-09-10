@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bridge STAC/Celery COGs in object storage → agri.parcel_scene_products lonlat_v1.
 
-Lists date folders under ``cogs/{org_id}/{field_id}/`` on the **configured**
-backend (``STORAGE_BACKEND=oss|minio``, default OSS), samples the six agri
+Discovers dates under ``cogs/{org_id}/{field_id}/`` on the **configured**
+backend (``STORAGE_BACKEND=oss|minio``, default OSS) via ``exists`` probes
+(no ListObjects — many OSS bucket policies deny listing), samples the six agri
 optical indices (NDVI/EVI/NDMI/NDRE/CIre/MNDWI; NDWI COG only as MNDWI fallback)
 inside the field polygon at native COG resolution, and upserts one S2 row per
 date with ``pixel_data.format = lonlat_v1``.
@@ -215,9 +216,10 @@ def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, flo
 
 
 def _list_dates_from_storage(storage, prefix: str) -> list[str]:
-    """List YYYY-MM-DD folders under prefix via storage.list_keys.
+    """Best-effort list via storage.list_keys (often denied on OSS).
 
-    Some OSS bucket policies deny ListObjects; callers should merge DB dates.
+    Prefer ``_discover_dates_via_exists`` — bucket policies commonly block
+    ListObjects while still allowing GetObject/HeadObject.
     """
     dates: set[str] = set()
     try:
@@ -231,7 +233,7 @@ def _list_dates_from_storage(storage, prefix: str) -> list[str]:
                 dates.add(d)
     except Exception as e:  # noqa: BLE001
         print(
-            f"  storage.list_keys failed ({type(e).__name__}: {e}); using DB dates",
+            f"  storage.list_keys skipped ({type(e).__name__}: {e})",
             file=sys.stderr,
         )
     return sorted(dates)
@@ -252,6 +254,84 @@ def _list_dates_from_db(conn, field_id: str) -> list[str]:
             if d and DATE_RE.match(d):
                 dates.add(d)
     return sorted(dates)
+
+
+def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
+    """Expand job params date_from/date_to into daily candidates (inclusive)."""
+    from datetime import date, timedelta
+
+    ranges: list[tuple[date, date]] = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT
+              params_json->>'date_from' AS df,
+              params_json->>'date_to' AS dt
+            FROM jobs
+            WHERE field_id = %s::uuid
+              AND params_json ? 'date_from'
+              AND params_json ? 'date_to'
+            """,
+            (field_id,),
+        )
+        for df, dt in cur.fetchall():
+            if not df or not dt:
+                continue
+            try:
+                start = date.fromisoformat(str(df)[:10])
+                end = date.fromisoformat(str(dt)[:10])
+            except ValueError:
+                continue
+            if end < start:
+                start, end = end, start
+            ranges.append((start, end))
+    if not ranges:
+        # Fallback: last ~24 months ending today (Shanghai)
+        end = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        start = (
+            end.replace(year=end.year - 2)
+            if end.month != 2 or end.day != 29
+            else end.replace(year=end.year - 2, day=28)
+        )
+        ranges.append((start, end))
+
+    out: set[str] = set()
+    for start, end in ranges:
+        cur_d = start
+        # Cap runaway ranges
+        for _ in range(900):
+            out.add(cur_d.isoformat())
+            if cur_d >= end:
+                break
+            cur_d += timedelta(days=1)
+    return sorted(out)
+
+
+def _discover_dates_via_exists(
+    storage,
+    prefix: str,
+    candidates: list[str],
+    *,
+    stems: tuple[str, ...] = (REQUIRED_BAND, "vv", "vh"),
+) -> list[str]:
+    """Probe ``prefix{date}/{stem}.tif`` with Head/exists — no ListObjects."""
+    found: set[str] = set()
+    for d in candidates:
+        if not DATE_RE.match(d):
+            continue
+        for stem in stems:
+            key = f"{prefix}{d}/{stem}.tif"
+            try:
+                if storage.exists(key):
+                    found.add(d)
+                    break
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"  exists({key}) failed ({type(e).__name__}: {e})",
+                    file=sys.stderr,
+                )
+                break
+    return sorted(found)
 
 
 def _vsis3(bucket: str, key: str) -> str:
@@ -538,8 +618,15 @@ def bridge_field_stac_to_agri(
             f"prefix={uri_scheme}://{bucket}/{prefix}"
         )
 
-        date_set = set(_list_dates_from_storage(storage, prefix))
-        date_set.update(_list_dates_from_db(conn, meta["field_id"]))
+        # Prefer exists-probes (OSS often denies ListObjects). list_keys is
+        # opportunistic only; job date ranges supply candidate calendars.
+        date_set = set(_list_dates_from_db(conn, meta["field_id"]))
+        listed = _list_dates_from_storage(storage, prefix)
+        if listed:
+            date_set.update(listed)
+        candidates = _candidate_dates_from_jobs(conn, meta["field_id"])
+        probed = _discover_dates_via_exists(storage, prefix, candidates)
+        date_set.update(probed)
         date_list = sorted(date_set)
         if dates:
             want = {d.strip() for d in dates if d and d.strip()}
