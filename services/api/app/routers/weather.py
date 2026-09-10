@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import Field, WeatherDaily
 from app.schemas.weather import (
     WeatherBackfillRequest,

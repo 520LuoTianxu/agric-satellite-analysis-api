@@ -16,7 +16,7 @@ from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.core.storage import get_storage
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import Field, Job
 from app.schemas.monitoring import JobOut
 from pydantic import BaseModel, Field as PydanticField

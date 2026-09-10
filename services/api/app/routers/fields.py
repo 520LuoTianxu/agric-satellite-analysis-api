@@ -29,7 +29,7 @@ from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
 from app.core.crops import normalize_crop_key as _norm_crop
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import AuditEvent, Farm, Field, Job
 from app.schemas.farm import (
     BackfillIndicesRequest,

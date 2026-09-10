@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.storage import get_parcel_product_storage
-from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
     AgriStatsOut,
     AgriTableCount,

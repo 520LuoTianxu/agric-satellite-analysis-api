@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.logging import logger
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, require_roles
 from app.schemas.monitoring import PresignedUploadOut, PresignedUploadRequest
 
 router = APIRouter()

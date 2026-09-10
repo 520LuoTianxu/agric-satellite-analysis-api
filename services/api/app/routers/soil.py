@@ -20,7 +20,7 @@ from app.core.soil_intelligence import (
     compute_sampling_zones,
     compute_soil_weather_stress,
     estimate_sequestration_potential)
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import Field, Job, SoilFieldSummary, SoilProfile, WeatherDaily
 from app.schemas.soil import (
     CarbonEstimateResponse,

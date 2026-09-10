@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.middleware.auth import OrgContext, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, require_roles
 from app.core.logging import logger
 
 router = APIRouter()

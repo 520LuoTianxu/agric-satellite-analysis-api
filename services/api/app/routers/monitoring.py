@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.middleware.auth import OrgContext, get_org_context, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, org_scope
 from app.models.tables import FieldStat, RasterLayer
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import FieldStatOut, RasterLayerOut

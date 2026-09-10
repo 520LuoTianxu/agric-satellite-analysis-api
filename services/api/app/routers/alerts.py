@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_matches, org_scope
+from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import Alert, Farm, Field
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import AlertOut, AlertSummaryOut, AlertUpdate
