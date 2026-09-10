@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -26,7 +29,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
-from app.core.config import settings
+from app.core.config import settings, scene_max_workers
 from app.tasks.indices import IndexDef
 
 logger = structlog.get_logger()
@@ -45,6 +48,13 @@ os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
 os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "YES")
 os.environ.setdefault("VSI_CACHE", "TRUE")
 os.environ.setdefault("VSI_CACHE_SIZE", "5000000")
+# Scene threads each open their own datasets; keep GDAL's internal pool at 1
+# so 16-way scene parallelism does not spawn nested thread storms.
+os.environ.setdefault("GDAL_NUM_THREADS", "1")
+
+# Serialize job.progress_json updates. SQLAlchemy Session and the Job row
+# are not thread-safe; each scene worker uses its own session and this lock.
+_job_progress_lock = threading.Lock()
 
 RETRY_DELAYS = [60, 300, 900]  # Per PRD Section 7.4
 
@@ -82,28 +92,44 @@ def get_db_session():
 
 
 def update_job_progress(session, job, step: str, details: dict | None = None):
-    progress = job.progress_json or {}
-    progress["current_step"] = step
-    progress.setdefault("steps", {})[step] = {
-        "status": "running",
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if details:
-        progress["steps"][step].update(details)
-    job.progress_json = progress
-    flag_modified(job, "progress_json")
-    session.commit()
+    """Update job.progress_json. Safe to call from scene worker threads.
+
+    Reloads the row under a process-local lock so concurrent scene workers
+    do not clobber each other's step maps.
+    """
+    with _job_progress_lock:
+        session.refresh(job)
+        progress = dict(job.progress_json or {})
+        steps = dict(progress.get("steps") or {})
+        entry = dict(steps.get(step) or {})
+        entry["status"] = "running"
+        entry["started_at"] = datetime.now(timezone.utc).isoformat()
+        if details:
+            entry.update(details)
+        steps[step] = entry
+        progress["current_step"] = step
+        progress["steps"] = steps
+        job.progress_json = progress
+        flag_modified(job, "progress_json")
+        session.commit()
 
 
 def complete_step(session, job, step: str, details: dict | None = None):
-    progress = job.progress_json or {}
-    if step in progress.get("steps", {}):
-        progress["steps"][step]["status"] = "completed"
-        progress["steps"][step]["finished_at"] = datetime.now(timezone.utc).isoformat()
-        if details:
-            progress["steps"][step].update(details)
-    flag_modified(job, "progress_json")
-    session.commit()
+    with _job_progress_lock:
+        session.refresh(job)
+        progress = dict(job.progress_json or {})
+        steps = dict(progress.get("steps") or {})
+        if step in steps:
+            entry = dict(steps[step])
+            entry["status"] = "completed"
+            entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+            if details:
+                entry.update(details)
+            steps[step] = entry
+            progress["steps"] = steps
+            job.progress_json = progress
+            flag_modified(job, "progress_json")
+            session.commit()
 
 
 # ── Existing-scene dedup (pre-COG) ────────────────────────────────────
@@ -292,21 +318,24 @@ def read_band_windowed(
     href: str, bounds: tuple, target_shape: tuple, target_transform
 ) -> np.ndarray:
     """Read a band from a remote COG, windowed to field extent."""
-    with rasterio.open(href) as src:
-        src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
-        window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
-        data = src.read(1, window=window, boundless=True, fill_value=0)
+    with rasterio.Env():
+        with rasterio.open(href) as src:
+            src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
+            window = rasterio.windows.from_bounds(
+                *src_bounds, transform=src.transform
+            )
+            data = src.read(1, window=window, boundless=True, fill_value=0)
 
-        dst = np.zeros(target_shape, dtype=np.float32)
-        reproject(
-            source=data.astype(np.float32),
-            destination=dst,
-            src_transform=rasterio.windows.transform(window, src.transform),
-            src_crs=src.crs,
-            dst_transform=target_transform,
-            dst_crs="EPSG:4326",
-            resampling=Resampling.bilinear)
-        return dst
+            dst = np.zeros(target_shape, dtype=np.float32)
+            reproject(
+                source=data.astype(np.float32),
+                destination=dst,
+                src_transform=rasterio.windows.transform(window, src.transform),
+                src_crs=src.crs,
+                dst_transform=target_transform,
+                dst_crs="EPSG:4326",
+                resampling=Resampling.bilinear)
+            return dst
 
 
 # ── COG writing ──────────────────────────────────────────────────────
@@ -322,8 +351,10 @@ def write_cog(
     index_key: str) -> str:
     """Write an index array as COG to object storage. Returns the ``cog_uri``."""
     object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{index_key}.tif"
-    tmp_src_path = tempfile.mktemp(suffix="_src.tif")
-    tmp_dst_path = tempfile.mktemp(suffix="_cog.tif")
+    src_fd, tmp_src_path = tempfile.mkstemp(suffix="_src.tif")
+    dst_fd, tmp_dst_path = tempfile.mkstemp(suffix="_cog.tif")
+    os.close(src_fd)
+    os.close(dst_fd)
 
     try:
         profile = {
@@ -336,8 +367,9 @@ def write_cog(
             "transform": transform,
             "nodata": np.nan,
         }
-        with rasterio.open(tmp_src_path, "w", **profile) as dst:
-            dst.write(data, 1)
+        with rasterio.Env():
+            with rasterio.open(tmp_src_path, "w", **profile) as dst:
+                dst.write(data, 1)
 
         output_profile = cog_profiles.get("deflate")
         cog_translate(
@@ -706,3 +738,108 @@ def process_scene(
         date=str(scene_date),
         mean=stats["mean"])
     return stats
+
+
+def process_scenes_parallel(
+    *,
+    job_id: str,
+    scenes: list[dict],
+    index_def: IndexDef,
+    target_transform,
+    target_shape: tuple,
+    field_mask: np.ndarray,
+    bounds: tuple,
+    org_id_str: str,
+    field_id_str: str,
+    date_from: date,
+    date_to: date,
+    historical_means: list[float],
+    extra_params: dict | None = None) -> int:
+    """Download and process scenes concurrently. Returns layers_created.
+
+    Each worker opens its own SQLAlchemy session (Session is not thread-safe).
+    Per-scene failures are logged and skipped, matching the serial loop.
+    ``historical_means`` is copied per scene so workers do not share a list;
+    backfill jobs already skip alerts, and weekly jobs typically have one scene.
+    """
+    from app.models.tables import Job
+
+    total = len(scenes)
+    if total == 0:
+        return 0
+
+    workers = min(scene_max_workers(), total)
+    hist_snapshot = list(historical_means)
+    extra = extra_params
+    logger.info(
+        "scene_parallel_start",
+        job_id=job_id,
+        index=index_def.key,
+        scenes=total,
+        workers=workers)
+
+    def _one(scene: dict, scene_idx: int):
+        session = get_db_session()
+        try:
+            job = session.get(Job, uuid.UUID(job_id))
+            if job is None:
+                logger.error("job_not_found_in_scene_worker", job_id=job_id)
+                return None
+            return process_scene(
+                session=session,
+                job=job,
+                scene=scene,
+                scene_idx=scene_idx,
+                total_scenes=total,
+                index_def=index_def,
+                target_transform=target_transform,
+                target_shape=target_shape,
+                field_mask=field_mask,
+                bounds=bounds,
+                org_id_str=org_id_str,
+                field_id_str=field_id_str,
+                date_from=date_from,
+                date_to=date_to,
+                historical_means=list(hist_snapshot),
+                extra_params=extra)
+        except Exception as e:
+            logger.error(
+                "scene_processing_error",
+                scene_id=scene.get("id"),
+                index=index_def.key,
+                error=str(e))
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            session.close()
+
+    layers_created = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_one, scene, i): scene for i, scene in enumerate(scenes)
+        }
+        for fut in as_completed(futures):
+            scene = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                logger.error(
+                    "scene_processing_error",
+                    scene_id=scene.get("id"),
+                    index=index_def.key,
+                    error=str(e))
+                continue
+            if result is not None:
+                layers_created += 1
+
+    logger.info(
+        "scene_parallel_done",
+        job_id=job_id,
+        index=index_def.key,
+        layers_created=layers_created,
+        total_scenes=total,
+        workers=workers)
+    return layers_created

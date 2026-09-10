@@ -19,6 +19,7 @@ import structlog
 
 from app.worker import celery_app
 from app.tasks.indices import get_index
+from app.core.config import scene_max_workers
 from app.tasks.pipeline import (
     RETRY_DELAYS,
     get_db_session,
@@ -26,7 +27,7 @@ from app.tasks.pipeline import (
     complete_step,
     search_scenes,
     compute_target_grid,
-    process_scene,
+    process_scenes_parallel,
     collect_existing_scene_dates,
     filter_scenes_skip_existing)
 
@@ -132,35 +133,39 @@ def process_ndvi(self, job_id: str) -> dict:
         )
         historical_means = [float(m) for m in existing_stats if m is not None]
 
-        layers_created = 0
+        workers = min(scene_max_workers(), len(scenes))
+        update_job_progress(
+            session,
+            job,
+            "process_scenes",
+            {"total_scenes": len(scenes), "workers": workers})
 
-        # Steps 2-6: Process each scene
-        for i, scene in enumerate(scenes):
-            try:
-                result = process_scene(
-                    session=session,
-                    job=job,
-                    scene=scene,
-                    scene_idx=i,
-                    total_scenes=len(scenes),
-                    index_def=index_def,
-                    target_transform=target_transform,
-                    target_shape=target_shape,
-                    field_mask=field_mask,
-                    bounds=bounds,
-                    org_id_str=org_id_str,
-                    field_id_str=field_id_str,
-                    date_from=date_from,
-                    date_to=date_to,
-                    historical_means=historical_means)
-                if result is not None:
-                    layers_created += 1
-            except Exception as e:
-                logger.error(
-                    "scene_processing_error",
-                    scene_id=scene["id"],
-                    error=str(e))
-                continue
+        layers_created = process_scenes_parallel(
+            job_id=job_id,
+            scenes=scenes,
+            index_def=index_def,
+            target_transform=target_transform,
+            target_shape=target_shape,
+            field_mask=field_mask,
+            bounds=bounds,
+            org_id_str=org_id_str,
+            field_id_str=field_id_str,
+            date_from=date_from,
+            date_to=date_to,
+            historical_means=historical_means)
+
+        # Scene workers used their own sessions; reload this job row.
+        session.expire(job)
+        job = session.get(Job, uuid.UUID(job_id))
+        if not job:
+            logger.error("job_missing_after_scenes", job_id=job_id)
+            return {"job_id": job_id, "status": "error", "detail": "Job not found"}
+
+        complete_step(
+            session,
+            job,
+            "process_scenes",
+            {"layers_created": layers_created, "workers": workers})
 
         # Step 7: Complete
         job.status = "completed"
@@ -169,6 +174,7 @@ def process_ndvi(self, job_id: str) -> dict:
         progress["current_step"] = "complete"
         progress["layers_created"] = layers_created
         progress["total_scenes"] = len(scenes)
+        progress["scene_workers"] = workers
         job.progress_json = progress
         flag_modified(job, "progress_json")
         session.commit()
