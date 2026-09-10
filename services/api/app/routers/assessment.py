@@ -104,23 +104,37 @@ async def create_assessment_report(
     db.add(job)
     await db.flush()
 
-    try:
-        from app.worker import celery_app
+    await db.commit()
 
-        celery_app.send_task(
-            "app.tasks.assessment_report.generate_assessment_report",
-            args=[str(job.id)])
+    try:
+        from app.mq_publish import publish_api_task
+
+        mq_task_id = publish_api_task(
+            type="assessment_report",
+            field_id=str(field_id),
+            extras={
+                "job_id": str(job.id),
+                "crop_type": crop_key,
+                "crop_name_zh": crop_name_zh(crop_key),
+            },
+        )
         logger.info(
             "assessment_job_dispatched",
             job_id=str(job.id),
-            field_id=str(field_id))
+            field_id=str(field_id),
+            mq_task_id=mq_task_id,
+        )
     except Exception as e:
         logger.error(
             "assessment_job_dispatch_failed",
             job_id=str(job.id),
-            error=str(e))
+            error=str(e),
+        )
+        # Re-open session state after commit for failure marking
+        job = await db.get(Job, job.id) or job
         job.status = "failed"
         job.error = f"dispatch failed: {e}"
+        await db.commit()
 
     return job
 
@@ -159,20 +173,26 @@ async def get_latest_assessment_report(
             status_code=404, detail="Report object not found in storage"
         )
 
+    # Prefer streaming from storage; public_url (OSS) is also in progress for
+    # process-host / frontend download without proxying through API.
     data = storage.get_bytes(object_key)
     filename = progress.get("filename") or "选地分析报告.pdf"
     # RFC 5987 for Chinese filenames
     disp = (
         f"attachment; filename=\"assessment.pdf\"; filename*=UTF-8''{quote(filename)}"
     )
+    headers = {
+        "Content-Disposition": disp,
+        "X-Assessment-Job-Id": str(job.id),
+        "X-Assessment-Score": str(progress.get("score", "")),
+    }
+    public_url = progress.get("public_url")
+    if public_url:
+        headers["X-Assessment-Public-Url"] = str(public_url)
     return Response(
         content=data,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": disp,
-            "X-Assessment-Job-Id": str(job.id),
-            "X-Assessment-Score": str(progress.get("score", "")),
-        })
+        headers=headers)
 
 
 @router.get(

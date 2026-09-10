@@ -9,6 +9,7 @@ Usage (from repo root, with .env loaded or env exported):
   python scripts/mq_publish_test.py --field-id <uuid> --type weather_backfill --days 30
   python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
   python scripts/mq_publish_test.py --field-id <uuid> --type field_bootstrap
+  python scripts/mq_publish_test.py --field-id <uuid> --type assessment_report --job-id <uuid>
 
 Never prints CLOUDAMQP password (uses connection_label).
 """
@@ -50,12 +51,14 @@ def main() -> int:
             "weather_backfill",
             "soil_fetch",
             "field_bootstrap",
+            "assessment_report",
         ),
     )
     ap.add_argument("--mode", default="full", choices=("full", "bridge_only"))
     ap.add_argument("--months", type=int, default=6)
     ap.add_argument("--days", type=int, default=None, help="weather_backfill days")
     ap.add_argument("--skip-indices", action="store_true", help="field_bootstrap")
+    ap.add_argument("--job-id", default=None, help="assessment_report Job UUID")
     ap.add_argument("--task-id", default=None)
     args = ap.parse_args()
 
@@ -83,6 +86,8 @@ def main() -> int:
         extras["days"] = args.days
     if args.type == "field_bootstrap" and args.skip_indices:
         extras["skip_indices"] = True
+    if args.type == "assessment_report" and args.job_id:
+        extras["job_id"] = args.job_id
 
     msg = TaskMessage(
         task_id=task_id,

@@ -22,6 +22,7 @@ ALLOWED_MQ_TYPES = frozenset(
         "weather_backfill",
         "soil_fetch",
         "field_bootstrap",
+        "assessment_report",
     }
 )
 

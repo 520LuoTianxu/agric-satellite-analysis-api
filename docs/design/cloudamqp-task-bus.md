@@ -48,7 +48,8 @@ Download host: mq_consumer  ──send_task──▶  Redis ──▶ ingest / s
     ▼
 Process host: mq_result_writer
     ├─ payload.kind=weather_daily / soil_profile → upsert 业务表
-    ├─ oss_urls → GET JSON
+    ├─ payload.kind=assessment_report → 仅记入 agri.mq_task_results（PDF 已在 OSS；`oss_urls.assessment_pdf` 为下载链）
+    ├─ oss_urls → GET JSON（**跳过** `.pdf` / `assessment_pdf` 链接，不当 JSON 拉）
     │     ├─ lonlat_v1 scene → agri.parcel_scene_products
     │     └─ weather/soil fallback body → 同上 upsert
     └─ 始终写入 agri.mq_task_results
@@ -61,6 +62,7 @@ Process host: mq_result_writer
 - **Process host（`mq_result_writer`）**：消费 `openfarm_process` 并 upsert 业务 DB。
 - **Weather / soil**：仍经 download 队列入队（页面点击）→ worker 拉取 → `ResultMessage`（inline payload）→ process 队列 → writer upsert。  
   **Follow-up**：ingest 天气/土壤任务目前可能仍直接写库（与 writer 双写）；以 result-writer 为单一真相源需另开小改，本轮不做大爆炸重写。
+- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report` → download → ingest 生成 PDF、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`）→ process → writer 写入 `agri.mq_task_results`。Job.progress_json 同步含 `object_key` / `public_url`；`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
 
 ## 3. 消息约定
 
@@ -69,7 +71,7 @@ Process host: mq_result_writer
 ```json
 {
   "task_id": "uuid",
-  "type": "satellite_analysis|agri_bridge|weather_backfill|soil_fetch|field_bootstrap",
+  "type": "satellite_analysis|agri_bridge|weather_backfill|soil_fetch|field_bootstrap|assessment_report",
   "field_id": "optional-openfarm-field-uuid",
   "parcel_id": "optional-agri-land_id",
   "land_id": "optional-same-as-parcel_id",
@@ -87,6 +89,7 @@ Process host: mq_result_writer
 | `weather_backfill` | `days?: int` | `backfill_weather_for_field(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
 | `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
 | `field_bootstrap` | `skip_indices?`, `sentinel_job_id?` | fan-out weather + soil +（可选）indices | consumer 轻量 `phase=bootstrap_dispatched`（子任务各自带结果） |
+| `assessment_report` | `job_id`（必填）、`crop_type?`、`crop_name_zh?` | `generate_assessment_report(..., mq_task_id=)` | **OSS** `oss_urls.assessment_pdf` + inline `payload.kind=assessment_report`（`public_url`/score/grade/filename） |
 
 ### ResultMessage → `CLOUDAMQP_PROCESS_QUEUE`（`openfarm_process`）
 
@@ -95,7 +98,7 @@ Process host: mq_result_writer
   "task_id": "uuid",
   "status": "success|failed",
   "oss_urls": { "2024-06-01_S2": "https://..." },
-  "payload": { "kind": "weather_daily|soil_profile|...", "...": "..." },
+  "payload": { "kind": "weather_daily|soil_profile|assessment_report|...", "...": "..." },
   "data": null,
   "error": null,
   "field_id": "...",
@@ -109,6 +112,7 @@ Process host: mq_result_writer
 - 遥感：bridge 将每景 DB-ready JSON 上传到  
   `{OSS_PREFIX}{land_id}/{date}_S2.json`（默认前缀 `s1s2_parcel/json/`），写入 `parcel_scene_products.json_oss_key`，并在 `oss_urls` 带上 URL。
 - Inline 超限（默认 100KB）：上传 `mq_results/{kind}/{task_id}.json`，`oss_urls[kind]=url`，payload 变为 stub（`oss_fallback: true`）。
+- 选地报告：`oss_urls.assessment_pdf` 为 HTTPS 下载链（storage `public_url`）；`payload` 含摘要，writer **不**把 PDF 当 JSON 拉取。
 
 ## 4. API → MQ 映射（UI 契约不变）
 
@@ -118,6 +122,7 @@ Process host: mq_result_writer
 | `POST /fields/{id}/backfill-indices` | `satellite_analysis` | backfill sentinel；agri 另建 `agri_bridge` Job |
 | `POST /fields/{id}/weather/backfill` | `weather_backfill` | — |
 | `POST /fields/{id}/soil/refresh` | `soil_fetch` | `soil_fetch` Job |
+| `POST /fields/{id}/assessment-report` | `assessment_report` | `assessment_report` Job（UI 轮询） |
 | `POST /v1/mq/tasks` | 上表类型白名单 | — |
 
 > 天气/土壤 **保持** MQ 入队（不要改回 API 直发 Celery）。Celery 任务仍可本地写库；process 侧 `mq_result_writer` 按 payload/OSS 再 upsert，便于跨库/对账。
@@ -152,6 +157,7 @@ pip install -e packages/openfarm_common
 python scripts/mq_publish_test.py --field-id <uuid>
 python scripts/mq_publish_test.py --field-id <uuid> --type weather_backfill --days 30
 python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
+python scripts/mq_publish_test.py --field-id <uuid> --type assessment_report --job-id <job-uuid>
 
 docker compose --profile mq up -d --build api ingest mq_consumer mq_result_writer
 # SELECT task_id, status, payload, oss_urls, updated_at FROM agri.mq_task_results ORDER BY updated_at DESC LIMIT 10;
@@ -173,6 +179,8 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 | `services/ingest/app/tasks/bridge_stac_cogs_to_agri_lonlat.py` | 每景上传 JSON + `json_oss_key` |
 | `services/ingest/app/tasks/agri_bridge.py` | 完成后发布带 `oss_urls` 的 Result |
 | `services/ingest/app/tasks/weather.py` / `soil.py` | 完成后发布 inline payload |
+| `services/ingest/app/tasks/assessment_report.py` | PDF 上传后发布 `oss_urls` + `payload.kind=assessment_report` |
+| `services/api/app/routers/assessment.py` | REST → `publish_api_task(assessment_report)` |
 | `docs/design/cloudamqp-task-bus.md` | 本文 |
 
 ## 8. 已知限制 / Follow-ups

@@ -20,6 +20,7 @@ SUPPORTED_TYPES = {
     "weather_backfill",
     "soil_fetch",
     "field_bootstrap",
+    "assessment_report",
 }
 
 
@@ -291,6 +292,30 @@ def _dispatch_field_bootstrap(
     }
 
 
+
+def _dispatch_assessment_report(
+    task: TaskMessage,
+    field_id: str,
+) -> dict[str, Any]:
+    """Dispatch land-assessment PDF Celery task; result published by ingest."""
+    extras = dict(task.extras or {})
+    job_id = extras.get("job_id")
+    if not job_id:
+        raise ValueError("assessment_report requires extras.job_id")
+    kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
+    async_result = celery_client.send_task(
+        "app.tasks.assessment_report.generate_assessment_report",
+        args=[str(job_id)],
+        kwargs=kwargs,
+        queue="ingest",
+    )
+    return {
+        "dispatched": ["app.tasks.assessment_report.generate_assessment_report"],
+        "celery_ids": [async_result.id],
+        "job_id": str(job_id),
+        "field_id": field_id,
+    }
+
 def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
     """Process one TaskMessage. Permanent failures publish failed result (no raise)."""
     try:
@@ -341,6 +366,19 @@ def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
             info = _dispatch_soil_fetch(task, field_id)
         elif task.type == "field_bootstrap":
             info = _dispatch_field_bootstrap(task, field_id, land_id)
+        elif task.type == "assessment_report":
+            try:
+                info = _dispatch_assessment_report(task, field_id)
+            except ValueError as exc:
+                publish_task_result(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=str(exc),
+                    field_id=field_id,
+                    land_id=land_id,
+                    upload_summary_if_empty=False,
+                )
+                return
         else:
             publish_task_result(
                 task_id=task.task_id,
