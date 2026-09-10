@@ -528,6 +528,18 @@ def _apply_domain_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]
             return stats
         apply_soil_payload(payload)
         stats["soil"] = "upserted"
+    elif kind == "assessment_report":
+        # PDF already on OSS; Job.progress_json holds object_key/public_url.
+        # Persist via mq_task_results only (no domain table upsert).
+        stats["assessment_report"] = {
+            "recorded": True,
+            "job_id": payload.get("job_id"),
+            "object_key": payload.get("object_key"),
+            "public_url": payload.get("public_url"),
+            "score": payload.get("score"),
+            "grade": payload.get("grade"),
+            "filename": payload.get("filename"),
+        }
     return stats
 
 
@@ -543,6 +555,15 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
     for label, url in (msg.oss_urls or {}).items():
         if not url or not str(url).startswith("http"):
             downloaded[label] = {"skipped": True, "raw": url}
+            continue
+        url_l = str(url).lower().split("?", 1)[0]
+        # Assessment PDFs (and other binaries) are link-only; do not GET as JSON.
+        if label in ("assessment_pdf",) or url_l.endswith(".pdf"):
+            downloaded[label] = {
+                "link_only": True,
+                "url": url,
+                "content_type": "application/pdf",
+            }
             continue
         data = _download_json(str(url))
         if data is None:

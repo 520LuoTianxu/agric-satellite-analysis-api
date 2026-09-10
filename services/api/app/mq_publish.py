@@ -112,6 +112,19 @@ def _fallback_celery(
             args=[fid],
             kwargs={"land_id": land_id or extras.get("land_id")},
         )
+    elif type == "assessment_report":
+        job_id = extras.get("job_id")
+        if not job_id:
+            raise HTTPException(
+                status_code=503,
+                detail="MQ_FALLBACK_CELERY assessment_report requires extras.job_id",
+            )
+        send_task(
+            "app.tasks.assessment_report.generate_assessment_report",
+            args=[str(job_id)],
+            kwargs={},
+            queue="ingest",
+        )
     else:
         raise HTTPException(
             status_code=503,
