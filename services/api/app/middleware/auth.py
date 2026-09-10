@@ -52,7 +52,9 @@ def org_matches(*_args: Any, **_kwargs: Any) -> bool:
     return True
 
 
-def org_scope(_column: Any = None, _ctx: OrgContext | None = None) -> ColumnElement[bool]:
+def org_scope(
+    _column: Any = None, _ctx: OrgContext | None = None
+) -> ColumnElement[bool]:
     """Org scoping removed — no-op SQL filter."""
     return sql_true()
 

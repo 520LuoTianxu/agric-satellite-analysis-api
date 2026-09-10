@@ -58,13 +58,11 @@ async def list_farms(
 async def create_farm(
     body: FarmCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     farm = Farm(
-
-        name=body.name,
-        country=body.country,
-        region=body.region,
-        timezone=body.timezone)
+        name=body.name, country=body.country, region=body.region, timezone=body.timezone
+    )
     db.add(farm)
     await db.flush()
     logger.info(
@@ -77,7 +75,8 @@ async def create_farm(
 async def get_farm(
     farm_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
@@ -89,7 +88,8 @@ async def update_farm(
     farm_id: uuid.UUID,
     body: FarmUpdate,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
@@ -111,7 +111,8 @@ async def update_farm(
 async def delete_farm(
     farm_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Soft-delete farm and cascade soft-delete all its fields."""
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
@@ -136,7 +137,8 @@ async def list_farm_fields(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0)):
+    offset: int = Query(0, ge=0),
+):
     # Verify farm access
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:

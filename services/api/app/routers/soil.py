@@ -19,7 +19,8 @@ from app.core.soil_intelligence import (
     classify_nutrient_risk,
     compute_sampling_zones,
     compute_soil_weather_stress,
-    estimate_sequestration_potential)
+    estimate_sequestration_potential,
+)
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import Field, Job, SoilFieldSummary, SoilProfile, WeatherDaily
 from app.schemas.soil import (
@@ -31,7 +32,8 @@ from app.schemas.soil import (
     SoilFieldSummaryOut,
     SoilProfileOut,
     SoilRefreshResponse,
-    SoilWeatherStressResponse)
+    SoilWeatherStressResponse,
+)
 
 router = APIRouter()
 
@@ -39,9 +41,8 @@ _writer = require_roles("owner", "admin")
 
 
 async def _get_field_or_404(
-    field_id: uuid.UUID,
-    org_id: uuid.UUID,
-    db: AsyncSession) -> Field:
+    field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession
+) -> Field:
     field = await db.get(Field, field_id)
     if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
@@ -52,7 +53,8 @@ async def _get_field_or_404(
 async def get_soil_profile(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return the soil profile with all layers for a field."""
     await _get_field_or_404(field_id, ctx.org_id, db)
 
@@ -74,7 +76,8 @@ async def get_soil_profile(
 async def get_soil_summary(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return the aggregated soil summary for a field."""
     await _get_field_or_404(field_id, ctx.org_id, db)
 
@@ -91,22 +94,20 @@ async def get_soil_summary(
 @router.post(
     "/fields/{field_id}/soil/refresh",
     response_model=SoilRefreshResponse,
-    status_code=202)
+    status_code=202,
+)
 @limiter.limit("1/minute")
 async def refresh_soil(
     request: Request,
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Trigger a re-fetch of soil data for a field."""
     await _get_field_or_404(field_id, ctx.org_id, db)
 
     # Create a Job row for progress tracking
-    job = Job(
-
-        field_id=field_id,
-        type="soil_fetch",
-        status="pending")
+    job = Job(field_id=field_id, type="soil_fetch", status="pending")
     db.add(job)
     await db.flush()
 
@@ -115,22 +116,22 @@ async def refresh_soil(
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
-        type="soil_fetch",
-        field_id=str(field_id),
-        extras={"job_id": str(job.id)})
+        type="soil_fetch", field_id=str(field_id), extras={"job_id": str(job.id)}
+    )
 
     logger.info(
         "soil_refresh_triggered",
         field_id=str(field_id),
         job_id=str(job.id),
-
-        mq_task_id=task_id)
+        mq_task_id=task_id,
+    )
 
     return SoilRefreshResponse(
         field_id=str(field_id),
         job_id=str(job.id),
         status="accepted",
-        message="Soil data refresh queued.")
+        message="Soil data refresh queued.",
+    )
 
 
 # ── Intelligence Endpoints ───────────────────────────────────────────
@@ -228,12 +229,13 @@ def _summary_to_dict(s: SoilFieldSummary) -> dict:
 
 
 @router.get(
-    "/fields/{field_id}/soil/sampling-zones",
-    response_model=SamplingZonesResponse)
+    "/fields/{field_id}/soil/sampling-zones", response_model=SamplingZonesResponse
+)
 async def get_sampling_zones(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return suggested sampling zone GeoJSON based on soil variability."""
     field = await _get_field_or_404(field_id, ctx.org_id, db)
     profile, _summary = await _get_profile_and_summary(field_id, db)
@@ -258,12 +260,13 @@ async def get_sampling_zones(
 
 
 @router.get(
-    "/fields/{field_id}/soil/crop-suitability",
-    response_model=CropSuitabilityResponse)
+    "/fields/{field_id}/soil/crop-suitability", response_model=CropSuitabilityResponse
+)
 async def get_crop_suitability(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return crop suitability scores for the field's soil conditions."""
     field = await _get_field_or_404(field_id, ctx.org_id, db)
     profile, summary = await _get_profile_and_summary(field_id, db)
@@ -283,9 +286,8 @@ async def get_crop_suitability(
             func.avg(WeatherDaily.temperature_2m_mean),
             func.min(WeatherDaily.temperature_2m_min),
             func.max(WeatherDaily.temperature_2m_max),
-            func.count()).where(
-            WeatherDaily.field_id == field_id,
-            WeatherDaily.date >= one_year_ago)
+            func.count(),
+        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
     )
     arow = annual_result.one_or_none()
     day_count = int(arow[4]) if arow and arow[4] else 0
@@ -310,7 +312,8 @@ async def get_crop_suitability(
             select(WeatherDaily)
             .where(
                 WeatherDaily.field_id == field_id,
-                WeatherDaily.date >= now - timedelta(days=30))
+                WeatherDaily.date >= now - timedelta(days=30),
+            )
             .order_by(WeatherDaily.date.desc())
             .limit(1)
         )
@@ -336,7 +339,8 @@ async def get_crop_suitability(
             field_crop_type=field.crop_type,
             field_crop_suitability=None,
             weather_available=False,
-            message="Crop suitability requires weather data. Run the weather pipeline first.")
+            message="Crop suitability requires weather data. Run the weather pipeline first.",
+        )
 
     crops_out = [
         CropSuitabilityItem(
@@ -344,7 +348,8 @@ async def get_crop_suitability(
             name=r.name,
             score=r.score,
             rating=r.rating,
-            limiting_factors=r.limiting_factors)
+            limiting_factors=r.limiting_factors,
+        )
         for r in results
     ]
 
@@ -362,16 +367,18 @@ async def get_crop_suitability(
         crops=crops_out[:10],
         field_crop_type=field_crop,
         field_crop_suitability=field_crop_item,
-        weather_available=True)
+        weather_available=True,
+    )
 
 
 @router.get(
-    "/fields/{field_id}/soil/nutrient-context",
-    response_model=NutrientContextResponse)
+    "/fields/{field_id}/soil/nutrient-context", response_model=NutrientContextResponse
+)
 async def get_nutrient_context(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return nutrient risk zone classification for the field."""
     await _get_field_or_404(field_id, ctx.org_id, db)
     profile, summary = await _get_profile_and_summary(field_id, db)
@@ -385,16 +392,16 @@ async def get_nutrient_context(
         zone_class=result.zone_class,
         confidence=result.confidence,
         factors=result.factors,
-        interpretation=result.interpretation)
+        interpretation=result.interpretation,
+    )
 
 
-@router.get(
-    "/fields/{field_id}/soil/carbon",
-    response_model=CarbonEstimateResponse)
+@router.get("/fields/{field_id}/soil/carbon", response_model=CarbonEstimateResponse)
 async def get_carbon_estimate(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return SOC stock, saturation estimate, and sequestration potential."""
     await _get_field_or_404(field_id, ctx.org_id, db)
     profile, summary = await _get_profile_and_summary(field_id, db)
@@ -410,9 +417,8 @@ async def get_carbon_estimate(
         select(
             func.sum(WeatherDaily.precipitation_sum),
             func.avg(WeatherDaily.temperature_2m_mean),
-            func.count()).where(
-            WeatherDaily.field_id == field_id,
-            WeatherDaily.date >= one_year_ago)
+            func.count(),
+        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
     )
     row = wd_result.one_or_none()
     if row and row[2] and row[2] > 180:  # need at least 6 months of data
@@ -436,16 +442,18 @@ async def get_carbon_estimate(
         sequestration_potential_low_t_ha=seq_low,
         sequestration_potential_high_t_ha=seq_high,
         climate_zone=result.climate_zone,
-        disclaimer=result.disclaimer)
+        disclaimer=result.disclaimer,
+    )
 
 
 @router.get(
-    "/fields/{field_id}/soil/weather-stress",
-    response_model=SoilWeatherStressResponse)
+    "/fields/{field_id}/soil/weather-stress", response_model=SoilWeatherStressResponse
+)
 async def get_soil_weather_stress(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return current root-zone moisture stress assessment."""
     await _get_field_or_404(field_id, ctx.org_id, db)
     _profile, summary = await _get_profile_and_summary(field_id, db)
@@ -458,7 +466,8 @@ async def get_soil_weather_stress(
         select(WeatherDaily)
         .where(
             WeatherDaily.field_id == field_id,
-            WeatherDaily.date >= now - timedelta(days=30))
+            WeatherDaily.date >= now - timedelta(days=30),
+        )
         .order_by(WeatherDaily.date.desc())
     )
     weather_rows = wd_result.scalars().all()
@@ -492,4 +501,5 @@ async def get_soil_weather_stress(
         moisture_status=result.moisture_status,
         awc_rootzone_mm=result.awc_rootzone_mm,
         water_balance_30d_mm=result.water_balance_30d_mm,
-        factors=result.factors)
+        factors=result.factors,
+    )

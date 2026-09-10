@@ -27,7 +27,8 @@ class AssessmentGenerateRequest(BaseModel):
 
     crop_type: str | None = PydanticField(
         default=None,
-        description="Catalog key from GET /v1/crops; binds to field if missing")
+        description="Catalog key from GET /v1/crops; binds to field if missing",
+    )
 
 
 router = APIRouter()
@@ -44,14 +45,16 @@ async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -
 @router.post(
     "/fields/{field_id}/assessment-report",
     response_model=JobOut,
-    status_code=status.HTTP_201_CREATED)
+    status_code=status.HTTP_201_CREATED,
+)
 @limiter.limit("5/minute")
 async def create_assessment_report(
     request: Request,
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    body: AssessmentGenerateRequest | None = None):
+    body: AssessmentGenerateRequest | None = None,
+):
     """Enqueue a 选地体检（白话版）PDF generation job."""
     field = await _get_field(field_id, ctx.org_id, db)
 
@@ -73,7 +76,8 @@ async def create_assessment_report(
                 "code": "crop_required",
                 "message": "请先选择作物后再生成选地报告",
                 "crops_path": "/v1/crops",
-            })
+            },
+        )
 
     # Reuse in-flight job if one is pending/running
     existing = (
@@ -83,7 +87,8 @@ async def create_assessment_report(
                 org_scope(None, ctx),
                 Job.field_id == field_id,
                 Job.type == "assessment_report",
-                Job.status.in_(("pending", "running")))
+                Job.status.in_(("pending", "running")),
+            )
             .order_by(Job.created_at.desc())
             .limit(1)
         )
@@ -92,7 +97,6 @@ async def create_assessment_report(
         return existing
 
     job = Job(
-
         field_id=field_id,
         type="assessment_report",
         status="pending",
@@ -100,7 +104,8 @@ async def create_assessment_report(
             "kind": "land_assessment_plain",
             "crop_type": crop_key,
             "crop_name_zh": crop_name_zh(crop_key),
-        })
+        },
+    )
     db.add(job)
     await db.flush()
 
@@ -143,7 +148,8 @@ async def create_assessment_report(
 async def get_latest_assessment_report(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Download the latest succeeded assessment PDF for a field."""
     await _get_field(field_id, ctx.org_id, db)
 
@@ -154,7 +160,8 @@ async def get_latest_assessment_report(
                 org_scope(None, ctx),
                 Job.field_id == field_id,
                 Job.type == "assessment_report",
-                Job.status == "succeeded")
+                Job.status == "succeeded",
+            )
             .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc())
             .limit(1)
         )
@@ -189,19 +196,15 @@ async def get_latest_assessment_report(
     public_url = progress.get("public_url")
     if public_url:
         headers["X-Assessment-Public-Url"] = str(public_url)
-    return Response(
-        content=data,
-        media_type="application/pdf",
-        headers=headers)
+    return Response(content=data, media_type="application/pdf", headers=headers)
 
 
-@router.get(
-    "/fields/{field_id}/assessment-report/latest/meta",
-    response_model=JobOut)
+@router.get("/fields/{field_id}/assessment-report/latest/meta", response_model=JobOut)
 async def get_latest_assessment_meta(
     field_id: uuid.UUID,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
-    db: Annotated[AsyncSession, Depends(get_db)]):
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """Return the latest assessment job (any status) for UI polling."""
     await _get_field(field_id, ctx.org_id, db)
     job = (
@@ -210,7 +213,8 @@ async def get_latest_assessment_meta(
             .where(
                 org_scope(None, ctx),
                 Job.field_id == field_id,
-                Job.type == "assessment_report")
+                Job.type == "assessment_report",
+            )
             .order_by(Job.created_at.desc())
             .limit(1)
         )

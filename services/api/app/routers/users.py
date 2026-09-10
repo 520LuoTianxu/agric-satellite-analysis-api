@@ -9,7 +9,11 @@ router = APIRouter()
 
 @router.api_route("/users/me", methods=["GET", "PATCH"], include_in_schema=False)
 @router.api_route("/users", methods=["GET", "POST"], include_in_schema=False)
-@router.api_route("/users/{path:path}", methods=["GET", "POST", "PATCH", "DELETE", "PUT"], include_in_schema=False)
+@router.api_route(
+    "/users/{path:path}",
+    methods=["GET", "POST", "PATCH", "DELETE", "PUT"],
+    include_in_schema=False,
+)
 async def users_gone(path: str | None = None) -> None:
     raise HTTPException(
         status_code=status.HTTP_410_GONE,

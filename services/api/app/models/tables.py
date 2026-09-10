@@ -324,9 +324,7 @@ class WeatherDaily(Base):
 
 class SoilProfile(Base):
     __tablename__ = "soil_profiles"
-    __table_args__ = (
-        Index("idx_soil_profiles_field_id", "field_id"),
-    )
+    __table_args__ = (Index("idx_soil_profiles_field_id", "field_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
