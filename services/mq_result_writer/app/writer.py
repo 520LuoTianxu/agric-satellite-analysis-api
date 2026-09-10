@@ -511,7 +511,6 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
         session.close()
 
 
-
 def _apply_assessment_job_progress(
     payload: dict[str, Any],
     *,
@@ -563,6 +562,8 @@ def _apply_assessment_job_progress(
     for key in ("crop_type", "crop_name_zh"):
         if payload.get(key) is not None:
             progress[key] = payload[key]
+    if isinstance(payload.get("scorecard"), dict):
+        progress["scorecard"] = payload["scorecard"]
     session = SyncSession()
     try:
         row = session.execute(
@@ -578,7 +579,10 @@ def _apply_assessment_job_progress(
                 RETURNING id::text
                 """
             ),
-            {"job_id": str(job_id), "progress": json.dumps(progress, ensure_ascii=False)},
+            {
+                "job_id": str(job_id),
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
         ).first()
         session.commit()
         if row:

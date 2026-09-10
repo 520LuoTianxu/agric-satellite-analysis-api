@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -18,6 +19,7 @@ from app.core.rate_limit import limiter
 from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import Field, Job
+from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.schemas.monitoring import JobOut
 from pydantic import BaseModel, Field as PydanticField
 
@@ -29,6 +31,34 @@ class AssessmentGenerateRequest(BaseModel):
         default=None,
         description="Catalog key from GET /v1/crops; binds to field if missing",
     )
+
+
+class AssessmentDimensionOut(BaseModel):
+    key: str
+    score: float
+    light: str | None = None
+    weight: str | None = None
+
+
+class AssessmentOverallOut(BaseModel):
+    score: float
+    grade: str | None = None
+    light: str | None = None
+    one_liner: str | None = None
+
+
+class AssessmentConfidenceOut(BaseModel):
+    score: float
+
+
+class AssessmentScorecardOut(BaseModel):
+    """Six-dimension land-assessment scorecard from a succeeded report job."""
+
+    job_id: uuid.UUID
+    overall: AssessmentOverallOut
+    dimensions: list[AssessmentDimensionOut]
+    confidence: AssessmentConfidenceOut | None = None
+    generated_at: datetime | None = None
 
 
 router = APIRouter()
@@ -222,3 +252,71 @@ async def get_latest_assessment_meta(
     if not job:
         raise HTTPException(status_code=404, detail="No assessment report yet")
     return job
+
+
+def _scorecard_from_job(job: Job) -> dict[str, Any] | None:
+    progress = job.progress_json or {}
+    raw = progress.get("scorecard")
+    if not isinstance(raw, dict):
+        return None
+    return scorecard_public_view(raw)
+
+
+@router.get(
+    "/fields/{field_id}/assessment-report/latest/scorecard",
+    response_model=AssessmentScorecardOut,
+)
+async def get_latest_assessment_scorecard(
+    field_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return the six-dimension scorecard from the latest succeeded report.
+
+    PDF download is unchanged. Jobs that finished before scorecards were
+    persisted return ``scorecard_unavailable`` so the UI can ask the user
+    to regenerate rather than inventing numbers.
+    """
+    await _get_field(field_id, ctx.org_id, db)
+    job = (
+        await db.execute(
+            select(Job)
+            .where(
+                org_scope(None, ctx),
+                Job.field_id == field_id,
+                Job.type == "assessment_report",
+                Job.status == "succeeded",
+            )
+            .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "no_assessment_report",
+                "message": "No assessment report yet",
+            },
+        )
+    view = _scorecard_from_job(job)
+    if not view:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "scorecard_unavailable",
+                "message": "Latest report has no stored scorecard; generate a new report",
+                "job_id": str(job.id),
+            },
+        )
+    return AssessmentScorecardOut(
+        job_id=job.id,
+        overall=AssessmentOverallOut(**view["overall"]),
+        dimensions=[AssessmentDimensionOut(**d) for d in view["dimensions"]],
+        confidence=(
+            AssessmentConfidenceOut(**view["confidence"])
+            if view.get("confidence")
+            else None
+        ),
+        generated_at=job.finished_at or job.created_at,
+    )

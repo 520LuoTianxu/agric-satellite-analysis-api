@@ -47,6 +47,7 @@ WEIGHTS = {
     "wet_safety": 0.10,
     "drought_safety": 0.10,
 }
+# Radar / API dimension order is DIMENSION_KEYS in scorecard_view.py (keep in sync).
 
 
 def _month(d: str) -> int:
