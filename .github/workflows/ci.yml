@@ -20,6 +20,19 @@ jobs:
       - name: Locale message keys match en.json
         run: python3 scripts/check-i18n-keys.py
 
+  common:
+    name: Common - Celery Redis transport tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install openfarm_common
+        run: pip install -e packages/openfarm_common
+      - name: Unit tests
+        run: python -m unittest discover -s packages/openfarm_common/tests -v
+
   web:
     name: Web - lint & type-check
     runs-on: ubuntu-latest
