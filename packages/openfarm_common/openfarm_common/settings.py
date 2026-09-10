@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings
+from typing import Self
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class CommonSettings(BaseSettings):
     """Subset of env used by ingest/storage and ObjectStorage."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     redis_url: str = "redis://redis:6379/0"
 
@@ -39,12 +44,30 @@ class CommonSettings(BaseSettings):
 
     # CloudAMQP outer task bus (never commit real URL)
     cloudamqp_url: str = ""
-    cloudamqp_task_queue: str = "openfarm_tasks"
-    cloudamqp_result_queue: str = "openfarm_results"
+    # Download queue: API publishes TaskMessage; mq_consumer + ingest consume
+    cloudamqp_download_queue: str = "openfarm_download"
+    # Process queue: workers publish ResultMessage; mq_result_writer consumes
+    cloudamqp_process_queue: str = "openfarm_process"
+    # One-release backward-compat aliases (env: CLOUDAMQP_TASK_QUEUE / CLOUDAMQP_RESULT_QUEUE)
+    cloudamqp_task_queue: str = ""
+    cloudamqp_result_queue: str = ""
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    @model_validator(mode="after")
+    def _apply_queue_aliases(self) -> Self:
+        """Prefer DOWNLOAD/PROCESS env; fall back to TASK/RESULT for one release."""
+        fields_set = self.model_fields_set
+        download = self.cloudamqp_download_queue
+        if "cloudamqp_download_queue" not in fields_set and self.cloudamqp_task_queue:
+            download = self.cloudamqp_task_queue
+        process = self.cloudamqp_process_queue
+        if "cloudamqp_process_queue" not in fields_set and self.cloudamqp_result_queue:
+            process = self.cloudamqp_result_queue
+        object.__setattr__(self, "cloudamqp_download_queue", download)
+        object.__setattr__(self, "cloudamqp_process_queue", process)
+        # Keep old attribute names pointing at resolved queues for leftover callers
+        object.__setattr__(self, "cloudamqp_task_queue", download)
+        object.__setattr__(self, "cloudamqp_result_queue", process)
+        return self
 
 
 settings = CommonSettings()

@@ -1,4 +1,4 @@
-"""Entrypoint: consume CLOUDAMQP_RESULT_QUEUE and write DB rows."""
+"""Entrypoint: consume CLOUDAMQP_PROCESS_QUEUE and write DB rows."""
 
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ def main() -> None:
         logger.error("CLOUDAMQP_URL is required for mq_result_writer")
         sys.exit(1)
     logger.info(
-        "starting mq_result_writer broker=%s result_queue=%s",
+        "starting mq_result_writer broker=%s process_queue=%s",
         connection_label(),
-        settings.cloudamqp_result_queue,
+        settings.cloudamqp_process_queue,
     )
     consume_forever(
-        settings.cloudamqp_result_queue,
+        settings.cloudamqp_process_queue,
         handle_result_message,
         prefetch=1,
     )

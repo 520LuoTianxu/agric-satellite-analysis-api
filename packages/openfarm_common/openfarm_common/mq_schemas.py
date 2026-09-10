@@ -13,7 +13,7 @@ def _utcnow() -> datetime:
 
 
 class TaskMessage(BaseModel):
-    """Inbound task published to CLOUDAMQP_TASK_QUEUE."""
+    """Inbound task published to CLOUDAMQP_DOWNLOAD_QUEUE (openfarm_download)."""
 
     task_id: str
     type: str = "satellite_analysis"
@@ -27,7 +27,7 @@ class TaskMessage(BaseModel):
 
 
 class ResultMessage(BaseModel):
-    """Outbound result published to CLOUDAMQP_RESULT_QUEUE.
+    """Outbound result published to CLOUDAMQP_PROCESS_QUEUE (openfarm_process).
 
     Remote sensing: prefer ``oss_urls`` (DB-ready JSON on OSS).
     Weather / soil: prefer inline ``payload`` / ``data`` (under ~100KB).

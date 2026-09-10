@@ -47,7 +47,7 @@ async def enqueue_mq_task(
     body: MqTaskEnqueue,
     ctx: Annotated[OrgContext, Depends(_writer)],
 ):
-    """Publish a TaskMessage to CloudAMQP task queue (does not run work inline)."""
+    """Publish a TaskMessage to CloudAMQP download queue (does not run work inline)."""
     if body.type not in ALLOWED_MQ_TYPES:
         raise HTTPException(
             status_code=400,
@@ -87,6 +87,6 @@ async def enqueue_mq_task(
     return MqTaskEnqueued(
         task_id=task_id,
         type=body.type,
-        queue=common_settings.cloudamqp_task_queue,
+        queue=common_settings.cloudamqp_download_queue,
         created_at=datetime.now(timezone.utc),
     )

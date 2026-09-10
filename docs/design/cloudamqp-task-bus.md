@@ -1,6 +1,6 @@
 # CloudAMQP 外层任务总线（Outer Task Bus）
 
-> 状态：MVP + API 入队 + 结果回写（天气/土壤 inline，遥感 OSS JSON）  
+> 状态：MVP + API 入队 + **两队列 rename/split**（download / process）  
 > 关联仓库：`agric-satellite-analysis`  
 > 日期：2026-09-10  
 > 分支：`feat/cloudamqp-task-bus`
@@ -23,21 +23,30 @@
 
 > 注：天气/土壤 JSON 通常不大；若未来确认稳定 &lt; CloudAMQP 实用上限，可继续以 inline 为主。遥感像素 JSON 走 OSS。
 
-## 2. 拓扑
+## 2. 两队列拓扑（download / process）
+
+旧名 `openfarm_tasks` / `openfarm_results`（及文档里的 `test_queue` / `result_queue`）已替换为：
+
+| Role | Queue name | Who |
+|------|------------|-----|
+| **Download queue** | `openfarm_download` | Page/API click 发布 `TaskMessage`。Download workers（`mq_consumer` + ingest/storage Celery）**只消费**此队列，做 download/compute/upload。 |
+| **Process / write-DB queue** | `openfarm_process` | Download（或 weather/soil fetch）完成后发布 `ResultMessage`。`mq_result_writer` **只消费**此队列并写业务 DB。 |
 
 ```
 Producer (API REST / script / POST /v1/mq/tasks)
-    │  TaskMessage → CLOUDAMQP_TASK_QUEUE
+    │  TaskMessage → CLOUDAMQP_DOWNLOAD_QUEUE  (openfarm_download)
+    │  （Producer 不消费 download 队列）
     ▼
-mq_consumer  ──send_task──▶  Redis ──▶ ingest / storage Celery
-    │                                      │
-    │                         mq_task_id 钩子
-    │                                      │
-    │◀──── ResultMessage ──────────────────┘
+Download host: mq_consumer  ──send_task──▶  Redis ──▶ ingest / storage Celery
+    │                                              │
+    │                                 mq_task_id 钩子
+    │                                              │
+    │◀──── ResultMessage ──────────────────────────┘
     │         payload?  +  oss_urls?
-    │         CLOUDAMQP_RESULT_QUEUE
+    │         CLOUDAMQP_PROCESS_QUEUE  (openfarm_process)
+    │  （Download host 若他机负责写库，则不要跑 mq_result_writer）
     ▼
-mq_result_writer
+Process host: mq_result_writer
     ├─ payload.kind=weather_daily / soil_profile → upsert 业务表
     ├─ oss_urls → GET JSON
     │     ├─ lonlat_v1 scene → agri.parcel_scene_products
@@ -45,9 +54,17 @@ mq_result_writer
     └─ 始终写入 agri.mq_task_results
 ```
 
+### 部署角色约定
+
+- **Producer（用户 API 机）**：只向 `openfarm_download` 发布；**不要**消费 download 队列。
+- **Download host**：只消费 `openfarm_download`；完成后向 `openfarm_process` 发布 `ResultMessage`；若另一台机器负责写库，**不要**在本机跑 `mq_result_writer`。
+- **Process host（`mq_result_writer`）**：消费 `openfarm_process` 并 upsert 业务 DB。
+- **Weather / soil**：仍经 download 队列入队（页面点击）→ worker 拉取 → `ResultMessage`（inline payload）→ process 队列 → writer upsert。  
+  **Follow-up**：ingest 天气/土壤任务目前可能仍直接写库（与 writer 双写）；以 result-writer 为单一真相源需另开小改，本轮不做大爆炸重写。
+
 ## 3. 消息约定
 
-### TaskMessage → `CLOUDAMQP_TASK_QUEUE`
+### TaskMessage → `CLOUDAMQP_DOWNLOAD_QUEUE`（`openfarm_download`）
 
 ```json
 {
@@ -71,7 +88,7 @@ mq_result_writer
 | `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
 | `field_bootstrap` | `skip_indices?`, `sentinel_job_id?` | fan-out weather + soil +（可选）indices | consumer 轻量 `phase=bootstrap_dispatched`（子任务各自带结果） |
 
-### ResultMessage → `CLOUDAMQP_RESULT_QUEUE`
+### ResultMessage → `CLOUDAMQP_PROCESS_QUEUE`（`openfarm_process`）
 
 ```json
 {
@@ -103,7 +120,7 @@ mq_result_writer
 | `POST /fields/{id}/soil/refresh` | `soil_fetch` | `soil_fetch` Job |
 | `POST /v1/mq/tasks` | 上表类型白名单 | — |
 
-> 天气/土壤 **保持** MQ 入队（不要改回 API 直发 Celery）。Celery 任务仍可本地写库；producer 侧 `mq_result_writer` 按 payload/OSS 再 upsert，便于跨库/对账。
+> 天气/土壤 **保持** MQ 入队（不要改回 API 直发 Celery）。Celery 任务仍可本地写库；process 侧 `mq_result_writer` 按 payload/OSS 再 upsert，便于跨库/对账。
 
 `GET .../backfill-status` 继续读 Job 行。
 
@@ -111,8 +128,8 @@ mq_result_writer
 
 | Profile | 服务 | 角色 |
 |---------|------|------|
-| `consumer` / `mq` | `mq_consumer` | 消费任务队列 → 派 Celery |
-| `producer` / `mq` | `mq_result_writer` | 消费结果队列 → inline/OSS → 写 DB |
+| `consumer` / `mq` | `mq_consumer` | 消费 **download** 队列 → 派 Celery |
+| `producer` / `mq` | `mq_result_writer` | 消费 **process** 队列 → inline/OSS → 写 DB |
 
 ```bash
 docker compose --profile mq up -d --build api ingest mq_consumer mq_result_writer
@@ -121,8 +138,10 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 环境变量（见 `.env.example`，**勿提交真实 URL**）：
 
 - `CLOUDAMQP_URL`
-- `CLOUDAMQP_TASK_QUEUE`（默认 `openfarm_tasks`）
-- `CLOUDAMQP_RESULT_QUEUE`（默认 `openfarm_results`）
+- `CLOUDAMQP_DOWNLOAD_QUEUE`（默认 `openfarm_download`）  
+  - 一发兼容别名：`CLOUDAMQP_TASK_QUEUE`（若设置且未设 DOWNLOAD，则沿用）
+- `CLOUDAMQP_PROCESS_QUEUE`（默认 `openfarm_process`）  
+  - 一发兼容别名：`CLOUDAMQP_RESULT_QUEUE`
 - `MQ_FALLBACK_CELERY`（可选，默认关闭）
 - `OSS_PREFIX`（默认 `s1s2_parcel/json/`）
 
@@ -138,16 +157,19 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 # SELECT task_id, status, payload, oss_urls, updated_at FROM agri.mq_task_results ORDER BY updated_at DESC LIMIT 10;
 ```
 
+> 共享 CloudAMQP 时注意：勿同时拉起多个 competing consumer；本机验证优先 code/compose，慎启 `mq_consumer` / `mq_result_writer`。
+
 ## 7. 关键文件
 
 | 路径 | 说明 |
 |------|------|
-| `packages/openfarm_common/openfarm_common/mq.py` | pika 连接 / publish / consume |
+| `packages/openfarm_common/openfarm_common/settings.py` | `cloudamqp_download_queue` / `cloudamqp_process_queue` + 旧别名 |
+| `packages/openfarm_common/openfarm_common/mq.py` | pika 连接 / publish→download / publish_result→process / consume |
 | `packages/openfarm_common/openfarm_common/mq_schemas.py` | TaskMessage / ResultMessage（含 payload/data） |
 | `packages/openfarm_common/openfarm_common/mq_results.py` | inline 限幅、scene JSON 上传、Result 发布 |
-| `services/api/app/mq_publish.py` | API 侧 publish |
-| `services/mq_consumer/` | 任务消费者 |
-| `services/mq_result_writer/` | 结果写库（mq_task_results + weather/soil/scene） |
+| `services/api/app/mq_publish.py` | API 侧 publish → download 队列 |
+| `services/mq_consumer/` | download 队列消费者 |
+| `services/mq_result_writer/` | process 队列写库（mq_task_results + weather/soil/scene） |
 | `services/ingest/app/tasks/bridge_stac_cogs_to_agri_lonlat.py` | 每景上传 JSON + `json_oss_key` |
 | `services/ingest/app/tasks/agri_bridge.py` | 完成后发布带 `oss_urls` 的 Result |
 | `services/ingest/app/tasks/weather.py` / `soil.py` | 完成后发布 inline payload |
@@ -158,7 +180,8 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 1. Full `satellite_analysis`（带 bridge）结果在 **bridge 完成** 后发布，耗时可能很长。  
 2. `field_bootstrap` 仅保证「已入队」结果；子任务失败看 Celery / Job / 各自 Result。  
 3. 365 天天气行可能超过 100KB → 自动 OSS fallback；短窗口（如 30 天）优先 inline。  
-4. Celery 与 writer 双写同一库时依赖 upsert 幂等。  
+4. Celery 与 writer 双写同一库时依赖 upsert 幂等（天气/土壤尤甚；长期应以 process writer 为源）。  
 5. S1 bridge 路径尚未统一上传 scene JSON（本 MVP 覆盖 STAC S2 lonlat bridge）。  
 6. 失败重试：consumer 用 `x-retry-count` 头，默认最多 3 次后 ack。  
-7. 改 `mq_consumer` / `mq_result_writer` / API / ingest 后需 `--build`。
+7. 改 `mq_consumer` / `mq_result_writer` / API / ingest 后需 `--build`。  
+8. 旧队列名 `openfarm_tasks` / `openfarm_results` 上若仍有残留消息，需人工迁移或消费干净后再切流量。

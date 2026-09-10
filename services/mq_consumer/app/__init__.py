@@ -1,1 +1,1 @@
-"""CloudAMQP task consumer — outer bus → Celery ingest."""
+"""CloudAMQP download-queue consumer — outer bus → Celery ingest."""
