@@ -6,10 +6,16 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.local.yml --profile minio up -d
 
 services:
-  processor:
+  ingest:
     command: >
       celery -A app.worker worker
-      -Q default,celery
+      -Q ingest
+      --loglevel=info
+      --concurrency=1
+  storage:
+    command: >
+      celery -A app.worker worker
+      -Q storage
       --loglevel=info
       --concurrency=1
   db:
@@ -36,6 +42,7 @@ services:
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: "true"
+        NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
         INTERNAL_API_URL: http://api:8000
     environment:
       ENABLE_DEMO_LOGIN: "true"

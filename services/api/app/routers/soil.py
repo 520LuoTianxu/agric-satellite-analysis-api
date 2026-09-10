@@ -119,9 +119,12 @@ async def refresh_soil(
     db.add(job)
     await db.flush()
 
-    from app.tasks.soil import fetch_soil_for_field
+    from app.celery_client import send_task
 
-    fetch_soil_for_field.delay(str(field_id), str(job.id))
+    send_task(
+        "app.tasks.soil.fetch_soil_for_field",
+        args=[str(field_id), str(job.id)],
+    )
 
     logger.info(
         "soil_refresh_triggered",

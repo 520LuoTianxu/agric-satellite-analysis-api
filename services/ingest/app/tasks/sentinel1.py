@@ -32,6 +32,7 @@ from shapely.geometry import mapping
 
 from app.core.config import settings
 from app.core.storage import get_storage, restore_gdal_env
+from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
     RETRY_DELAYS,
     complete_step,
@@ -259,9 +260,8 @@ def _write_index_cog(
             dst.write(data.astype(np.float32), 1)
         output_profile = cog_profiles.get("deflate")
         cog_translate(tmp_src, tmp_dst, output_profile, overview_level=2, quiet=True)
-        storage = get_storage()
-        storage.upload_file(object_key, tmp_dst, content_type="image/tiff")
-        return storage.uri_for(object_key)
+        result = upload_file_via_storage(object_key, tmp_dst, content_type="image/tiff")
+        return result["uri"]
     finally:
         for p in (tmp_src, tmp_dst):
             try:

@@ -11,7 +11,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database_sync import SyncSession
 from app.core.logging import logger
-from app.core.storage import get_storage
+from app.tasks.storage_tasks import upload_file_via_storage
 from app.models.tables import Job
 from app.reports.land_assessment.service import generate_assessment_pdf
 from app.worker import celery_app
@@ -77,10 +77,9 @@ def generate_assessment_report(self, job_id: str) -> dict:
             progress={"stage": "uploading", "percent": 70, "score": result["score"]},
         )
 
-        storage = get_storage()
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         object_key = f"reports/{job.org_id}/{job.field_id}/assessment-{ts}.pdf"
-        storage.upload_file(
+        upload_file_via_storage(
             object_key,
             str(pdf_path),
             content_type="application/pdf",

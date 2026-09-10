@@ -1,58 +1,14 @@
-"""Celery worker configuration - broker=Redis, per PRD Section 7.4."""
+"""Celery client for the API process (send_task / beat).
 
-from celery import Celery
-from celery.schedules import crontab
+Heavy task modules live in ``services/ingest`` and ``services/storage``.
+This module must not import them — routers dispatch by stable task name.
+"""
 
-from app.core.config import settings
+from openfarm_common.celery_app import create_celery_app
 
-celery_app = Celery(
-    "openfarm",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
-)
-
-celery_app.conf.update(
-    # At-least-once delivery
-    task_acks_late=True,
-    task_reject_on_worker_lost=True,
-    # Visibility timeout > max job duration
-    broker_transport_options={"visibility_timeout": 7200},
-    # Concurrency - match 8 vCPU / 16 GB RAM spec
-    worker_concurrency=4,
-    # Timeouts
-    task_time_limit=1800,  # 30 min hard kill
-    task_soft_time_limit=1500,  # 25 min soft warning
-    # Serialization
-    task_serializer="json",
-    result_serializer="json",
-    accept_content=["json"],
-    # Task discovery
-    include=[
-        "app.tasks.ndvi",
-        "app.tasks.vegetation",
-        "app.tasks.weather",
-        "app.tasks.backfill",
-        "app.tasks.soil",
-        "app.tasks.agri_bridge",
-        "app.tasks.agri_alerts",
-        "app.tasks.sentinel1",
-        "app.tasks.assessment_report",
-        "app.tasks.overview_preagg",
-    ],
-    # Celery Beat schedule
-    beat_schedule={
-        "compute-indices-weekly": {
-            "task": "app.tasks.backfill.schedule_weekly_index_compute",
-            "schedule": crontab(hour=6, minute=0, day_of_week=1),
-        },
-        "fetch-weather-daily": {
-            "task": "app.tasks.weather.schedule_daily_weather_fetch",
-            "schedule": crontab(hour=8, minute=0),
-        },
-        # 02:30 Asia/Shanghai → 18:30 UTC (CST/CST no DST)
-        "refresh-overview-stats-daily": {
-            "task": "app.tasks.overview_preagg.refresh_overview_stats",
-            "schedule": crontab(hour=18, minute=30),
-        },
-    },
+celery_app = create_celery_app(
+    name="openfarm",
+    include=[],
+    default_queue="ingest",
+    with_beat_schedule=True,
 )

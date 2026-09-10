@@ -26,6 +26,25 @@ OpenFarm follows a 3-layer strategic architecture. Each layer has a distinct rol
 
 Collects, standardizes, and stores raw signals about every field. Source-agnostic, reproducible, and extensible.
 
+
+### Ingest vs storage workers
+
+Layer A download (STAC / Open-Meteo / SoilGrids) runs on the **`ingest`** Celery
+queue; object-store puts (OSS/MinIO) run on the **`storage`** queue. The FastAPI
+`api` service dispatches jobs via `send_task` and does not run the heavy worker.
+
+**物理拆包已落地** (separate images + packages):
+
+| Path | Role |
+|------|------|
+| `packages/openfarm_common` | Shared settings, `ObjectStorage`, Celery factory, storage client |
+| `services/ingest` | Own `app/tasks/*` + GDAL/STAC image |
+| `services/storage` | Lean Celery image (**no GDAL**) |
+| `services/api` | FastAPI + beat client only |
+
+Compose builds api/ingest/storage from **repo root** context. Design:
+[`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
+
 ### Satellite Intelligence
 - Sentinel-2 (initial), extensible to Landsat, Planet, SAR (Sentinel-1)
 - Raster ingestion pipelines (COG/STAC compliant)

@@ -1,0 +1,20 @@
+{
+  "bucket": "agric-dev",
+  "endpoint": "https://oss-cn-beijing.aliyuncs.com",
+  "prefix": "web/glossary/",
+  "base_url": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/",
+  "files": {
+    "cire.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/cire.png",
+    "drought.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/drought.png",
+    "evi.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/evi.png",
+    "flood.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/flood.png",
+    "mndwi.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/mndwi.png",
+    "ndmi.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/ndmi.png",
+    "ndre.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/ndre.png",
+    "ndvi.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/ndvi.png",
+    "sentinel-s1.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/sentinel-s1.png",
+    "sentinel-s2.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/sentinel-s2.png",
+    "vh.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/vh.png",
+    "vv.png": "https://agric-dev.oss-cn-beijing.aliyuncs.com/web/glossary/vv.png"
+  }
+}

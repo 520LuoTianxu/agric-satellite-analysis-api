@@ -74,8 +74,8 @@ services:
   # ── FastAPI (API service) ──────────────────────────────────────────
   api:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/api/Dockerfile
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
@@ -99,25 +99,31 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      OPENFARM_SCRATCH_DIR: /data/scratch
+    volumes:
+      - scratch:/data/scratch
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      storage:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── Celery Worker (Processor) ──────────────────────────────────────
-  processor:
+  # ── Celery ingest (foreign download + raster compute) ─────────────
+  # Replaces legacy ``processor``. Queue: ingest. See docs/design/ingest-storage-split.md
+  ingest:
     build:
-      context: ./services/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/ingest/Dockerfile
     command: >
       celery -A app.worker worker
-      -Q default,celery
+      -Q ingest
       --loglevel=info
       --concurrency=4
     environment:
@@ -140,6 +146,9 @@ services:
       SOIL_FETCH_TIMEOUT_SECONDS: ${SOIL_FETCH_TIMEOUT_SECONDS}
       SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      OPENFARM_SCRATCH_DIR: /data/scratch
+    volumes:
+      - scratch:/data/scratch
     depends_on:
       db:
         condition: service_healthy
@@ -155,6 +164,62 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── Celery storage (OSS/MinIO uploads only) ───────────────────────
+  storage:
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile
+    command: >
+      celery -A app.worker worker
+      -Q storage
+      --loglevel=info
+      --concurrency=2
+    environment:
+      REDIS_URL: ${REDIS_URL}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+      OPENFARM_SCRATCH_DIR: /data/scratch
+    volumes:
+      - scratch:/data/scratch
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.worker inspect ping --timeout 5 2>/dev/null | grep -q OK",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Celery Beat (schedules → ingest queue) ────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: >
+      celery -A app.worker beat
+      --loglevel=info
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      REDIS_URL: ${REDIS_URL}
+    depends_on:
+      redis:
+        condition: service_healthy
 
   # ── TiTiler ────────────────────────────────────────────────────────
   # Default: S3-compatible access to Aliyun OSS (same keys as OSS_*).
@@ -192,6 +257,7 @@ services:
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
+        NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
         INTERNAL_API_URL: http://api:8000
     environment:
       # Next.js standalone binds to $HOSTNAME, which Docker sets to the
@@ -209,6 +275,7 @@ services:
       NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
       NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
       NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
+      NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
       DATABASE_URL: ${DATABASE_URL_SYNC}
       INTERNAL_API_URL: http://api:8000
     depends_on:
@@ -228,3 +295,4 @@ volumes:
   pgdata:
   redisdata:
   miniodata:
+  scratch:
