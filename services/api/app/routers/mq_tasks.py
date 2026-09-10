@@ -48,7 +48,9 @@ async def enqueue_mq_task(
         from openfarm_common.mq_schemas import TaskMessage
         from openfarm_common.settings import settings as common_settings
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"MQ helpers unavailable: {e}") from e
+        raise HTTPException(
+            status_code=503, detail=f"MQ helpers unavailable: {e}"
+        ) from e
 
     if not common_settings.cloudamqp_url:
         raise HTTPException(status_code=503, detail="CLOUDAMQP_URL not configured")
@@ -70,7 +72,9 @@ async def enqueue_mq_task(
         publish_task(msg)
     except Exception as e:
         logger.error("mq_enqueue_failed", task_id=task_id, error=str(e))
-        raise HTTPException(status_code=502, detail=f"Failed to publish task: {e}") from e
+        raise HTTPException(
+            status_code=502, detail=f"Failed to publish task: {e}"
+        ) from e
 
     logger.info(
         "mq_task_enqueued",
