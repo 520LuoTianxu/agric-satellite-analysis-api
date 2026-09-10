@@ -204,12 +204,12 @@ async def trigger_weather_backfill(
     if body.days < 1 or body.days > 365:
         raise HTTPException(status_code=400, detail="days must be between 1 and 365")
 
-    from app.celery_client import send_task
+    from app.mq_publish import publish_api_task
 
-    send_task(
-        "app.tasks.weather.backfill_weather_for_field",
-        args=[str(field_id)],
-        kwargs={"days": body.days},
+    task_id = publish_api_task(
+        type="weather_backfill",
+        field_id=str(field_id),
+        extras={"days": body.days},
     )
 
     logger.info(
@@ -217,6 +217,7 @@ async def trigger_weather_backfill(
         field_id=str(field_id),
         days=body.days,
         user_id=str(ctx.user.id),
+        mq_task_id=task_id,
     )
     return WeatherBackfillResponse(
         field_id=field_id,

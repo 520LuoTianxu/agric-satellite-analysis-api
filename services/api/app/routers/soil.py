@@ -119,11 +119,14 @@ async def refresh_soil(
     db.add(job)
     await db.flush()
 
-    from app.celery_client import send_task
+    await db.commit()
 
-    send_task(
-        "app.tasks.soil.fetch_soil_for_field",
-        args=[str(field_id), str(job.id)],
+    from app.mq_publish import publish_api_task
+
+    task_id = publish_api_task(
+        type="soil_fetch",
+        field_id=str(field_id),
+        extras={"job_id": str(job.id)},
     )
 
     logger.info(
@@ -131,6 +134,7 @@ async def refresh_soil(
         field_id=str(field_id),
         job_id=str(job.id),
         user_id=str(ctx.user.id),
+        mq_task_id=task_id,
     )
 
     return SoilRefreshResponse(

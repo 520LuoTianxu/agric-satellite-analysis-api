@@ -6,6 +6,9 @@ Usage (from repo root, with .env loaded or env exported):
   pip install -e packages/openfarm_common
   python scripts/mq_publish_test.py --field-id <uuid>
   python scripts/mq_publish_test.py --parcel-id <land_id> --mode bridge_only
+  python scripts/mq_publish_test.py --field-id <uuid> --type weather_backfill --days 30
+  python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
+  python scripts/mq_publish_test.py --field-id <uuid> --type field_bootstrap
 
 Never prints CLOUDAMQP password (uses connection_label).
 """
@@ -38,9 +41,21 @@ def main() -> int:
     ap.add_argument("--field-id", default=None)
     ap.add_argument("--parcel-id", default=None, help="agri land_id")
     ap.add_argument("--land-id", default=None)
-    ap.add_argument("--type", default="satellite_analysis")
+    ap.add_argument(
+        "--type",
+        default="satellite_analysis",
+        choices=(
+            "satellite_analysis",
+            "agri_bridge",
+            "weather_backfill",
+            "soil_fetch",
+            "field_bootstrap",
+        ),
+    )
     ap.add_argument("--mode", default="full", choices=("full", "bridge_only"))
     ap.add_argument("--months", type=int, default=6)
+    ap.add_argument("--days", type=int, default=None, help="weather_backfill days")
+    ap.add_argument("--skip-indices", action="store_true", help="field_bootstrap")
     ap.add_argument("--task-id", default=None)
     args = ap.parse_args()
 
@@ -60,13 +75,22 @@ def main() -> int:
         return 1
 
     task_id = args.task_id or str(uuid.uuid4())
+    extras: dict = {"smoke": True}
+    if args.type in ("satellite_analysis", "agri_bridge"):
+        extras["mode"] = args.mode
+        extras["months"] = args.months
+    if args.type == "weather_backfill" and args.days is not None:
+        extras["days"] = args.days
+    if args.type == "field_bootstrap" and args.skip_indices:
+        extras["skip_indices"] = True
+
     msg = TaskMessage(
         task_id=task_id,
         type=args.type,
         field_id=args.field_id,
         parcel_id=args.parcel_id,
         land_id=args.land_id,
-        extras={"mode": args.mode, "months": args.months, "smoke": True},
+        extras=extras,
     )
     print(f"broker={connection_label()}")
     print(f"queue={settings.cloudamqp_task_queue}")

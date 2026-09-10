@@ -418,15 +418,71 @@ def schedule_daily_weather_fetch() -> dict:
 
 
 @celery_app.task(name="app.tasks.weather.backfill_weather_for_field")
-def backfill_weather_for_field(field_id: str, days: int | None = None) -> dict:
+def backfill_weather_for_field(
+    field_id: str,
+    days: int | None = None,
+    mq_task_id: str | None = None,
+) -> dict:
     """Trigger a historical weather backfill for a field.
 
-    Called on field creation or manually via API.
+    Called on field creation or manually via API / CloudAMQP weather_backfill.
+    When ``mq_task_id`` is set, publish a ResultMessage on completion.
     """
     backfill = days or settings.weather_backfill_days
     logger.info(
         "weather_backfill_start",
         field_id=field_id,
         days=backfill,
+        mq_task_id=mq_task_id,
     )
-    return fetch_weather_for_field(field_id, backfill_days=backfill)
+    try:
+        result = fetch_weather_for_field(field_id, backfill_days=backfill)
+        if mq_task_id:
+            try:
+                from openfarm_common.mq_results import publish_task_result
+
+                status = "success"
+                if isinstance(result, dict) and result.get("status") in (
+                    "error",
+                    "failed",
+                ):
+                    status = "failed"
+                publish_task_result(
+                    task_id=mq_task_id,
+                    status=status,
+                    field_id=field_id,
+                    error=(
+                        str(result.get("message") or result.get("detail") or "")[:500]
+                        if status == "failed" and isinstance(result, dict)
+                        else None
+                    ),
+                    extras={
+                        "source": "weather_backfill",
+                        "days": backfill,
+                        "result": result if isinstance(result, dict) else None,
+                    },
+                )
+            except Exception as e:
+                logger.warning(
+                    "weather_mq_result_publish_failed",
+                    field_id=field_id,
+                    mq_task_id=mq_task_id,
+                    error=str(e),
+                )
+        return result
+    except Exception as e:
+        if mq_task_id:
+            try:
+                from openfarm_common.mq_results import publish_task_result
+
+                publish_task_result(
+                    task_id=mq_task_id,
+                    status="failed",
+                    field_id=field_id,
+                    error=str(e)[:500],
+                    extras={"source": "weather_backfill", "days": backfill},
+                    upload_summary_if_empty=False,
+                )
+            except Exception:
+                pass
+        raise

@@ -39,8 +39,8 @@ class CommonSettings(BaseSettings):
 
     # CloudAMQP outer task bus (never commit real URL)
     cloudamqp_url: str = ""
-    cloudamqp_task_queue: str = "test_queue"
-    cloudamqp_result_queue: str = "result_queue"
+    cloudamqp_task_queue: str = "openfarm_tasks"
+    cloudamqp_openfarm_results: str = "openfarm_results"
 
     class Config:
         env_file = ".env"

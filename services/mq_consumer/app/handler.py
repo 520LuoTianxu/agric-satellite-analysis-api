@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import Any
-
-from sqlalchemy import text
 
 from openfarm_common.celery_app import celery_client
 from openfarm_common.database_sync import SyncSession
 from openfarm_common.mq_results import publish_task_result
 from openfarm_common.mq_schemas import TaskMessage
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TYPES = {"satellite_analysis", "agri_bridge"}
+SUPPORTED_TYPES = {
+    "satellite_analysis",
+    "agri_bridge",
+    "weather_backfill",
+    "soil_fetch",
+    "field_bootstrap",
+}
 
 
 def _resolve_field_and_land(
@@ -68,22 +72,32 @@ def _dispatch_satellite_analysis(
     field_id: str,
     land_id: str | None,
 ) -> dict[str, Any]:
-    """Fire-and-forget: index backfill + agri bridge; bridge publishes MQ result."""
+    """Fire-and-forget: index backfill + optional agri bridge; bridge publishes MQ result."""
     extras = dict(task.extras or {})
     months = int(extras.get("months") or 6)
     force = bool(extras.get("force") or False)
     mode = str(extras.get("mode") or "full")
-
-    mq_kwargs = {
-        "mq_task_id": task.task_id,
-        "land_id": land_id,
-    }
+    allow_agri = bool(extras.get("allow_agri") or False)
+    # External producers default to agri-aware full path (historical MVP behavior).
+    if "allow_agri" not in extras and mode != "bridge_only":
+        allow_agri = True
+    with_bridge = bool(extras.get("with_bridge") or extras.get("bridge_job_id"))
+    if mode == "full" and "with_bridge" not in extras and "bridge_job_id" not in extras:
+        # Default full path includes bridge when land_id known or allow_agri
+        with_bridge = bool(land_id) or allow_agri
+    sentinel_job_id = extras.get("sentinel_job_id")
+    bridge_job_id = extras.get("bridge_job_id")
+    dispatch_alerts = bool(extras.get("dispatch_alerts") or False)
+    lid = land_id or extras.get("land_id")
 
     if mode == "bridge_only":
         async_result = celery_client.send_task(
             "app.tasks.agri_bridge.bridge_field_stac_to_agri",
             args=[field_id],
-            kwargs={**mq_kwargs, "land_id": land_id},
+            kwargs={
+                "mq_task_id": task.task_id,
+                "land_id": lid,
+            },
             queue="ingest",
         )
         return {
@@ -92,34 +106,188 @@ def _dispatch_satellite_analysis(
             "mode": mode,
         }
 
-    # Full path mirrors API backfill_field_indices (agri-aware)
+    backfill_kwargs: dict[str, Any] = {
+        "months": months,
+        "allow_agri": allow_agri,
+        "force": force,
+    }
+    if sentinel_job_id:
+        backfill_kwargs["sentinel_job_id"] = str(sentinel_job_id)
+
     celery_client.send_task(
         "app.tasks.backfill.backfill_indices_for_field",
         args=[field_id],
-        kwargs={
-            "months": months,
-            "allow_agri": True,
-            "force": force,
-        },
+        kwargs=backfill_kwargs,
         queue="ingest",
     )
-    bridge = celery_client.send_task(
-        "app.tasks.agri_bridge.bridge_after_backfill",
-        args=[field_id],
-        kwargs={
-            "land_id": land_id,
+    dispatched = ["app.tasks.backfill.backfill_indices_for_field"]
+    celery_ids: list[str] = []
+
+    if with_bridge:
+        bridge_kwargs: dict[str, Any] = {
+            "land_id": lid,
             "mq_task_id": task.task_id,
-        },
+        }
+        if bridge_job_id:
+            bridge_kwargs["bridge_job_id"] = str(bridge_job_id)
+        bridge = celery_client.send_task(
+            "app.tasks.agri_bridge.bridge_after_backfill",
+            args=[field_id],
+            kwargs=bridge_kwargs,
+            queue="ingest",
+        )
+        dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
+        celery_ids.append(bridge.id)
+
+        if dispatch_alerts:
+            try:
+                celery_client.send_task(
+                    "app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
+                    args=[field_id],
+                    kwargs={"land_id": lid, "replace_open": True},
+                    queue="ingest",
+                )
+                dispatched.append(
+                    "app.tasks.agri_alerts.evaluate_agri_alerts_for_field"
+                )
+            except Exception:
+                logger.warning(
+                    "mq_alert_dispatch_failed task_id=%s field_id=%s",
+                    task.task_id,
+                    field_id,
+                )
+    else:
+        # Non-agri / no bridge: publish lightweight accepted result (orchestration only).
+        publish_task_result(
+            task_id=task.task_id,
+            status="success",
+            field_id=field_id,
+            land_id=lid,
+            extras={
+                "phase": "dispatched",
+                "dispatched": dispatched,
+                "months": months,
+            },
+            upload_summary_if_empty=True,
+        )
+
+    return {
+        "dispatched": dispatched,
+        "celery_ids": celery_ids,
+        "mode": mode,
+        "months": months,
+        "with_bridge": with_bridge,
+    }
+
+
+def _dispatch_weather_backfill(
+    task: TaskMessage,
+    field_id: str,
+) -> dict[str, Any]:
+    extras = dict(task.extras or {})
+    kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
+    if extras.get("days") is not None:
+        kwargs["days"] = int(extras["days"])
+    async_result = celery_client.send_task(
+        "app.tasks.weather.backfill_weather_for_field",
+        args=[field_id],
+        kwargs=kwargs,
         queue="ingest",
     )
     return {
-        "dispatched": [
+        "dispatched": ["app.tasks.weather.backfill_weather_for_field"],
+        "celery_ids": [async_result.id],
+        "days": kwargs.get("days"),
+    }
+
+
+def _dispatch_soil_fetch(
+    task: TaskMessage,
+    field_id: str,
+) -> dict[str, Any]:
+    extras = dict(task.extras or {})
+    kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
+    job_id = extras.get("job_id")
+    args: list[str] = [field_id]
+    if job_id:
+        args.append(str(job_id))
+    async_result = celery_client.send_task(
+        "app.tasks.soil.fetch_soil_for_field",
+        args=args,
+        kwargs=kwargs,
+        queue="ingest",
+    )
+    return {
+        "dispatched": ["app.tasks.soil.fetch_soil_for_field"],
+        "celery_ids": [async_result.id],
+        "job_id": job_id,
+    }
+
+
+def _dispatch_field_bootstrap(
+    task: TaskMessage,
+    field_id: str,
+    land_id: str | None,
+) -> dict[str, Any]:
+    """One MQ message → fan-out weather + soil + optional satellite indices.
+
+    Publishes a single lightweight ResultMessage after Celery enqueue
+    (accepted/dispatched). Standalone weather_backfill / soil_fetch /
+    satellite_analysis carry full end-of-task results via mq_task_id hooks.
+    """
+    extras = dict(task.extras or {})
+    skip_indices = bool(extras.get("skip_indices") or False)
+    sentinel_job_id = extras.get("sentinel_job_id")
+    dispatched: list[str] = []
+    celery_ids: list[str] = []
+
+    w = celery_client.send_task(
+        "app.tasks.weather.backfill_weather_for_field",
+        args=[field_id],
+        kwargs={},
+        queue="ingest",
+    )
+    dispatched.append("app.tasks.weather.backfill_weather_for_field")
+    celery_ids.append(w.id)
+
+    s = celery_client.send_task(
+        "app.tasks.soil.fetch_soil_for_field",
+        args=[field_id],
+        kwargs={},
+        queue="ingest",
+    )
+    dispatched.append("app.tasks.soil.fetch_soil_for_field")
+    celery_ids.append(s.id)
+
+    if not skip_indices:
+        bk: dict[str, Any] = {}
+        if sentinel_job_id:
+            bk["sentinel_job_id"] = str(sentinel_job_id)
+        b = celery_client.send_task(
             "app.tasks.backfill.backfill_indices_for_field",
-            "app.tasks.agri_bridge.bridge_after_backfill",
-        ],
-        "celery_ids": [bridge.id],
-        "mode": mode,
-        "months": months,
+            args=[field_id],
+            kwargs=bk,
+            queue="ingest",
+        )
+        dispatched.append("app.tasks.backfill.backfill_indices_for_field")
+        celery_ids.append(b.id)
+
+    publish_task_result(
+        task_id=task.task_id,
+        status="success",
+        field_id=field_id,
+        land_id=land_id,
+        extras={
+            "phase": "bootstrap_dispatched",
+            "dispatched": dispatched,
+            "skip_indices": skip_indices,
+        },
+        upload_summary_if_empty=True,
+    )
+    return {
+        "dispatched": dispatched,
+        "celery_ids": celery_ids,
+        "skip_indices": skip_indices,
     }
 
 
@@ -164,20 +332,15 @@ def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
 
     try:
         if task.type in ("satellite_analysis", "agri_bridge"):
-            # agri_bridge forces bridge_only
             if task.type == "agri_bridge":
                 task.extras = {**(task.extras or {}), "mode": "bridge_only"}
             info = _dispatch_satellite_analysis(task, field_id, land_id)
-            logger.info(
-                "mq_task_dispatched task_id=%s field_id=%s land_id=%s info=%s meta=%s",
-                task.task_id,
-                field_id,
-                land_id,
-                info,
-                {k: meta.get(k) for k in ("retry_count", "redelivered")},
-            )
-            # Result is published by agri_bridge when work finishes.
-            # For bridge_only we still rely on the Celery task hook.
+        elif task.type == "weather_backfill":
+            info = _dispatch_weather_backfill(task, field_id)
+        elif task.type == "soil_fetch":
+            info = _dispatch_soil_fetch(task, field_id)
+        elif task.type == "field_bootstrap":
+            info = _dispatch_field_bootstrap(task, field_id, land_id)
         else:
             publish_task_result(
                 task_id=task.task_id,
@@ -187,10 +350,20 @@ def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
                 land_id=land_id,
                 upload_summary_if_empty=False,
             )
+            return
+
+        logger.info(
+            "mq_task_dispatched task_id=%s type=%s field_id=%s land_id=%s info=%s meta=%s",
+            task.task_id,
+            task.type,
+            field_id,
+            land_id,
+            info,
+            {k: meta.get(k) for k in ("retry_count", "redelivered")},
+        )
     except Exception as exc:
         # Transient broker/dispatch errors → requeue via raise
         logger.exception("mq_dispatch_failed task_id=%s", task.task_id)
-        # If already retried heavily, publish failed (caller may drop)
         if int(meta.get("retry_count") or 0) >= 2:
             try:
                 publish_task_result(
