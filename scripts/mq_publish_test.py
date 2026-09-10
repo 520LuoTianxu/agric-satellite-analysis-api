@@ -93,7 +93,7 @@ def main() -> int:
         extras=extras,
     )
     print(f"broker={connection_label()}")
-    print(f"queue={settings.cloudamqp_task_queue}")
+    print(f"queue={settings.cloudamqp_download_queue}")
     print(f"publishing task_id={task_id} type={msg.type}")
     publish_task(msg)
     print("ok")

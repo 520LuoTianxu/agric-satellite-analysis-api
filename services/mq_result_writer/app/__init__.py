@@ -1,1 +1,1 @@
-"""CloudAMQP result consumer — download OSS JSON → DB."""
+"""CloudAMQP process-queue consumer — ResultMessage → business DB."""

@@ -66,15 +66,20 @@ def mq_connection(url: str | None = None):
 def declare_queues(
     channel: BlockingChannel,
     *,
+    download_queue: str | None = None,
+    process_queue: str | None = None,
     task_queue: str | None = None,
     result_queue: str | None = None,
 ) -> tuple[str, str]:
-    """Declare durable task + result queues. Returns (task_q, result_q)."""
-    tq = task_queue or settings.cloudamqp_task_queue
-    rq = result_queue or settings.cloudamqp_result_queue
-    channel.queue_declare(queue=tq, durable=True)
-    channel.queue_declare(queue=rq, durable=True)
-    return tq, rq
+    """Declare durable download + process queues. Returns (download_q, process_q).
+
+    ``task_queue`` / ``result_queue`` are one-release aliases for download/process.
+    """
+    dq = download_queue or task_queue or settings.cloudamqp_download_queue
+    pq = process_queue or result_queue or settings.cloudamqp_process_queue
+    channel.queue_declare(queue=dq, durable=True)
+    channel.queue_declare(queue=pq, durable=True)
+    return dq, pq
 
 
 def publish_json(
@@ -102,7 +107,7 @@ def publish_task(
     url: str | None = None,
     queue: str | None = None,
 ) -> None:
-    """Publish a TaskMessage to the task queue (producer helper)."""
+    """Publish a TaskMessage to the download queue (producer helper)."""
     if isinstance(message, dict):
         message = TaskMessage.model_validate(message)
     payload = message.model_dump(mode="json")
@@ -117,7 +122,7 @@ def publish_task(
         "mq_task_published task_id=%s type=%s queue=%s broker=%s",
         message.task_id,
         message.type,
-        queue or settings.cloudamqp_task_queue,
+        queue or settings.cloudamqp_download_queue,
         connection_label(url),
     )
 
@@ -128,7 +133,7 @@ def publish_result(
     url: str | None = None,
     queue: str | None = None,
 ) -> None:
-    """Publish a ResultMessage to the result queue."""
+    """Publish a ResultMessage to the process queue."""
     if isinstance(message, dict):
         message = ResultMessage.model_validate(message)
     payload = message.model_dump(mode="json")
@@ -142,7 +147,7 @@ def publish_result(
         "mq_result_published task_id=%s status=%s queue=%s broker=%s",
         message.task_id,
         message.status,
-        queue or settings.cloudamqp_result_queue,
+        queue or settings.cloudamqp_process_queue,
         connection_label(url),
     )
 

@@ -100,8 +100,8 @@ services:
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
+      CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
+      CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
       MQ_FALLBACK_CELERY: ${MQ_FALLBACK_CELERY:-0}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
@@ -151,8 +151,8 @@ services:
       SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
+      CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
+      CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
@@ -298,7 +298,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── CloudAMQP outer bus: task consumer (profile: consumer) ─────────
+  # ── CloudAMQP outer bus: download consumer (profile: consumer) ─────
   #   docker compose --profile consumer up -d mq_consumer
   mq_consumer:
     profiles: ["consumer", "mq"]
@@ -307,8 +307,8 @@ services:
       dockerfile: services/mq_consumer/Dockerfile
     environment:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
+      CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
+      CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
@@ -329,7 +329,7 @@ services:
       db:
         condition: service_healthy
 
-  # ── CloudAMQP outer bus: result writer (profile: producer) ─────────
+  # ── CloudAMQP outer bus: process writer (profile: producer) ────────
   #   docker compose --profile producer up -d mq_result_writer
   mq_result_writer:
     profiles: ["producer", "mq"]
@@ -338,8 +338,8 @@ services:
       dockerfile: services/mq_result_writer/Dockerfile
     environment:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
-      CLOUDAMQP_TASK_QUEUE: ${CLOUDAMQP_TASK_QUEUE:-openfarm_tasks}
-      CLOUDAMQP_RESULT_QUEUE: ${CLOUDAMQP_RESULT_QUEUE:-openfarm_results}
+      CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
+      CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}

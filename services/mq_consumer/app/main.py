@@ -1,4 +1,4 @@
-"""Entrypoint: consume CLOUDAMQP_TASK_QUEUE forever."""
+"""Entrypoint: consume CLOUDAMQP_DOWNLOAD_QUEUE forever."""
 
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ def main() -> None:
         logger.error("CLOUDAMQP_URL is required for mq_consumer")
         sys.exit(1)
     logger.info(
-        "starting mq_consumer broker=%s task_queue=%s",
+        "starting mq_consumer broker=%s download_queue=%s",
         connection_label(),
-        settings.cloudamqp_task_queue,
+        settings.cloudamqp_download_queue,
     )
     consume_forever(
-        settings.cloudamqp_task_queue,
+        settings.cloudamqp_download_queue,
         handle_task_message,
         prefetch=1,
     )
