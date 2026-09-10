@@ -1068,7 +1068,11 @@ def fetch_soil_for_field(
     job: Job | None = None
 
     def _publish_soil_mq(
-        status: str, *, error: str | None = None, extras: dict | None = None
+        status: str,
+        *,
+        error: str | None = None,
+        extras: dict | None = None,
+        payload: dict | None = None,
     ) -> None:
         if not mq_task_id:
             return
@@ -1081,7 +1085,9 @@ def fetch_soil_for_field(
                 field_id=field_id,
                 error=error,
                 extras={"source": "soil_fetch", **(extras or {})},
-                upload_summary_if_empty=status == "success",
+                payload=payload,
+                collect_parcel_urls=False,
+                upload_summary_if_empty=False,
             )
         except Exception as e:
             logger.warning(
@@ -1346,6 +1352,22 @@ def fetch_soil_for_field(
             quality_score=quality,
         )
 
+        soil_payload = {
+            "kind": "soil_profile",
+            "field_id": field_id,
+            "org_id": str(field.org_id),
+            "profile": {
+                "source": source,
+                "source_resolution_m": resolution,
+                "fetched_at": profile.fetched_at.isoformat()
+                if profile.fetched_at
+                else None,
+                "metadata_json": profile.metadata_json,
+            },
+            "layers": layer_dicts,
+            "summary": summary_data,
+            "data_quality_score": quality,
+        }
         _publish_soil_mq(
             "success",
             extras={
@@ -1353,6 +1375,7 @@ def fetch_soil_for_field(
                 "layers": len(layer_dicts),
                 "quality_score": quality,
             },
+            payload=soil_payload,
         )
         return {
             "status": "success",

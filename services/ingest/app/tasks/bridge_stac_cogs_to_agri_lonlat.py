@@ -69,7 +69,7 @@ INSERT INTO agri.parcel_scene_products (
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, 'S2', %(scene_id)s, %(land_name)s,
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
-  NULL, %(pixel_count)s, %(generated_at_shanghai)s,
+  %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
   %(pixel_data_url)s,
   %(ndvi_avg)s, %(ndvi_min)s, %(ndvi_max)s,
   %(evi_avg)s, %(evi_min)s, %(evi_max)s,
@@ -85,6 +85,7 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
+  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agri.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   pixel_data_url = EXCLUDED.pixel_data_url,
@@ -571,6 +572,8 @@ def process_date(
         "mndwi_min": mndwi_min,
         "mndwi_max": mndwi_max,
         "pixel_data": json.dumps(pixel_data, separators=(",", ":")),
+        "json_oss_key": None,
+        "_pixel_data_obj": pixel_data,
     }
     if dry_run:
         print(
@@ -637,6 +640,8 @@ def bridge_field_stac_to_agri(
 
         upserted = 0
         skipped = 0
+        oss_urls: dict[str, str] = {}
+        oss_keys: list[str] = []
         with conn.cursor() as cur:
             for d in date_list:
                 row = process_date(
@@ -651,11 +656,76 @@ def bridge_field_stac_to_agri(
                 if row is None:
                     skipped += 1
                     continue
+                pixel_obj = row.pop("_pixel_data_obj", None)
+                oss_url = None
                 if not dry_run:
+                    try:
+                        from openfarm_common.mq_results import (
+                            scene_json_oss_key,
+                            upload_scene_product_json,
+                        )
+
+                        key = scene_json_oss_key(row["land_id"], row["date"], "S2")
+                        product = {
+                            "land_id": row["land_id"],
+                            "tile_id": row["tile_id"],
+                            "date": row["date"],
+                            "sensor": "S2",
+                            "scene_id": row["scene_id"],
+                            "land_name": row["land_name"],
+                            "cloud_cover": row["cloud_cover"],
+                            "cloud_cover_over_30": row["cloud_cover_over_30"],
+                            "parcel_cloud_cover_pct": row["parcel_cloud_cover_pct"],
+                            "pixel_count": row["pixel_count"],
+                            "generated_at_shanghai": row["generated_at_shanghai"],
+                            "pixel_data_url": row["pixel_data_url"],
+                            "json_oss_key": key,
+                            "ndvi_avg": row["ndvi_avg"],
+                            "ndvi_min": row["ndvi_min"],
+                            "ndvi_max": row["ndvi_max"],
+                            "evi_avg": row["evi_avg"],
+                            "evi_min": row["evi_min"],
+                            "evi_max": row["evi_max"],
+                            "ndmi_avg": row["ndmi_avg"],
+                            "ndmi_min": row["ndmi_min"],
+                            "ndmi_max": row["ndmi_max"],
+                            "ndre_avg": row["ndre_avg"],
+                            "ndre_min": row["ndre_min"],
+                            "ndre_max": row["ndre_max"],
+                            "cire_avg": row["cire_avg"],
+                            "cire_min": row["cire_min"],
+                            "cire_max": row["cire_max"],
+                            "mndwi_avg": row["mndwi_avg"],
+                            "mndwi_min": row["mndwi_min"],
+                            "mndwi_max": row["mndwi_max"],
+                            "pixel_data": pixel_obj or json.loads(row["pixel_data"]),
+                        }
+                        key, oss_url = upload_scene_product_json(
+                            land_id=row["land_id"],
+                            date_str=row["date"],
+                            sensor="S2",
+                            product=product,
+                        )
+                        row["json_oss_key"] = key
+                        product["json_url"] = oss_url
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"  warn {d}: scene JSON OSS upload failed: {exc}",
+                            file=sys.stderr,
+                        )
                     cur.execute(UPSERT_SQL, row)
                 upserted += 1
+                if row.get("json_oss_key") and oss_url:
+                    oss_urls[f"{d}_S2"] = oss_url
+                elif row.get("json_oss_key"):
+                    oss_keys.append(row["json_oss_key"])
                 _log(
                     f"  upserted {d} pixels={row['pixel_count']} ndvi={row['ndvi_avg']}"
+                    + (
+                        f" json={row.get('json_oss_key')}"
+                        if row.get("json_oss_key")
+                        else ""
+                    )
                 )
             if not dry_run:
                 conn.commit()
@@ -670,6 +740,8 @@ def bridge_field_stac_to_agri(
             "upserted": upserted,
             "skipped": skipped,
             "dry_run": dry_run,
+            "oss_urls": oss_urls,
+            "oss_keys": oss_keys,
         }
         _log(json.dumps(result))
         return result

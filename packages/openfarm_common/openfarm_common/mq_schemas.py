@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _utcnow() -> datetime:
@@ -27,7 +27,11 @@ class TaskMessage(BaseModel):
 
 
 class ResultMessage(BaseModel):
-    """Outbound result published to CLOUDAMQP_RESULT_QUEUE (OSS URLs only)."""
+    """Outbound result published to CLOUDAMQP_RESULT_QUEUE.
+
+    Remote sensing: prefer ``oss_urls`` (DB-ready JSON on OSS).
+    Weather / soil: prefer inline ``payload`` / ``data`` (under ~100KB).
+    """
 
     task_id: str
     status: Literal["success", "failed"]
@@ -37,3 +41,14 @@ class ResultMessage(BaseModel):
     land_id: str | None = None
     finished_at: datetime = Field(default_factory=_utcnow)
     extras: dict[str, Any] = Field(default_factory=dict)
+    # Inline result JSON (weather/soil). ``data`` is an accepted alias.
+    payload: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _sync_payload_and_data(self) -> ResultMessage:
+        if self.payload is None and self.data is not None:
+            self.payload = self.data
+        elif self.data is None and self.payload is not None:
+            self.data = self.payload
+        return self

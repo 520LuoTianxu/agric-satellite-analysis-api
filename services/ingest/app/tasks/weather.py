@@ -417,6 +417,80 @@ def schedule_daily_weather_fetch() -> dict:
         session.close()
 
 
+def _num(val):
+    return float(val) if val is not None else None
+
+
+def _weather_result_payload(field_id: str, *, days: int) -> dict:
+    """Serialize recent weather_daily rows for inline ResultMessage.payload."""
+    from app.models.tables import WeatherDaily
+
+    session = _get_db_session()
+    try:
+        end = date.today()
+        start = end - timedelta(days=max(days, 1))
+        rows = (
+            session.execute(
+                select(WeatherDaily)
+                .where(
+                    WeatherDaily.field_id == uuid.UUID(field_id),
+                    WeatherDaily.date >= start,
+                    WeatherDaily.date <= end,
+                )
+                .order_by(WeatherDaily.date.asc())
+            )
+            .scalars()
+            .all()
+        )
+        out_rows = []
+        for r in rows:
+            out_rows.append(
+                {
+                    "field_id": str(r.field_id),
+                    "org_id": str(r.org_id),
+                    "date": r.date.isoformat(),
+                    "latitude": float(r.latitude) if r.latitude is not None else None,
+                    "longitude": float(r.longitude)
+                    if r.longitude is not None
+                    else None,
+                    "temperature_2m_min": _num(r.temperature_2m_min),
+                    "temperature_2m_max": _num(r.temperature_2m_max),
+                    "temperature_2m_mean": _num(r.temperature_2m_mean),
+                    "precipitation_sum": _num(r.precipitation_sum),
+                    "et0_fao_mm": _num(r.et0_fao_mm),
+                    "soil_temperature_0cm": _num(r.soil_temperature_0cm),
+                    "soil_temperature_6cm": _num(r.soil_temperature_6cm),
+                    "soil_temperature_18cm": _num(r.soil_temperature_18cm),
+                    "soil_temperature_54cm": _num(r.soil_temperature_54cm),
+                    "soil_moisture_0_1cm": _num(r.soil_moisture_0_1cm),
+                    "soil_moisture_1_3cm": _num(r.soil_moisture_1_3cm),
+                    "soil_moisture_3_9cm": _num(r.soil_moisture_3_9cm),
+                    "soil_moisture_9_27cm": _num(r.soil_moisture_9_27cm),
+                    "soil_moisture_27_81cm": _num(r.soil_moisture_27_81cm),
+                    "vapor_pressure_deficit": _num(r.vapor_pressure_deficit),
+                    "shortwave_radiation_sum": _num(r.shortwave_radiation_sum),
+                    "wind_speed_10m_max": _num(r.wind_speed_10m_max),
+                    "cloud_cover_mean": r.cloud_cover_mean,
+                    "gdd_daily": _num(r.gdd_daily),
+                    "gdd_cumulative": _num(r.gdd_cumulative),
+                    "water_balance_30d_mm": _num(r.water_balance_30d_mm),
+                    "drought_index": _num(r.drought_index),
+                    "heat_stress_flag": r.heat_stress_flag,
+                    "source": r.source,
+                    "model_used": r.model_used,
+                }
+            )
+        return {
+            "kind": "weather_daily",
+            "field_id": field_id,
+            "days": days,
+            "rows_count": len(out_rows),
+            "rows": out_rows,
+        }
+    finally:
+        session.close()
+
+
 @celery_app.task(name="app.tasks.weather.backfill_weather_for_field")
 def backfill_weather_for_field(
     field_id: str,
@@ -447,6 +521,9 @@ def backfill_weather_for_field(
                     "failed",
                 ):
                     status = "failed"
+                payload = None
+                if status == "success":
+                    payload = _weather_result_payload(field_id, days=backfill)
                 publish_task_result(
                     task_id=mq_task_id,
                     status=status,
@@ -459,8 +536,15 @@ def backfill_weather_for_field(
                     extras={
                         "source": "weather_backfill",
                         "days": backfill,
-                        "result": result if isinstance(result, dict) else None,
+                        "rows_upserted": (
+                            result.get("rows_upserted")
+                            if isinstance(result, dict)
+                            else None
+                        ),
                     },
+                    payload=payload,
+                    collect_parcel_urls=False,
+                    upload_summary_if_empty=False,
                 )
             except Exception as e:
                 logger.warning(
@@ -481,6 +565,7 @@ def backfill_weather_for_field(
                     field_id=field_id,
                     error=str(e)[:500],
                     extras={"source": "weather_backfill", "days": backfill},
+                    collect_parcel_urls=False,
                     upload_summary_if_empty=False,
                 )
             except Exception:
