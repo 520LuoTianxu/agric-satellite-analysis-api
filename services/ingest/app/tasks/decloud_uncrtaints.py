@@ -42,6 +42,7 @@ from app.core.decloud import (
     decloud_mode,
     decloud_oss_sensor,
     decloud_pixel_payload,
+    decloud_quality_metrics,
     decloud_scene_id,
     decloud_use_sar,
     fallback_lonlat_pixels,
@@ -484,6 +485,7 @@ def _publish_decloud_product(
     stac_cloud: float | None,
     parcel_cloud: float | None,
     mq_task_id: str | None,
+    quality_inputs: DecloudQualityInputs | None = None,
 ) -> dict[str, Any] | None:
     from app.tasks.agri_lonlat import publish_optical_lonlat_to_oss_mq
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
@@ -557,12 +559,16 @@ def _publish_decloud_product(
 
     official = quality.is_official
     over_30, parcel_excl = decloud_drought_exclusion_flags(official)
+    metrics = (
+        decloud_quality_metrics(quality_inputs) if quality_inputs is not None else None
+    )
     pixel_data = decloud_pixel_payload(
         quality=quality.quality,
         score=quality.score,
         reasons=quality.reasons,
         raw_scene_id=raw_scene_id,
         pixels=pixels,
+        metrics=metrics,
     )
     row = {
         "land_id": meta["land_id"],
@@ -583,7 +589,15 @@ def _publish_decloud_product(
             "%Y-%m-%d %H:%M:%S%z"
         ),
         "pixel_data_url": f"decloud://field/{field_id_str}/{date_str}",
-        "ndvi_avg": index_avgs.get("NDVI") if index_avgs.get("NDVI") is not None else _avg_triple("NDVI")[0],
+        "ndvi_avg": (
+            float(quality_inputs.ndvi_mean)
+            if quality_inputs is not None
+            else (
+                index_avgs.get("NDVI")
+                if index_avgs.get("NDVI") is not None
+                else _avg_triple("NDVI")[0]
+            )
+        ),
         "ndvi_min": _avg_triple("NDVI")[1],
         "ndvi_max": _avg_triple("NDVI")[2],
         "evi_avg": _avg_triple("EVI")[0],
@@ -890,16 +904,15 @@ def _decloud_one_from_buffer(
     neighbor = _neighbor_ndvi(session, land_id, target)
     if neighbor is None:
         neighbor = _neighbor_ndvi_from_cache(land_id, target)
-    quality = score_decloud(
-        DecloudQualityInputs(
-            rgb_mean=rgb_mean,
-            rgb_mean_raw=rgb_raw,
-            rgb_std=rgb_std,
-            rgb_std_raw=rgb_std_raw,
-            ndvi_mean=float(ndvi_stats.get("mean") or 0.0),
-            neighbor_ndvi_mean=neighbor,
-        )
+    quality_inputs = DecloudQualityInputs(
+        rgb_mean=rgb_mean,
+        rgb_mean_raw=rgb_raw,
+        rgb_std=rgb_std,
+        rgb_std_raw=rgb_std_raw,
+        ndvi_mean=float(ndvi_stats.get("mean") or 0.0),
+        neighbor_ndvi_mean=neighbor,
     )
+    quality = score_decloud(quality_inputs)
     published = _publish_decloud_product(
         meta=agri_meta,
         date_str=target.isoformat(),
@@ -912,6 +925,7 @@ def _decloud_one_from_buffer(
         stac_cloud=stac_cloud,
         parcel_cloud=parcel_cloud,
         mq_task_id=mq_task_id,
+        quality_inputs=quality_inputs,
     )
     logger.info(
         "decloud_published",

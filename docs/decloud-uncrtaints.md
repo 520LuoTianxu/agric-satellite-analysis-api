@@ -95,9 +95,11 @@ After reconstruct, a heuristic scores the parcel window:
 Only **`good`** may enter official drought, land-assessment
 RS inputs, overview drought/weak-growth, and share optical drought series.
 
-`fair` and `bad` are **always stored** (OSS + MQ upsert) whenever a
+`fair` and `bad` are **always stored** (OSS + MQ upsert → `agri.parcel_scene_products`) whenever a
 reconstruction produced a usable array, even if lonlat sampling found few
-or weak pixels. Existing cloud>30% drought filters also skip them
+or weak pixels. Column averages (`ndvi_avg`, …) and `pixel_data.decloud_metrics`
+(rgb / reconstr NDVI / neighbor NDVI / gap) are kept for audit; only
+`decloud_quality=good` feeds drought / land metrics. Existing cloud>30% drought filters also skip them
 (`cloud_cover_over_30` stays true; `decloud_quality` is not `good`).
 Tooltips mark them as de-cloud that may be unreliable.
 
