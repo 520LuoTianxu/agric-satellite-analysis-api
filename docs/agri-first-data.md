@@ -18,7 +18,8 @@ STAC (Sentinel-2 L2A / Sentinel-1 GRD)
   → upload lonlat JSON to OSS
   → publish one MQ result per scene (producer mq_result_writer pulls OSS → upserts PG)
   → optional compact JSON object under OSS_PREFIX
-  → if DECLOUD_ENABLED and cloud > 30%: parcel-window UnCRtainTS decloud
+  → if DECLOUD_ENABLED and cloud > 30%: cache parcel windows; after the job
+     has enough nearby S2 (+ S1) context, batch UnCRtainTS decloud
      (additive lonlat product; only quality=good is official)
 ```
 
@@ -31,6 +32,7 @@ Env knobs (ingest worker):
 | `WRITE_INDEX_COGS` | unset | Agri: no index rasters. Classic fields: COGs on. `0` never, `1` always. |
 | `UPLOAD_SCENE_JSON` | `1` | Compact lonlat JSON to `OSS_PREFIX` (not rasters). |
 | `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window decloud. Additive product; only quality `good` enters official drought metrics. See `docs/decloud-uncrtaints.md`. |
+| `DECLOUD_MODE` | `batch` | When decloud is on: buffer many field windows, then decloud. `per_scene` only if neighbors are already cached. |
 
 ## Remote sensing (truth)
 

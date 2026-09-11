@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Mean NDVI chart tooltips now show cloud cover and a short de-cloud quality note (clear raw, good, fair, or poor) for the product actually plotted that day.
 
 ### Changed
+- Optional cloud-removal now waits until nearby field windows (optical and radar) for that job are downloaded, then cleans cloudy dates in one batch. It no longer tries to clean a single cloudy date the moment that date finishes, which often lacked nearby scenes and produced empty or poor results. Raw scenes are still saved as they complete. Only high-quality cloud-removed products are used for official drought and growth numbers.
 - Cloud-removal can now run on satellite scenes with up to 90% scene cloud (was 80). It still starts when the field or the scene is above 30% cloud.
 - On dates with both a raw scene and a high-quality cloud-removed product, drought and NDVI now pick the one whose vegetation index is closer to nearby clear days, instead of always keeping the raw scene when scene cloud is under 30%.
 - Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.

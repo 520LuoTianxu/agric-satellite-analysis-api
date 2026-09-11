@@ -29,6 +29,7 @@ indices 2-3; S1 VV+VH).
 | `WRITE_INDEX_COGS` | unset | Agri: skip index TIF/COG uploads. Classic fields: write COGs. `0` = never. `1` = always (storage-heavy). |
 | `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
 | `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window cloud removal after agri optical ingest. Off by default. See `docs/decloud-uncrtaints.md`. |
+| `DECLOUD_MODE` | `batch` | When enabled: buffer field windows, then decloud the job. `per_scene` only if neighbors are already cached. |
 
 Raising Celery concurrency alone still leaves each job looping scenes
 serially. Scene-level threads overlap HTTP/GDAL I/O across dates in one

@@ -480,6 +480,25 @@ def _process_one_optical_scene(
                 target_transform,
                 resampling=Resampling.nearest,
             )
+        from app.core.decloud import decloud_enabled
+
+        if decloud_enabled():
+            from app.tasks.decloud_uncrtaints import cache_optical_s2_window
+
+            scene_date = scene.get("date")
+            date_str = (
+                scene_date.isoformat()
+                if hasattr(scene_date, "isoformat")
+                else str(scene_date)[:10]
+            )
+            cache_optical_s2_window(
+                land_id=str(agri_meta["land_id"]),
+                date_str=date_str,
+                bands=bands,
+                band_hrefs=scene.get("band_hrefs"),
+                cloud_cover=scene.get("cloud_cover"),
+                stac_id=scene.get("id"),
+            )
         download_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "download_bands")
 
@@ -530,19 +549,6 @@ def _process_one_optical_scene(
             scl=scl,
             mq_task_id=mq_task_id,
         )
-        if result:
-            from app.tasks.decloud_uncrtaints import enqueue_parcel_decloud
-
-            enqueue_parcel_decloud(
-                field_id=field_id_str,
-                land_id=str(agri_meta["land_id"]),
-                date_str=str(result["date"]),
-                mq_task_id=mq_task_id,
-                raw_scene_id=result.get("scene_id"),
-                stac_cloud=result.get("cloud_cover"),
-                parcel_cloud=result.get("parcel_cloud_cover_pct"),
-                cloud_over_30=result.get("cloud_cover_over_30"),
-            )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(
             session,
@@ -639,6 +645,11 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
 
         extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
+        extra_assets: dict[str, tuple[str, ...]] = {"SCL": SCL_STAC_ASSETS}
+        if decloud_enabled():
+            from app.core.decloud import decloud_s2_extra_assets
+
+            extra_assets.update(decloud_s2_extra_assets())
         scenes = search_scenes_for_defs(
             field_geom_geojson,
             date_from,
@@ -646,7 +657,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             index_defs,
             index_label="agri_optical",
             max_cloud_cover=extra_cloud,
-            extra_assets={"SCL": SCL_STAC_ASSETS},
+            extra_assets=extra_assets,
         )
         skipped_existing = 0
         if not force:
@@ -722,6 +733,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         )
 
         upserted = 0
+        raw_results: list[dict[str, Any]] = []
         t_process = time.perf_counter()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -759,6 +771,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                     continue
                 if result is not None:
                     upserted += 1
+                    raw_results.append(result)
 
         logger.info(
             "scene_parallel_done",
@@ -781,6 +794,20 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             "process_scenes",
             {"scenes_upserted": upserted, "workers": workers},
         )
+
+        decloud_schedule: dict[str, Any] | None = None
+        if decloud_enabled() and raw_results:
+            from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
+
+            decloud_schedule = schedule_decloud_after_raw(
+                field_id=field_id_str,
+                land_id=str(agri_meta["land_id"]),
+                date_from=date_from.isoformat(),
+                date_to=date_to.isoformat(),
+                raw_results=raw_results,
+                mq_task_id=mq_task_id,
+            )
+
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
         progress = job.progress_json or {}
@@ -789,6 +816,13 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         progress["total_scenes"] = len(scenes)
         progress["skipped_existing"] = skipped_existing
         progress["write_cogs"] = write_cogs
+        if decloud_schedule:
+            progress["decloud"] = {
+                "mode": decloud_schedule.get("mode"),
+                "batch": decloud_schedule.get("batch"),
+                "per_scene": decloud_schedule.get("per_scene"),
+                "hold_decloud_dates": decloud_schedule.get("hold_decloud_dates"),
+            }
         job.progress_json = progress
         flag_modified(job, "progress_json")
         session.commit()
