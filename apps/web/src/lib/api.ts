@@ -342,6 +342,14 @@ export interface FieldStat {
     stddev: number | null;
     quality_score: number | null;
     created_at: string;
+    /** Parcel or STAC cloud cover % when this point comes from agri scenes. */
+    cloud_cover?: number | null;
+    /** good | fair | bad; omitted for raw clear scenes. */
+    decloud_quality?: string | null;
+    decloud_reasons?: string[] | null;
+    /** stac_direct or uncrtaints_decloud */
+    product_source?: string | null;
+    scene_id?: string | null;
 }
 
 export interface NdviJob {
@@ -755,6 +763,11 @@ export interface ShareStatPoint {
     id?: string | null;
     field_id?: string | null;
     created_at?: string | null;
+    cloud_cover?: number | null;
+    decloud_quality?: string | null;
+    decloud_reasons?: string[] | null;
+    product_source?: string | null;
+    scene_id?: string | null;
 }
 
 export interface ShareReport {
@@ -999,6 +1012,10 @@ export interface AgriSceneProduct {
     /** good | fair | bad; only good enters official drought metrics */
     decloud_quality?: string | null;
     decloud_score?: number | null;
+    /** Quality-gate reason codes when the row is a decloud product */
+    decloud_reasons?: string[] | null;
+    /** Sentinel-1 relative orbit when known (parsed from scene_id if missing) */
+    relative_orbit?: number | null;
     ndvi_avg: number | null;
     ndvi_min: number | null;
     ndvi_max: number | null;
@@ -1216,7 +1233,7 @@ export interface OverviewChild {
     drought_alert: number;
     /** open water: flood_severe + flood_moderate */
     flood: number;
-    /** flood_severe + flood_moderate + flood_mild */
+    /** confirmed flood only (watch / former mild is not included) */
     flood_alert?: number;
     weak_growth: number;
     area_mu: number;

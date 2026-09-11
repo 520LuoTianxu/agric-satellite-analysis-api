@@ -15,7 +15,10 @@ from jose import jwt
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.agri_classify import is_decloud_product, is_official_optical_product
+from app.core.agri_classify import (
+    optical_tooltip_fields,
+    pick_optical_for_ndvi,
+)
 from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
@@ -114,7 +117,17 @@ def _quality_from_cloud(cloud: Any) -> float:
 
 
 def _stat_point(
-    *, field_id: uuid.UUID, d: Any, mean: float, quality: float, idx: str
+    *,
+    field_id: uuid.UUID,
+    d: Any,
+    mean: float,
+    quality: float,
+    idx: str,
+    cloud_cover: float | None = None,
+    decloud_quality: str | None = None,
+    decloud_reasons: list[str] | None = None,
+    product_source: str | None = None,
+    scene_id: str | None = None,
 ) -> ShareStatPoint:
     from datetime import date as date_cls
 
@@ -140,6 +153,11 @@ def _stat_point(
         stddev=None,
         quality_score=quality,
         created_at=datetime.now(timezone.utc),
+        cloud_cover=cloud_cover,
+        decloud_quality=decloud_quality,
+        decloud_reasons=decloud_reasons,
+        product_source=product_source,
+        scene_id=scene_id,
     )
 
 
@@ -164,6 +182,7 @@ async def _load_agri_share_series(
                            scene_id,
                            pixel_data->>'source' AS source,
                            pixel_data->>'decloud_quality' AS decloud_quality,
+                           pixel_data->'decloud_reasons' AS decloud_reasons,
                            CASE
                              WHEN pixel_data->>'format' = 'lonlat_v1'
                               AND jsonb_typeof(pixel_data->'pixels') = 'array'
@@ -188,32 +207,34 @@ async def _load_agri_share_series(
 
     stats_by_type: dict[str, list[ShareStatPoint]] = {}
     heatmap_available = False
+    s2_by_date: dict[str, list[dict[str, Any]]] = {}
+    s1_rows: list[Any] = []
     for r in rows:
         if int(r.get("lonlat_pixels") or 0) > 0:
             heatmap_available = True
-        cloud = r.get("parcel_cloud_cover_pct")
-        if cloud is None:
-            cloud = r.get("cloud_cover")
-        q = _quality_from_cloud(cloud)
         sensor = r.get("sensor")
-        if (
-            sensor == "S2"
-            and is_decloud_product(r.get("source"), r.get("scene_id"))
-            and not is_official_optical_product(
-                source=r.get("source"),
-                scene_id=r.get("scene_id"),
-                decloud_quality=r.get("decloud_quality"),
-                parcel_cloud_cover_pct=r.get("parcel_cloud_cover_pct"),
-                cloud_cover=r.get("cloud_cover"),
-                cloud_cover_over_30=r.get("cloud_cover_over_30"),
+        if sensor == "S2":
+            dkey = (
+                r["date"].isoformat()
+                if hasattr(r["date"], "isoformat")
+                else str(r["date"])[:10]
             )
-        ):
-            # fair/bad decloud is audit-only; keep raw S2 (including cloudy).
-            continue
+            s2_by_date.setdefault(dkey, []).append(dict(r))
+        elif sensor == "S1":
+            s1_rows.append(r)
+
+    def _emit(row: dict[str, Any] | Any, sensor: str) -> None:
+        mapping = dict(row) if not isinstance(row, dict) else row
+        tip = optical_tooltip_fields(mapping) if sensor == "S2" else {}
+        cloud = mapping.get("parcel_cloud_cover_pct")
+        if cloud is None:
+            cloud = mapping.get("cloud_cover")
+        q = _quality_from_cloud(cloud)
+        reasons = tip.get("decloud_reasons") if sensor == "S2" else None
         for idx, col, want_sensor in _AGRI_INDEX_COLS:
             if sensor != want_sensor:
                 continue
-            raw = r.get(col)
+            raw = mapping.get(col)
             if raw is None:
                 continue
             try:
@@ -221,9 +242,26 @@ async def _load_agri_share_series(
             except (TypeError, ValueError):
                 continue
             pt = _stat_point(
-                field_id=field_id, d=r["date"], mean=mean, quality=q, idx=idx
+                field_id=field_id,
+                d=mapping["date"],
+                mean=mean,
+                quality=q,
+                idx=idx,
+                cloud_cover=tip.get("cloud_cover") if sensor == "S2" else None,
+                decloud_quality=tip.get("decloud_quality") if sensor == "S2" else None,
+                decloud_reasons=reasons if sensor == "S2" else None,
+                product_source=tip.get("product_source") if sensor == "S2" else None,
+                scene_id=str(mapping.get("scene_id") or "") or None,
             )
             stats_by_type.setdefault(idx, []).append(pt)
+
+    for group in s2_by_date.values():
+        picked = pick_optical_for_ndvi(group)
+        if picked is None:
+            continue
+        _emit(picked, "S2")
+    for r in s1_rows:
+        _emit(r, "S1")
 
     # Cap each series (newest first already); keep enough for seasonal charts
     for idx, pts in list(stats_by_type.items()):

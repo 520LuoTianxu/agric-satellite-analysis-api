@@ -14,11 +14,46 @@
  *
  * Modes:
  * - Continuous vegetation/SAR indices (NDVI/EVI/…)
- * - drought: NDDI (Gu et al., 2007) with NDDI-primary class bands
- * - flood: Sentinel-1 VV/VH backscatter thresholding (operational S1 flood mapping)
+ * - drought: NDDI (Gu et al., 2007) pixel paint; scene class is multi-indicator
+ * - flood: S1 VV vs per-orbit baseline (scene); pixel paint uses VV+VH helper
  */
 
 import * as turf from "@turf/turf";
+import {
+    DECLOUD_SOURCE,
+    DROUGHT_CLOUD_MAX_PCT,
+    NDDI_MILD_MIN,
+    NDDI_MODERATE_MIN,
+    NDDI_SEVERE_MIN,
+    NDMI_FALLBACK_SEVERE,
+    classifyDrought,
+    classifyFloodPixel,
+    computeNddi,
+    droughtClassFromAvgs,
+    isDecloudProduct,
+    isDroughtDayClass,
+    isOfficialOpticalScene,
+    type AgriDroughtClass,
+    type AgriDroughtPixelClass,
+    type AgriFloodClass,
+} from "@/lib/agri-classify";
+
+export {
+    DECLOUD_SOURCE,
+    DROUGHT_CLOUD_MAX_PCT,
+    NDDI_MILD_MIN,
+    NDDI_MODERATE_MIN,
+    NDDI_SEVERE_MIN,
+    NDMI_FALLBACK_SEVERE,
+    classifyDrought,
+    classifyFloodPixel as classifyFlood,
+    computeNddi,
+    droughtClassFromAvgs,
+    isDecloudProduct,
+    isDroughtDayClass,
+    isOfficialOpticalScene,
+};
+export type { AgriDroughtClass, AgriDroughtPixelClass, AgriFloodClass };
 
 export type AgriHeatIndex =
     | "ndvi"
@@ -155,11 +190,8 @@ const SAR_STOPS: [number, number, number][] = [
 export const VEG_GRADIENT_CSS =
     "linear-gradient(90deg, rgb(165,0,38), rgb(215,48,39), rgb(244,109,67), rgb(253,174,97), rgb(254,224,139), rgb(255,255,191), rgb(217,239,139), rgb(166,217,106), rgb(102,189,99), rgb(26,152,80), rgb(0,104,55))";
 
-export type AgriDroughtClass = "severe" | "moderate" | "mild" | "normal";
-export type AgriFloodClass = "flood_severe" | "flood_moderate" | "flood_mild" | "dry";
-
 export const DROUGHT_CLASS_STYLE: Record<
-    AgriDroughtClass,
+    AgriDroughtPixelClass,
     { label: string; color: string; rgba: [number, number, number, number] }
 > = {
     // Discrete drought classes — transparent outside painted pixels.
@@ -169,130 +201,19 @@ export const DROUGHT_CLASS_STYLE: Record<
     normal: { label: "正常/湿润", color: "#1a9850", rgba: [26, 152, 80, 200] },
 };
 
+const WATCH_STYLE = { label: "关注（近阈值）", color: "#6baed6", rgba: [107, 174, 214, 200] as [number, number, number, number] };
+
 export const FLOOD_CLASS_STYLE: Record<
-    AgriFloodClass,
+    AgriFloodClass | "flood_mild",
     { label: string; color: string; rgba: [number, number, number, number] }
 > = {
-    // Finer S1 flood tiers: 重/中/轻 + dry (transparent).
+    // Confirmed flood (VV + orbit drop + helper) vs watch (near-threshold).
     flood_severe: { label: "重度洪涝", color: "#08306b", rgba: [8, 48, 107, 240] },
     flood_moderate: { label: "中度洪涝", color: "#08519c", rgba: [8, 81, 156, 230] },
-    flood_mild: { label: "轻度洪涝", color: "#6baed6", rgba: [107, 174, 214, 200] },
+    watch: WATCH_STYLE,
+    flood_mild: WATCH_STYLE,
     dry: { label: "干燥地表", color: "#74c476", rgba: [116, 196, 118, 0] }, // alpha 0
 };
-
-/**
- * NDDI drought index (Gu, Brown, Verdin & Wardlow, 2007, GRL):
- *   NDDI = (NDVI − NDWI) / (NDVI + NDWI)
- * Gao (1996) NDMI (NIR/SWIR) stands in for NDWI (`ndmi` in S2 pixels).
- * Higher NDDI ⇒ drier. Later categorical NDDI applications (e.g. Frontiers
- * in Environmental Science 2023; tropical NDDI papers) commonly use ~0.1-wide
- * bins: 0–0.1 dry, 0.1–0.2 moderate, 0.2–0.3 severe, ≥0.3–0.4 extreme.
- *
- * Agri parcel mapping (four UI classes, keep in sync with agri_classify.py):
- * literature 0 / 0.1 / 0.2 / 0.3 bins shifted +0.3 because 10 m crop
- * canopy often has NDVI 0.6–0.8 and NDMI 0.2–0.4 (NDDI already ~0.2–0.5
- * when well watered). Copying 0.2 as “severe” would paint most green
- * fields as drought.
- *   NDDI < 0.3           normal
- *   0.3 ≤ NDDI < 0.4     mild
- *   0.4 ≤ NDDI < 0.5     moderate
- *   NDDI ≥ 0.5           severe (Gu-like high NDDI; previous NDDI severe)
- *
- * Previous OR shortcuts (ndmi < 0.1 / 0 / −0.2) over-flagged healthy canopy
- * where NDMI often sits near 0.0–0.2. NDMI is only a last-resort fallback
- * when NDDI cannot be formed, and then only ndmi < −0.2 → severe.
- */
-export const NDDI_MILD_MIN = 0.3;
-export const NDDI_MODERATE_MIN = 0.4;
-export const NDDI_SEVERE_MIN = 0.5;
-export const NDMI_FALLBACK_SEVERE = -0.2;
-export const DROUGHT_CLOUD_MAX_PCT = 30;
-export const DECLOUD_SOURCE = "uncrtaints_decloud";
-
-export function isDecloudProduct(scene: {
-    source?: string | null;
-    scene_id?: string | null;
-}): boolean {
-    if (scene.source === DECLOUD_SOURCE) return true;
-    return typeof scene.scene_id === "string" && scene.scene_id.endsWith("_decloud");
-}
-
-/** Raw clear S2, or good-quality decloud. fair/bad decloud is audit-only. */
-export function isOfficialOpticalScene(scene: {
-    source?: string | null;
-    scene_id?: string | null;
-    decloud_quality?: string | null;
-    cloud_cover_over_30?: boolean | null;
-    cloud_cover?: number | null;
-    parcel_cloud_cover_pct?: number | null;
-}): boolean {
-    if (isDecloudProduct(scene)) {
-        return scene.decloud_quality === "good";
-    }
-    if (scene.cloud_cover_over_30 === true) return false;
-    if (scene.cloud_cover_over_30 === false) return true;
-    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
-        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
-    }
-    if (
-        typeof scene.parcel_cloud_cover_pct === "number" &&
-        Number.isFinite(scene.parcel_cloud_cover_pct)
-    ) {
-        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
-    }
-    return false;
-}
-
-export function computeNddi(ndvi: number, ndmi: number): number | null {
-    if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) return null;
-    const denom = ndvi + ndmi;
-    if (Math.abs(denom) < 1e-6) return null;
-    return (ndvi - ndmi) / denom;
-}
-
-export function classifyDrought(ndvi: number, ndmi: number): AgriDroughtClass {
-    const nddi = computeNddi(ndvi, ndmi);
-    if (nddi != null) {
-        if (nddi >= NDDI_SEVERE_MIN) return "severe";
-        if (nddi >= NDDI_MODERATE_MIN) return "moderate";
-        if (nddi >= NDDI_MILD_MIN) return "mild";
-        return "normal";
-    }
-    if (Number.isFinite(ndmi) && ndmi < NDMI_FALLBACK_SEVERE) return "severe";
-    return "normal";
-}
-
-export function isDroughtDayClass(cls: AgriDroughtClass | null | undefined): boolean {
-    return cls === "mild" || cls === "moderate" || cls === "severe";
-}
-
-export function droughtClassFromAvgs(
-    ndvi: number | null | undefined,
-    ndmi: number | null | undefined,
-): AgriDroughtClass | null {
-    if (typeof ndvi !== "number" || !Number.isFinite(ndvi)) return null;
-    if (typeof ndmi !== "number" || !Number.isFinite(ndmi)) return null;
-    return classifyDrought(ndvi, ndmi);
-}
-
-/**
- * Sentinel-1 open-water / flood mapping via VV (and VH) backscatter thresholds.
- * Operational S1 flood literature (e.g. Martinis-style / global flood mapping)
- * commonly treats calm open water as very low VV (often ≲ −15…−18 dB);
- * dual-pol (low VV + low VH) strengthens the water class.
- * Values expected in dB from agri pixel_data.
- */
-export function classifyFlood(vvDb: number, vhDb: number | null): AgriFloodClass {
-    if (!Number.isFinite(vvDb)) return "dry";
-    const vh = vhDb != null && Number.isFinite(vhDb) ? vhDb : null;
-    // 重: VV ≤ -20, or (VV ≤ -18 and VH ≤ -24)
-    if (vvDb <= -20 || (vvDb <= -18 && vh != null && vh <= -24)) return "flood_severe";
-    // 中: former open-water / flood band
-    if (vvDb <= -18) return "flood_moderate";
-    // 轻: former wet band
-    if (vvDb <= -15 || (vh != null && vvDb <= -14 && vh <= -20)) return "flood_mild";
-    return "dry";
-}
 
 export function colorizeValue(
     value: number,
@@ -546,8 +467,8 @@ function droughtLegend(): AgriHeatmapLegend {
     return {
         kind: "classes",
         label: "干旱 NDDI",
-        hint: "NDDI=(NDVI−NDMI)/(NDVI+NDMI) · Gu et al. 2007; 0.3 / 0.4 / 0.5",
-        classes: (Object.keys(DROUGHT_CLASS_STYLE) as AgriDroughtClass[]).map((k) => ({
+        hint: "生育季 6–9 月 · 官方晴空/去云良好 · NDDI 色斑；日期等级另需 NDMI 干或 NDVI 偏低",
+        classes: (["severe", "moderate", "mild", "normal"] as AgriDroughtPixelClass[]).map((k) => ({
             key: k,
             label: DROUGHT_CLASS_STYLE[k].label,
             color: DROUGHT_CLASS_STYLE[k].color,
@@ -559,8 +480,8 @@ function floodLegend(): AgriHeatmapLegend {
     return {
         kind: "classes",
         label: "洪涝 S1",
-        hint: "VV/VH 后向散射 · 重/中/轻 (VV≲−20 / −18 / −15 dB)",
-        classes: (["flood_severe", "flood_moderate", "flood_mild"] as AgriFloodClass[]).map((k) => ({
+        hint: "洪涝需 VV≤−17 dB、相对轨道基线下降≥3 dB、且 VH 或 VV−VH 辅助；近阈值为关注。春灌积水可能不是灾害洪涝",
+        classes: (["flood_severe", "flood_moderate", "watch"] as AgriFloodClass[]).map((k) => ({
             key: k,
             label: FLOOD_CLASS_STYLE[k].label,
             color: FLOOD_CLASS_STYLE[k].color,
@@ -661,7 +582,7 @@ function collectPaintedCells(
             const vh = row.length > iVh ? Number(row[iVh]) : NaN;
             if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(vv)) continue;
             if (r < 0 || r >= height || c < 0 || c >= width) continue;
-            const cls = classifyFlood(vv, Number.isFinite(vh) ? vh : null);
+            const cls = classifyFloodPixel(vv, Number.isFinite(vh) ? vh : null);
             const rgba = FLOOD_CLASS_STYLE[cls].rgba;
             if (rgba[3] === 0) continue; // dry → transparent
             cells.push({
@@ -1367,7 +1288,7 @@ function collectLonLatPainted(
             const vv = numProp(p, "VV_db", "VV", "vv");
             const vh = numProp(p, "VH_db", "VH", "vh");
             if (!Number.isFinite(vv)) continue;
-            const cls = classifyFlood(vv, Number.isFinite(vh) ? vh : null);
+            const cls = classifyFloodPixel(vv, Number.isFinite(vh) ? vh : null);
             const rgba = FLOOD_CLASS_STYLE[cls].rgba;
             if (rgba[3] === 0) continue;
             cells.push({

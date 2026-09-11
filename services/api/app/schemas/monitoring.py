@@ -50,6 +50,11 @@ class FieldStatOut(BaseModel):
     stddev: float | None = None
     quality_score: float | None = None
     created_at: datetime
+    cloud_cover: float | None = None
+    decloud_quality: str | None = None
+    decloud_reasons: list[str] | None = None
+    product_source: str | None = None
+    scene_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -207,6 +212,11 @@ class ShareStatPoint(BaseModel):
     id: uuid.UUID | None = None
     field_id: uuid.UUID | None = None
     created_at: datetime | None = None
+    cloud_cover: float | None = None
+    decloud_quality: str | None = None
+    decloud_reasons: list[str] | None = None
+    product_source: str | None = None
+    scene_id: str | None = None
 
     model_config = {"from_attributes": True}
 

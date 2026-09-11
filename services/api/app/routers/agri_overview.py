@@ -16,13 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.agri_classify import (
     CLOUD_MAX_PCT,
+    NDMI_DRY_ABS,
     PHENOLOGY_MONTHS,
     WEAK_NDVI_LT,
     classify_drought,
     classify_drought_from_pixels,
     classify_flood,
+    is_drought_season,
     is_flood_alert,
     is_open_water_flood,
+    overview_flood_bucket,
     official_s2_sql,
 )
 from app.core.crops import get_crop_season, normalize_crop_key
@@ -446,7 +449,7 @@ async def _compute_live_stats(
                 text(
                     f"""
                     SELECT DISTINCT ON (s.land_id)
-                           s.land_id, s.ndvi_avg, s.ndmi_avg
+                           s.land_id, s.date, s.ndvi_avg, s.ndmi_avg
                            {pixel_col}
                     FROM agri.parcel_scene_products s
                     JOIN agri.land_parcels p ON p.land_id = s.land_id
@@ -462,6 +465,11 @@ async def _compute_live_stats(
         ).fetchall()
 
         for r in s2_rows:
+            date_str = (
+                r.date.isoformat() if hasattr(r.date, "isoformat") else str(r.date)
+            )
+            if not is_drought_season(date_str):
+                continue
             cls = None
             if allow_pixels:
                 pdata = getattr(r, "pixel_data", None)
@@ -473,6 +481,14 @@ async def _compute_live_stats(
                         pixels_parcels += 1
             if cls is None:
                 cls = classify_drought(r.ndvi_avg, r.ndmi_avg)
+            if cls is None:
+                continue
+            # Snapshot confirmation: NDMI dry. Without a month baseline, do
+            # not keep mild+ drought on a well-watered canopy.
+            if cls in ("mild", "moderate", "severe"):
+                ndmi = r.ndmi_avg
+                if ndmi is None or float(ndmi) >= NDMI_DRY_ABS:
+                    cls = "normal"
             if cls is None:
                 continue
             drought_counts[cls] += 1
@@ -508,10 +524,11 @@ async def _compute_live_stats(
 
         for r in s1_rows:
             cls = classify_flood(r.vv_avg, r.vh_avg)
-            if cls is None:
+            bucket = overview_flood_bucket(cls)
+            if bucket is None:
                 continue
-            flood_counts[cls] += 1
-            flood_area[cls] += area_by_land.get(r.land_id, 0.0)
+            flood_counts[bucket] += 1
+            flood_area[bucket] += area_by_land.get(r.land_id, 0.0)
             ck = land_to_child.get(r.land_id)
             if ck and ck in child_agg:
                 if is_open_water_flood(cls):

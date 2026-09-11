@@ -129,6 +129,14 @@ class SceneProductOut(BaseModel):
         description="good | fair | bad. Only good feeds official drought metrics.",
     )
     decloud_score: float | None = None
+    decloud_reasons: list[str] | None = Field(
+        default=None,
+        description="Quality-gate reason codes for the additive decloud product.",
+    )
+    relative_orbit: int | None = Field(
+        default=None,
+        description="Sentinel-1 relative orbit (1-175) when parseable from scene_id.",
+    )
     json_oss_key: str | None = None
     pixel_data_url: str | None = None
     pixel_count: int | None = None

@@ -1,0 +1,536 @@
+/**
+ * Drought / flood classifiers + official optical product picking.
+ * Keep in sync with services/api/app/core/agri_classify.py
+ * (thresholds documented there and in docs/agri-drought-flood.md).
+ */
+
+export const CLOUD_MAX_PCT = 30;
+export const DROUGHT_CLOUD_MAX_PCT = CLOUD_MAX_PCT;
+/** Official drought window: June-September (override per crop if needed). */
+export const PHENOLOGY_MONTHS = [6, 7, 8, 9] as const;
+
+export const NDDI_MILD_MIN = 0.3;
+export const NDDI_MODERATE_MIN = 0.4;
+export const NDDI_SEVERE_MIN = 0.5;
+export const NDMI_FALLBACK_SEVERE = -0.2;
+
+export const NDDI_PCTL_DRY = 80;
+export const MIN_MONTH_SAMPLES = 3;
+export const NDMI_DRY_ABS = 0.1;
+export const NDMI_DROP_VS_MEDIAN = 0.05;
+export const NDVI_DROP_VS_MEDIAN = 0.08;
+export const NDVI_DROP_MODERATE = 0.12;
+export const NDVI_DROP_SEVERE = 0.2;
+
+export const FLOOD_VV_MAX = -17;
+export const FLOOD_VV_DROP = -3;
+export const FLOOD_VH_MAX = -22;
+export const WATCH_VV_MAX = -15;
+export const WATCH_VV_DROP = -2;
+export const WATCH_VH_MAX = -20;
+export const FLOOD_VV_SEVERE = -20;
+export const MIN_ORBIT_SAMPLES = 3;
+export const VV_VH_DIFF_PCTL = 40;
+export const FLOOD_SPRING_MONTHS = [3, 4, 5] as const;
+
+export const DECLOUD_SOURCE = "uncrtaints_decloud";
+export const DECLOUD_SCENE_ID_SUFFIX = "_decloud";
+
+export type AgriDroughtClass =
+    | "severe"
+    | "moderate"
+    | "mild"
+    | "normal"
+    | "unreliable"
+    | "out_of_season";
+export type AgriDroughtPixelClass = "severe" | "moderate" | "mild" | "normal";
+export type AgriFloodClass = "flood_severe" | "flood_moderate" | "watch" | "dry";
+
+export type OpticalSceneLike = {
+    date?: string | null;
+    source?: string | null;
+    scene_id?: string | null;
+    decloud_quality?: string | null;
+    decloud_reasons?: string[] | string | null;
+    cloud_cover_over_30?: boolean | null;
+    cloud_cover?: number | null;
+    parcel_cloud_cover_pct?: number | null;
+    ndvi_avg?: number | null;
+    ndmi_avg?: number | null;
+    sensor?: string | null;
+};
+
+export type SarSceneLike = {
+    date?: string | null;
+    scene_id?: string | null;
+    relative_orbit?: number | null;
+    vv_avg?: number | null;
+    vh_avg?: number | null;
+    sensor?: string | null;
+};
+
+export type OpticalTooltipFields = {
+    cloudCover: number | null;
+    decloudQuality: string | null;
+    decloudReasons: string[];
+    productSource: string | null;
+    sceneId: string | null;
+    isDecloud: boolean;
+    isOfficial: boolean;
+};
+
+const S1_ORBIT_OFFSET: Record<string, number> = { S1A: 73, S1B: 27, S1C: 172 };
+const S1_ID_RE =
+    /^(S1[ABC])_IW_GRD[HM]?_1S[DS][VH]_\d{8}T\d{6}_\d{8}T\d{6}_(\d{6})/i;
+
+function finiteNum(v: unknown): number | null {
+    if (typeof v !== "number" || !Number.isFinite(v)) return null;
+    return v;
+}
+
+export function computeNddi(ndvi: number, ndmi: number): number | null {
+    if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) return null;
+    const denom = ndvi + ndmi;
+    if (Math.abs(denom) < 1e-6) return null;
+    return (ndvi - ndmi) / denom;
+}
+
+/** Pixel / heatmap NDDI class (not season-gated). */
+export function classifyDrought(ndvi: number, ndmi: number): AgriDroughtPixelClass {
+    const nddi = computeNddi(ndvi, ndmi);
+    if (nddi != null) {
+        if (nddi >= NDDI_SEVERE_MIN) return "severe";
+        if (nddi >= NDDI_MODERATE_MIN) return "moderate";
+        if (nddi >= NDDI_MILD_MIN) return "mild";
+        return "normal";
+    }
+    if (Number.isFinite(ndmi) && ndmi < NDMI_FALLBACK_SEVERE) return "severe";
+    return "normal";
+}
+
+export function droughtClassFromAvgs(
+    ndvi: number | null | undefined,
+    ndmi: number | null | undefined,
+): AgriDroughtPixelClass | null {
+    if (typeof ndvi !== "number" || !Number.isFinite(ndvi)) return null;
+    if (typeof ndmi !== "number" || !Number.isFinite(ndmi)) return null;
+    return classifyDrought(ndvi, ndmi);
+}
+
+export function isDroughtDayClass(cls: AgriDroughtClass | null | undefined): boolean {
+    return cls === "mild" || cls === "moderate" || cls === "severe";
+}
+
+export function isDecloudProduct(scene: {
+    source?: string | null;
+    scene_id?: string | null;
+}): boolean {
+    if (scene.source === DECLOUD_SOURCE) return true;
+    return typeof scene.scene_id === "string" && scene.scene_id.endsWith(DECLOUD_SCENE_ID_SUFFIX);
+}
+
+export function isOfficialOpticalScene(scene: {
+    source?: string | null;
+    scene_id?: string | null;
+    decloud_quality?: string | null;
+    cloud_cover_over_30?: boolean | null;
+    cloud_cover?: number | null;
+    parcel_cloud_cover_pct?: number | null;
+}): boolean {
+    if (isDecloudProduct(scene)) {
+        return scene.decloud_quality === "good";
+    }
+    if (scene.cloud_cover_over_30 === true) return false;
+    if (scene.cloud_cover_over_30 === false) return true;
+    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
+        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
+    }
+    if (
+        typeof scene.parcel_cloud_cover_pct === "number" &&
+        Number.isFinite(scene.parcel_cloud_cover_pct)
+    ) {
+        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
+    }
+    return false;
+}
+
+export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
+    if (!scene) return null;
+    const parcel = scene.parcel_cloud_cover_pct;
+    if (typeof parcel === "number" && Number.isFinite(parcel)) return parcel;
+    const cc = scene.cloud_cover;
+    if (typeof cc === "number" && Number.isFinite(cc)) return cc;
+    return null;
+}
+
+function cloudSortKey(scene: OpticalSceneLike): [number, string] {
+    const pct = sceneCloudPct(scene);
+    return [pct ?? 999, String(scene.scene_id ?? "")];
+}
+
+/** Clear raw, else good decloud. Same-date scenes. */
+export function pickOfficialOptical<T extends OpticalSceneLike>(scenes: T[]): T | null {
+    const official = scenes.filter(isOfficialOpticalScene);
+    const raw = official.filter((s) => !isDecloudProduct(s));
+    const pool = raw.length ? raw : official;
+    if (!pool.length) return null;
+    return [...pool].sort((a, b) => {
+        const [pa, ia] = cloudSortKey(a);
+        const [pb, ib] = cloudSortKey(b);
+        return pa - pb || ia.localeCompare(ib);
+    })[0]!;
+}
+
+/** Official if present; else raw (cloudy). Never fair/bad decloud. */
+export function pickOpticalForNdvi<T extends OpticalSceneLike>(scenes: T[]): T | null {
+    const official = pickOfficialOptical(scenes);
+    if (official) return official;
+    const raw = scenes.filter((s) => !isDecloudProduct(s));
+    if (!raw.length) return null;
+    return [...raw].sort((a, b) => {
+        const [pa, ia] = cloudSortKey(a);
+        const [pb, ib] = cloudSortKey(b);
+        return pa - pb || ia.localeCompare(ib);
+    })[0]!;
+}
+
+export function opticalTooltipFields(scene: OpticalSceneLike | null | undefined): OpticalTooltipFields {
+    if (!scene) {
+        return {
+            cloudCover: null,
+            decloudQuality: null,
+            decloudReasons: [],
+            productSource: null,
+            sceneId: null,
+            isDecloud: false,
+            isOfficial: false,
+        };
+    }
+    const rawReasons = scene.decloud_reasons;
+    const reasons = Array.isArray(rawReasons)
+        ? rawReasons.map(String).filter(Boolean)
+        : typeof rawReasons === "string" && rawReasons
+          ? [rawReasons]
+          : [];
+    return {
+        cloudCover: sceneCloudPct(scene),
+        decloudQuality: scene.decloud_quality ?? null,
+        decloudReasons: reasons,
+        productSource: scene.source ?? null,
+        sceneId: scene.scene_id ?? null,
+        isDecloud: isDecloudProduct(scene),
+        isOfficial: isOfficialOpticalScene(scene),
+    };
+}
+
+export function monthFromDate(dateStr: string | null | undefined): number | null {
+    if (!dateStr || dateStr.length < 7) return null;
+    const m = Number(String(dateStr).slice(5, 7));
+    return Number.isFinite(m) && m >= 1 && m <= 12 ? m : null;
+}
+
+export function isDroughtSeason(
+    dateStr: string | null | undefined,
+    seasonMonths: readonly number[] = PHENOLOGY_MONTHS,
+): boolean {
+    const m = monthFromDate(dateStr);
+    return m != null && seasonMonths.includes(m);
+}
+
+function median(values: number[]): number | null {
+    if (!values.length) return null;
+    const s = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+function percentileRank(value: number, values: number[]): number | null {
+    if (!values.length) return null;
+    const below = values.filter((v) => v < value).length;
+    const equal = values.filter((v) => v === value).length;
+    return ((below + 0.5 * equal) / values.length) * 100;
+}
+
+function percentile(values: number[], p: number): number | null {
+    if (!values.length) return null;
+    const s = [...values].sort((a, b) => a - b);
+    if (s.length === 1) return s[0]!;
+    const x = (Math.max(0, Math.min(100, p)) / 100) * (s.length - 1);
+    const lo = Math.floor(x);
+    const hi = Math.ceil(x);
+    if (lo === hi) return s[lo]!;
+    const t = x - lo;
+    return s[lo]! * (1 - t) + s[hi]! * t;
+}
+
+export type MonthDroughtBaseline = {
+    ndviMedian: number | null;
+    ndmiMedian: number | null;
+    nddiValues: number[];
+    n: number;
+};
+
+export function buildMonthDroughtBaselines(
+    scenes: OpticalSceneLike[],
+    seasonMonths: readonly number[] = PHENOLOGY_MONTHS,
+): Map<number, MonthDroughtBaseline> {
+    const buckets = new Map<number, { ndvi: number[]; ndmi: number[]; nddi: number[] }>();
+    for (const s of scenes) {
+        if (!isOfficialOpticalScene(s)) continue;
+        const date = String(s.date ?? "");
+        if (!isDroughtSeason(date, seasonMonths)) continue;
+        const month = monthFromDate(date);
+        if (month == null) continue;
+        const ndvi = finiteNum(s.ndvi_avg);
+        const ndmi = finiteNum(s.ndmi_avg);
+        if (ndvi == null || ndmi == null) continue;
+        const b = buckets.get(month) ?? { ndvi: [], ndmi: [], nddi: [] };
+        b.ndvi.push(ndvi);
+        b.ndmi.push(ndmi);
+        const nddi = computeNddi(ndvi, ndmi);
+        if (nddi != null) b.nddi.push(nddi);
+        buckets.set(month, b);
+    }
+    const out = new Map<number, MonthDroughtBaseline>();
+    for (const [month, b] of buckets) {
+        out.set(month, {
+            ndviMedian: median(b.ndvi),
+            ndmiMedian: median(b.ndmi),
+            nddiValues: b.nddi,
+            n: b.ndvi.length,
+        });
+    }
+    return out;
+}
+
+function droughtSeverity(nddi: number | null, ndviDrop: number | null): AgriDroughtClass {
+    if ((nddi != null && nddi >= NDDI_SEVERE_MIN) || (ndviDrop != null && ndviDrop >= NDVI_DROP_SEVERE)) {
+        return "severe";
+    }
+    if (
+        (nddi != null && nddi >= NDDI_MODERATE_MIN) ||
+        (ndviDrop != null && ndviDrop >= NDVI_DROP_MODERATE)
+    ) {
+        return "moderate";
+    }
+    return "mild";
+}
+
+export function classifyDroughtScene(
+    scene: OpticalSceneLike,
+    monthStats: MonthDroughtBaseline | null | undefined,
+    seasonMonths: readonly number[] = PHENOLOGY_MONTHS,
+): AgriDroughtClass {
+    const date = String(scene.date ?? "");
+    if (!isDroughtSeason(date, seasonMonths)) return "out_of_season";
+    if (!isOfficialOpticalScene(scene)) return "unreliable";
+    const ndvi = finiteNum(scene.ndvi_avg);
+    const ndmi = finiteNum(scene.ndmi_avg);
+    if (ndvi == null || ndmi == null) return "unreliable";
+    const nddi = computeNddi(ndvi, ndmi);
+    const n = monthStats?.n ?? 0;
+    const ndviMed = monthStats?.ndviMedian ?? null;
+    const ndmiMed = monthStats?.ndmiMedian ?? null;
+    const nddiVals = monthStats?.nddiValues ?? [];
+
+    const nddiAbs = nddi != null && nddi >= NDDI_MILD_MIN;
+    let nddiAnom = false;
+    if (n >= MIN_MONTH_SAMPLES && nddi != null && nddiVals.length) {
+        const rank = percentileRank(nddi, nddiVals);
+        nddiAnom = rank != null && rank >= NDDI_PCTL_DRY;
+    }
+
+    let ndmiDry = ndmi < NDMI_DRY_ABS;
+    if (ndmiMed != null) ndmiDry = ndmiDry || ndmi <= ndmiMed - NDMI_DROP_VS_MEDIAN;
+
+    let ndviDrop: number | null = null;
+    let ndviDropped = false;
+    if (ndviMed != null) {
+        ndviDrop = ndviMed - ndvi;
+        ndviDropped = ndvi <= ndviMed - NDVI_DROP_VS_MEDIAN;
+    }
+
+    if ((nddiAbs || nddiAnom) && (ndmiDry || ndviDropped)) {
+        return droughtSeverity(nddi, ndviDrop);
+    }
+    return "normal";
+}
+
+export function classifyDroughtSeries(
+    scenes: OpticalSceneLike[],
+    seasonMonths: readonly number[] = PHENOLOGY_MONTHS,
+): Map<string, AgriDroughtClass> {
+    const byDate = new Map<string, OpticalSceneLike>();
+    for (const s of scenes) {
+        if (s.sensor && s.sensor !== "S2") continue;
+        const date = String(s.date ?? "");
+        if (!date) continue;
+        const existing = byDate.get(date);
+        if (!existing) {
+            byDate.set(date, s);
+            continue;
+        }
+        const picked = pickOfficialOptical([existing, s]) ?? pickOpticalForNdvi([existing, s]);
+        if (picked) byDate.set(date, picked);
+    }
+    const list = [...byDate.values()];
+    const baselines = buildMonthDroughtBaselines(list, seasonMonths);
+    const out = new Map<string, AgriDroughtClass>();
+    for (const s of list) {
+        const date = String(s.date ?? "");
+        const month = monthFromDate(date);
+        const stats = month != null ? (baselines.get(month) ?? null) : null;
+        out.set(date, classifyDroughtScene(s, stats, seasonMonths));
+    }
+    return out;
+}
+
+/**
+ * Pixel heatmap: spatial open-water-like backscatter. Not a date-level flood
+ * event (that needs the per-orbit drop in classifyFloodScene).
+ * VV-VH difference alone never flags.
+ */
+export function classifyFloodPixel(vvDb: number, vhDb: number | null): AgriFloodClass {
+    if (!Number.isFinite(vvDb)) return "dry";
+    const vh = vhDb != null && Number.isFinite(vhDb) ? vhDb : null;
+    const helper = vh != null && vh <= FLOOD_VH_MAX;
+    if (vvDb <= FLOOD_VV_MAX && helper) {
+        return vvDb <= FLOOD_VV_SEVERE ? "flood_severe" : "flood_moderate";
+    }
+    const watchVh = vh != null && vh <= WATCH_VH_MAX;
+    if (vvDb <= WATCH_VV_MAX && (helper || watchVh || vvDb <= FLOOD_VV_MAX)) {
+        return "watch";
+    }
+    return "dry";
+}
+
+export function parseS1RelativeOrbit(
+    sceneId: string | null | undefined,
+    relativeOrbit?: number | null,
+): number | null {
+    if (typeof relativeOrbit === "number" && relativeOrbit >= 1 && relativeOrbit <= 175) {
+        return Math.trunc(relativeOrbit);
+    }
+    if (!sceneId) return null;
+    const m = S1_ID_RE.exec(sceneId.trim());
+    if (!m) return null;
+    const mission = m[1]!.toUpperCase();
+    const absOrbit = Number(m[2]);
+    if (!Number.isFinite(absOrbit)) return null;
+    const offset = S1_ORBIT_OFFSET[mission] ?? 73;
+    return ((((absOrbit - offset) % 175) + 175) % 175) + 1;
+}
+
+export function orbitGroupKey(scene: SarSceneLike): string {
+    const rel = parseS1RelativeOrbit(scene.scene_id, scene.relative_orbit);
+    return rel == null ? "unknown" : `ron${rel}`;
+}
+
+export function classifyFloodScene(
+    vv: number | null,
+    vh: number | null,
+    baselineVv: number | null,
+    orbitDiffP40: number | null,
+): AgriFloodClass | null {
+    if (vv == null || !Number.isFinite(vv)) return null;
+    const vhF = vh != null && Number.isFinite(vh) ? vh : null;
+    const drop = baselineVv != null && Number.isFinite(baselineVv) ? vv - baselineVv : null;
+    const vvVh = vhF != null ? vv - vhF : null;
+
+    let helper = false;
+    if (vhF != null && vhF <= FLOOD_VH_MAX) helper = true;
+    if (vvVh != null && orbitDiffP40 != null && Number.isFinite(orbitDiffP40) && vvVh <= orbitDiffP40) {
+        helper = true;
+    }
+
+    const lowVv = vv <= FLOOD_VV_MAX;
+    const dropped = drop != null && drop <= FLOOD_VV_DROP;
+    if (lowVv && dropped && helper) {
+        return vv <= FLOOD_VV_SEVERE ? "flood_severe" : "flood_moderate";
+    }
+
+    const watchVv = vv <= WATCH_VV_MAX;
+    const watchDrop = drop != null && drop <= WATCH_VV_DROP;
+    const watchVh = vhF != null && vhF <= WATCH_VH_MAX;
+    if (watchVv && (watchDrop || watchVh || helper || lowVv)) return "watch";
+    return "dry";
+}
+
+export function classifyFloodSeries(scenes: SarSceneLike[]): Map<string, AgriFloodClass> {
+    const valid = scenes.filter((s) => finiteNum(s.vv_avg) != null);
+    const groups = new Map<string, SarSceneLike[]>();
+    for (const s of valid) {
+        const key = orbitGroupKey(s);
+        const arr = groups.get(key) ?? [];
+        arr.push(s);
+        groups.set(key, arr);
+    }
+
+    const allVv = valid.map((s) => s.vv_avg!).filter((v) => Number.isFinite(v));
+    const allDiff: number[] = [];
+    for (const s of valid) {
+        const vv = finiteNum(s.vv_avg);
+        const vh = finiteNum(s.vh_avg);
+        if (vv != null && vh != null) allDiff.push(vv - vh);
+    }
+
+    const baselines = new Map<string, { vv: number | null; p40: number | null }>();
+    for (const [key, rows] of groups) {
+        const vvs = rows.map((r) => r.vv_avg!).filter((v) => Number.isFinite(v));
+        const diffs: number[] = [];
+        for (const r of rows) {
+            const vv = finiteNum(r.vv_avg);
+            const vh = finiteNum(r.vh_avg);
+            if (vv != null && vh != null) diffs.push(vv - vh);
+        }
+        if (vvs.length >= MIN_ORBIT_SAMPLES) {
+            baselines.set(key, { vv: median(vvs), p40: percentile(diffs, VV_VH_DIFF_PCTL) });
+        } else {
+            baselines.set(key, {
+                vv: allVv.length >= MIN_ORBIT_SAMPLES ? median(allVv) : median(vvs),
+                p40:
+                    allDiff.length >= MIN_ORBIT_SAMPLES
+                        ? percentile(allDiff, VV_VH_DIFF_PCTL)
+                        : percentile(diffs, VV_VH_DIFF_PCTL),
+            });
+        }
+    }
+
+    const out = new Map<string, AgriFloodClass>();
+    for (const s of valid) {
+        const date = String(s.date ?? "");
+        if (!date) continue;
+        const base = baselines.get(orbitGroupKey(s));
+        const cls = classifyFloodScene(
+            finiteNum(s.vv_avg),
+            finiteNum(s.vh_avg),
+            base?.vv ?? null,
+            base?.p40 ?? null,
+        );
+        if (cls) {
+            const prev = out.get(date);
+            if (!prev || floodRank(cls) > floodRank(prev)) out.set(date, cls);
+        }
+    }
+    return out;
+}
+
+function floodRank(cls: AgriFloodClass): number {
+    if (cls === "flood_severe") return 3;
+    if (cls === "flood_moderate") return 2;
+    if (cls === "watch") return 1;
+    return 0;
+}
+
+export function isFloodDayClass(cls: AgriFloodClass | null | undefined): boolean {
+    return cls === "flood_severe" || cls === "flood_moderate";
+}
+
+export function isFloodWatchClass(cls: AgriFloodClass | null | undefined): boolean {
+    return cls === "watch";
+}
+
+export function isSpringFloodMonth(dateStr: string | null | undefined): boolean {
+    const m = monthFromDate(dateStr);
+    return m != null && (FLOOD_SPRING_MONTHS as readonly number[]).includes(m);
+}
