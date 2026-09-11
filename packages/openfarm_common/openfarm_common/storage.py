@@ -17,6 +17,12 @@ from minio import Minio
 from openfarm_common.settings import settings
 
 
+def signed_get_expire_sec(*, years: float = 20.0) -> int:
+    """OSS/MinIO signed GET TTL in seconds (default 20 years)."""
+    return max(int(years * 365.25 * 24 * 3600), 24 * 3600)
+
+
+
 class ObjectStorage(ABC):
     """Backend-agnostic object storage interface."""
 
@@ -84,6 +90,18 @@ class ObjectStorage(ABC):
     @abstractmethod
     def public_url(self, key: str) -> str:
         """Best-effort public (or endpoint) URL for the object."""
+
+    def presigned_get(
+        self,
+        key: str,
+        expires: timedelta | None = None,
+    ) -> str:
+        """Return a browser-usable signed GET URL for a private bucket object.
+
+        Default expiry is long-lived (through 2099-12-31 UTC) to match the
+        offline parcel pipeline's ``forever_expire_sec`` convention.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def uri_for(self, key: str) -> str:
@@ -202,6 +220,16 @@ class MinioStorage(ObjectStorage):
         scheme = "https" if settings.minio_secure else "http"
         return f"{scheme}://{endpoint}/{self._bucket}/{key}"
 
+    def presigned_get(
+        self,
+        key: str,
+        expires: timedelta | None = None,
+    ) -> str:
+        ttl = expires if expires is not None else timedelta(seconds=signed_get_expire_sec())
+        return self._signing_client.presigned_get_object(
+            self._bucket, key, expires=ttl
+        )
+
     def uri_for(self, key: str) -> str:
         return f"s3://{self._bucket}/{key}"
 
@@ -287,6 +315,20 @@ class OssStorage(ObjectStorage):
         host = parsed.netloc or parsed.path
         scheme = parsed.scheme or "https"
         return f"{scheme}://{self._bucket_name}.{host}/{key}"
+
+    def presigned_get(
+        self,
+        key: str,
+        expires: timedelta | None = None,
+    ) -> str:
+        # Aliyun OSS sign_url expects seconds; private buckets need GET signatures
+        # for browser <img> (public_url alone returns AccessDenied).
+        secs = (
+            int(expires.total_seconds())
+            if expires is not None
+            else signed_get_expire_sec(years=20.0)
+        )
+        return self._bucket.sign_url("GET", key, secs)
 
     def uri_for(self, key: str) -> str:
         return f"oss://{self._bucket_name}/{key}"
@@ -413,4 +455,5 @@ __all__ = [
     "clear_storage_cache",
     "configure_gdal_vsis3",
     "restore_gdal_env",
+    "signed_get_expire_sec",
 ]
