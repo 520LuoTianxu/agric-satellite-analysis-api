@@ -9,6 +9,7 @@ import {
     TooltipComponent,
     LegendComponent,
     TitleComponent,
+    DataZoomComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { axisLabel, baseTooltip, legendStyle, secondaryValueAxis, valueAxis } from "./chart-base";
@@ -21,6 +22,7 @@ echarts.use([
     TooltipComponent,
     LegendComponent,
     TitleComponent,
+    DataZoomComponent,
     CanvasRenderer,
 ]);
 
@@ -148,9 +150,10 @@ export default function NdviGradeSharesChart({
                 {
                     text: centerTop,
                     subtext: "总面积",
-                    left: "34%",
-                    top: "42%",
+                    left: "38%",
+                    top: "54%",
                     textAlign: "center",
+                    textVerticalAlign: "middle",
                     textStyle: { fontSize: 14, fontWeight: 700, color: "#111827", lineHeight: 18 },
                     subtextStyle: { fontSize: 10, color: "#6b7280", lineHeight: 14 },
                 },
@@ -188,9 +191,51 @@ export default function NdviGradeSharesChart({
             const alt = meanByDate?.[d];
             return alt != null && Number.isFinite(alt) ? +Number(alt).toFixed(3) : null;
         });
+
+        // Default zoom: last ~12 months of categories, or last ~30 points if sparse.
+        const n = dates.length;
+        let zoomStart = 0;
+        const zoomEnd = 100;
+        if (n > 12) {
+            const lastMs = Date.parse(dates[n - 1]);
+            let startIdx = Math.max(0, n - 30); // sparse fallback
+            if (Number.isFinite(lastMs)) {
+                const cutoff = lastMs - 365 * 24 * 60 * 60 * 1000;
+                const byYear = dates.findIndex((d) => {
+                    const ms = Date.parse(d);
+                    return Number.isFinite(ms) && ms >= cutoff;
+                });
+                // Prefer calendar year when it meaningfully narrows the view.
+                if (byYear > 0) startIdx = byYear;
+                else if (byYear === 0) startIdx = 0; // span <= ~1y → full view
+            }
+            zoomStart = startIdx <= 0 ? 0 : (startIdx / n) * 100;
+        }
+        const needSlider = n > 12 && zoomStart > 0;
+        const dataZoom = [
+            {
+                type: "inside" as const,
+                start: zoomStart,
+                end: zoomEnd,
+                xAxisIndex: 0,
+            },
+            ...(needSlider
+                ? [
+                      {
+                          type: "slider" as const,
+                          start: zoomStart,
+                          end: zoomEnd,
+                          height: 18,
+                          bottom: 4,
+                          xAxisIndex: 0,
+                      },
+                  ]
+                : []),
+        ];
+
         return {
             animation: false,
-            grid: { top: 36, right: 52, bottom: 36, left: 44 },
+            grid: { top: 36, right: 52, bottom: needSlider ? 56 : 36, left: 44 },
             legend: {
                 data: [...NDVI_DAY_GRADE_ORDER, "平均NDVI"],
                 top: 0,
@@ -209,11 +254,12 @@ export default function NdviGradeSharesChart({
                         const unit = p.seriesName === "平均NDVI" ? "" : "%";
                         lines.push(`${p.marker ?? ""}${p.seriesName}: ${p.value}${unit}`);
                     }
-                    const n = historyByDate[date]?.n;
-                    if (n != null) lines.push(`像元 n=${n}`);
+                    const nPts = historyByDate[date]?.n;
+                    if (nPts != null) lines.push(`像元 n=${nPts}`);
                     return lines.join("<br/>");
                 },
             },
+            dataZoom,
             xAxis: {
                 type: "category" as const,
                 data: dates.map((d) => d.slice(5)),

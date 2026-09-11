@@ -72,7 +72,7 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
+import { Loader2, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgriIndexGlossary } from "@/components/field/agri-index-glossary";
 import { toast } from "sonner";
@@ -1151,7 +1151,6 @@ export default function AgriTimeseriesPanel({
                 <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 space-y-1">
                         <CardTitle className="flex flex-wrap items-center gap-1.5 text-sm font-semibold tracking-tight">
-                            <Satellite className="h-3.5 w-3.5 shrink-0 text-primary" />
                             <span>{t("title")}</span>
                             <AgriIndexGlossary
                                 initialKey={series}

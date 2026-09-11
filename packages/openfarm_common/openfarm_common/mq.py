@@ -82,6 +82,26 @@ def _is_connection_limit_error(exc: BaseException) -> bool:
     return "connection limit" in text or "not_allowed" in text
 
 
+def _is_retryable_publish_error(exc: BaseException) -> bool:
+    """True for transient AMQP/publish failures worth reconnect+retry."""
+    if _is_connection_limit_error(exc):
+        return True
+    if isinstance(exc, (BrokenPipeError, ConnectionError, TimeoutError)):
+        return True
+    text = str(exc).lower()
+    needles = (
+        "connection",
+        "broken pipe",
+        "stream connection lost",
+        "streamlost",
+        "eof",
+        "connection reset",
+        "socket closed",
+        "transport",
+    )
+    return any(n in text for n in needles)
+
+
 def _close_quiet(obj: Any) -> None:
     if obj is None:
         return
@@ -210,6 +230,13 @@ def _publish_locked(
         with _publish_lock:
             try:
                 conn = _shared_connection(url)
+                # Flush heartbeats / pending frames so a dead shared conn fails
+                # before basic_publish (best-effort; invalidate+retry on error).
+                try:
+                    conn.process_data_events(time_limit=0)
+                except Exception:
+                    _invalidate_shared_publisher()
+                    conn = _shared_connection(url)
                 if kind == "process":
                     ch = _shared.get("process_channel")
                     if ch is None or not getattr(ch, "is_open", False):
@@ -239,7 +266,7 @@ def _publish_locked(
             except Exception as exc:
                 last_exc = exc
                 _invalidate_shared_publisher()
-                retryable = _is_connection_limit_error(exc) or "connection" in str(exc).lower()
+                retryable = _is_retryable_publish_error(exc)
                 if attempt < attempts and retryable:
                     logger.warning(
                         "mq_publish_retry kind=%s attempt=%s/%s err=%s",
