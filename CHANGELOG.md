@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Optical Sentinel-2 scenes are still saved when the optional cloud-removal scratch cache cannot write a temporary array file.
+- NDVI date tooltips no longer show 0% cloud on heavily cloudy Sentinel-2 scenes. Empty or unknown field cloud is left blank (or uses the satellite scene cloud) instead of being stored or drawn as 0.
 - NDVI date tooltips no longer show a stuck ~82% field cloud on small fields. That number was empty space around the field, not cloud. Tooltips now use in-field cloud, or the satellite scene cloud when an old stored value looks wrong.
 - Cloud-removal now writes field-window files to a temporary name that the array library can rename, so nearby scenes are not silently dropped.
 - Cloud-removal no longer skips saving a reconstructed scene just because in-field sampling found no strong NDVI pixels. Fair and poor results are stored with quality notes instead of disappearing.

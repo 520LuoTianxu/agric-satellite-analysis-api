@@ -233,7 +233,7 @@ class ProductPickTests(unittest.TestCase):
             "cloud_cover_over_30": False,
         }
         tip = optical_tooltip_fields(scene)
-        self.assertEqual(tip["cloud_cover"], 0.0)
+        self.assertEqual(tip["cloud_cover"], 41.0)
         self.assertEqual(tip["decloud_quality"], "good")
         self.assertTrue(tip["is_decloud"])
         self.assertTrue(tip["is_official"])
@@ -495,6 +495,67 @@ class SceneCloudFieldsTests(unittest.TestCase):
         self.assertEqual(parcel_cloud_from_counts(0, 50), 0.0)
         self.assertAlmostEqual(parcel_cloud_from_counts(10, 50) or 0.0, 20.0)
         self.assertIsNone(parcel_cloud_from_counts(0, 0))
+
+    def test_scl_all_cloudy_is_100(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_scl_values
+
+        self.assertEqual(parcel_cloud_from_scl_values([9, 9, 8, 10, 3]), 100.0)
+
+    def test_scl_all_clear_is_zero(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_scl_values
+
+        self.assertEqual(parcel_cloud_from_scl_values([4, 4, 5, 6]), 0.0)
+
+    def test_scl_missing_and_empty_mask_are_none(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_scl_values
+
+        self.assertIsNone(parcel_cloud_from_scl_values(None))
+        self.assertIsNone(parcel_cloud_from_scl_values([]))
+
+    def test_scl_nodata_and_out_of_range_are_not_clear(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_scl_values
+
+        # All nodata (0) or fill/reflectance values must not become 0% cloud.
+        self.assertIsNone(parcel_cloud_from_scl_values([0, 0, 0]))
+        self.assertIsNone(parcel_cloud_from_scl_values([255, 255, 1000]))
+        # Nodata ignored; remaining classes 9/9 → 100%.
+        self.assertEqual(parcel_cloud_from_scl_values([0, 9, 0, 9]), 100.0)
+
+    def test_overcast_stac_does_not_trust_parcel_zero(self) -> None:
+        from app.core.agri_classify import (
+            effective_cloud_pct,
+            is_clear_scene,
+            parcel_cloud_is_untrusted_clear,
+            scene_cloud_fields,
+        )
+
+        # Jiahebei-style: SCL/lonlat wrote 0 while Element84 eo:cloud_cover is 99.98.
+        self.assertTrue(parcel_cloud_is_untrusted_clear(0.0, 99.981987))
+        self.assertAlmostEqual(effective_cloud_pct(0.0, 99.981987) or 0.0, 99.981987)
+        self.assertFalse(
+            is_clear_scene(0.0, 99.981987, False, parcel_cloud_source="scl")
+        )
+        cloud, over, parcel = scene_cloud_fields(99.981987, 0.0)
+        self.assertAlmostEqual(cloud or 0.0, 99.981987)
+        self.assertTrue(over)
+        self.assertIsNone(parcel)
+        # A real clear hole under a moderately cloudy scene is still 0.
+        self.assertFalse(parcel_cloud_is_untrusted_clear(0.0, 41.0))
+        self.assertEqual(effective_cloud_pct(0.0, 41.0, parcel_cloud_source="scl"), 0.0)
+
+    def test_good_decloud_zero_parcel_falls_back_to_stac(self) -> None:
+        from app.core.agri_classify import effective_cloud_pct
+
+        self.assertAlmostEqual(
+            effective_cloud_pct(
+                0.0,
+                41.0,
+                source="uncrtaints_decloud",
+                scene_id="stac_bridge_2026-09-10_S2_decloud",
+            )
+            or 0.0,
+            41.0,
+        )
 
     def test_lonlat_clear_pixels_are_low_cloud(self) -> None:
         from app.core.agri_classify import parcel_cloud_from_lonlat_pixels

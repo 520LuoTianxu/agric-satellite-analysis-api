@@ -538,9 +538,9 @@ def _publish_decloud_product(
         # fair/bad stay excluded from existing cloud>30 drought filters.
         "cloud_cover_over_30": over_30,
         "parcel_cloud_cover_pct": (
-            0.0
-            if official
-            else (_round6(parcel_cloud) if parcel_cloud is not None else parcel_excl)
+            _round6(parcel_cloud)
+            if parcel_cloud is not None
+            else (None if official else parcel_excl)
         ),
         "pixel_count": len(pixels),
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(

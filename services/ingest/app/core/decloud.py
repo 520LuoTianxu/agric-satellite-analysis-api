@@ -518,14 +518,18 @@ def should_persist_decloud_product(
 
 def decloud_drought_exclusion_flags(
     is_official: bool,
-) -> tuple[bool, float]:
-    """``(cloud_cover_over_30, parcel_cloud_cover_pct)`` for a decloud row.
+) -> tuple[bool, float | None]:
+    """``(cloud_cover_over_30, parcel_cloud_cover_pct)`` fallback for a decloud row.
 
     Fair/bad stay out of drought SQL (quality != good) and the legacy
-    cloud>30 filter (over_30 True, parcel 100).
+    cloud>30 filter (over_30 True, parcel 100). Good rows keep over_30 False
+    for that legacy filter but must not invent a 0% parcel cloud; callers
+    persist the raw parcel metric or NULL (tooltip then uses STAC).
     """
     if is_official:
-        return False, 0.0
+        # Drought SQL includes good decloud via quality, not a fake 0% parcel.
+        # Persist NULL so tooltips fall back to STAC instead of inventing 0.
+        return False, None
     return True, 100.0
 
 

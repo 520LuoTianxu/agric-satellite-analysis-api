@@ -108,13 +108,20 @@ the crop calendar / neighbor canopy loses to raw.
 ## Parcel cloud (not window fill)
 
 `parcel_cloud_cover_pct` is the in-polygon SCL cloud/shadow/cirrus fraction
-(classes 3, 8, 9, 10), or the share of lonlat pixels with `clear==0`. It is
-**not** zonal `quality_score` (finite pixels / padded window). That old formula
-stuck small fields near 82.5% on every date.
+(classes 3, 8, 9, 10), or the share of lonlat pixels with `clear==0`. Nodata
+(class 0) and values outside Sen2Cor 1-11 are ignored, not treated as clear.
+Missing SCL or an empty polygon mask stores NULL, not 0. It is **not** zonal
+`quality_score` (finite pixels / padded window). That old formula stuck small
+fields near 82.5% on every date.
+
+If a stored parcel value is ~0% while STAC `eo:cloud_cover` is 80% or higher,
+display and drought skip treat the 0 as missing and use STAC. Good cloud-removed
+rows no longer write 0% parcel cloud as a drought flag; tooltips show STAC
+(or the raw parcel metric) instead of a fake 0.
 
 New writes set `pixel_data.parcel_cloud_source` to `scl` or `lonlat_clear`.
 `cloud_cover` remains STAC `eo:cloud_cover`. `cloud_cover_over_30` follows the
-parcel metric when present.
+parcel metric when present (and STAC when that parcel 0 is untrusted).
 
 Rows written before this change have no source marker. Values near 70-90% while
 STAC is under 40% are treated as missing (tooltips / official pick use STAC).

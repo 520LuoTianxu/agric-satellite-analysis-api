@@ -17,7 +17,9 @@ For a calendar date:
    cloud/shadow fraction, or lonlat `clear==0` share). STAC scene cloud is
    stored separately in `cloud_cover`. Old rows whose parcel cloud sits near
    82% while STAC is much lower are treated as the padded-window fill bug, not
-   real cloud; those dates fall back to STAC.
+   real cloud; those dates fall back to STAC. Parcel ~0% while STAC is 80% or
+   higher is also treated as missing (not a true clear field). Missing parcel
+   cloud is shown as none, not 0%.
 2. If raw is cloudy (real parcel > 30%) and a **good** decloud exists, use
    good decloud.
 3. If both exist and raw is borderline (parcel 20-40%) *or* STAC is clear

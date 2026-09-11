@@ -458,6 +458,21 @@ class PersistProductTests(unittest.TestCase):
             )
         )
 
+    def test_good_decloud_flags_do_not_invent_zero_parcel(self) -> None:
+        over_30, parcel = decloud_drought_exclusion_flags(True)
+        self.assertFalse(over_30)
+        self.assertIsNone(parcel)
+        self.assertTrue(
+            is_official_optical_product(
+                source=DECLOUD_SOURCE,
+                scene_id="stac_bridge_2024-07-01_S2_decloud",
+                decloud_quality="good",
+                cloud_cover_over_30=over_30,
+                parcel_cloud_cover_pct=parcel,
+                cloud_cover=62.0,
+            )
+        )
+
     def test_pixel_payload_includes_quality_and_reasons(self) -> None:
         payload = decloud_pixel_payload(
             quality="bad",

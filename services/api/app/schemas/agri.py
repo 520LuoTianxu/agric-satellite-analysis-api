@@ -121,7 +121,8 @@ class SceneProductOut(BaseModel):
         default=None,
         description=(
             "How parcel_cloud_cover_pct was computed: scl or lonlat_clear. "
-            "Missing means a legacy window-fill value that may not be cloud."
+            "Missing means unknown, a legacy window-fill value, or an "
+            "untrusted 0 that was dropped in favor of STAC cloud_cover."
         ),
     )
     source: str | None = Field(

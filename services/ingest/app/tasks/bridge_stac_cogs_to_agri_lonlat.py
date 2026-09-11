@@ -366,7 +366,7 @@ def _sample_lonlat(
     ``require_finite_ndvi=False`` keeps weak/non-finite NDVI cells (filled as
     0) so a reconstruction can still be stored when quality is fair/bad.
     """
-    from app.core.agri_classify import is_scl_cloudy_class
+    from app.core.agri_classify import is_scl_cloudy_class, is_scl_valid_class
 
     if "NDVI" not in bands:
         return []
@@ -412,16 +412,17 @@ def _sample_lonlat(
     emit_keys = [k for k in EMIT_PIXEL_KEYS if k in bands]
     for i in range(rows.size):
         r, c = int(rows[i]), int(cols[i])
-        clear = 1
+        clear: int | None = None
         if scl_ok:
             sv = scl[r, c]
-            if np.isfinite(sv) and is_scl_cloudy_class(sv):
-                clear = 0
+            if np.isfinite(sv) and is_scl_valid_class(sv):
+                clear = 0 if is_scl_cloudy_class(sv) else 1
         pix: dict[str, Any] = {
             "lon": _round6(xs[i]),
             "lat": _round6(ys[i]),
-            "clear": clear,
         }
+        if clear is not None:
+            pix["clear"] = clear
         ok = True
         for key in emit_keys:
             v = bands[key][r, c]
