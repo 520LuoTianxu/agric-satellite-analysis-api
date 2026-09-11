@@ -5,6 +5,7 @@ Stdlib-only so CI ingest tests can import this without torch/numpy/rasterio.
 Product rules:
 - Additive: never overwrite raw S2 lonlat rows.
 - Trigger when scene/parcel cloud > DECLOUD_CLOUD_MIN_PCT (default 30).
+- STAC search/ingest cap is DECLOUD_STAC_CLOUD_MAX_PCT (default 90).
 - Store as sensor=S2 with scene_id suffix ``_decloud`` and
   pixel_data.source = ``uncrtaints_decloud``.
 - Official drought / timeseries / land metrics accept only quality ``good``.
@@ -30,7 +31,7 @@ DecloudQuality = Literal["good", "fair", "bad"]
 DecloudBackend = Literal["uncrtaints", "dummy"]
 
 DEFAULT_CLOUD_MIN_PCT = CLOUD_MAX_PCT
-DEFAULT_STAC_CLOUD_MAX_PCT = 80.0
+DEFAULT_STAC_CLOUD_MAX_PCT = 90.0
 DEFAULT_INPUT_T = 3
 DEFAULT_CHECKPOINT_NAME = "diagonal_1"
 
@@ -141,20 +142,41 @@ def should_trigger_decloud(
     parcel_cloud_cover_pct: float | None = None,
     cloud_cover: float | None = None,
     cloud_min_pct: float | None = None,
+    cloud_max_pct: float | None = None,
 ) -> bool:
-    """True when this parcel/scene is cloudy enough to try decloud."""
-    threshold = DEFAULT_CLOUD_MIN_PCT if cloud_min_pct is None else cloud_min_pct
-    if cloud_cover_over_30 is True:
-        return True
-    cloud = (
-        parcel_cloud_cover_pct if parcel_cloud_cover_pct is not None else cloud_cover
+    """True when parcel or STAC cloud is above min and STAC is within the ingest max.
+
+    Trigger if in-polygon parcel cloud > min (default 30) **or** STAC
+    ``eo:cloud_cover`` > min, up to ``DECLOUD_STAC_CLOUD_MAX_PCT`` (default 90).
+    Scenes above the max should not have been ingested.
+    """
+    lo = DEFAULT_CLOUD_MIN_PCT if cloud_min_pct is None else float(cloud_min_pct)
+    hi = (
+        decloud_stac_cloud_max_pct()
+        if cloud_max_pct is None
+        else float(cloud_max_pct)
     )
-    if cloud is None:
+
+    def _f(v: float | None) -> float | None:
+        if v is None:
+            return None
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        if x != x or x in (float("inf"), float("-inf")):
+            return None
+        return x
+
+    stac = _f(cloud_cover)
+    parcel = _f(parcel_cloud_cover_pct)
+    if stac is not None and stac > hi:
         return False
-    try:
-        return float(cloud) > threshold
-    except (TypeError, ValueError):
-        return False
+    parcel_hi = parcel is not None and parcel > lo
+    stac_hi = stac is not None and stac > lo
+    if parcel is not None or stac is not None:
+        return bool(parcel_hi or stac_hi)
+    return cloud_cover_over_30 is True
 
 
 @dataclass(frozen=True)

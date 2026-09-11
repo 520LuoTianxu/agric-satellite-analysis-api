@@ -11,11 +11,23 @@ deleted. Fair/bad decloud products are stored for audit only.
 
 For a calendar date:
 
-1. Prefer **clear raw** S2 (`cloud ≤ 30%`, not a `_decloud` scene).
-2. Else use **good** decloud (`decloud_quality=good`).
-3. Fair/bad decloud never enter official NDVI, drought, overview, or land RS.
-4. Cloudy raw without a good decloud may still plot on the NDVI chart (tooltip
+1. Prefer **clear raw** S2 when the **in-polygon** cloud is <= 30% (SCL
+   cloud/shadow fraction, or lonlat `clear==0` share). STAC scene cloud is
+   stored separately in `cloud_cover`. Old rows whose parcel cloud sits near
+   82% while STAC is much lower are treated as the padded-window fill bug, not
+   real cloud; those dates fall back to STAC.
+2. If raw is cloudy (real parcel > 30%) and a **good** decloud exists, use
+   good decloud.
+3. If both exist and raw is borderline (parcel 20-40%) *or* STAC is clear
+   while parcel is cloudy, pick the product whose NDVI (then NDMI) is closer
+   to the median of nearby clear raw dates (plus/minus 45 days, else same
+   month). Tie-break: raw, then scene id.
+4. Fair/bad decloud never enter official NDVI, drought, overview, or land RS.
+5. Cloudy raw without a good decloud may still plot on the NDVI chart (tooltip
    says cloudy / no de-cloud) but drought skips it (`unreliable`).
+
+Cloud-removal search default is 90% STAC cloud (`DECLOUD_STAC_CLOUD_MAX_PCT`).
+Decloud runs when parcel cloud > 30% **or** STAC cloud > 30%, up to that max.
 
 ## Drought (scene / date class)
 

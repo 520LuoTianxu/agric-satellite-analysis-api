@@ -1007,6 +1007,8 @@ export interface AgriSceneProduct {
     cloud_cover: number | null;
     cloud_cover_over_30: boolean | null;
     parcel_cloud_cover_pct: number | null;
+    /** scl | lonlat_clear when the parcel cloud is in-polygon; missing = legacy */
+    parcel_cloud_source?: string | null;
     /** stac_direct (raw) or uncrtaints_decloud (additive) */
     source?: string | null;
     /** good | fair | bad; only good enters official drought metrics */

@@ -15,6 +15,7 @@ from app.core.decloud import (
     decloud_enabled,
     decloud_oss_sensor,
     decloud_scene_id,
+    decloud_stac_cloud_max_pct,
     score_decloud,
     should_trigger_decloud,
 )
@@ -39,6 +40,11 @@ class DecloudFlagTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DECLOUD_CLOUD_MIN_PCT", None)
             self.assertEqual(decloud_cloud_min_pct(), 30.0)
+
+    def test_stac_max_default_is_90(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DECLOUD_STAC_CLOUD_MAX_PCT", None)
+            self.assertEqual(decloud_stac_cloud_max_pct(), 90.0)
 
     def test_backend_dummy(self) -> None:
         with patch.dict(os.environ, {"DECLOUD_BACKEND": "dummy"}):
@@ -70,6 +76,25 @@ class TriggerTests(unittest.TestCase):
 
     def test_stac_cloud_over_threshold(self) -> None:
         self.assertTrue(should_trigger_decloud(cloud_cover=55.0))
+
+    def test_parcel_or_stac_above_min(self) -> None:
+        self.assertTrue(
+            should_trigger_decloud(parcel_cloud_cover_pct=42.0, cloud_cover=10.0)
+        )
+        self.assertTrue(
+            should_trigger_decloud(parcel_cloud_cover_pct=10.0, cloud_cover=42.0)
+        )
+        self.assertFalse(
+            should_trigger_decloud(
+                cloud_cover_over_30=False,
+                parcel_cloud_cover_pct=10.0,
+                cloud_cover=12.0,
+            )
+        )
+
+    def test_stac_85_triggers_95_does_not(self) -> None:
+        self.assertTrue(should_trigger_decloud(cloud_cover=85.0))
+        self.assertFalse(should_trigger_decloud(cloud_cover=95.0))
 
 
 class QualityScoreTests(unittest.TestCase):

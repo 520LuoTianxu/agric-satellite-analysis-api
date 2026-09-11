@@ -25,16 +25,17 @@ UNCRTAINTS_HOME=/opt/UnCRtainTS
 UNCRTAINTS_CHECKPOINT_NAME=diagonal_1
 DECLOUD_BACKEND=uncrtaints
 DECLOUD_CLOUD_MIN_PCT=30
-DECLOUD_STAC_CLOUD_MAX_PCT=80
+DECLOUD_STAC_CLOUD_MAX_PCT=90
 DECLOUD_INPUT_T=3
 DECLOUD_USE_SAR=1
 ```
 
 Restart the ingest worker. Optical jobs then:
 
-- search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (still weekly-best cloud)
+- search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 90; still weekly-best cloud)
 - write the raw S2 lonlat product as today
-- if parcel/scene cloud > 30%, enqueue `app.tasks.decloud_uncrtaints.process_parcel_decloud`
+- if **parcel** cloud (in-polygon SCL / clear flags) > 30% **or** STAC scene
+  cloud > 30%, enqueue `app.tasks.decloud_uncrtaints.process_parcel_decloud`
 
 That task reads **only the field polygon window** (never a full Sentinel scene):
 current cloudy S2 12 L2A bands (B10 filled with zeros), nearest other S2 dates
@@ -71,6 +72,35 @@ RS inputs, overview drought/weak-growth, and share optical series.
 
 `fair` and `bad` are stored for audit. Existing cloud>30% drought filters also
 skip them (`cloud_cover_over_30` stays true).
+
+## Parcel cloud (not window fill)
+
+`parcel_cloud_cover_pct` is the in-polygon SCL cloud/shadow/cirrus fraction
+(classes 3, 8, 9, 10), or the share of lonlat pixels with `clear==0`. It is
+**not** zonal `quality_score` (finite pixels / padded window). That old formula
+stuck small fields near 82.5% on every date.
+
+New writes set `pixel_data.parcel_cloud_source` to `scl` or `lonlat_clear`.
+`cloud_cover` remains STAC `eo:cloud_cover`. `cloud_cover_over_30` follows the
+parcel metric when present.
+
+Rows written before this change have no source marker. Values near 70-90% while
+STAC is under 40% are treated as missing (tooltips / official pick use STAC).
+Optional cleanup SQL: `scripts/legacy-parcel-cloud-cover.sql`.
+
+## Official pick (raw vs good decloud)
+
+Both products stay stored. Official NDVI / drought pick:
+
+1. Truly clear raw (real parcel cloud <= 30%, or STAC when parcel is missing or
+   legacy fill): prefer raw.
+2. Cloudy raw (real parcel > 30%) and a **good** decloud exists: prefer good
+   decloud.
+3. Both exist and raw is borderline (parcel 20-40%) *or* STAC is clear while
+   parcel is cloudy: pick the product whose NDVI (then NDMI) is closer to the
+   median of nearby clear raw dates (plus/minus 45 days, else same calendar
+   month). Tie-break: raw, then `scene_id`.
+4. Fair/bad decloud never enter official series.
 
 ## Smoke tests (no weights)
 

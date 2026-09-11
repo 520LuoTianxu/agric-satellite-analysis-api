@@ -210,8 +210,8 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
         const picked =
             meta.sensor === "S2"
                 ? key === "drought"
-                    ? pickOfficialOptical(group)
-                    : pickOpticalForNdvi(group)
+                    ? pickOfficialOptical(group, { neighbors: scenes })
+                    : pickOpticalForNdvi(group, { neighbors: scenes })
                 : group[0];
         if (!picked) return;
         if (key === "drought" && !isOfficialOpticalScene(picked)) return;
@@ -317,11 +317,8 @@ function pickBestDefaultDate(scenes: AgriSceneProduct[], key: SeriesKey): string
 
 function sceneLooksCloudyOrLowVeg(scene: AgriSceneProduct | undefined, key: SeriesKey): boolean {
     if (!scene || sensorForIndex(key) !== "S2") return false;
-    const cloudy =
-        scene.cloud_cover_over_30 === true ||
-        (typeof scene.cloud_cover === "number" && scene.cloud_cover > DROUGHT_CLOUD_MAX_PCT) ||
-        (typeof scene.parcel_cloud_cover_pct === "number" &&
-            scene.parcel_cloud_cover_pct > DROUGHT_CLOUD_MAX_PCT);
+    const pct = sceneCloudPct(scene);
+    const cloudy = pct != null && pct > DROUGHT_CLOUD_MAX_PCT;
     const avg = sceneSeriesAvg(scene, key);
     const lowVeg = avg != null && avg <= 0.1;
     return cloudy || lowVeg;
@@ -944,8 +941,8 @@ export default function AgriTimeseriesPanel({
             const picked =
                 sensor === "S2"
                     ? series === "drought"
-                        ? pickOfficialOptical(group)
-                        : pickOpticalForNdvi(group)
+                        ? pickOfficialOptical(group, { neighbors: scenes })
+                        : pickOpticalForNdvi(group, { neighbors: scenes })
                     : group[0];
             out[d] = sceneCloudPct(picked);
         }
@@ -978,7 +975,9 @@ export default function AgriTimeseriesPanel({
         if (!matches.length) return null;
         if (sensor === "S2") {
             return (
-                (series === "drought" ? pickOfficialOptical(matches) : pickOpticalForNdvi(matches)) ??
+                (series === "drought"
+                    ? pickOfficialOptical(matches, { neighbors: scenes })
+                    : pickOpticalForNdvi(matches, { neighbors: scenes })) ??
                 matches[0] ??
                 null
             );
@@ -993,9 +992,8 @@ export default function AgriTimeseriesPanel({
 
     const cloudCoverOver30 = useMemo(() => {
         if (!selectedScene) return false;
-        if (selectedScene.cloud_cover_over_30 === true) return true;
-        if (cloudCoverPct != null && cloudCoverPct > 30) return true;
-        return false;
+        if (cloudCoverPct != null) return cloudCoverPct > DROUGHT_CLOUD_MAX_PCT;
+        return selectedScene.cloud_cover_over_30 === true;
     }, [selectedScene, cloudCoverPct]);
 
     const sceneMeanByDate = useMemo(() => {

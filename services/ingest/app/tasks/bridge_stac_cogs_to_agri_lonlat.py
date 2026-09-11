@@ -356,8 +356,13 @@ def _sample_lonlat(
     geom4326: dict,
     bands: dict[str, np.ndarray],
     transform,
-    crs) -> list[dict[str, Any]]:
+    crs,
+    *,
+    scl: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
     """Emit lonlat_v1 pixels for cells inside polygon with finite NDVI."""
+    from app.core.agri_classify import is_scl_cloudy_class
+
     if "NDVI" not in bands:
         return []
     ndvi = bands["NDVI"]
@@ -391,14 +396,24 @@ def _sample_lonlat(
         xs = np.asarray(lons, dtype=np.float64)
         ys = np.asarray(lats, dtype=np.float64)
 
+    scl_ok = (
+        scl is not None
+        and isinstance(scl, np.ndarray)
+        and scl.shape == ndvi.shape
+    )
     pixels: list[dict[str, Any]] = []
     emit_keys = [k for k in EMIT_PIXEL_KEYS if k in bands]
     for i in range(rows.size):
         r, c = int(rows[i]), int(cols[i])
+        clear = 1
+        if scl_ok:
+            sv = scl[r, c]
+            if np.isfinite(sv) and is_scl_cloudy_class(sv):
+                clear = 0
         pix: dict[str, Any] = {
             "lon": _round6(xs[i]),
             "lat": _round6(ys[i]),
-            "clear": 1,
+            "clear": clear,
         }
         ok = True
         for key in emit_keys:
@@ -514,20 +529,11 @@ def process_date(
     mndwi_fs = fs_map.get((date_str, "MNDWI")) or fs_map.get((date_str, "NDWI"))
     mndwi_avg, mndwi_min, mndwi_max = _pick_stats(mndwi_s, mndwi_fs)
 
-    q = None
-    for layer in ("NDVI", "EVI", "NDMI", "NDRE", "CIRE", "MNDWI", "NDWI"):
-        if (date_str, layer) in fs_map:
-            q = fs_map[(date_str, layer)].get("quality_score")
-            break
+    # Do not derive parcel cloud from field_stats quality_score (that is
+    # window fill, not cloud). Without SCL, leave parcel_cloud None so
+    # callers fall back to STAC cloud_cover.
     cloud_over_30 = False
     parcel_cloud = None
-    if q is not None:
-        try:
-            qf = float(q)
-            parcel_cloud = _round6(max(0.0, min(100.0, (1.0 - qf) * 100.0)))
-            cloud_over_30 = qf < 0.05
-        except (TypeError, ValueError):
-            pass
 
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
     scene_id = f"stac_bridge_{date_str}_S2"

@@ -183,6 +183,7 @@ async def _load_agri_share_series(
                            pixel_data->>'source' AS source,
                            pixel_data->>'decloud_quality' AS decloud_quality,
                            pixel_data->'decloud_reasons' AS decloud_reasons,
+                           pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
                            CASE
                              WHEN pixel_data->>'format' = 'lonlat_v1'
                               AND jsonb_typeof(pixel_data->'pixels') = 'array'
@@ -226,9 +227,7 @@ async def _load_agri_share_series(
     def _emit(row: dict[str, Any] | Any, sensor: str) -> None:
         mapping = dict(row) if not isinstance(row, dict) else row
         tip = optical_tooltip_fields(mapping) if sensor == "S2" else {}
-        cloud = mapping.get("parcel_cloud_cover_pct")
-        if cloud is None:
-            cloud = mapping.get("cloud_cover")
+        cloud = tip.get("cloud_cover") if sensor == "S2" else mapping.get("cloud_cover")
         q = _quality_from_cloud(cloud)
         reasons = tip.get("decloud_reasons") if sensor == "S2" else None
         for idx, col, want_sensor in _AGRI_INDEX_COLS:
@@ -255,8 +254,9 @@ async def _load_agri_share_series(
             )
             stats_by_type.setdefault(idx, []).append(pt)
 
+    all_s2 = [row for group in s2_by_date.values() for row in group]
     for group in s2_by_date.values():
-        picked = pick_optical_for_ndvi(group)
+        picked = pick_optical_for_ndvi(group, neighbors=all_s2)
         if picked is None:
             continue
         _emit(picked, "S2")

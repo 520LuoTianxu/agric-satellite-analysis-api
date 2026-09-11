@@ -170,6 +170,7 @@ class ProductPickTests(unittest.TestCase):
             "cloud_cover": 8.0,
             "cloud_cover_over_30": False,
             "parcel_cloud_cover_pct": 8.0,
+            "parcel_cloud_source": "scl",
             "decloud_quality": None,
         }
         decloud = {
@@ -190,6 +191,7 @@ class ProductPickTests(unittest.TestCase):
             "cloud_cover": 62.0,
             "cloud_cover_over_30": True,
             "parcel_cloud_cover_pct": 70.0,
+            "parcel_cloud_source": "scl",
         }
         decloud = {
             "source": "uncrtaints_decloud",
@@ -225,6 +227,7 @@ class ProductPickTests(unittest.TestCase):
             "scene_id": "stac_bridge_2026-09-10_S2_decloud",
             "cloud_cover": 41.0,
             "parcel_cloud_cover_pct": 0.0,
+            "parcel_cloud_source": "scl",
             "decloud_quality": "good",
             "decloud_reasons": [],
             "cloud_cover_over_30": False,
@@ -236,25 +239,192 @@ class ProductPickTests(unittest.TestCase):
         self.assertTrue(tip["is_official"])
         self.assertEqual(tip["scene_id"], scene["scene_id"])
 
+    def test_legacy_window_fill_tooltip_falls_back_to_stac(self) -> None:
+        scene = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-19_S2",
+            "cloud_cover": 27.4,
+            "parcel_cloud_cover_pct": 82.45,
+            "cloud_cover_over_30": True,
+        }
+        tip = optical_tooltip_fields(scene)
+        self.assertAlmostEqual(tip["cloud_cover"], 27.4)
+        self.assertTrue(tip["is_official"])
+
+    def test_legacy_fill_prefers_clear_raw_over_decloud(self) -> None:
+        raw = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-19_S2",
+            "date": "2026-07-19",
+            "cloud_cover": 27.4,
+            "parcel_cloud_cover_pct": 82.45,
+            "cloud_cover_over_30": True,
+            "ndvi_avg": 0.82,
+        }
+        decloud = {
+            "source": "uncrtaints_decloud",
+            "scene_id": "stac_bridge_2026-07-19_S2_decloud",
+            "date": "2026-07-19",
+            "cloud_cover": 27.4,
+            "parcel_cloud_cover_pct": 0.0,
+            "decloud_quality": "good",
+            "ndvi_avg": 0.55,
+        }
+        picked = pick_official_optical([raw, decloud])
+        self.assertEqual(picked["scene_id"], raw["scene_id"])
+
+    def test_closer_to_truth_picks_decloud_near_neighbors(self) -> None:
+        raw = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-15_S2",
+            "date": "2026-07-15",
+            "cloud_cover": 22.0,
+            "parcel_cloud_cover_pct": 35.0,
+            "parcel_cloud_source": "scl",
+            "ndvi_avg": 0.21,
+            "ndmi_avg": 0.05,
+        }
+        decloud = {
+            "source": "uncrtaints_decloud",
+            "scene_id": "stac_bridge_2026-07-15_S2_decloud",
+            "date": "2026-07-15",
+            "cloud_cover": 22.0,
+            "parcel_cloud_cover_pct": 0.0,
+            "decloud_quality": "good",
+            "ndvi_avg": 0.71,
+            "ndmi_avg": 0.28,
+        }
+        neighbors = [
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-01_S2",
+                "date": "2026-07-01",
+                "cloud_cover": 8.0,
+                "parcel_cloud_cover_pct": 5.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.70,
+                "ndmi_avg": 0.30,
+            },
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-20_S2",
+                "date": "2026-07-20",
+                "cloud_cover": 6.0,
+                "parcel_cloud_cover_pct": 4.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.72,
+                "ndmi_avg": 0.29,
+            },
+        ]
+        picked = pick_official_optical([raw, decloud], neighbors=neighbors)
+        self.assertEqual(picked["scene_id"], decloud["scene_id"])
+
+    def test_closer_to_truth_tie_breaks_to_raw(self) -> None:
+        raw = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-15_S2",
+            "date": "2026-07-15",
+            "cloud_cover": 18.0,
+            "parcel_cloud_cover_pct": 28.0,
+            "parcel_cloud_source": "scl",
+            "ndvi_avg": 0.70,
+            "ndmi_avg": 0.30,
+        }
+        decloud = {
+            "source": "uncrtaints_decloud",
+            "scene_id": "stac_bridge_2026-07-15_S2_decloud",
+            "date": "2026-07-15",
+            "cloud_cover": 18.0,
+            "parcel_cloud_cover_pct": 0.0,
+            "decloud_quality": "good",
+            "ndvi_avg": 0.70,
+            "ndmi_avg": 0.30,
+        }
+        neighbors = [
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-01_S2",
+                "date": "2026-07-01",
+                "cloud_cover": 5.0,
+                "parcel_cloud_cover_pct": 4.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.70,
+                "ndmi_avg": 0.30,
+            }
+        ]
+        picked = pick_official_optical([raw, decloud], neighbors=neighbors)
+        self.assertEqual(picked["scene_id"], raw["scene_id"])
+
 
 class SceneCloudFieldsTests(unittest.TestCase):
-    def test_stac_over_30_skips_parcel_metrics(self) -> None:
-        cloud, over, parcel = scene_cloud_fields(42.0, 0.9)
+    def test_parcel_metric_used_for_over_30_not_stac_alone(self) -> None:
+        cloud, over, parcel = scene_cloud_fields(42.0, 5.0)
+        self.assertEqual(cloud, 42.0)
+        self.assertFalse(over)
+        self.assertEqual(parcel, 5.0)
+
+    def test_parcel_over_30_flags_without_dropping_stac(self) -> None:
+        cloud, over, parcel = scene_cloud_fields(12.0, 50.0)
+        self.assertEqual(cloud, 12.0)
+        self.assertTrue(over)
+        self.assertEqual(parcel, 50.0)
+
+    def test_missing_parcel_uses_stac_for_over_30(self) -> None:
+        cloud, over, parcel = scene_cloud_fields(42.0, None)
         self.assertEqual(cloud, 42.0)
         self.assertTrue(over)
         self.assertIsNone(parcel)
 
-    def test_parcel_from_quality_when_stac_clear(self) -> None:
-        cloud, over, parcel = scene_cloud_fields(10.0, 0.8)
-        self.assertEqual(cloud, 10.0)
+    def test_window_fill_quality_cannot_become_parcel_cloud(self) -> None:
+        # Old bug: parcel = (1 - quality_score) * 100.
+        # quality 0.1755 over a padded window -> fake 82.45.
+        # Second arg is now parcel %, so 0.1755 means 0.1755% cloud, not 82%.
+        cloud, over, parcel = scene_cloud_fields(27.4, 0.1755)
+        self.assertEqual(cloud, 27.4)
         self.assertFalse(over)
-        self.assertAlmostEqual(parcel or 0.0, 20.0, places=4)
+        self.assertLess(parcel or 0.0, 1.0)
+        self.assertNotAlmostEqual(parcel or 0.0, 82.45, places=1)
 
-    def test_parcel_over_30_flags_without_dropping_stac(self) -> None:
-        cloud, over, parcel = scene_cloud_fields(12.0, 0.5)
-        self.assertEqual(cloud, 12.0)
-        self.assertTrue(over)
-        self.assertAlmostEqual(parcel or 0.0, 50.0, places=4)
+    def test_counts_ignore_window_size(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_counts
+
+        # 50 in-polygon pixels, 0 cloudy; 280-cell padded window is irrelevant.
+        self.assertEqual(parcel_cloud_from_counts(0, 50), 0.0)
+        self.assertAlmostEqual(parcel_cloud_from_counts(10, 50) or 0.0, 20.0)
+        self.assertIsNone(parcel_cloud_from_counts(0, 0))
+
+    def test_lonlat_clear_pixels_are_low_cloud(self) -> None:
+        from app.core.agri_classify import parcel_cloud_from_lonlat_pixels
+
+        pixels = [{"clear": 1, "NDVI": 0.82} for _ in range(20)]
+        self.assertEqual(parcel_cloud_from_lonlat_pixels(pixels), 0.0)
+        pixels[0]["clear"] = 0
+        self.assertAlmostEqual(parcel_cloud_from_lonlat_pixels(pixels) or 0.0, 5.0)
+
+    def test_jiahebei_style_legacy_fill_is_not_trusted(self) -> None:
+        from app.core.agri_classify import (
+            effective_cloud_pct,
+            parcel_cloud_is_legacy_window_fill,
+        )
+
+        self.assertTrue(parcel_cloud_is_legacy_window_fill(82.45, 27.4))
+        self.assertAlmostEqual(effective_cloud_pct(82.45, 27.4) or 0.0, 27.4)
+        # Trusted SCL writes are never treated as the fill artifact.
+        self.assertFalse(
+            parcel_cloud_is_legacy_window_fill(82.45, 27.4, parcel_cloud_source="scl")
+        )
+        self.assertAlmostEqual(
+            effective_cloud_pct(82.45, 27.4, parcel_cloud_source="scl") or 0.0,
+            82.45,
+        )
+
+    def test_clear_frac_overrides_high_legacy_parcel(self) -> None:
+        from app.core.agri_classify import effective_cloud_pct
+
+        self.assertAlmostEqual(
+            effective_cloud_pct(82.45, 27.4, clear_frac=1.0) or 0.0,
+            27.4,
+        )
 
 
 if __name__ == "__main__":

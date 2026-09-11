@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Mean NDVI chart tooltips now show cloud cover and a short de-cloud quality note (clear raw, good, fair, or poor) for the product actually plotted that day.
 
 ### Changed
+- Cloud-removal can now run on satellite scenes with up to 90% scene cloud (was 80). It still starts when the field or the scene is above 30% cloud.
+- On dates with both a raw scene and a high-quality cloud-removed product, drought and NDVI now pick the one whose vegetation index is closer to nearby clear days, instead of always keeping the raw scene when scene cloud is under 30%.
 - Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.
 - Field drought days now use the growing season (June-September by default) and a two-part rule: dry NDDI (or a dry same-month percentile) plus either dry NDMI or a drop in NDVI versus that month's median. Cloudy or poor de-cloud dates are skipped.
 - Field flood days now use Sentinel-1 VV against a per-orbit baseline (low VV, a drop versus that orbit's median, and a VH helper). Near-threshold dates are marked watch. Spring detections may be irrigation puddles, not disaster flood.
@@ -22,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed
+- NDVI date tooltips no longer show a stuck ~82% field cloud on small fields. That number was empty space around the field, not cloud. Tooltips now use in-field cloud, or the satellite scene cloud when an old stored value looks wrong.
 - Cloud-removal now loads the official UnCRtainTS weights correctly. Earlier loads missed the network prefix and the usual checkpoint filename, so reconstructions were wrong.
 - Sentinel-1 agri scenes download via Planetary Computer SAS-signed Azure assets (no AWS requester-pays keys). Earlier unsigned Element84/S3 reads returned 403 and jobs often finished with zero scenes saved.
 - Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.

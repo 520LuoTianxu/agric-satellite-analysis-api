@@ -9,6 +9,23 @@ export const DROUGHT_CLOUD_MAX_PCT = CLOUD_MAX_PCT;
 /** Official drought window: June-September (override per crop if needed). */
 export const PHENOLOGY_MONTHS = [6, 7, 8, 9] as const;
 
+export const PARCEL_CLOUD_SOURCE_SCL = "scl";
+export const PARCEL_CLOUD_SOURCE_LONLAT = "lonlat_clear";
+export const PARCEL_CLOUD_SOURCES_TRUSTED = new Set([
+    PARCEL_CLOUD_SOURCE_SCL,
+    PARCEL_CLOUD_SOURCE_LONLAT,
+]);
+
+/** Legacy window-fill parcel cloud: (1 - finite/window)*100 on small padded fields. */
+export const LEGACY_PARCEL_CLOUD_MIN = 70;
+export const LEGACY_STAC_CLOUD_MAX = 40;
+export const LEGACY_PARCEL_STAC_GAP = 40;
+export const CLEAR_PIXEL_FRACTION_TRUST = 0.9;
+export const SUSPICIOUS_PARCEL_VS_CLEAR = 50;
+export const NEARBY_CLEAR_DAYS = 45;
+export const BORDERLINE_PARCEL_MIN = 20;
+export const BORDERLINE_PARCEL_MAX = 40;
+
 export const NDDI_MILD_MIN = 0.3;
 export const NDDI_MODERATE_MIN = 0.4;
 export const NDDI_SEVERE_MIN = 0.5;
@@ -55,6 +72,8 @@ export type OpticalSceneLike = {
     cloud_cover_over_30?: boolean | null;
     cloud_cover?: number | null;
     parcel_cloud_cover_pct?: number | null;
+    parcel_cloud_source?: string | null;
+    clear_frac?: number | null;
     ndvi_avg?: number | null;
     ndmi_avg?: number | null;
     sensor?: string | null;
@@ -129,6 +148,43 @@ export function isDecloudProduct(scene: {
     return typeof scene.scene_id === "string" && scene.scene_id.endsWith(DECLOUD_SCENE_ID_SUFFIX);
 }
 
+export function parcelCloudIsLegacyWindowFill(scene: {
+    parcel_cloud_cover_pct?: number | null;
+    cloud_cover?: number | null;
+    parcel_cloud_source?: string | null;
+    clear_frac?: number | null;
+}): boolean {
+    const src = (scene.parcel_cloud_source ?? "").trim().toLowerCase();
+    if (PARCEL_CLOUD_SOURCES_TRUSTED.has(src)) return false;
+    const parcel = finiteNum(scene.parcel_cloud_cover_pct);
+    const stac = finiteNum(scene.cloud_cover);
+    const clearFrac = finiteNum(scene.clear_frac);
+    if (
+        clearFrac != null &&
+        clearFrac >= CLEAR_PIXEL_FRACTION_TRUST &&
+        parcel != null &&
+        parcel > SUSPICIOUS_PARCEL_VS_CLEAR
+    ) {
+        return true;
+    }
+    if (parcel == null || stac == null) return false;
+    return (
+        parcel >= LEGACY_PARCEL_CLOUD_MIN &&
+        stac <= LEGACY_STAC_CLOUD_MAX &&
+        parcel - stac >= LEGACY_PARCEL_STAC_GAP
+    );
+}
+
+export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
+    if (!scene) return null;
+    if (parcelCloudIsLegacyWindowFill(scene)) {
+        return finiteNum(scene.cloud_cover);
+    }
+    const parcel = finiteNum(scene.parcel_cloud_cover_pct);
+    if (parcel != null) return parcel;
+    return finiteNum(scene.cloud_cover);
+}
+
 export function isOfficialOpticalScene(scene: {
     source?: string | null;
     scene_id?: string | null;
@@ -136,31 +192,17 @@ export function isOfficialOpticalScene(scene: {
     cloud_cover_over_30?: boolean | null;
     cloud_cover?: number | null;
     parcel_cloud_cover_pct?: number | null;
+    parcel_cloud_source?: string | null;
+    clear_frac?: number | null;
 }): boolean {
     if (isDecloudProduct(scene)) {
         return scene.decloud_quality === "good";
     }
+    const pct = sceneCloudPct(scene);
+    if (pct != null) return pct <= DROUGHT_CLOUD_MAX_PCT;
     if (scene.cloud_cover_over_30 === true) return false;
     if (scene.cloud_cover_over_30 === false) return true;
-    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
-        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
-    }
-    if (
-        typeof scene.parcel_cloud_cover_pct === "number" &&
-        Number.isFinite(scene.parcel_cloud_cover_pct)
-    ) {
-        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
-    }
     return false;
-}
-
-export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
-    if (!scene) return null;
-    const parcel = scene.parcel_cloud_cover_pct;
-    if (typeof parcel === "number" && Number.isFinite(parcel)) return parcel;
-    const cc = scene.cloud_cover;
-    if (typeof cc === "number" && Number.isFinite(cc)) return cc;
-    return null;
 }
 
 function cloudSortKey(scene: OpticalSceneLike): [number, string] {
@@ -168,22 +210,122 @@ function cloudSortKey(scene: OpticalSceneLike): [number, string] {
     return [pct ?? 999, String(scene.scene_id ?? "")];
 }
 
-/** Clear raw, else good decloud. Same-date scenes. */
-export function pickOfficialOptical<T extends OpticalSceneLike>(scenes: T[]): T | null {
-    const official = scenes.filter(isOfficialOpticalScene);
-    const raw = official.filter((s) => !isDecloudProduct(s));
-    const pool = raw.length ? raw : official;
-    if (!pool.length) return null;
-    return [...pool].sort((a, b) => {
+function sceneIsoDate(scene: OpticalSceneLike): string {
+    return String(scene.date ?? "").slice(0, 10);
+}
+
+function parseIsoDate(dateStr: string): Date | null {
+    if (!dateStr || dateStr.length < 10) return null;
+    const d = new Date(`${dateStr.slice(0, 10)}T00:00:00Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function daysBetween(a: Date, b: Date): number {
+    return Math.abs((a.getTime() - b.getTime()) / 86400000);
+}
+
+export function nearbyClearIndexMedians<T extends OpticalSceneLike>(
+    neighbors: T[] | undefined,
+    targetDate: string,
+    windowDays = NEARBY_CLEAR_DAYS,
+): { ndvi: number | null; ndmi: number | null } {
+    const target = parseIsoDate(targetDate);
+    if (!target || !neighbors?.length) return { ndvi: null, ndmi: null };
+    const windowed: Array<{ ndvi: number; ndmi: number | null }> = [];
+    const sameMonth: Array<{ ndvi: number; ndmi: number | null }> = [];
+    for (const s of neighbors) {
+        if (isDecloudProduct(s)) continue;
+        const ds = sceneIsoDate(s);
+        const d = parseIsoDate(ds);
+        if (!d || ds === targetDate.slice(0, 10)) continue;
+        if (!isOfficialOpticalScene(s)) continue;
+        const ndvi = finiteNum(s.ndvi_avg);
+        if (ndvi == null) continue;
+        const rec = { ndvi, ndmi: finiteNum(s.ndmi_avg) };
+        if (daysBetween(d, target) <= windowDays) windowed.push(rec);
+        if (d.getUTCMonth() + 1 === target.getUTCMonth() + 1) sameMonth.push(rec);
+    }
+    const pool = windowed.length ? windowed : sameMonth;
+    if (!pool.length) return { ndvi: null, ndmi: null };
+    const ndmiVals = pool.map((p) => p.ndmi).filter((v): v is number => v != null);
+    return {
+        ndvi: median(pool.map((p) => p.ndvi)),
+        ndmi: ndmiVals.length ? median(ndmiVals) : null,
+    };
+}
+
+function needsCloserToTruth(raw: OpticalSceneLike): boolean {
+    if (parcelCloudIsLegacyWindowFill(raw)) return false;
+    const parcel = finiteNum(raw.parcel_cloud_cover_pct);
+    const stac = finiteNum(raw.cloud_cover);
+    if (parcel == null) return false;
+    if (parcel > BORDERLINE_PARCEL_MIN && parcel <= BORDERLINE_PARCEL_MAX) return true;
+    if (parcel > DROUGHT_CLOUD_MAX_PCT && stac != null && stac <= DROUGHT_CLOUD_MAX_PCT) {
+        return true;
+    }
+    return false;
+}
+
+function truthSortKey(
+    scene: OpticalSceneLike,
+    ndviMed: number | null,
+    ndmiMed: number | null,
+): [number, number, number, string] {
+    const ndvi = finiteNum(scene.ndvi_avg);
+    const ndmi = finiteNum(scene.ndmi_avg);
+    const dNdvi = ndvi != null && ndviMed != null ? Math.abs(ndvi - ndviMed) : 999;
+    const dNdmi = ndmi != null && ndmiMed != null ? Math.abs(ndmi - ndmiMed) : 999;
+    const decloudRank = isDecloudProduct(scene) ? 1 : 0;
+    return [dNdvi, dNdmi, decloudRank, String(scene.scene_id ?? "")];
+}
+
+export type PickOpticalOpts<T extends OpticalSceneLike> = {
+    neighbors?: T[];
+};
+
+/** Clear raw, else good decloud. Same-date scenes. See docs/agri-drought-flood.md. */
+export function pickOfficialOptical<T extends OpticalSceneLike>(
+    scenes: T[],
+    opts?: PickOpticalOpts<T>,
+): T | null {
+    if (!scenes.length) return null;
+    const rawScenes = scenes.filter((s) => !isDecloudProduct(s));
+    const goodDecloud = scenes.filter(
+        (s) => isDecloudProduct(s) && s.decloud_quality === "good",
+    );
+    const byCloud = (a: T, b: T) => {
         const [pa, ia] = cloudSortKey(a);
         const [pb, ib] = cloudSortKey(b);
         return pa - pb || ia.localeCompare(ib);
-    })[0]!;
+    };
+    const bestRaw = rawScenes.length ? [...rawScenes].sort(byCloud)[0]! : null;
+    const bestDecloud = goodDecloud.length ? [...goodDecloud].sort(byCloud)[0]! : null;
+    const rawClear = bestRaw != null && isOfficialOpticalScene(bestRaw);
+
+    if (bestRaw && !bestDecloud) return rawClear ? bestRaw : null;
+    if (!bestRaw) return bestDecloud;
+
+    if (needsCloserToTruth(bestRaw) && bestDecloud) {
+        const { ndvi, ndmi } = nearbyClearIndexMedians(opts?.neighbors, sceneIsoDate(bestRaw));
+        if (ndvi != null) {
+            const candidates: T[] = [bestRaw, bestDecloud];
+            return candidates.sort((a, b) => {
+                const ka = truthSortKey(a, ndvi, ndmi);
+                const kb = truthSortKey(b, ndvi, ndmi);
+                return ka[0] - kb[0] || ka[1] - kb[1] || ka[2] - kb[2] || ka[3].localeCompare(kb[3]);
+            })[0]!;
+        }
+    }
+    if (rawClear) return bestRaw;
+    return bestDecloud;
 }
 
 /** Official if present; else raw (cloudy). Never fair/bad decloud. */
-export function pickOpticalForNdvi<T extends OpticalSceneLike>(scenes: T[]): T | null {
-    const official = pickOfficialOptical(scenes);
+export function pickOpticalForNdvi<T extends OpticalSceneLike>(
+    scenes: T[],
+    opts?: PickOpticalOpts<T>,
+): T | null {
+    const official = pickOfficialOptical(scenes, opts);
     if (official) return official;
     const raw = scenes.filter((s) => !isDecloudProduct(s));
     if (!raw.length) return null;
@@ -360,20 +502,24 @@ export function classifyDroughtSeries(
     scenes: OpticalSceneLike[],
     seasonMonths: readonly number[] = PHENOLOGY_MONTHS,
 ): Map<string, AgriDroughtClass> {
-    const byDate = new Map<string, OpticalSceneLike>();
+    const groups = new Map<string, OpticalSceneLike[]>();
     for (const s of scenes) {
         if (s.sensor && s.sensor !== "S2") continue;
         const date = String(s.date ?? "");
         if (!date) continue;
-        const existing = byDate.get(date);
-        if (!existing) {
-            byDate.set(date, s);
-            continue;
-        }
-        const picked = pickOfficialOptical([existing, s]) ?? pickOpticalForNdvi([existing, s]);
-        if (picked) byDate.set(date, picked);
+        const arr = groups.get(date) ?? [];
+        arr.push(s);
+        groups.set(date, arr);
     }
-    const list = [...byDate.values()];
+    const allS2 = [...groups.values()].flat();
+    const list: OpticalSceneLike[] = [];
+    for (const group of groups.values()) {
+        const picked =
+            pickOfficialOptical(group, { neighbors: allS2 }) ??
+            pickOpticalForNdvi(group, { neighbors: allS2 });
+        if (picked) list.push(picked);
+        else if (group[0]) list.push(group[0]);
+    }
     const baselines = buildMonthDroughtBaselines(list, seasonMonths);
     const out = new Map<string, AgriDroughtClass>();
     for (const s of list) {
