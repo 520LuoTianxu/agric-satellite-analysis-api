@@ -13,6 +13,8 @@ L2A has no cirrus band: B10 is inserted as zeros.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -178,6 +180,195 @@ class DummyInferencer:
         return out
 
 
+_CHECKPOINT_SUFFIXES = (".pth.tar", ".pth", ".pt", ".ckpt")
+_BLOCK_DIGIT = re.compile(r"^(in_block|out_block)(\d+)$")
+S2_BANDS = 13
+
+
+def _is_checkpoint_file(path: Path) -> bool:
+    return path.name.lower().endswith(_CHECKPOINT_SUFFIXES)
+
+
+def _checkpoint_rank(path: Path) -> tuple[int, int, str]:
+    name = path.name.lower()
+    if name.endswith(".pth.tar"):
+        ext_rank = 0
+    elif name.endswith(".pth"):
+        ext_rank = 1
+    elif name.endswith(".pt"):
+        ext_rank = 2
+    else:
+        ext_rank = 3
+    model_rank = 0 if name.startswith("model.") else 1
+    return (ext_rank, model_rank, name)
+
+
+def _collect_checkpoint_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    found = [p for p in directory.iterdir() if p.is_file() and _is_checkpoint_file(p)]
+    return sorted(found, key=_checkpoint_rank)
+
+
+def _as_int_list(value: Any, default: list[int]) -> list[int]:
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        text = value.strip().lstrip("[").rstrip("]")
+        if not text:
+            return list(default)
+        try:
+            return [int(part.strip()) for part in text.split(",") if part.strip()]
+        except ValueError:
+            return list(default)
+    if isinstance(value, (list, tuple)):
+        try:
+            return [int(part) for part in value]
+        except (TypeError, ValueError):
+            return list(default)
+    return list(default)
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
+def _load_conf_json(ckpt_path: Path) -> dict[str, Any]:
+    conf_path = ckpt_path.parent / "conf.json"
+    if not conf_path.is_file():
+        return {}
+    try:
+        with conf_path.open() as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("uncrtaints_conf_unreadable", path=str(conf_path))
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _expand_out_conv(out_conv: list[int], covmode: str) -> list[int]:
+    """Match train_reconstruct.py: diag/uni add 13, iso adds 1, if still S2-sized."""
+    if not out_conv:
+        return [2 * S2_BANDS]
+    last = out_conv[-1]
+    if last != S2_BANDS:
+        return out_conv
+    expanded = list(out_conv)
+    if covmode == "iso":
+        expanded[-1] = last + 1
+    elif covmode in ("uni", "diag"):
+        expanded[-1] = last + S2_BANDS
+    return expanded
+
+
+def _uncrtaints_ctor_kwargs(conf: dict[str, Any], input_dim: int) -> dict[str, Any]:
+    covmode = str(conf.get("covmode") or "diag")
+    out_conv = _expand_out_conv(
+        _as_int_list(conf.get("out_conv"), [2 * S2_BANDS]), covmode
+    )
+    pretrain = conf.get("pretrain")
+    if pretrain is None:
+        is_mono = decloud_input_t() <= 1
+    else:
+        is_mono = _as_bool(pretrain, False)
+    return {
+        "input_dim": input_dim,
+        "encoder_widths": _as_int_list(conf.get("encoder_widths"), [128]),
+        "decoder_widths": _as_int_list(
+            conf.get("decoder_widths"), [128, 128, 128, 128, 128]
+        ),
+        "out_conv": out_conv,
+        "out_nonlin_mean": _as_bool(conf.get("mean_nonLinearity"), True),
+        "out_nonlin_var": str(conf.get("var_nonLinearity") or "softplus"),
+        "agg_mode": str(conf.get("agg_mode") or "att_group"),
+        "encoder_norm": str(conf.get("encoder_norm") or "group"),
+        "decoder_norm": str(conf.get("decoder_norm") or "batch"),
+        "n_head": int(conf.get("n_head") or 16),
+        "d_model": int(conf.get("d_model") or 256),
+        "d_k": int(conf.get("d_k") or 4),
+        "pad_value": conf.get("pad_value", 0),
+        "padding_mode": str(conf.get("padding_mode") or "reflect"),
+        "positional_encoding": _as_bool(conf.get("positional_encoding"), True),
+        "covmode": covmode,
+        "scale_by": 10.0 if conf.get("scale_by") is None else float(conf["scale_by"]),
+        "separate_out": _as_bool(conf.get("separate_out"), False),
+        "use_v": _as_bool(conf.get("use_v"), False),
+        "block_type": str(conf.get("block_type") or "mbconv"),
+        "is_mono": is_mono,
+    }
+
+
+def _extract_state_dict(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise DecloudUnavailable("checkpoint is not a state dict")
+    nested = raw.get("state_dict")
+    if isinstance(nested, dict):
+        return nested
+    nested = raw.get("model")
+    if isinstance(nested, dict):
+        return nested
+    return raw
+
+
+def _strip_netg_prefix(state: dict[str, Any]) -> dict[str, Any]:
+    """Drop BaseModel wrapper keys so a bare UNCRTAINTS can load official weights."""
+    netg_only: dict[str, Any] = {}
+    rest: dict[str, Any] = {}
+    for key, value in state.items():
+        name = key[7:] if key.startswith("module.") else key
+        if name.startswith("netG."):
+            netg_only[name[5:]] = value
+        elif name != "netG":
+            rest[name] = value
+    return netg_only if netg_only else rest
+
+
+def _rename_in_out_blocks(state: dict[str, Any]) -> dict[str, Any]:
+    """Official load_checkpoint fallback: in_block1 -> in_block.0 (digit minus 1)."""
+    renamed: dict[str, Any] = {}
+    for key, value in state.items():
+        parts = key.split(".")
+        new_parts: list[str] = []
+        for part in parts:
+            match = _BLOCK_DIGIT.match(part)
+            if match:
+                new_parts.append(f"{match.group(1)}.{int(match.group(2)) - 1}")
+            else:
+                new_parts.append(part)
+        renamed[".".join(new_parts)] = value
+    return renamed
+
+
+def _load_state_into_generator(
+    model: Any, state: dict[str, Any], ckpt_path: Path
+) -> tuple[list[str], list[str]]:
+    cleaned = _strip_netg_prefix(state)
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    missing_list = list(missing or ())
+    unexpected_list = list(unexpected or ())
+    if missing_list:
+        renamed = _rename_in_out_blocks(cleaned)
+        missing, unexpected = model.load_state_dict(renamed, strict=False)
+        missing_list = list(missing or ())
+        unexpected_list = list(unexpected or ())
+    if missing_list or unexpected_list:
+        logger.warning(
+            "uncrtaints_state_partial",
+            missing=len(missing_list),
+            unexpected=len(unexpected_list),
+            path=str(ckpt_path),
+        )
+    return missing_list, unexpected_list
+
+
 class UncrtainTSInferencer:
     def __init__(self, device: str | None = None) -> None:
         self.device = device or pick_device()
@@ -215,48 +406,15 @@ class UncrtainTSInferencer:
                 ) from exc
 
         ckpt_path = _resolve_checkpoint_file()
+        conf = _load_conf_json(ckpt_path)
         s1_bands = 2 if decloud_use_sar() else 0
-        s2_bands = 13
+        # Bare generator only. Do not import get_model/BaseModel (pulls fvcore + Adam).
         model = UNCRTAINTS(
-            input_dim=s1_bands + s2_bands,
-            encoder_widths=[128],
-            decoder_widths=[128, 128, 128, 128, 128],
-            out_conv=[2 * s2_bands],
-            out_nonlin_mean=True,
-            out_nonlin_var="softplus",
-            agg_mode="att_group",
-            encoder_norm="group",
-            decoder_norm="batch",
-            n_head=16,
-            d_model=256,
-            d_k=4,
-            pad_value=0,
-            padding_mode="reflect",
-            positional_encoding=True,
-            covmode="diag",
-            scale_by=10.0,
-            separate_out=False,
-            use_v=False,
-            block_type="mbconv",
-            is_mono=decloud_input_t() <= 1,
+            **_uncrtaints_ctor_kwargs(conf, input_dim=s1_bands + S2_BANDS)
         )
-        state = torch.load(ckpt_path, map_location=self.device)
-        if isinstance(state, dict) and "state_dict" in state:
-            state = state["state_dict"]
-        if (
-            isinstance(state, dict)
-            and "model" in state
-            and isinstance(state["model"], dict)
-        ):
-            state = state["model"]
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        if missing or unexpected:
-            logger.warning(
-                "uncrtaints_state_partial",
-                missing=len(missing),
-                unexpected=len(unexpected),
-                path=str(ckpt_path),
-            )
+        raw = torch.load(ckpt_path, map_location=self.device)
+        state = _extract_state_dict(raw)
+        _load_state_into_generator(model, state, ckpt_path)
         model.to(self.device)
         model.eval()
         logger.info(
@@ -291,9 +449,10 @@ class UncrtainTSInferencer:
         dates = _batch_positions(date_ordinals, t)
         tensor = torch.from_numpy(fused[None] * 10.0).to(self.device)
         pos = torch.from_numpy(dates).to(self.device)
+        generator = getattr(self.model, "netG", self.model)
         with torch.no_grad():
-            out = self.model(tensor, batch_positions=pos)
-        mean = out[:, :, :13, ...].detach().cpu().numpy() / 10.0
+            out = generator(tensor, batch_positions=pos)
+        mean = out[:, :, :13].detach().cpu().numpy() / 10.0
         rec = crop_hw(mean[0, -1], hw)
         return np.clip(rec.astype(np.float32), 0.0, 1.0)
 
@@ -319,25 +478,25 @@ def _resolve_checkpoint_file() -> Path:
             "and point the env var at that directory"
         )
     base = Path(root)
-    if base.is_file() and base.suffix in {".pth", ".pt", ".ckpt"}:
-        return base
-    name = uncrtaints_checkpoint_name()
-    candidates: list[Path] = []
-    if base.is_dir():
-        named = base / name
-        if named.is_dir():
-            candidates.extend(sorted(named.glob("*.pth")))
-            candidates.extend(sorted(named.glob("*.pt")))
-            candidates.extend(sorted(named.glob("*.ckpt")))
-        candidates.extend(sorted(base.glob(f"{name}*.pth")))
-        candidates.extend(sorted(base.glob("*.pth")))
-        candidates.extend(sorted(base.glob("*.pt")))
-        candidates.extend(sorted(base.glob("*.ckpt")))
-    if not candidates:
+    if base.is_file():
+        if _is_checkpoint_file(base):
+            return base
         raise DecloudUnavailable(
-            f"no .pth/.pt checkpoint under {base} (expected {name})"
+            f"checkpoint file {base} is not .pth.tar/.pth/.pt/.ckpt"
         )
-    return candidates[0]
+    name = uncrtaints_checkpoint_name()
+    search_dirs: list[Path] = []
+    named = base / name
+    if named.is_dir():
+        search_dirs.append(named)
+    search_dirs.append(base)
+    for directory in search_dirs:
+        found = _collect_checkpoint_files(directory)
+        if found:
+            return found[0]
+    raise DecloudUnavailable(
+        f"no .pth.tar/.pth/.pt/.ckpt checkpoint under {base} (expected {name})"
+    )
 
 
 def get_inferencer() -> Inferencer:
