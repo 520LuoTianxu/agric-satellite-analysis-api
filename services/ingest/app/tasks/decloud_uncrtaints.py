@@ -107,15 +107,18 @@ def enqueue_parcel_decloud(
         cloud_min_pct=decloud_cloud_min_pct(),
     ):
         return False
-    process_parcel_decloud.delay(
-        field_id,
-        str(land_id),
-        date_str,
-        mq_task_id,
-        raw_scene_id,
-        stac_cloud,
-        parcel_cloud,
-        cloud_over_30,
+    process_parcel_decloud.apply_async(
+        args=(
+            field_id,
+            str(land_id),
+            date_str,
+            mq_task_id,
+            raw_scene_id,
+            stac_cloud,
+            parcel_cloud,
+            cloud_over_30,
+        ),
+        queue="decloud",
     )
     logger.info(
         "decloud_enqueued",
@@ -142,14 +145,17 @@ def enqueue_decloud_parcel_batch(
     """Enqueue job-level buffer-then-decloud after raw lonlat is stored."""
     if not decloud_enabled():
         return False
-    decloud_parcel_batch.delay(
-        field_id,
-        str(land_id),
-        str(date_from)[:10],
-        str(date_to)[:10],
-        list(targets or []),
-        mq_task_id,
-        list(season_months) if season_months is not None else None,
+    decloud_parcel_batch.apply_async(
+        args=(
+            field_id,
+            str(land_id),
+            str(date_from)[:10],
+            str(date_to)[:10],
+            list(targets or []),
+            mq_task_id,
+            list(season_months) if season_months is not None else None,
+        ),
+        queue="decloud",
     )
     logger.info(
         "decloud_batch_enqueued",
