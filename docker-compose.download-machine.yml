@@ -1,0 +1,94 @@
+# Download machine: remote PG/Redis, host networking (box bridge NAT broken),
+# no local db/redis/minio/api/web/writer.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f docker-compose.download-machine.yml --profile consumer \
+#     up -d --build ingest storage beat tiler mq_consumer decloud
+#
+# Secrets stay in .env / docker-compose.dev.yml — never hard-code credentials here.
+
+services:
+  db:
+    profiles: ["local-db"]
+  redis:
+    profiles: ["local-redis"]
+  api:
+    profiles: ["api"]
+  web:
+    profiles: ["web"]
+  mq_result_writer:
+    profiles: ["producer"]
+
+  ingest:
+    network_mode: host
+    depends_on: !reset []
+    restart: unless-stopped
+    environment:
+      MPLCONFIGDIR: /tmp/matplotlib
+      SYNC_DB_POOL_SIZE: "8"
+      SYNC_DB_MAX_OVERFLOW: "8"
+      SYNC_DB_POOL_RECYCLE: "300"
+      SYNC_DB_APP_NAME: "download-ingest"
+      INGEST_SCENE_MAX_WORKERS: "8"
+    volumes:
+      - scratch:/data/scratch
+      - ${UNCRTAINTS_HOME:-/workspace/UnCRtainTS}:/opt/UnCRtainTS:ro
+      - ${UNCRTAINTS_CHECKPOINT_HOST:-/workspace/UnCRtainTS/checkpoints}:/models/uncrtaints:ro
+    command: >
+      celery -A app.worker worker
+      -Q ingest
+      -n ingest@%h
+      --loglevel=info
+      --concurrency=2
+
+  # Separate queue so UnCRtainTS runs while optical shards keep downloading.
+  # Same image as ingest; env comes from compose base + .env (no secrets here).
+  decloud:
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
+    network_mode: host
+    depends_on: !reset []
+    restart: unless-stopped
+    environment:
+      MPLCONFIGDIR: /tmp/matplotlib
+      SYNC_DB_POOL_SIZE: "4"
+      SYNC_DB_MAX_OVERFLOW: "4"
+      SYNC_DB_POOL_RECYCLE: "300"
+      SYNC_DB_APP_NAME: "download-decloud"
+      INGEST_SCENE_MAX_WORKERS: "2"
+    volumes:
+      - scratch:/data/scratch
+      - ${UNCRTAINTS_HOME:-/workspace/UnCRtainTS}:/opt/UnCRtainTS:ro
+      - ${UNCRTAINTS_CHECKPOINT_HOST:-/workspace/UnCRtainTS/checkpoints}:/models/uncrtaints:ro
+    command: >
+      celery -A app.worker worker
+      -Q decloud
+      -n decloud@%h
+      --loglevel=info
+      --concurrency=2
+
+  storage:
+    network_mode: host
+    depends_on: !reset []
+    restart: unless-stopped
+    command: >
+      celery -A app.worker worker
+      -Q storage
+      -n storage@%h
+      --loglevel=info
+      --concurrency=2
+  beat:
+    network_mode: host
+    depends_on: !reset []
+    restart: unless-stopped
+  mq_consumer:
+    network_mode: host
+    depends_on: !reset []
+    restart: unless-stopped
+  tiler:
+    network_mode: host
+    ports: !reset []
+    depends_on: !reset []
+    restart: unless-stopped
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]

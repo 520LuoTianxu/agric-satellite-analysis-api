@@ -5,7 +5,7 @@ Stdlib-only so CI ingest tests can import this without torch/numpy/rasterio.
 Product rules:
 - Additive: never overwrite raw S2 lonlat rows.
 - Trigger when scene/parcel cloud > DECLOUD_CLOUD_MIN_PCT (default 30).
-- STAC search/ingest cap is DECLOUD_STAC_CLOUD_MAX_PCT (default 90).
+- STAC search/ingest cap is DECLOUD_STAC_CLOUD_MAX_PCT (default 100).
 - When enabled, default ``DECLOUD_MODE=batch``: buffer many parcel windows,
   then decloud; do not publish the official cloudy-date product as soon as
   one raw scene finishes.
@@ -38,7 +38,7 @@ DecloudBackend = Literal["uncrtaints", "dummy"]
 DecloudMode = Literal["batch", "per_scene"]
 
 DEFAULT_CLOUD_MIN_PCT = CLOUD_MAX_PCT
-DEFAULT_STAC_CLOUD_MAX_PCT = 90.0
+DEFAULT_STAC_CLOUD_MAX_PCT = 100.0
 DEFAULT_INPUT_T = 3
 DEFAULT_CHECKPOINT_NAME = "diagonal_1"
 DEFAULT_MODE: DecloudMode = "batch"
@@ -178,19 +178,140 @@ def _iso_date(value: Any) -> str | None:
     return text[:10] if text else None
 
 
+
+def _months_from_window(window: dict) -> set[int]:
+    """Parse one growing-season window: months[] and/or start_month..end_month (wrap)."""
+    out: set[int] = set()
+    for m in window.get("months") or []:
+        try:
+            mi = int(m)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= mi <= 12:
+            out.add(mi)
+    sm, em = window.get("start_month"), window.get("end_month")
+    if sm is not None and em is not None:
+        try:
+            sm_i, em_i = int(sm), int(em)
+        except (TypeError, ValueError):
+            sm_i = em_i = 0
+        if 1 <= sm_i <= 12 and 1 <= em_i <= 12:
+            if sm_i <= em_i:
+                out.update(range(sm_i, em_i + 1))
+            else:
+                # e.g. winter wheat Oct→May
+                out.update(range(sm_i, 13))
+                out.update(range(1, em_i + 1))
+    return out
+
+
+def normalize_season_months(
+    *,
+    season_months: list[int] | tuple[int, ...] | None = None,
+    growing_seasons: list[dict] | None = None,
+    crop_type: str | None = None,
+) -> tuple[int, ...]:
+    """Union user-selected seasons (rotation) → month set; else crop/default calendar."""
+    months: set[int] = set()
+    for m in season_months or []:
+        try:
+            mi = int(m)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= mi <= 12:
+            months.add(mi)
+    for window in growing_seasons or []:
+        if isinstance(window, dict):
+            months |= _months_from_window(window)
+    if months:
+        return tuple(sorted(months))
+    return decloud_season_months(crop_type)
+
+
+def decloud_season_months(crop_type: str | None = None) -> tuple[int, ...]:
+    """Growing-season months for decloud + high-cloud ingest.
+
+    Prefer the field crop calendar; fall back to drought phenology (Jun-Sep).
+    """
+    try:
+        from app.core.crops import get_crop_season
+
+        months = sorted(int(m) for m in get_crop_season(crop_type).season_months)
+        if months:
+            return tuple(months)
+    except Exception:
+        pass
+    from app.core.agri_classify import PHENOLOGY_MONTHS
+
+    return tuple(int(m) for m in PHENOLOGY_MONTHS)
+
+
+def date_in_decloud_season(
+    date_str: str | None,
+    season_months: tuple[int, ...] | list[int] | None = None,
+) -> bool:
+    """True when ``date_str`` falls in the crop growing season."""
+    from app.core.agri_classify import is_drought_season
+
+    months = decloud_season_months(None) if season_months is None else season_months
+    return is_drought_season(date_str, months)
+
+
+def filter_scenes_outside_season_high_cloud(
+    scenes: list[dict],
+    *,
+    season_months: tuple[int, ...] | list[int] | None = None,
+    cloud_skip_pct: float | None = None,
+) -> tuple[list[dict], int]:
+    """Drop out-of-season scenes with STAC cloud > threshold (default 30%).
+
+    In-season scenes are kept regardless of cloud (decloud path needs them).
+    Out-of-season clear/low-cloud scenes stay for winter baseline / NDVI.
+    Returns ``(kept_scenes, skipped_count)``.
+    """
+    lo = DEFAULT_CLOUD_MIN_PCT if cloud_skip_pct is None else float(cloud_skip_pct)
+    months = decloud_season_months(None) if season_months is None else season_months
+    kept: list[dict] = []
+    skipped = 0
+    for sc in scenes or []:
+        date_str = _iso_date(sc.get("date") or sc.get("datetime"))
+        if date_str and date_in_decloud_season(date_str, months):
+            kept.append(sc)
+            continue
+        cloud = sc.get("cloud_cover")
+        if cloud is None:
+            cloud = (sc.get("properties") or {}).get("eo:cloud_cover")
+        try:
+            cloud_f = float(cloud) if cloud is not None else None
+        except (TypeError, ValueError):
+            cloud_f = None
+        if cloud_f is not None and cloud_f > lo:
+            skipped += 1
+            continue
+        kept.append(sc)
+    return kept, skipped
+
+
 def cloudy_targets_from_raw(
     raw_results: list[dict[str, Any]] | None,
     *,
     cloud_min_pct: float | None = None,
+    season_months: tuple[int, ...] | list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Cloudy raw lonlat rows that still need an additive decloud attempt."""
+    """Cloudy raw lonlat rows that still need an additive decloud attempt.
+
+    Out-of-season cloudy dates are never decloud targets (skip UnCRtainTS).
+    """
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    months = decloud_season_months(None) if season_months is None else season_months
     for row in raw_results or []:
         if not row:
             continue
         date_str = _iso_date(row.get("date"))
         if not date_str or date_str in seen:
+            continue
+        if not date_in_decloud_season(date_str, months):
             continue
         if not should_trigger_decloud(
             cloud_cover_over_30=row.get("cloud_cover_over_30"),
@@ -237,6 +358,7 @@ def plan_decloud_after_raw(
     cached_neighbor_counts: dict[str, int] | None = None,
     input_t: int | None = None,
     cloud_min_pct: float | None = None,
+    season_months: tuple[int, ...] | list[int] | None = None,
 ) -> DecloudPlan:
     """Decide per-scene vs batch decloud after raw products are stored.
 
@@ -246,7 +368,11 @@ def plan_decloud_after_raw(
     cached; otherwise those dates still go to batch.
     """
     targets = (
-        cloudy_targets_from_raw(raw_results, cloud_min_pct=cloud_min_pct)
+        cloudy_targets_from_raw(
+            raw_results,
+            cloud_min_pct=cloud_min_pct,
+            season_months=season_months,
+        )
         if enabled
         else []
     )
@@ -367,7 +493,7 @@ def should_trigger_decloud(
     """True when parcel or STAC cloud is above min and STAC is within the ingest max.
 
     Trigger if in-polygon parcel cloud > min (default 30) **or** STAC
-    ``eo:cloud_cover`` > min, up to ``DECLOUD_STAC_CLOUD_MAX_PCT`` (default 90).
+    ``eo:cloud_cover`` > min, up to ``DECLOUD_STAC_CLOUD_MAX_PCT`` (default 100).
     Scenes above the max should not have been ingested.
     """
     lo = DEFAULT_CLOUD_MIN_PCT if cloud_min_pct is None else float(cloud_min_pct)
@@ -644,6 +770,10 @@ __all__ = [
     "DecloudQualityInputs",
     "DecloudQualityResult",
     "batch_neighbors_ready",
+    "normalize_season_months",
+    "decloud_season_months",
+    "date_in_decloud_season",
+    "filter_scenes_outside_season_high_cloud",
     "cloudy_targets_from_raw",
     "decloud_backend",
     "decloud_cloud_min_pct",

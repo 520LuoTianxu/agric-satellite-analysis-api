@@ -17,6 +17,9 @@ from app.core.decloud import (
     DecloudQualityInputs,
     batch_neighbors_ready,
     cloudy_targets_from_raw,
+    decloud_season_months,
+    filter_scenes_outside_season_high_cloud,
+    date_in_decloud_season,
     decloud_backend,
     decloud_cloud_min_pct,
     decloud_drought_exclusion_flags,
@@ -418,6 +421,48 @@ class BatchPlanTests(unittest.TestCase):
                 has_finite_index=True,
             )
         )
+
+
+    def test_offseason_cloudy_not_decloud_target(self) -> None:
+        winter = {
+            "date": "2024-12-15",
+            "scene_id": "stac_bridge_2024-12-15_S2",
+            "cloud_cover": 70.0,
+            "cloud_cover_over_30": True,
+            "parcel_cloud_cover_pct": 55.0,
+        }
+        targets = cloudy_targets_from_raw([winter, self._cloudy_raw])
+        self.assertEqual([t["date"] for t in targets], ["2024-07-15"])
+
+    def test_plan_skips_offseason_cloudy(self) -> None:
+        winter = {
+            "date": "2025-01-10",
+            "scene_id": "stac_bridge_2025-01-10_S2",
+            "cloud_cover": 80.0,
+            "cloud_cover_over_30": True,
+            "parcel_cloud_cover_pct": 60.0,
+        }
+        plan = plan_decloud_after_raw(
+            enabled=True,
+            mode="batch",
+            raw_results=[winter, self._cloudy_raw],
+            cached_neighbor_counts={},
+            input_t=3,
+        )
+        self.assertEqual([t["date"] for t in plan.batch_targets], ["2024-07-15"])
+
+    def test_filter_scenes_drops_offseason_high_cloud(self) -> None:
+        scenes = [
+            {"date": "2024-07-15", "cloud_cover": 80.0},
+            {"date": "2024-12-01", "cloud_cover": 80.0},
+            {"date": "2024-12-08", "cloud_cover": 10.0},
+        ]
+        kept, skipped = filter_scenes_outside_season_high_cloud(
+            scenes, season_months=(6, 7, 8, 9)
+        )
+        self.assertEqual(skipped, 1)
+        self.assertEqual([s["date"] for s in kept], ["2024-07-15", "2024-12-08"])
+
 
 
 class PersistProductTests(unittest.TestCase):

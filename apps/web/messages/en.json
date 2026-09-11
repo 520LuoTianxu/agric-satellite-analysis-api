@@ -877,7 +877,12 @@
     "reason_spatial_std_low": "low spatial contrast",
     "reason_ndvi_far_below_neighbors": "NDVI far below nearby clear dates",
     "reason_ndvi_below_neighbors": "NDVI below nearby clear dates",
-    "reason_non_finite_reconstruction": "invalid reconstruction"
+    "reason_non_finite_reconstruction": "invalid reconstruction",
+    "pointLegendTitle": "Point colors",
+    "pointLegendGreen": "Green dots: in-season official NDVI (raw or good de-cloud)",
+    "pointLegendGray": "Gray dots: official but muted — off-season, or peak-month NDVI too low (bare/weak)",
+    "pointLegendYellow": "Yellow diamonds: de-cloud alternate (fair/bad, may be unreliable) — compare only, not official/drought",
+    "pointLegendSelected": "Red large dot: selected date"
   },
   "agriPanel": {
     "title": "Agri RS time series · heatmap",
@@ -921,7 +926,10 @@
     "decloudChip_bad": "de-cloud poor (may be unreliable)",
     "refreshComplete": "Remote-sensing refresh complete; scenes reloaded",
     "progressBridge": "Confirming agri lonlat is written…",
-    "progressCounts": "Chunks {done}/{total} (running {running}, queued {pending})"
+    "progressCounts": "Chunks {done}/{total} (running {running}, queued {pending})",
+    "refreshRsSeasons": "Growing seasons (multi-select for rotation)",
+    "refreshRsSeasonsHint": "In selected months, cloudy (>30%) scenes are pulled and de-clouded. Outside them only ≤30% cloud is pulled, no de-cloud. Leave empty to use the field crop calendar.",
+    "refreshRsSeasonsEmpty": "Empty = crop default season"
   },
   "landReportTab": {
     "title": "Land assessment report",

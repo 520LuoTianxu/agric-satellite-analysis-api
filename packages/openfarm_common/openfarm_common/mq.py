@@ -49,9 +49,40 @@ def _params(url: str | None = None) -> pika.URLParameters:
     return params
 
 
+# pika BlockingConnection is not thread-safe. Keep one cached connection per
+# thread so scene-parallel publishes do not redo CloudAMQP TLS every scene
+# (~2s each was dominating lonlat write time).
+_tls = __import__("threading").local()
+
+
+def _cached_connection(url: str | None = None) -> BlockingConnection:
+    key = url or ""
+    conn = getattr(_tls, "conn", None)
+    conn_key = getattr(_tls, "conn_key", None)
+    if conn is not None and conn_key == key and getattr(conn, "is_open", False):
+        return conn
+    if conn is not None:
+        try:
+            if conn.is_open:
+                conn.close()
+        except Exception:
+            pass
+    conn = pika.BlockingConnection(_params(url))
+    _tls.conn = conn
+    _tls.conn_key = key
+    return conn
+
+
 @contextmanager
-def mq_connection(url: str | None = None):
-    """Yield a BlockingConnection; always close on exit."""
+def mq_connection(url: str | None = None, *, reuse: bool = False):
+    """Yield a BlockingConnection.
+
+    ``reuse=True`` keeps a thread-local connection open (publish hot path).
+    Default still opens+closes for one-shot callers.
+    """
+    if reuse:
+        yield _cached_connection(url)
+        return
     conn = pika.BlockingConnection(_params(url))
     try:
         yield conn
@@ -111,13 +142,31 @@ def publish_task(
     if isinstance(message, dict):
         message = TaskMessage.model_validate(message)
     payload = message.model_dump(mode="json")
-    with mq_connection(url) as conn:
-        ch = conn.channel()
-        tq, _ = declare_queues(ch)
-        target = queue or tq
-        declare_queues(ch)  # ensure both exist
-        ch.queue_declare(queue=target, durable=True)
-        publish_json(ch, target, payload)
+    with mq_connection(url, reuse=True) as conn:
+        ch = getattr(_tls, "download_channel", None)
+        if ch is None or not getattr(ch, "is_open", False):
+            ch = conn.channel()
+            tq, _ = declare_queues(ch)
+            _tls.download_queue = tq
+            _tls.download_channel = ch
+        target = queue or getattr(_tls, "download_queue", None) or settings.cloudamqp_download_queue
+        try:
+            publish_json(ch, target, payload)
+        except Exception:
+            try:
+                if ch is not None and getattr(ch, "is_open", False):
+                    ch.close()
+            except Exception:
+                pass
+            _tls.download_channel = None
+            try:
+                c = getattr(_tls, "conn", None)
+                if c is not None and getattr(c, "is_open", False):
+                    c.close()
+            except Exception:
+                pass
+            _tls.conn = None
+            raise
     logger.info(
         "mq_task_published task_id=%s type=%s queue=%s broker=%s",
         message.task_id,
@@ -137,12 +186,34 @@ def publish_result(
     if isinstance(message, dict):
         message = ResultMessage.model_validate(message)
     payload = message.model_dump(mode="json")
-    with mq_connection(url) as conn:
-        ch = conn.channel()
-        _, rq = declare_queues(ch)
-        target = queue or rq
-        ch.queue_declare(queue=target, durable=True)
-        publish_json(ch, target, payload)
+    with mq_connection(url, reuse=True) as conn:
+        ch = getattr(_tls, "process_channel", None)
+        if ch is None or not getattr(ch, "is_open", False):
+            ch = conn.channel()
+            _, rq = declare_queues(ch)
+            _tls.process_queue = rq
+            _tls.process_channel = ch
+            _tls.queues_declared = True
+        target = queue or getattr(_tls, "process_queue", None) or settings.cloudamqp_process_queue
+        try:
+            publish_json(ch, target, payload)
+        except Exception:
+            # Drop cached channel/conn so the next publish reconnects cleanly.
+            try:
+                if ch is not None and getattr(ch, "is_open", False):
+                    ch.close()
+            except Exception:
+                pass
+            _tls.process_channel = None
+            _tls.queues_declared = False
+            try:
+                conn = getattr(_tls, "conn", None)
+                if conn is not None and getattr(conn, "is_open", False):
+                    conn.close()
+            except Exception:
+                pass
+            _tls.conn = None
+            raise
     logger.info(
         "mq_result_published task_id=%s status=%s queue=%s broker=%s",
         message.task_id,

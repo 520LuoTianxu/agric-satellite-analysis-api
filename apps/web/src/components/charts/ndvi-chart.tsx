@@ -343,7 +343,16 @@ export default function NdviChart({
                     }
                     if (!isSar && (hasOpticalTooltip(extras) || extraLines.length)) {
                         lines.push(formatCloudLine(extras?.cloudCover, t));
-                        for (const line of extraLines) lines.push(line);
+                        // Prefer real decloud status over "无（多云原始）" when an alt
+                        // (fair/bad) product is also on this axis date.
+                        const unique = [...new Set(extraLines.filter(Boolean))];
+                        const hasRealDecloud = unique.some(
+                            (line) => line !== t("decloudNone") && line !== t("decloudClear") && line !== t("decloudNA"),
+                        );
+                        for (const line of unique) {
+                            if (hasRealDecloud && line === t("decloudNone")) continue;
+                            lines.push(line);
+                        }
                     }
                     return lines.join("<br/>");
                 },
@@ -472,15 +481,63 @@ export default function NdviChart({
         );
     }
 
+    const lineColor = indexLineColor(indexType);
+    const grayColor = tokenColor("--muted-foreground");
+    const yellowColor = tokenColor("--warning");
+    const redColor = tokenColor("--danger");
+
     return (
-        <ReactEChartsCore
-            echarts={echarts}
-            option={option}
-            style={{ height, width: "100%" }}
-            onEvents={onEvents}
-            notMerge
-            lazyUpdate
-        />
+        <div className="w-full space-y-1.5">
+            <ReactEChartsCore
+                echarts={echarts}
+                option={option}
+                style={{ height, width: "100%" }}
+                onEvents={onEvents}
+                notMerge
+                lazyUpdate
+            />
+            {!isSar ? (
+                <div className="px-1 space-y-1">
+                    <p className="text-[10px] font-medium text-muted-foreground">
+                        {t("pointLegendTitle")}
+                    </p>
+                    <ul className="grid gap-1 text-[10px] text-muted-foreground leading-snug sm:grid-cols-2">
+                        <li className="flex items-start gap-1.5">
+                            <span
+                                className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: lineColor }}
+                                aria-hidden
+                            />
+                            <span>{t("pointLegendGreen")}</span>
+                        </li>
+                        <li className="flex items-start gap-1.5">
+                            <span
+                                className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full opacity-60"
+                                style={{ backgroundColor: grayColor }}
+                                aria-hidden
+                            />
+                            <span>{t("pointLegendGray")}</span>
+                        </li>
+                        <li className="flex items-start gap-1.5">
+                            <span
+                                className="mt-0.5 h-2.5 w-2.5 shrink-0 rotate-45"
+                                style={{ backgroundColor: yellowColor }}
+                                aria-hidden
+                            />
+                            <span>{t("pointLegendYellow")}</span>
+                        </li>
+                        <li className="flex items-start gap-1.5">
+                            <span
+                                className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: redColor }}
+                                aria-hidden
+                            />
+                            <span>{t("pointLegendSelected")}</span>
+                        </li>
+                    </ul>
+                </div>
+            ) : null}
+        </div>
     );
 }
 

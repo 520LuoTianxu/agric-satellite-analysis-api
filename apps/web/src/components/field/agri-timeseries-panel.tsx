@@ -12,6 +12,7 @@ import {
     type BackfillStatusResponse,
     type CropOption,
     type FieldStat,
+    type GrowingSeasonWindow,
     type IndexType,
 } from "@/lib/api";
 import { useTranslations } from "next-intl";
@@ -266,8 +267,11 @@ function collectDecloudAltStats(
     for (const s of scenes) {
         if (s.sensor !== "S2" || !isDecloudProduct(s)) continue;
         if (s.scene_id && pickedIds.has(s.scene_id)) continue;
-        const v = s[avgKey];
-        if (typeof v !== "number" || Number.isNaN(v)) continue;
+        let v = s[avgKey];
+        // Fair/bad reconstructions sometimes persisted with null ndvi_avg while
+        // pixels are all 0 — still show the pink alt marker so "去云无" is not the
+        // only story for that date.
+        if (typeof v !== "number" || Number.isNaN(v)) v = 0;
         const tip = opticalTooltipFields(s);
         out.push({
             id: `agri-${key}-decloud-alt-${s.date}-${s.scene_id ?? out.length}`,
@@ -422,6 +426,9 @@ export default function AgriTimeseriesPanel({
     const [backfillActive, setBackfillActive] = useState(false);
     const [refreshDateOpen, setRefreshDateOpen] = useState(false);
     const [refreshDateFrom, setRefreshDateFrom] = useState(defaultRsDateFrom);
+    const [cropCatalog, setCropCatalog] = useState<CropOption[]>([]);
+    /** Crop keys selected as growing seasons for this pull (rotation = multi). */
+    const [selectedSeasonKeys, setSelectedSeasonKeys] = useState<string[]>([]);
     const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -479,6 +486,7 @@ export default function AgriTimeseriesPanel({
             .list()
             .then((list) => {
                 if (cancelled) return;
+                setCropCatalog(list);
                 const key = (cropType || "").toLowerCase();
                 const hit =
                     list.find((c) => c.key === key) ||
@@ -487,9 +495,15 @@ export default function AgriTimeseriesPanel({
                     list[0] ||
                     null;
                 setCropOption(hit);
+                if (hit) {
+                    setSelectedSeasonKeys((prev) => (prev.length ? prev : [hit.key]));
+                }
             })
             .catch(() => {
-                if (!cancelled) setCropOption(null);
+                if (!cancelled) {
+                    setCropOption(null);
+                    setCropCatalog([]);
+                }
             });
         return () => {
             cancelled = true;
@@ -604,7 +618,16 @@ export default function AgriTimeseriesPanel({
 
     const openRefreshRsDialog = () => {
         setRefreshDateFrom(defaultRsDateFrom());
+        if (!selectedSeasonKeys.length && cropOption?.key) {
+            setSelectedSeasonKeys([cropOption.key]);
+        }
         setRefreshDateOpen(true);
+    };
+
+    const toggleSeasonKey = (key: string) => {
+        setSelectedSeasonKeys((prev) =>
+            prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+        );
     };
 
     const handleRefreshRs = async () => {
@@ -612,10 +635,19 @@ export default function AgriTimeseriesPanel({
         setBackfilling(true);
         try {
             const today = new Date().toISOString().slice(0, 10);
+            const growing_seasons: GrowingSeasonWindow[] = selectedSeasonKeys
+                .map((key) => cropCatalog.find((c) => c.key === key))
+                .filter((c): c is CropOption => !!c)
+                .map((c) => ({
+                    crop: c.key,
+                    label: c.season_label_zh || c.name_zh || c.name,
+                    months: c.season_months,
+                }));
             await fieldsApi.backfillIndices(fieldId, {
                 force: true,
                 date_from: refreshDateFrom,
                 date_to: today,
+                ...(growing_seasons.length ? { growing_seasons } : {}),
             });
             setBackfillActive(true);
             setBackfillProgress((prev) =>
@@ -1169,15 +1201,48 @@ export default function AgriTimeseriesPanel({
                             <DialogTitle>{t("refreshRsDateTitle")}</DialogTitle>
                             <DialogDescription>{t("refreshRsDateDesc")}</DialogDescription>
                         </DialogHeader>
-                        <div className="grid gap-2 py-2">
-                            <Label htmlFor="rs-date-from">{t("refreshRsDateFrom")}</Label>
-                            <Input
-                                id="rs-date-from"
-                                type="date"
-                                value={refreshDateFrom}
-                                max={new Date().toISOString().slice(0, 10)}
-                                onChange={(e) => setRefreshDateFrom(e.target.value)}
-                            />
+                        <div className="grid gap-3 py-2">
+                            <div className="grid gap-2">
+                                <Label htmlFor="rs-date-from">{t("refreshRsDateFrom")}</Label>
+                                <Input
+                                    id="rs-date-from"
+                                    type="date"
+                                    value={refreshDateFrom}
+                                    max={new Date().toISOString().slice(0, 10)}
+                                    onChange={(e) => setRefreshDateFrom(e.target.value)}
+                                />
+                            </div>
+                            <div className="grid gap-1.5">
+                                <Label>{t("refreshRsSeasons")}</Label>
+                                <p className="text-[10px] text-muted-foreground leading-snug">
+                                    {t("refreshRsSeasonsHint")}
+                                </p>
+                                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pt-1">
+                                    {(cropCatalog.length ? cropCatalog : cropOption ? [cropOption] : []).map((c) => {
+                                        const on = selectedSeasonKeys.includes(c.key);
+                                        const months = (c.season_months || []).join("/");
+                                        return (
+                                            <Button
+                                                key={c.key}
+                                                type="button"
+                                                size="sm"
+                                                variant={on ? "default" : "outline"}
+                                                className="h-7 text-xs px-2.5"
+                                                onClick={() => toggleSeasonKey(c.key)}
+                                                title={months ? `${c.name_zh || c.name}: ${months}` : c.name}
+                                            >
+                                                {c.name_zh || c.name}
+                                                {months ? (
+                                                    <span className="opacity-70 ml-1 tabular-nums">{months}</span>
+                                                ) : null}
+                                            </Button>
+                                        );
+                                    })}
+                                </div>
+                                {!selectedSeasonKeys.length ? (
+                                    <p className="text-[10px] text-muted-foreground">{t("refreshRsSeasonsEmpty")}</p>
+                                ) : null}
+                            </div>
                         </div>
                         <DialogFooter className="gap-2 sm:gap-0">
                             <Button type="button" variant="outline" onClick={() => setRefreshDateOpen(false)}>

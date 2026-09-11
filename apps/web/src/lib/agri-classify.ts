@@ -25,6 +25,9 @@ export const SUSPICIOUS_PARCEL_VS_CLEAR = 50;
 /** Parcel ~0% while STAC is nearly overcast: nodata counted as clear, or invented 0. */
 export const SUSPICIOUS_CLEAR_PARCEL_MAX = 5;
 export const SUSPICIOUS_STAC_OVERCAST_MIN = 80;
+/** Prefer Element84 eo:cloud_cover when trusted parcel cloud under-reports. */
+export const SUSPICIOUS_STAC_OVER_PARCEL_GAP = 25;
+export const SUSPICIOUS_STAC_MIN = 20;
 export const NEARBY_CLEAR_DAYS = 45;
 export const BORDERLINE_PARCEL_MIN = 20;
 export const BORDERLINE_PARCEL_MAX = 40;
@@ -206,8 +209,17 @@ export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): numbe
         return finiteNum(scene.cloud_cover);
     }
     const parcel = finiteNum(scene.parcel_cloud_cover_pct);
+    const stac = finiteNum(scene.cloud_cover);
+    if (
+        parcel != null &&
+        stac != null &&
+        stac >= SUSPICIOUS_STAC_MIN &&
+        stac - parcel >= SUSPICIOUS_STAC_OVER_PARCEL_GAP
+    ) {
+        return stac;
+    }
     if (parcel != null) return parcel;
-    return finiteNum(scene.cloud_cover);
+    return stac;
 }
 
 export function isOfficialOpticalScene(scene: {

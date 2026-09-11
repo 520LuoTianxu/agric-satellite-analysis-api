@@ -58,6 +58,10 @@ SUSPICIOUS_PARCEL_VS_CLEAR = 50.0
 # clear=1, or good-decloud rows forcing parcel_cloud_cover_pct=0.
 SUSPICIOUS_CLEAR_PARCEL_MAX = 5.0
 SUSPICIOUS_STAC_OVERCAST_MIN = 80.0
+# Trusted SCL/lonlat can still under-report vs Element84 eo:cloud_cover
+# (tiny clear hole, bad SCL read). Prefer STAC when the gap is large.
+SUSPICIOUS_STAC_OVER_PARCEL_GAP = 25.0
+SUSPICIOUS_STAC_MIN = 20.0
 
 # Official pick: compare raw vs good decloud to nearby clear dates.
 NEARBY_CLEAR_DAYS = 45
@@ -386,6 +390,8 @@ def effective_cloud_pct(
     """Cloud % for tooltips / official filters: real parcel, else STAC.
 
     Invented zeros and legacy window-fill parcel values are treated as missing.
+    When in-polygon parcel is far below Element84 ``eo:cloud_cover``, prefer
+    STAC so UI/drought match the catalog the user queries (not a false 0%).
     """
     parcel = _cloud_float(parcel_cloud_cover_pct)
     stac = _cloud_float(cloud_cover)
@@ -396,6 +402,13 @@ def effective_cloud_pct(
         stac,
         parcel_cloud_source=parcel_cloud_source,
         clear_frac=clear_frac,
+    ):
+        return stac
+    if (
+        parcel is not None
+        and stac is not None
+        and stac >= SUSPICIOUS_STAC_MIN
+        and (stac - parcel) >= SUSPICIOUS_STAC_OVER_PARCEL_GAP
     ):
         return stac
     if parcel is not None:
@@ -422,6 +435,14 @@ def scene_cloud_fields(
         parcel = None
     if parcel is not None:
         parcel = max(0.0, min(100.0, parcel))
+    if (
+        parcel is not None
+        and stac is not None
+        and stac >= SUSPICIOUS_STAC_MIN
+        and (stac - parcel) >= SUSPICIOUS_STAC_OVER_PARCEL_GAP
+    ):
+        over = stac > cloud_max_pct
+    elif parcel is not None:
         over = parcel > cloud_max_pct
     else:
         over = bool(stac is not None and stac > cloud_max_pct)

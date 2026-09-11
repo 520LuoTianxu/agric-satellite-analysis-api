@@ -555,13 +555,22 @@ export const fieldsApi = {
     },
     backfillIndices: (
         fieldId: string,
-        opts: { months?: number; force?: boolean; date_from?: string; date_to?: string } = {},
+        opts: {
+            months?: number;
+            force?: boolean;
+            date_from?: string;
+            date_to?: string;
+            growing_seasons?: GrowingSeasonWindow[];
+            season_months?: number[];
+        } = {},
     ) => {
         const months = opts.months ?? 24;
         const force = opts.force ?? true;
         const body: Record<string, unknown> = { months, force };
         if (opts.date_from) body.date_from = opts.date_from;
         if (opts.date_to) body.date_to = opts.date_to;
+        if (opts.growing_seasons?.length) body.growing_seasons = opts.growing_seasons;
+        if (opts.season_months?.length) body.season_months = opts.season_months;
         return apiFetch<{ field_id: string; status: string; message: string }>(
             `/fields/${fieldId}/backfill-indices`,
             { method: "POST", body: JSON.stringify(body) },
@@ -602,6 +611,14 @@ export const jobsApi = {
 
 // ── Alerts ───────────────────────────────────────────────────────────
 
+
+export interface GrowingSeasonWindow {
+    label?: string;
+    crop?: string;
+    months?: number[];
+    start_month?: number;
+    end_month?: number;
+}
 
 export interface CropOption {
     key: string;
