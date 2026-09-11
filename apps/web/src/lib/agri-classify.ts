@@ -22,6 +22,9 @@ export const LEGACY_STAC_CLOUD_MAX = 40;
 export const LEGACY_PARCEL_STAC_GAP = 40;
 export const CLEAR_PIXEL_FRACTION_TRUST = 0.9;
 export const SUSPICIOUS_PARCEL_VS_CLEAR = 50;
+/** Parcel ~0% while STAC is nearly overcast: nodata counted as clear, or invented 0. */
+export const SUSPICIOUS_CLEAR_PARCEL_MAX = 5;
+export const SUSPICIOUS_STAC_OVERCAST_MIN = 80;
 export const NEARBY_CLEAR_DAYS = 45;
 export const BORDERLINE_PARCEL_MIN = 20;
 export const BORDERLINE_PARCEL_MAX = 40;
@@ -153,6 +156,20 @@ export function isDecloudProduct(scene: {
     return typeof scene.scene_id === "string" && scene.scene_id.endsWith(DECLOUD_SCENE_ID_SUFFIX);
 }
 
+export function parcelCloudIsUntrustedClear(scene: {
+    parcel_cloud_cover_pct?: number | null;
+    cloud_cover?: number | null;
+    source?: string | null;
+    scene_id?: string | null;
+}): boolean {
+    const parcel = finiteNum(scene.parcel_cloud_cover_pct);
+    const stac = finiteNum(scene.cloud_cover);
+    if (parcel == null || parcel > SUSPICIOUS_CLEAR_PARCEL_MAX) return false;
+    if (isDecloudProduct(scene) && stac != null) return true;
+    if (stac == null) return false;
+    return stac >= SUSPICIOUS_STAC_OVERCAST_MIN;
+}
+
 export function parcelCloudIsLegacyWindowFill(scene: {
     parcel_cloud_cover_pct?: number | null;
     cloud_cover?: number | null;
@@ -182,6 +199,9 @@ export function parcelCloudIsLegacyWindowFill(scene: {
 
 export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
     if (!scene) return null;
+    if (parcelCloudIsUntrustedClear(scene)) {
+        return finiteNum(scene.cloud_cover);
+    }
     if (parcelCloudIsLegacyWindowFill(scene)) {
         return finiteNum(scene.cloud_cover);
     }

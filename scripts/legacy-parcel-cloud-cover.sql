@@ -14,3 +14,13 @@
 --   AND cloud_cover IS NOT NULL
 --   AND cloud_cover <= 40
 --   AND (parcel_cloud_cover_pct - cloud_cover) >= 40;
+
+-- Invented zeros: in-polygon cloud stored as ~0 while the STAC scene is
+-- nearly overcast. New ingest stores NULL instead. Optional:
+-- UPDATE agri.parcel_scene_products
+-- SET parcel_cloud_cover_pct = NULL
+-- WHERE sensor = 'S2'
+--   AND parcel_cloud_cover_pct IS NOT NULL
+--   AND parcel_cloud_cover_pct <= 5
+--   AND cloud_cover IS NOT NULL
+--   AND cloud_cover >= 80;

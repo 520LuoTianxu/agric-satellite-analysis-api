@@ -29,6 +29,12 @@ PHENOLOGY_MONTHS = (6, 7, 8, 9)
 # ESA SCL classes treated as cloud/shadow inside the field (not nodata=0).
 # 3=cloud shadow, 8=medium cloud, 9=high cloud, 10=thin cirrus.
 SCL_CLOUD_CLASSES = frozenset({3, 8, 9, 10})
+# Sen2Cor L2A SCL is 0-11. 0=nodata; 1-11 are real classes. Values outside
+# that range (palette RGB, reflectance DN, fill 255) must not count as clear.
+SCL_CLASS_MIN = 0
+SCL_CLASS_MAX = 11
+SCL_VALID_MIN = 1
+SCL_VALID_MAX = 11
 
 # How parcel_cloud_cover_pct was computed. Trusted sources are in-polygon.
 # Missing / unknown = legacy zonal quality_score (window fill), untrustworthy.
@@ -47,6 +53,11 @@ LEGACY_PARCEL_STAC_GAP = 40.0
 # If almost all lonlat pixels are clear but stored parcel cloud is high, prefer STAC.
 CLEAR_PIXEL_FRACTION_TRUST = 0.9
 SUSPICIOUS_PARCEL_VS_CLEAR = 50.0
+# Inverse artifact: parcel ~0% while STAC eo:cloud_cover is nearly overcast.
+# Caused by nodata/out-of-range SCL counted as clear, missing SCL defaulting
+# clear=1, or good-decloud rows forcing parcel_cloud_cover_pct=0.
+SUSPICIOUS_CLEAR_PARCEL_MAX = 5.0
+SUSPICIOUS_STAC_OVERCAST_MIN = 80.0
 
 # Official pick: compare raw vs good decloud to nearby clear dates.
 NEARBY_CLEAR_DAYS = 45
@@ -196,11 +207,31 @@ def _cloud_float(value: Any) -> float | None:
     return f if _finite(f) else None
 
 
+def _scl_class_code(value: Any) -> int | None:
+    """Rounded SCL class, or None if missing / non-numeric."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not _finite(f):
+        return None
+    return int(round(f))
+
+
+def is_scl_valid_class(value: Any) -> bool:
+    """True for Sen2Cor classes 1-11 (excludes nodata=0 and out-of-range)."""
+    code = _scl_class_code(value)
+    if code is None:
+        return False
+    return SCL_VALID_MIN <= code <= SCL_VALID_MAX
+
+
 def is_scl_cloudy_class(value: Any) -> bool:
     """True when an SCL class is cloud, shadow, or cirrus (not vegetation/soil)."""
-    try:
-        code = int(round(float(value)))
-    except (TypeError, ValueError):
+    code = _scl_class_code(value)
+    if code is None:
         return False
     return code in SCL_CLOUD_CLASSES
 
@@ -215,6 +246,34 @@ def parcel_cloud_from_counts(
     cloudy = max(0, int(cloudy_pixels))
     valid = int(valid_pixels)
     return max(0.0, min(100.0, 100.0 * cloudy / valid))
+
+
+def parcel_cloud_from_scl_values(values: Any) -> float | None:
+    """Cloud % from SCL class samples already clipped to the polygon.
+
+    ``None`` when SCL is missing, the mask is empty, or every sample is
+    nodata / out of 1-11. Out-of-range values are not treated as clear.
+    """
+    if values is None:
+        return None
+    try:
+        seq = list(values)
+    except TypeError:
+        return None
+    if not seq:
+        return None
+    cloudy = 0
+    valid = 0
+    for raw in seq:
+        code = _scl_class_code(raw)
+        if code is None:
+            continue
+        if code < SCL_VALID_MIN or code > SCL_VALID_MAX:
+            continue
+        valid += 1
+        if code in SCL_CLOUD_CLASSES:
+            cloudy += 1
+    return parcel_cloud_from_counts(cloudy, valid)
 
 
 def parcel_cloud_from_lonlat_pixels(pixels: Any) -> float | None:
@@ -252,6 +311,32 @@ def lonlat_clear_fraction(pixels: Any) -> float | None:
     if n <= 0:
         return None
     return clear / n
+
+
+def parcel_cloud_is_untrusted_clear(
+    parcel_cloud_cover_pct: float | None,
+    cloud_cover: float | None,
+    *,
+    source: str | None = None,
+    scene_id: str | None = None,
+) -> bool:
+    """True when a stored ~0% parcel cloud is not real in-polygon clear.
+
+    Two artifacts write 0% that is not cloud:
+    - SCL/lonlat counted nodata or defaulted ``clear=1``, while STAC
+      ``eo:cloud_cover`` is nearly overcast (80%+).
+    - Good decloud rows forced ``parcel_cloud_cover_pct=0`` so drought SQL
+      would treat them as clear. Display must use STAC / the raw parcel.
+    """
+    parcel = _cloud_float(parcel_cloud_cover_pct)
+    stac = _cloud_float(cloud_cover)
+    if parcel is None or parcel > SUSPICIOUS_CLEAR_PARCEL_MAX:
+        return False
+    if is_decloud_product(source, scene_id) and stac is not None:
+        return True
+    if stac is None:
+        return False
+    return stac >= SUSPICIOUS_STAC_OVERCAST_MIN
 
 
 def parcel_cloud_is_legacy_window_fill(
@@ -295,13 +380,17 @@ def effective_cloud_pct(
     *,
     parcel_cloud_source: str | None = None,
     clear_frac: float | None = None,
+    source: str | None = None,
+    scene_id: str | None = None,
 ) -> float | None:
     """Cloud % for tooltips / official filters: real parcel, else STAC.
 
-    Legacy window-fill parcel values are treated as missing.
+    Invented zeros and legacy window-fill parcel values are treated as missing.
     """
     parcel = _cloud_float(parcel_cloud_cover_pct)
     stac = _cloud_float(cloud_cover)
+    if parcel_cloud_is_untrusted_clear(parcel, stac, source=source, scene_id=scene_id):
+        return stac
     if parcel_cloud_is_legacy_window_fill(
         parcel,
         stac,
@@ -329,6 +418,8 @@ def scene_cloud_fields(
     """
     stac = _cloud_float(stac_cloud)
     parcel = _cloud_float(parcel_cloud)
+    if parcel_cloud_is_untrusted_clear(parcel, stac):
+        parcel = None
     if parcel is not None:
         parcel = max(0.0, min(100.0, parcel))
         over = parcel > cloud_max_pct
@@ -456,6 +547,8 @@ def is_clear_scene(
     cloud_max_pct: float = CLOUD_MAX_PCT,
     parcel_cloud_source: str | None = None,
     clear_frac: float | None = None,
+    source: str | None = None,
+    scene_id: str | None = None,
 ) -> bool:
     """Optical clear filter: real parcel cloud, else STAC. Legacy fill is ignored."""
     cloud = effective_cloud_pct(
@@ -463,6 +556,8 @@ def is_clear_scene(
         cloud_cover,
         parcel_cloud_source=parcel_cloud_source,
         clear_frac=clear_frac,
+        source=source,
+        scene_id=scene_id,
     )
     if cloud is not None:
         return float(cloud) <= cloud_max_pct
@@ -510,6 +605,8 @@ def is_official_optical_product(
         cloud_max_pct=cloud_max_pct,
         parcel_cloud_source=parcel_cloud_source,
         clear_frac=clear_frac,
+        source=source,
+        scene_id=scene_id,
     )
 
 
@@ -521,14 +618,21 @@ def official_s2_sql(
     """SQL predicate: clear raw S2, or good-quality decloud only.
 
     Raw cloud uses in-polygon parcel % when ``parcel_cloud_source`` is scl /
-    lonlat_clear. Legacy window-fill parcel (~82% on small padded fields) falls
-    back to STAC ``cloud_cover``. ``cloud_cover_over_30`` is not used alone
-    because old writes set it from that fill ratio.
+    lonlat_clear. Parcel ~0% while STAC is nearly overcast is treated as
+    missing (nodata counted as clear / invented zeros). Legacy window-fill
+    parcel (~82% on small padded fields) falls back to STAC ``cloud_cover``.
+    ``cloud_cover_over_30`` is not used alone because old writes set it from
+    that fill ratio.
     """
     a = f"{alias}." if alias else ""
     trusted = ",".join(f"'{s}'" for s in sorted(PARCEL_CLOUD_SOURCES_TRUSTED))
     effective = f"""(
         CASE
+          WHEN {a}parcel_cloud_cover_pct IS NOT NULL
+               AND {a}cloud_cover IS NOT NULL
+               AND {a}parcel_cloud_cover_pct <= {SUSPICIOUS_CLEAR_PARCEL_MAX}
+               AND {a}cloud_cover >= {SUSPICIOUS_STAC_OVERCAST_MIN}
+          THEN {a}cloud_cover
           WHEN {a}pixel_data->>'parcel_cloud_source' IN ({trusted})
           THEN coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover)
           WHEN {a}parcel_cloud_cover_pct IS NOT NULL
@@ -582,12 +686,16 @@ def cloud_pct(
     *,
     parcel_cloud_source: str | None = None,
     clear_frac: float | None = None,
+    source: str | None = None,
+    scene_id: str | None = None,
 ) -> float | None:
     return effective_cloud_pct(
         parcel_cloud_cover_pct,
         cloud_cover,
         parcel_cloud_source=parcel_cloud_source,
         clear_frac=clear_frac,
+        source=source,
+        scene_id=scene_id,
     )
 
 
@@ -597,6 +705,8 @@ def _scene_cloud_pct(scene: dict[str, Any]) -> float | None:
         scene.get("cloud_cover"),
         parcel_cloud_source=scene.get("parcel_cloud_source"),
         clear_frac=_num(scene.get("clear_frac")),
+        source=scene.get("source"),
+        scene_id=scene.get("scene_id"),
     )
 
 

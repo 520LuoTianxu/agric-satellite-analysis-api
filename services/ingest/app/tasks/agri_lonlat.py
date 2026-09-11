@@ -28,9 +28,8 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.agri_classify import (
     PARCEL_CLOUD_SOURCE_LONLAT,
     PARCEL_CLOUD_SOURCE_SCL,
-    SCL_CLOUD_CLASSES,
-    parcel_cloud_from_counts,
     parcel_cloud_from_lonlat_pixels,
+    parcel_cloud_from_scl_values,
     scene_cloud_fields,
 )
 from app.core.band_parallel import band_max_workers
@@ -73,21 +72,20 @@ def parcel_cloud_from_scl_window(
     scl: np.ndarray | None,
     field_mask: np.ndarray | None,
 ) -> float | None:
-    """In-polygon SCL cloud/shadow fraction. Ignores nodata and window padding."""
+    """In-polygon SCL cloud/shadow fraction. Ignores nodata and window padding.
+
+    Returns None (not 0) when SCL is missing, the polygon covers no cells,
+    or every sample is nodata / not a Sen2Cor class 1-11.
+    """
     if scl is None or field_mask is None:
         return None
-    if scl.shape != field_mask.shape:
+    if getattr(scl, "shape", None) != getattr(field_mask, "shape", None):
         return None
     inside = field_mask & np.isfinite(scl)
     if not np.any(inside):
         return None
     classes = np.rint(scl[inside]).astype(np.int16)
-    valid = classes > 0
-    n_valid = int(np.count_nonzero(valid))
-    if n_valid <= 0:
-        return None
-    cloudy = np.isin(classes, tuple(SCL_CLOUD_CLASSES)) & valid
-    return parcel_cloud_from_counts(int(np.count_nonzero(cloudy)), n_valid)
+    return parcel_cloud_from_scl_values(classes.tolist())
 
 
 def agri_optical_index_defs():
@@ -322,7 +320,7 @@ def emit_optical_lonlat(
     parcel = parcel_cloud
     if parcel is None:
         lonlat_cloud = parcel_cloud_from_lonlat_pixels(pixels)
-        if lonlat_cloud is not None and any(p.get("clear") == 0 for p in pixels):
+        if lonlat_cloud is not None:
             parcel = lonlat_cloud
             source = PARCEL_CLOUD_SOURCE_LONLAT
 
@@ -348,6 +346,8 @@ def emit_optical_lonlat(
     cloud_f, cloud_over_30, parcel_cloud_raw = scene_cloud_fields(
         scene.get("cloud_cover"), parcel
     )
+    if parcel_cloud_raw is None:
+        source = None
     parcel_out = (
         _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
     )
