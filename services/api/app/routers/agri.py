@@ -49,7 +49,10 @@ _SCENE_COLS = """
     cire_avg, cire_min, cire_max,
     vv_avg, vv_min, vv_max,
     vh_avg, vh_min, vh_max,
-    generated_at_shanghai, ingested_at
+    generated_at_shanghai, ingested_at,
+    pixel_data->>'source' AS source,
+    pixel_data->>'decloud_quality' AS decloud_quality,
+    NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score
 """
 
 

@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.core.agri_classify import CLOUD_MAX_PCT, official_s2_sql
 from app.core.agri_tags import parse_agri_land_id
 from app.models.tables import (
     Field,
@@ -97,15 +98,16 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
     rows = (
         session.execute(
             text(
-                """
+                f"""
             SELECT date, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
                    parcel_cloud_cover_pct, cloud_cover
             FROM agri.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
+              AND {official_s2_sql("")}
             ORDER BY date
             """
             ),
-            {"land_id": land_id},
+            {"land_id": land_id, "cloud_max": CLOUD_MAX_PCT},
         )
         .mappings()
         .all()
@@ -193,11 +195,12 @@ def load_agri_lonlat_pixels(
     """
     if not land_id:
         return {}
-    params: dict[str, Any] = {"land_id": land_id}
+    params: dict[str, Any] = {"land_id": land_id, "cloud_max": CLOUD_MAX_PCT}
     where = [
         "land_id = :land_id",
         "sensor = 'S2'",
         "pixel_data->>'format' = 'lonlat_v1'",
+        official_s2_sql(""),
     ]
     if dates:
         # Expand IN list safely for SQLAlchemy text()
@@ -216,10 +219,6 @@ def load_agri_lonlat_pixels(
         where.append("EXTRACT(MONTH FROM date) BETWEEN 6 AND 9")
     if cloud_max is not None:
         params["cloud_max"] = cloud_max
-        where.append(
-            "(COALESCE(parcel_cloud_cover_pct, cloud_cover) IS NULL "
-            "OR COALESCE(parcel_cloud_cover_pct, cloud_cover) <= :cloud_max)"
-        )
     sql = f"""
         SELECT date, pixel_data, ndvi_avg,
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud
@@ -249,14 +248,10 @@ def load_agri_pixel_date_index(
     """Lightweight maize-season S2 date index (no pixel payload) for stage picking."""
     if not land_id:
         return []
-    params: dict[str, Any] = {"land_id": land_id}
-    cloud_clause = ""
-    if cloud_max is not None:
-        params["cloud_max"] = cloud_max
-        cloud_clause = (
-            "AND (COALESCE(parcel_cloud_cover_pct, cloud_cover) IS NULL "
-            "OR COALESCE(parcel_cloud_cover_pct, cloud_cover) <= :cloud_max)"
-        )
+    params: dict[str, Any] = {
+        "land_id": land_id,
+        "cloud_max": CLOUD_MAX_PCT if cloud_max is None else cloud_max,
+    }
     sql = f"""
         SELECT date, ndvi_avg,
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud,
@@ -270,7 +265,7 @@ def load_agri_pixel_date_index(
         FROM agri.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
           AND EXTRACT(MONTH FROM date) BETWEEN 6 AND 9
-          {cloud_clause}
+          AND {official_s2_sql("")}
         ORDER BY date
     """
     try:

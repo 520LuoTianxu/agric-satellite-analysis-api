@@ -15,6 +15,7 @@ from jose import jwt
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.agri_classify import is_decloud_product, is_official_optical_product
 from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
@@ -159,6 +160,10 @@ async def _load_agri_share_series(
                            ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                            mndwi_avg, cire_avg, vv_avg, vh_avg,
                            parcel_cloud_cover_pct, cloud_cover,
+                           cloud_cover_over_30,
+                           scene_id,
+                           pixel_data->>'source' AS source,
+                           pixel_data->>'decloud_quality' AS decloud_quality,
                            CASE
                              WHEN pixel_data->>'format' = 'lonlat_v1'
                               AND jsonb_typeof(pixel_data->'pixels') = 'array'
@@ -191,6 +196,20 @@ async def _load_agri_share_series(
             cloud = r.get("cloud_cover")
         q = _quality_from_cloud(cloud)
         sensor = r.get("sensor")
+        if (
+            sensor == "S2"
+            and is_decloud_product(r.get("source"), r.get("scene_id"))
+            and not is_official_optical_product(
+                source=r.get("source"),
+                scene_id=r.get("scene_id"),
+                decloud_quality=r.get("decloud_quality"),
+                parcel_cloud_cover_pct=r.get("parcel_cloud_cover_pct"),
+                cloud_cover=r.get("cloud_cover"),
+                cloud_cover_over_30=r.get("cloud_cover_over_30"),
+            )
+        ):
+            # fair/bad decloud is audit-only; keep raw S2 (including cloudy).
+            continue
         for idx, col, want_sensor in _AGRI_INDEX_COLS:
             if sensor != want_sensor:
                 continue

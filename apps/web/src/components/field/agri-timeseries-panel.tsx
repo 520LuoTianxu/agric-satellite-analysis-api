@@ -25,6 +25,8 @@ import {
     DROUGHT_CLOUD_MAX_PCT,
     droughtClassFromAvgs,
     isDroughtDayClass,
+    isDecloudProduct,
+    isOfficialOpticalScene,
     type AgriDroughtClass,
     type AgriHeatIndex,
     type AgriHeatmapImage,
@@ -183,7 +185,8 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
     const byDate = new Map<string, number[]>();
     for (const s of scenes) {
         if (s.sensor !== meta.sensor) continue;
-        if (key === "drought" && !isLowCloud(s)) continue;
+        if (isDecloudProduct(s) && s.decloud_quality !== "good") continue;
+        if (key === "drought" && !isOfficialOpticalScene(s)) continue;
         const v = s[avgKey];
         if (typeof v !== "number" || Number.isNaN(v)) continue;
         const arr = byDate.get(s.date) ?? [];
@@ -220,21 +223,6 @@ function sceneSeriesAvg(scene: AgriSceneProduct, key: SeriesKey): number | null 
     if (!avgKey) return null;
     const v = scene[avgKey];
     return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-function isLowCloud(scene: AgriSceneProduct): boolean {
-    if (scene.cloud_cover_over_30 === true) return false;
-    if (scene.cloud_cover_over_30 === false) return true;
-    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
-        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
-    }
-    if (
-        typeof scene.parcel_cloud_cover_pct === "number" &&
-        Number.isFinite(scene.parcel_cloud_cover_pct)
-    ) {
-        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
-    }
-    return false;
 }
 
 function sceneCloudPct(scene: AgriSceneProduct | null | undefined): number | null {
@@ -284,10 +272,10 @@ function pickBestDefaultDate(scenes: AgriSceneProduct[], key: SeriesKey): string
         return sorted[sorted.length - 1]!.date;
     }
 
-    // 1) Latest with low cloud AND (for veg modes) avg > 0.1
+    // 1) Latest with official optical (clear raw or good decloud) AND (for veg) avg > 0.1
     for (let i = sorted.length - 1; i >= 0; i--) {
         const s = sorted[i]!;
-        if (!isLowCloud(s)) continue;
+        if (!isOfficialOpticalScene(s)) continue;
         const avg = sceneSeriesAvg(s, key);
         if (avg == null) continue;
         if (VEG_AVG_KEYS.has(key) && !(avg > 0.1)) continue;
@@ -636,11 +624,20 @@ export default function AgriTimeseriesPanel({
                 });
                 // Ignore stale overlapping NDVI/EVI (or date) loads
                 if (gen !== heatmapLoadGenRef.current) return;
+                const official = res.items.filter(isOfficialOpticalScene);
+                const withLonlat = (list: AgriSceneProduct[]) =>
+                    list.find((s) => (s.pixels_lonlat?.length ?? 0) > 0);
+                const withGrid = (list: AgriSceneProduct[]) =>
+                    list.find((s) => (s.pixel_data?.pixels?.length ?? 0) > 0);
                 const scene =
-                    res.items.find((s) => (s.pixels_lonlat?.length ?? 0) > 0) ??
-                    res.items.find((s) => (s.pixel_data?.pixels?.length ?? 0) > 0) ??
-                    res.items[0];
-                if (index === "drought" && scene && !isLowCloud(scene)) {
+                    index === "drought"
+                        ? (withLonlat(official) ?? withGrid(official) ?? official[0])
+                        : (withLonlat(official) ??
+                          withLonlat(res.items) ??
+                          withGrid(res.items) ??
+                          official[0] ??
+                          res.items[0]);
+                if (index === "drought" && scene && !isOfficialOpticalScene(scene)) {
                     cachedHeatmapRef.current = { date, index, img: null };
                     setHeatmapMeta(null);
                     publishHeatmap(null);
@@ -849,7 +846,7 @@ export default function AgriTimeseriesPanel({
         const out: Record<string, AgriDroughtClass> = {};
         for (const s of scenes) {
             if (s.sensor !== "S2") continue;
-            if (!isLowCloud(s)) continue;
+            if (!isOfficialOpticalScene(s)) continue;
             const cls = droughtClassFromAvgs(s.ndvi_avg, s.ndmi_avg);
             if (cls && isDroughtDayClass(cls)) {
                 const prev = out[s.date];
@@ -890,7 +887,7 @@ export default function AgriTimeseriesPanel({
     const clearS2Count = useMemo(() => {
         const dates = new Set<string>();
         for (const s of scenes) {
-            if (s.sensor === "S2" && isLowCloud(s) && typeof s.ndvi_avg === "number") {
+            if (s.sensor === "S2" && isOfficialOpticalScene(s) && typeof s.ndvi_avg === "number") {
                 dates.add(s.date);
             }
         }
@@ -938,7 +935,10 @@ export default function AgriTimeseriesPanel({
     const selectedScene = useMemo(() => {
         if (!selectedDate) return null;
         const sensor = sensorForIndex(series);
-        return scenes.find((s) => s.sensor === sensor && s.date === selectedDate) ?? null;
+        const matches = scenes.filter((s) => s.sensor === sensor && s.date === selectedDate);
+        if (!matches.length) return null;
+        const official = matches.filter(isOfficialOpticalScene);
+        return official[0] ?? matches[0] ?? null;
     }, [scenes, selectedDate, series]);
 
     const cloudCoverPct = useMemo(() => {

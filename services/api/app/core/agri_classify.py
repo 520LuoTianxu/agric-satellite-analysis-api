@@ -228,5 +228,75 @@ def is_clear_scene(
     return True
 
 
+# Additive UnCRtainTS decloud products (keep in sync with ingest
+# app.core.decloud / agri_classify and apps/web agri-heatmap.ts).
+DECLOUD_SOURCE = "uncrtaints_decloud"
+DECLOUD_SCENE_ID_SUFFIX = "_decloud"
+DECLOUD_QUALITY_GOOD = "good"
+
+
+def is_decloud_product(
+    source: str | None = None,
+    scene_id: str | None = None,
+) -> bool:
+    """True when the row is the additive decloud product, not raw S2."""
+    if source == DECLOUD_SOURCE:
+        return True
+    if scene_id and str(scene_id).endswith(DECLOUD_SCENE_ID_SUFFIX):
+        return True
+    return False
+
+
+def is_official_optical_product(
+    *,
+    source: str | None = None,
+    scene_id: str | None = None,
+    decloud_quality: str | None = None,
+    parcel_cloud_cover_pct: float | None = None,
+    cloud_cover: float | None = None,
+    cloud_cover_over_30: bool | None = None,
+    cloud_max_pct: float = CLOUD_MAX_PCT,
+) -> bool:
+    """Whether a scene may feed drought / timeseries / land metrics.
+
+    Raw S2 still uses the cloud > 30% skip. Decloud rows are official only
+    when quality is ``good``. ``fair`` / ``bad`` stay stored for audit.
+    """
+    if is_decloud_product(source, scene_id):
+        return (decloud_quality or "").strip().lower() == DECLOUD_QUALITY_GOOD
+    return is_clear_scene(
+        parcel_cloud_cover_pct,
+        cloud_cover,
+        cloud_cover_over_30,
+        cloud_max_pct=cloud_max_pct,
+    )
+
+
+def official_s2_sql(
+    alias: str = "s",
+    *,
+    cloud_param: str = "cloud_max",
+) -> str:
+    """SQL predicate: clear raw S2, or good-quality decloud only."""
+    a = f"{alias}." if alias else ""
+    return f"""(
+      (
+        COALESCE({a}pixel_data->>'source', '') <> '{DECLOUD_SOURCE}'
+        AND COALESCE({a}scene_id, '') NOT LIKE '%{DECLOUD_SCENE_ID_SUFFIX}'
+        AND NOT (
+          coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover) > :{cloud_param}
+          OR {a}cloud_cover_over_30 IS TRUE
+        )
+      )
+      OR (
+        (
+          {a}pixel_data->>'source' = '{DECLOUD_SOURCE}'
+          OR {a}scene_id LIKE '%{DECLOUD_SCENE_ID_SUFFIX}'
+        )
+        AND {a}pixel_data->>'decloud_quality' = '{DECLOUD_QUALITY_GOOD}'
+      )
+    )"""
+
+
 def _finite(v: float) -> bool:
     return v == v and v not in (float("inf"), float("-inf"))

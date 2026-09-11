@@ -28,6 +28,7 @@ indices 2-3; S1 VV+VH).
 | `INGEST_BAND_MAX_WORKERS` | `16` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 4 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
 | `WRITE_INDEX_COGS` | unset | Agri: skip index TIF/COG uploads. Classic fields: write COGs. `0` = never. `1` = always (storage-heavy). |
 | `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
+| `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window cloud removal after agri optical ingest. Off by default. See `docs/decloud-uncrtaints.md`. |
 
 Raising Celery concurrency alone still leaves each job looping scenes
 serially. Scene-level threads overlap HTTP/GDAL I/O across dates in one

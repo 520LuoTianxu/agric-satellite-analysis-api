@@ -994,6 +994,11 @@ export interface AgriSceneProduct {
     cloud_cover: number | null;
     cloud_cover_over_30: boolean | null;
     parcel_cloud_cover_pct: number | null;
+    /** stac_direct (raw) or uncrtaints_decloud (additive) */
+    source?: string | null;
+    /** good | fair | bad; only good enters official drought metrics */
+    decloud_quality?: string | null;
+    decloud_score?: number | null;
     ndvi_avg: number | null;
     ndvi_min: number | null;
     ndvi_max: number | null;
