@@ -1,9 +1,11 @@
-"""Sentinel-1 STAC / GDAL access helpers (stdlib only).
+"""Sentinel-1 STAC / GDAL access helpers (Planetary Computer).
 
-Element84 ``sentinel-1-grd`` assets live in the AWS Open Data bucket
-``sentinel-s1-l1c`` with ``storage:requester_pays: true``. Unsigned
-``AWS_NO_SIGN_REQUEST=YES`` (and blanked keys) yields HTTP 403, so STAC
-search succeeds but every scene fails and processed stays 0.
+Default catalog is Microsoft Planetary Computer ``sentinel-1-grd``.
+Assets live on Azure Blob Storage; unsigned hrefs 404, so HREFs are SAS-signed
+via ``planetary_computer`` (no AWS requester-pays keys required).
+
+Optional override: set ``S1_STAC_API_URL`` (must still expose ``sentinel-1-grd``
+with readable VV/VH assets after signing when using MPC).
 """
 
 from __future__ import annotations
@@ -11,58 +13,65 @@ from __future__ import annotations
 import os
 from typing import Any
 
-
-S1_AWS_BUCKET_HINT = "sentinel-s1-l1c"
-S1_REQUESTER_PAYS_REGION = "eu-central-1"
-
-
-def s1_credential_pair() -> tuple[str | None, str | None]:
-    """Prefer S1-specific AWS keys; fall back to process AWS_*. Never OSS keys."""
-    key = (os.environ.get("S1_AWS_ACCESS_KEY_ID") or "").strip() or None
-    secret = (os.environ.get("S1_AWS_SECRET_ACCESS_KEY") or "").strip() or None
-    if key and secret:
-        return key, secret
-    key = (os.environ.get("AWS_ACCESS_KEY_ID") or "").strip() or None
-    secret = (os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip() or None
-    if key and secret:
-        return key, secret
-    return None, None
+# Microsoft Planetary Computer STAC API (default for agri S1).
+S1_STAC_API_URL_DEFAULT = "https://planetarycomputer.microsoft.com/api/stac/v1"
+S1_STAC_COLLECTION = "sentinel-1-grd"
 
 
-def s1_has_aws_credentials() -> bool:
-    key, secret = s1_credential_pair()
-    return bool(key and secret)
+def s1_stac_api_url() -> str:
+    return (
+        (os.environ.get("S1_STAC_API_URL") or "").strip()
+        or S1_STAC_API_URL_DEFAULT
+    )
+
+
+def s1_uses_planetary_computer() -> bool:
+    url = s1_stac_api_url().lower()
+    return "planetarycomputer.microsoft.com" in url
+
+
+def sign_s1_href(href: str) -> str:
+    """Attach a Planetary Computer SAS token when using MPC; else return href."""
+    if not href:
+        return href
+    if not s1_uses_planetary_computer():
+        return href
+    import planetary_computer as pc
+
+    return str(pc.sign(href))
+
+
+def open_s1_stac_client():
+    """Open the S1 STAC client; MPC results are signed in-place."""
+    from pystac_client import Client as STACClient
+
+    url = s1_stac_api_url()
+    if s1_uses_planetary_computer():
+        import planetary_computer as pc
+
+        return STACClient.open(url, modifier=pc.sign_inplace)
+    return STACClient.open(url)
 
 
 def s1_gdal_env() -> dict[str, str]:
-    """Thread-local GDAL/AWS options for requester-pays S1 GRD COGs.
+    """Thread-local GDAL options for signed HTTPS (Azure) S1 GRD assets.
 
-    Do not set AWS_NO_SIGN_REQUEST=YES and do not blank AWS_ACCESS_KEY_ID:
-    that combination cannot read sentinel-s1-l1c. Do not mutate process-wide
-    os.environ (would race OSS uploads on the same worker).
+    Do not mutate process-wide os.environ (would race OSS uploads on the same
+    worker). AWS requester-pays knobs are intentionally omitted for the MPC path.
     """
-    env: dict[str, str] = {
-        "AWS_NO_SIGN_REQUEST": "NO",
-        "AWS_REQUEST_PAYER": "requester",
-        "AWS_VIRTUAL_HOSTING": "TRUE",
-        "AWS_HTTPS": "YES",
-        "AWS_REGION": S1_REQUESTER_PAYS_REGION,
-        "AWS_DEFAULT_REGION": S1_REQUESTER_PAYS_REGION,
-        "AWS_S3_ENDPOINT": f"s3.{S1_REQUESTER_PAYS_REGION}.amazonaws.com",
+    return {
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+        "GDAL_HTTP_UNSAFESSL": "NO",
+        "CPL_VSIL_CURL_USE_HEAD": "NO",
     }
-    key, secret = s1_credential_pair()
-    if key and secret:
-        env["AWS_ACCESS_KEY_ID"] = key
-        env["AWS_SECRET_ACCESS_KEY"] = secret
-    return env
 
 
 def s1_open_path(href: str) -> str:
-    """Map an S3 href to a GDAL /vsis3/ path; leave https:// unchanged."""
-    if href.startswith("s3://"):
-        return href.replace("s3://", "/vsis3/", 1)
-    return href
+    """Sign (if MPC) then map s3:// to /vsis3/; leave https:// for GDAL curl."""
+    signed = sign_s1_href(href)
+    if signed.startswith("s3://"):
+        return signed.replace("s3://", "/vsis3/", 1)
+    return signed
 
 
 def stac_asset_href(asset: Any) -> str | None:
@@ -89,10 +98,26 @@ def stac_asset_href(asset: Any) -> str | None:
     return str(href) if href else None
 
 
-def s1_missing_credentials_hint() -> str:
+def s1_access_hint() -> str:
+    if s1_uses_planetary_computer():
+        return (
+            "S1 uses Microsoft Planetary Computer "
+            f"({s1_stac_api_url()}, collection={S1_STAC_COLLECTION}). "
+            "Assets need SAS signing via planetary_computer; install the "
+            "planetary-computer package on the ingest image. No AWS "
+            "requester-pays keys are required for this path."
+        )
     return (
-        "sentinel-1-grd assets are requester-pays "
-        f"(s3://{S1_AWS_BUCKET_HINT}/, eu-central-1). "
-        "Set S1_AWS_ACCESS_KEY_ID and S1_AWS_SECRET_ACCESS_KEY on the download "
-        "host (do not reuse Aliyun OSS keys). Unsigned reads return 403."
+        f"S1 STAC is {s1_stac_api_url()} (collection={S1_STAC_COLLECTION}). "
+        "Ensure VV/VH assets are readable by GDAL from this catalog."
     )
+
+
+# Back-compat aliases used by older call sites / logs
+def s1_has_aws_credentials() -> bool:
+    """Deprecated: MPC path needs no AWS keys. Always True for readiness logs."""
+    return True
+
+
+def s1_missing_credentials_hint() -> str:
+    return s1_access_hint()

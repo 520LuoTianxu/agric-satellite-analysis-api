@@ -1,4 +1,4 @@
-"""Stdlib tests for Sentinel-1 requester-pays STAC/GDAL helpers."""
+"""Stdlib tests for Sentinel-1 Planetary Computer STAC/GDAL helpers."""
 
 from __future__ import annotations
 
@@ -9,48 +9,38 @@ from unittest.mock import patch
 
 
 class S1StacTests(unittest.TestCase):
-    def test_open_path_maps_s3_to_vsis3(self) -> None:
-        from app.core.s1_stac import s1_open_path
-
-        self.assertEqual(
-            s1_open_path("s3://sentinel-s1-l1c/GRD/foo.tiff"),
-            "/vsis3/sentinel-s1-l1c/GRD/foo.tiff",
-        )
-        self.assertEqual(
-            s1_open_path("https://example.com/vv.tif"),
-            "https://example.com/vv.tif",
-        )
-
-    def test_gdal_env_is_requester_pays_not_unsigned(self) -> None:
-        from app.core.s1_stac import s1_gdal_env
+    def test_default_stac_is_planetary_computer(self) -> None:
+        from app.core.s1_stac import s1_stac_api_url, s1_uses_planetary_computer
 
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("S1_AWS_ACCESS_KEY_ID", None)
-            os.environ.pop("S1_AWS_SECRET_ACCESS_KEY", None)
-            os.environ.pop("AWS_ACCESS_KEY_ID", None)
-            os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-            env = s1_gdal_env()
-        self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "NO")
-        self.assertEqual(env["AWS_REQUEST_PAYER"], "requester")
-        self.assertNotIn("AWS_ACCESS_KEY_ID", env)
+            os.environ.pop("S1_STAC_API_URL", None)
+            self.assertTrue(s1_uses_planetary_computer())
+            self.assertIn("planetarycomputer.microsoft.com", s1_stac_api_url())
 
-    def test_gdal_env_prefers_s1_keys(self) -> None:
-        from app.core.s1_stac import s1_gdal_env, s1_has_aws_credentials
+    def test_open_path_maps_s3_to_vsis3_without_signing_non_mpc(self) -> None:
+        from app.core.s1_stac import s1_open_path
 
         with patch.dict(
             os.environ,
-            {
-                "S1_AWS_ACCESS_KEY_ID": "s1key",
-                "S1_AWS_SECRET_ACCESS_KEY": "s1secret",
-                "AWS_ACCESS_KEY_ID": "generic",
-                "AWS_SECRET_ACCESS_KEY": "generic-secret",
-            },
+            {"S1_STAC_API_URL": "https://earth-search.aws.element84.com/v1"},
             clear=False,
         ):
-            env = s1_gdal_env()
-            self.assertTrue(s1_has_aws_credentials())
-        self.assertEqual(env["AWS_ACCESS_KEY_ID"], "s1key")
-        self.assertEqual(env["AWS_SECRET_ACCESS_KEY"], "s1secret")
+            self.assertEqual(
+                s1_open_path("s3://sentinel-s1-l1c/GRD/foo.tiff"),
+                "/vsis3/sentinel-s1-l1c/GRD/foo.tiff",
+            )
+            self.assertEqual(
+                s1_open_path("https://example.com/vv.tif"),
+                "https://example.com/vv.tif",
+            )
+
+    def test_gdal_env_is_https_friendly_not_requester_pays(self) -> None:
+        from app.core.s1_stac import s1_gdal_env
+
+        env = s1_gdal_env()
+        self.assertEqual(env["GDAL_DISABLE_READDIR_ON_OPEN"], "EMPTY_DIR")
+        self.assertNotIn("AWS_REQUEST_PAYER", env)
+        self.assertNotIn("AWS_NO_SIGN_REQUEST", env)
 
     def test_stac_asset_href_prefers_https_alternate(self) -> None:
         from app.core.s1_stac import stac_asset_href
@@ -68,9 +58,21 @@ class S1StacTests(unittest.TestCase):
         )
         self.assertIsNone(stac_asset_href(None))
 
-    def test_missing_credentials_hint_mentions_requester_pays(self) -> None:
-        from app.core.s1_stac import s1_missing_credentials_hint
+    def test_access_hint_mentions_planetary_computer(self) -> None:
+        from app.core.s1_stac import s1_access_hint
 
-        hint = s1_missing_credentials_hint()
-        self.assertIn("requester-pays", hint)
-        self.assertIn("S1_AWS_ACCESS_KEY_ID", hint)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("S1_STAC_API_URL", None)
+            hint = s1_access_hint()
+        self.assertIn("Planetary Computer", hint)
+        self.assertIn("planetary-computer", hint)
+
+    def test_sign_s1_href_calls_pc_when_mpc(self) -> None:
+        from app.core import s1_stac
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("S1_STAC_API_URL", None)
+            with patch("planetary_computer.sign", return_value="https://signed/x") as m:
+                out = s1_stac.sign_s1_href("https://raw/x")
+        self.assertEqual(out, "https://signed/x")
+        m.assert_called_once_with("https://raw/x")

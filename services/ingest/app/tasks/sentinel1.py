@@ -1,8 +1,11 @@
 """Sentinel-1 GRD → agri.parcel_scene_products lonlat_v1 (VV_db/VH_db).
 
-Searches Element84 earth-search ``sentinel-1-grd`` (VV/VH COGs on the AWS
-Open Data bucket), converts amplitude DN to approximate σ⁰ dB, samples the
-field polygon, and upserts ``sensor='S1'`` lonlat_v1 rows.
+Searches Microsoft Planetary Computer ``sentinel-1-grd`` (VV/VH on Azure Blob,
+SAS-signed via ``planetary_computer``), converts amplitude DN to approximate
+σ⁰ dB, samples the field polygon, and upserts ``sensor='S1'`` lonlat_v1 rows.
+
+Override catalog with ``S1_STAC_API_URL`` if needed. Optical S2 still uses
+``STAC_API_URL`` (Element84 by default).
 
 Index ``vv.tif`` / ``vh.tif`` COGs are **not** uploaded for agri fields
 unless ``WRITE_INDEX_COGS=1``. Classic (non-agri) fields still write COGs.
@@ -23,7 +26,6 @@ import numpy as np
 import rasterio
 import structlog
 from geoalchemy2.shape import to_shape
-from pystac_client import Client as STACClient
 from rasterio.features import geometry_mask
 from rasterio.transform import from_bounds, xy
 from rasterio.warp import Resampling, reproject
@@ -36,10 +38,12 @@ from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
 from app.core.index_cogs import write_index_cogs_enabled
 from app.core.s1_stac import (
+    S1_STAC_COLLECTION,
+    open_s1_stac_client,
+    s1_access_hint,
     s1_gdal_env,
-    s1_has_aws_credentials,
-    s1_missing_credentials_hint,
     s1_open_path,
+    s1_stac_api_url,
     stac_asset_href,
 )
 from app.core.storage import get_storage
@@ -58,8 +62,7 @@ from app.worker import celery_app
 
 logger = structlog.get_logger()
 
-STAC_API_URL = os.environ.get("STAC_API_URL", settings.stac_api_url)
-STAC_S1_COLLECTION = "sentinel-1-grd"
+STAC_S1_COLLECTION = S1_STAC_COLLECTION
 # Nominal IW GRDH amplitude calibration scale so DN→dB lands near typical σ⁰.
 # Full LUT calibration is not applied; values are approximate but flood-usable.
 _S1_DN_CAL = 1000.0
@@ -121,7 +124,7 @@ def search_s1_scenes(
 ) -> list[dict]:
     """Search sentinel-1-grd; keep lowest-id scene per ISO week (IW DV preferred)."""
     t0 = time.perf_counter()
-    catalog = STACClient.open(STAC_API_URL)
+    catalog = open_s1_stac_client()
     search = catalog.search(
         collections=[STAC_S1_COLLECTION],
         intersects=field_geom_geojson,
@@ -136,7 +139,8 @@ def search_s1_scenes(
         date_from=str(date_from),
         date_to=str(date_to),
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
-        has_aws_credentials=s1_has_aws_credentials(),
+        stac_api=s1_stac_api_url(),
+        provider="planetary_computer",
     )
     if not items:
         return []
@@ -536,9 +540,15 @@ def _process_one_s1_scene(
             err = str(e)
             extra: dict[str, Any] = {}
             low = err.lower()
-            if "403" in err or "access denied" in low or "forbidden" in low:
-                extra["hint"] = s1_missing_credentials_hint()
-                extra["has_aws_credentials"] = s1_has_aws_credentials()
+            if (
+                "403" in err
+                or "404" in err
+                or "access denied" in low
+                or "forbidden" in low
+                or "not found" in low
+            ):
+                extra["hint"] = s1_access_hint()
+                extra["stac_api"] = s1_stac_api_url()
             logger.error(
                 "s1_scene_skipped",
                 reason="band_read_failed",
@@ -694,7 +704,7 @@ def _process_one_s1_scene(
             "s1_scene_failed",
             scene_id=scene_id,
             error=str(e),
-            has_aws_credentials=s1_has_aws_credentials(),
+            stac_api=s1_stac_api_url(),
         )
         try:
             session.rollback()
@@ -835,11 +845,6 @@ def process_s1_backfill(self, job_id: str) -> dict:
                 "s1_agri_meta_unresolved",
                 field_id=field_id_str,
                 tags=field.tags_json,
-            )
-        if not s1_has_aws_credentials():
-            logger.warning(
-                "s1_aws_credentials_missing",
-                hint=s1_missing_credentials_hint(),
             )
         if not force:
             if agri_meta is not None:
