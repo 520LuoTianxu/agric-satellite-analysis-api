@@ -53,6 +53,7 @@ from app.tasks.pipeline import (
     get_db_session,
     read_band_windowed,
     read_bands_windowed_parallel,
+    read_rgb_windowed,
     search_scenes_for_defs,
     update_job_progress,
     write_cog,
@@ -481,7 +482,9 @@ def _process_one_optical_scene(
         t0 = time.perf_counter()
         hrefs = dict(scene.get("band_hrefs") or {})
         scl_href = hrefs.pop("SCL", None)
-        hrefs.pop("visual", None)  # optional RGB composite; true-color uses B02/B03/B04
+        # Keep visual href for true-color preview only — never feed it into
+        # spectral index formulas (NDVI/EVI/…).
+        visual_href = hrefs.pop("visual", None)
         bands = read_bands_windowed_parallel(
             hrefs,
             bounds,
@@ -498,6 +501,21 @@ def _process_one_optical_scene(
                 target_transform,
                 resampling=Resampling.nearest,
             )
+        visual_rgb = None
+        if visual_href:
+            try:
+                visual_rgb = read_rgb_windowed(
+                    visual_href,
+                    bounds,
+                    target_shape,
+                    target_transform,
+                )
+            except Exception as exc:  # noqa: BLE001 — preview soft-fail
+                logger.warning(
+                    "visual_rgb_download_failed",
+                    scene_id=scene_id,
+                    error=str(exc),
+                )
         from app.core.decloud import decloud_enabled
 
         if decloud_enabled():
@@ -586,6 +604,7 @@ def _process_one_optical_scene(
             date_str=date_str_rgb,
             bands=bands,
             field_mask=field_mask,
+            visual=visual_rgb,
         )
         mark_scene_progress(
             job_id,
@@ -696,8 +715,8 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
 
         extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
-        # SCL for parcel cloud; B02/B03/B04 already required by EVI/MNDWI/NDVI
-        # for true-color previews. Optional visual asset when Element84 provides it.
+        # SCL for parcel cloud; B02/B03/B04 for indices + true-color fallback.
+        # Optional visual/true_color asset for natural large RGB previews.
         extra_assets: dict[str, tuple[str, ...]] = {
             "SCL": SCL_STAC_ASSETS,
             "visual": ("visual", "true_color", "TCI"),
