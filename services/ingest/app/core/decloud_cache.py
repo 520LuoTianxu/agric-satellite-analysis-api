@@ -224,9 +224,19 @@ def write_window_array(
     packed = {k: np.asarray(v) for k, v in arrays.items() if v is not None}
     if not packed:
         return None
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    np.savez_compressed(tmp, **packed)
-    tmp.replace(path)
+    # savez_compressed appends .npz unless the name already ends with it.
+    # path.with_suffix(".npz.tmp") became foo.npz.tmp, so numpy wrote
+    # foo.npz.tmp.npz and replace() looked for the missing foo.npz.tmp.
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
+    try:
+        np.savez_compressed(tmp, **packed)
+        tmp.replace(path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     put_window_meta(
         land_id=land_id,
         date_str=date_str,

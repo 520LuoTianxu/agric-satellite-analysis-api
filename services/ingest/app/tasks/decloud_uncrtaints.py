@@ -178,7 +178,15 @@ def cache_optical_s2_window(
     from app.core.uncrtaints import stack_s2_13
 
     stack = stack_s2_13(bands)
-    write_window_array(str(land_id), date_str, "S2", stack=stack)
+    try:
+        write_window_array(str(land_id), date_str, "S2", stack=stack)
+    except OSError as exc:
+        logger.warning(
+            "decloud_cache_array_write_failed",
+            land_id=str(land_id),
+            date=date_str,
+            error=str(exc),
+        )
 
 
 def schedule_decloud_after_raw(
