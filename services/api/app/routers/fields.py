@@ -470,6 +470,26 @@ async def backfill_field_indices(
     if date_to:
         date_to = str(date_to).strip()[:10] or None
 
+    growing_seasons: list[dict[str, Any]] | None = None
+    season_months: list[int] | None = None
+    if body is not None:
+        raw_gs = getattr(body, "growing_seasons", None)
+        if raw_gs:
+            growing_seasons = [
+                gs.model_dump(exclude_none=True) if hasattr(gs, "model_dump") else dict(gs)
+                for gs in raw_gs
+            ]
+        raw_sm = getattr(body, "season_months", None)
+        if raw_sm:
+            season_months = []
+            for m in raw_sm:
+                try:
+                    mi = int(m)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= mi <= 12:
+                    season_months.append(mi)
+
     # Create sentinel job so status endpoint immediately reflects active backfill
     sentinel = Job(
         field_id=field_id,
@@ -482,6 +502,8 @@ async def backfill_field_indices(
             "force": force,
             **({"date_from": date_from} if date_from else {}),
             **({"date_to": date_to} if date_to else {}),
+            **({"growing_seasons": growing_seasons} if growing_seasons else {}),
+            **({"season_months": season_months} if season_months else {}),
         },
     )
     db.add(sentinel)
@@ -499,6 +521,10 @@ async def backfill_field_indices(
         extras["date_from"] = date_from
     if date_to:
         extras["date_to"] = date_to
+    if growing_seasons:
+        extras["growing_seasons"] = growing_seasons
+    if season_months:
+        extras["season_months"] = season_months
 
     if is_agri:
         bridge_job = Job(

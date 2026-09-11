@@ -28,6 +28,8 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.agri_classify import (
     PARCEL_CLOUD_SOURCE_LONLAT,
     PARCEL_CLOUD_SOURCE_SCL,
+    SUSPICIOUS_STAC_MIN,
+    SUSPICIOUS_STAC_OVER_PARCEL_GAP,
     parcel_cloud_from_lonlat_pixels,
     parcel_cloud_from_scl_values,
     scene_cloud_fields,
@@ -346,6 +348,15 @@ def emit_optical_lonlat(
     cloud_f, cloud_over_30, parcel_cloud_raw = scene_cloud_fields(
         scene.get("cloud_cover"), parcel
     )
+    # Do not persist a hard 0% parcel that under-reports Element84 eo:cloud_cover;
+    # null lets UI/API fall back to STAC (matches earth-search).
+    if (
+        parcel_cloud_raw is not None
+        and cloud_f is not None
+        and cloud_f >= SUSPICIOUS_STAC_MIN
+        and (cloud_f - parcel_cloud_raw) >= SUSPICIOUS_STAC_OVER_PARCEL_GAP
+    ):
+        parcel_cloud_raw = None
     if parcel_cloud_raw is None:
         source = None
     parcel_out = (
@@ -660,6 +671,8 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             from app.core.decloud import decloud_s2_extra_assets
 
             extra_assets.update(decloud_s2_extra_assets())
+        # Agri needs the full Element84 series (not weekly lowest-cloud):
+        # weekly dedupe dropped the high-cloud days users compare in STAC.
         scenes = search_scenes_for_defs(
             field_geom_geojson,
             date_from,
@@ -668,7 +681,35 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             index_label="agri_optical",
             max_cloud_cover=extra_cloud,
             extra_assets=extra_assets,
+            cloud_dedupe="none",
+            max_items=2000,
         )
+        # Out of growing season: skip STAC cloud >30% (no pull, no decloud).
+        # In season: keep all cloudy scenes for UnCRtainTS.
+        from app.core.decloud import (
+            filter_scenes_outside_season_high_cloud,
+            normalize_season_months,
+        )
+
+        crop_type = getattr(field, "crop_type", None)
+        # User-selected rotation windows (from backfill) beat crop default.
+        season_months = normalize_season_months(
+            season_months=params.get("season_months"),
+            growing_seasons=params.get("growing_seasons"),
+            crop_type=crop_type,
+        )
+        scenes, skipped_offseason_cloudy = filter_scenes_outside_season_high_cloud(
+            scenes,
+            season_months=season_months,
+        )
+        if skipped_offseason_cloudy:
+            logger.info(
+                "agri_optical_skip_offseason_cloudy",
+                job_id=job_id,
+                skipped=skipped_offseason_cloudy,
+                season_months=list(season_months),
+                crop_type=crop_type,
+            )
         skipped_existing = 0
         if not force:
             existing = existing_agri_scene_dates(session, agri_meta["land_id"], "S2")
@@ -816,6 +857,8 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                 date_to=date_to.isoformat(),
                 raw_results=raw_results,
                 mq_task_id=mq_task_id,
+                season_months=season_months,
+                crop_type=crop_type,
             )
 
         job.status = "completed"

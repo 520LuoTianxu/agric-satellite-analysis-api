@@ -109,6 +109,22 @@ class FieldImportResponse(BaseModel):
 # ── Backfill ─────────────────────────────────────────────────────────
 
 
+class GrowingSeasonWindow(BaseModel):
+    """One crop season the user selected for RS pull / decloud.
+
+    Rotation: send several windows; backend unions their months.
+    Prefer ``months`` (1-12). Optional ``start_month``/``end_month`` wrap
+    across year boundary (e.g. winter wheat 10→5).
+    """
+
+    label: str | None = None
+    crop: str | None = None
+    months: list[int] = PydanticField(default_factory=list)
+    start_month: int | None = None
+    end_month: int | None = None
+
+
+
 class BackfillIndicesRequest(BaseModel):
     months: int = 24
     force: bool = False
@@ -116,6 +132,11 @@ class BackfillIndicesRequest(BaseModel):
     # (or date_to); months is ignored for range calculation.
     date_from: str | None = None
     date_to: str | None = None
+    # User-selected growing seasons (rotation = multiple). Union of months
+    # drives which high-cloud scenes are pulled and which dates get decloud.
+    growing_seasons: list[GrowingSeasonWindow] | None = None
+    # Flat month list alternative / override merged with growing_seasons.
+    season_months: list[int] | None = None
 
 
 class BackfillIndicesResponse(BaseModel):

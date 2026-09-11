@@ -72,6 +72,10 @@ def _fallback_celery(
             kwargs["date_from"] = str(extras["date_from"])[:10]
         if extras.get("date_to"):
             kwargs["date_to"] = str(extras["date_to"])[:10]
+        if extras.get("growing_seasons"):
+            kwargs["growing_seasons"] = extras["growing_seasons"]
+        if extras.get("season_months"):
+            kwargs["season_months"] = extras["season_months"]
         send_task(
             "app.tasks.backfill.backfill_indices_for_field",
             args=[fid],

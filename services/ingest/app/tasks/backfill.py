@@ -51,6 +51,8 @@ def backfill_indices_for_field(
     mq_task_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    growing_seasons: list | None = None,
+    season_months: list | None = None,
 ) -> dict:
     """Backfill vegetation indices for *field_id* over *months*.
 
@@ -129,6 +131,8 @@ def backfill_indices_for_field(
                     "force": bool(force),
                     "path": "agri_lonlat_direct",
                     **({"mq_task_id": mq_task_id} if mq_task_id else {}),
+                    **({"growing_seasons": growing_seasons} if growing_seasons else {}),
+                    **({"season_months": season_months} if season_months else {}),
                 }
                 job = Job(
                     field_id=field.id,

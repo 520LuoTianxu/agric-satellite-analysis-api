@@ -877,7 +877,12 @@
     "reason_spatial_std_low": "空间对比偏低",
     "reason_ndvi_far_below_neighbors": "NDVI 远低于邻近晴空日",
     "reason_ndvi_below_neighbors": "NDVI 低于邻近晴空日",
-    "reason_non_finite_reconstruction": "重建数值无效"
+    "reason_non_finite_reconstruction": "重建数值无效",
+    "pointLegendTitle": "点颜色说明",
+    "pointLegendGreen": "绿色圆点：生育期内正常官方 NDVI（原景或 good 去云）",
+    "pointLegendGray": "灰色圆点：官方点但弱化——非生育期，或峰值月 NDVI 过低（偏裸土/弱长势）",
+    "pointLegendYellow": "黄色菱形：去云副产品（fair/bad，未必可靠），仅对比，不作官方/干旱依据",
+    "pointLegendSelected": "红色大点：当前选中日期"
   },
   "agriPanel": {
     "title": "Agri 遥感时序 · 色斑图",
@@ -921,7 +926,10 @@
     "decloudChip_bad": "去云较差（未必可靠）",
     "refreshComplete": "遥感数据拉取完成，已刷新场景",
     "progressBridge": "正在确认 agri lonlat 已写入…",
-    "progressCounts": "分片任务 {done}/{total}（进行中 {running}，排队 {pending}）"
+    "progressCounts": "分片任务 {done}/{total}（进行中 {running}，排队 {pending}）",
+    "refreshRsSeasons": "生育期（可多选，轮作）",
+    "refreshRsSeasonsHint": "选中月份内云量>30%会拉取并去云；未选中月份只拉云量≤30%的景，不去云。不选则用地块作物默认季。",
+    "refreshRsSeasonsEmpty": "未选则用作物默认生育期"
   },
   "landReportTab": {
     "title": "选地体检报告",

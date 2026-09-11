@@ -137,6 +137,7 @@ def enqueue_decloud_parcel_batch(
     date_to: str,
     targets: list[dict[str, Any]] | None = None,
     mq_task_id: str | None = None,
+    season_months: list[int] | tuple[int, ...] | None = None,
 ) -> bool:
     """Enqueue job-level buffer-then-decloud after raw lonlat is stored."""
     if not decloud_enabled():
@@ -148,6 +149,7 @@ def enqueue_decloud_parcel_batch(
         str(date_to)[:10],
         list(targets or []),
         mq_task_id,
+        list(season_months) if season_months is not None else None,
     )
     logger.info(
         "decloud_batch_enqueued",
@@ -203,10 +205,19 @@ def schedule_decloud_after_raw(
     date_to: str,
     raw_results: list[dict[str, Any]] | None,
     mq_task_id: str | None = None,
+    season_months: tuple[int, ...] | list[int] | None = None,
+    crop_type: str | None = None,
 ) -> dict[str, Any]:
     """Apply ``plan_decloud_after_raw`` and enqueue the chosen path."""
     if not decloud_enabled():
         return {"enabled": False, "batch": False, "per_scene": []}
+    from app.core.decloud import decloud_season_months
+
+    months = (
+        season_months
+        if season_months is not None
+        else decloud_season_months(crop_type)
+    )
     dates = [
         str(r["date"])[:10]
         for r in (raw_results or [])
@@ -218,6 +229,7 @@ def schedule_decloud_after_raw(
         raw_results=raw_results,
         cached_neighbor_counts=neighbor_counts_for_dates(str(land_id), dates),
         input_t=decloud_input_t(),
+        season_months=months,
     )
     by_date = {
         str(r["date"])[:10]: r for r in (raw_results or []) if r and r.get("date")
@@ -242,12 +254,14 @@ def schedule_decloud_after_raw(
             date_to=date_to,
             targets=list(plan.batch_targets),
             mq_task_id=mq_task_id,
+            season_months=months,
         )
     logger.info(
         "decloud_scheduled_after_raw",
         field_id=field_id,
         land_id=str(land_id),
         mode=decloud_mode(),
+        season_months=list(months),
         per_scene=list(plan.per_scene_dates),
         batch=plan.batch,
         hold=list(plan.hold_decloud_dates),
@@ -261,6 +275,7 @@ def schedule_decloud_after_raw(
         "batch": plan.batch,
         "hold_decloud_dates": list(plan.hold_decloud_dates),
         "targets": len(plan.batch_targets),
+        "season_months": list(months),
     }
 
 
@@ -506,6 +521,21 @@ def _publish_decloud_product(
             quality=quality.quality,
         )
 
+    # Prefer array stats; if reconstruction collapsed to stub pixels, fill avgs from pixels
+    # so UI alt series (fair/bad) is not dropped for null ndvi_avg.
+    if pixels:
+        for key in EMIT_PIXEL_KEYS:
+            if index_avgs.get(key) is not None:
+                continue
+            vals = [
+                float(px[key])
+                for px in pixels
+                if isinstance(px, dict) and px.get(key) is not None
+            ]
+            if not vals:
+                continue
+            index_avgs[key] = float(round(sum(vals) / len(vals), 6))
+
     has_finite_index = any(v is not None for v in index_avgs.values())
     if not should_persist_decloud_product(
         has_reconstruction=True,
@@ -547,7 +577,7 @@ def _publish_decloud_product(
             "%Y-%m-%d %H:%M:%S%z"
         ),
         "pixel_data_url": f"decloud://field/{field_id_str}/{date_str}",
-        "ndvi_avg": _avg_triple("NDVI")[0],
+        "ndvi_avg": index_avgs.get("NDVI") if index_avgs.get("NDVI") is not None else _avg_triple("NDVI")[0],
         "ndvi_min": _avg_triple("NDVI")[1],
         "ndvi_max": _avg_triple("NDVI")[2],
         "evi_avg": _avg_triple("EVI")[0],
@@ -927,6 +957,7 @@ def _field_context(session, field_id: str):
     max_retries=2,
     time_limit=1800,
     soft_time_limit=1500,
+    queue="decloud",
 )
 def process_parcel_decloud(
     self,
@@ -1007,6 +1038,7 @@ def process_parcel_decloud(
     max_retries=2,
     time_limit=1800,
     soft_time_limit=1500,
+    queue="decloud",
 )
 def decloud_parcel_batch(
     self,
@@ -1016,6 +1048,7 @@ def decloud_parcel_batch(
     date_to: str,
     targets: list[dict[str, Any]] | None = None,
     mq_task_id: str | None = None,
+    season_months: list[int] | None = None,
 ) -> dict[str, Any]:
     """Buffer S2 (+ S1) parcel windows for the job, then decloud cloudy dates.
 
@@ -1024,6 +1057,24 @@ def decloud_parcel_batch(
     """
     if not decloud_enabled():
         return {"status": "skipped", "reason": "decloud_disabled"}
+
+    from app.core.decloud import date_in_decloud_season, normalize_season_months
+
+    season_months = normalize_season_months(season_months=season_months)
+    if targets:
+        targets = [
+            t
+            for t in targets
+            if date_in_decloud_season(
+                str((t or {}).get("date") or "")[:10], season_months
+            )
+        ]
+        if not targets:
+            return {
+                "status": "skipped",
+                "reason": "no_in_season_cloudy_targets",
+                "season_months": list(season_months),
+            }
 
     start = date.fromisoformat(str(date_from)[:10])
     end = date.fromisoformat(str(date_to)[:10])

@@ -294,20 +294,33 @@ def search_scenes_for_defs(
     index_label: str | None = None,
     max_cloud_cover: float | None = None,
     extra_assets: dict[str, tuple[str, ...]] | None = None,
+    cloud_dedupe: str = "week",
+    max_items: int | None = None,
 ) -> list[dict]:
-    """Search Element84 STAC and resolve HREFs for the union of index bands."""
+    """Search Element84 STAC and resolve HREFs for the union of index bands.
+
+    ``cloud_dedupe``:
+      - ``week`` (default): one lowest-cloud scene per ISO week (legacy NDVI).
+      - ``day``: one lowest-cloud scene per calendar day.
+      - ``none``: keep every matching STAC item (agri + decloud need full series).
+    """
     if not index_defs:
         return []
     label = index_label or ",".join(d.key for d in index_defs)
-    cloud_lt = MAX_CLOUD_COVER if max_cloud_cover is None else float(max_cloud_cover)
+    cloud_cap = MAX_CLOUD_COVER if max_cloud_cover is None else float(max_cloud_cover)
+    dedupe = (cloud_dedupe or "week").strip().lower()
+    if dedupe not in ("week", "day", "none"):
+        dedupe = "week"
+    item_cap = int(max_items) if max_items is not None else (2000 if dedupe == "none" else 100)
     t0 = time.perf_counter()
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        query={"eo:cloud_cover": {"lt": cloud_lt}},
-        max_items=100,
+        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=90 still includes 90.0% scenes
+        query={"eo:cloud_cover": {"lte": cloud_cap}},
+        max_items=item_cap,
     )
     items = list(search.items())
     logger.info(
@@ -317,24 +330,36 @@ def search_scenes_for_defs(
         date_from=str(date_from),
         date_to=str(date_to),
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
-        max_cloud_cover=cloud_lt,
+        max_cloud_cover=cloud_cap,
+        cloud_dedupe=dedupe,
+        max_items=item_cap,
     )
     if not items:
         return []
 
-    # Group by week, pick lowest cloud cover per week
-    weekly: dict[str, Any] = {}
-    for item in items:
-        item_date = item.datetime.date() if item.datetime else date_from
-        week_key = item_date.isocalendar()[:2]
-        week_str = f"{week_key[0]}-W{week_key[1]:02d}"
-        cloud = item.properties.get("eo:cloud_cover", 100)
-        if week_str not in weekly or cloud < weekly[week_str]["cloud"]:
-            weekly[week_str] = {"item": item, "cloud": cloud, "date": item_date}
+    selected: list[dict[str, Any]] = []
+    if dedupe == "none":
+        for item in items:
+            item_date = item.datetime.date() if item.datetime else date_from
+            cloud = item.properties.get("eo:cloud_cover", 100)
+            selected.append({"item": item, "cloud": cloud, "date": item_date})
+        selected.sort(key=lambda e: (e["date"], e["cloud"], e["item"].id))
+    else:
+        buckets: dict[str, Any] = {}
+        for item in items:
+            item_date = item.datetime.date() if item.datetime else date_from
+            if dedupe == "day":
+                key = item_date.isoformat()
+            else:
+                week_key = item_date.isocalendar()[:2]
+                key = f"{week_key[0]}-W{week_key[1]:02d}"
+            cloud = item.properties.get("eo:cloud_cover", 100)
+            if key not in buckets or cloud < buckets[key]["cloud"]:
+                buckets[key] = {"item": item, "cloud": cloud, "date": item_date}
+        selected = [buckets[k] for k in sorted(buckets.keys())]
 
     scenes = []
-    for week_str in sorted(weekly.keys()):
-        entry = weekly[week_str]
+    for entry in selected:
         item = entry["item"]
         band_hrefs = _resolve_band_hrefs(item, index_defs)
         if band_hrefs:
