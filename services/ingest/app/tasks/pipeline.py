@@ -318,7 +318,7 @@ def search_scenes_for_defs(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=90 still includes 90.0% scenes
+        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 still includes 100.0% scenes
         query={"eo:cloud_cover": {"lte": cloud_cap}},
         max_items=item_cap,
     )

@@ -26,7 +26,7 @@ UNCRTAINTS_CHECKPOINT_NAME=diagonal_1
 DECLOUD_BACKEND=uncrtaints
 DECLOUD_MODE=batch
 DECLOUD_CLOUD_MIN_PCT=30
-DECLOUD_STAC_CLOUD_MAX_PCT=90
+DECLOUD_STAC_CLOUD_MAX_PCT=100
 DECLOUD_INPUT_T=3
 DECLOUD_USE_SAR=1
 ```
@@ -45,7 +45,7 @@ cloud-removed product too early.
 
 **New (batch, default):**
 
-1. Search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 90; still weekly-best
+1. Search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 100; still weekly-best
    cloud) for the job date range.
 2. Download **parcel windows only** (never a full Sentinel scene). When decloud
    is on, the optical job also pulls the extra L2A bands UnCRtainTS needs and

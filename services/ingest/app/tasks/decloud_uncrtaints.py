@@ -304,7 +304,8 @@ def _search_s2_l2a_windows(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        query={"eo:cloud_cover": {"lt": max_cloud}},
+        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 includes 100.0% scenes
+        query={"eo:cloud_cover": {"lte": max_cloud}},
         max_items=80,
     )
     items = list(search.items())
