@@ -141,4 +141,24 @@ async def get_job(
     job = await db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    # Prefer live Redis hot-path counters when present (graceful no-op if down).
+    try:
+        from openfarm_common.job_progress_redis import merge_progress_for_api
+
+        merged = merge_progress_for_api(job.id, job.progress_json)
+        if merged is not None and merged is not job.progress_json:
+            # Build response without mutating the ORM row.
+            return JobOut(
+                id=job.id,
+                field_id=job.field_id,
+                type=job.type,
+                status=job.status,
+                progress_json=merged,
+                error=job.error,
+                created_at=job.created_at,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+            )
+    except Exception:
+        pass
     return job
