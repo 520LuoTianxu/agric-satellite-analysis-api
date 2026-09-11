@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import io
 import unittest
 
-import numpy as np
+try:
+    import numpy as np
+
+    HAS_NUMPY = True
+except ImportError:  # CI ingest job is dependency-light
+    HAS_NUMPY = False
 
 
+@unittest.skipUnless(HAS_NUMPY, "numpy required")
 class JointStretchTests(unittest.TestCase):
     def test_joint_preserves_green_dominance(self) -> None:
         from app.core.true_color_preview import joint_stretch_rgb
 
-        # Synthetic vegetated parcel: green reflectance high, red/blue low.
         h, w = 32, 32
         r = np.full((h, w), 0.05, dtype=np.float64)
         g = np.full((h, w), 0.18, dtype=np.float64)
@@ -19,7 +25,6 @@ class JointStretchTests(unittest.TestCase):
         mask = np.ones((h, w), dtype=bool)
 
         jr, jg, jb = joint_stretch_rgb(r, g, b, valid_mask=mask)
-        # Green channel must stay brightest (natural vegetation look).
         self.assertGreater(float(jg.mean()), float(jr.mean()))
         self.assertGreater(float(jg.mean()), float(jb.mean()))
 
@@ -43,7 +48,6 @@ class JointStretchTests(unittest.TestCase):
             return out
 
         ir, ig, ib = _indep(r), _indep(g), _indep(b)
-        # Flat bands → each channel maps to ~same mid/high gray (washed).
         self.assertAlmostEqual(float(ir.mean()), float(ig.mean()), delta=8.0)
         self.assertAlmostEqual(float(ig.mean()), float(ib.mean()), delta=8.0)
 
@@ -57,8 +61,8 @@ class JointStretchTests(unittest.TestCase):
     def test_dn_scale_10000(self) -> None:
         from app.core.true_color_preview import joint_stretch_rgb
 
-        r = np.full((8, 8), 500.0)  # 0.05 refl
-        g = np.full((8, 8), 1800.0)  # 0.18
+        r = np.full((8, 8), 500.0)
+        g = np.full((8, 8), 1800.0)
         b = np.full((8, 8), 400.0)
         mask = np.ones((8, 8), dtype=bool)
         jr, jg, jb = joint_stretch_rgb(r, g, b, valid_mask=mask)
@@ -68,18 +72,17 @@ class JointStretchTests(unittest.TestCase):
         from app.core.true_color_preview import render_scene_rgb_jpeg
 
         rgb = np.zeros((16, 16, 3), dtype=np.uint8)
-        rgb[..., 1] = 200  # green field
+        rgb[..., 1] = 200
         rgb[..., 0] = 40
         rgb[..., 2] = 30
         jpg = render_scene_rgb_jpeg(visual=rgb)
         self.assertIsNotNone(jpg)
         self.assertGreater(len(jpg), 50)
-        self.assertEqual(jpg[:2], b"\xff\xd8")  # JPEG SOI
+        self.assertEqual(jpg[:2], b"\xff\xd8")
 
     def test_field_png_has_alpha(self) -> None:
         from app.core.true_color_preview import render_field_rgb_png
         from PIL import Image
-        import io
 
         bands = {
             "B04": np.full((10, 10), 0.05),
