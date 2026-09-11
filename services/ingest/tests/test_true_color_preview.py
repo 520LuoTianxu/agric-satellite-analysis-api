@@ -100,5 +100,45 @@ class JointStretchTests(unittest.TestCase):
         self.assertTrue(np.all(arr[mask, 3] == 255))
 
 
+
+    def test_outline_is_one_pixel_ring(self) -> None:
+        from app.core.true_color_preview import outline_mask_from_filled
+
+        mask = np.zeros((12, 12), dtype=bool)
+        mask[3:9, 3:9] = True
+        outline = outline_mask_from_filled(mask)
+        self.assertTrue(np.any(outline))
+        self.assertTrue(np.all(outline <= mask))
+        # Interior of the square should be cleared.
+        self.assertFalse(bool(outline[5, 5]))
+        self.assertTrue(bool(outline[3, 5]))
+        self.assertTrue(bool(outline[8, 5]))
+        # Outline should be much thinner than filled.
+        self.assertLess(int(outline.sum()), int(mask.sum()) // 2)
+
+    def test_draw_red_outline_paints_bright_red(self) -> None:
+        from app.core.true_color_preview import draw_red_outline, outline_mask_from_filled
+        from app.core.true_color_preview import render_scene_rgb_jpeg
+        from PIL import Image
+
+        rgb = np.zeros((20, 20, 3), dtype=np.uint8)
+        rgb[..., 1] = 180
+        mask = np.zeros((20, 20), dtype=bool)
+        mask[5:15, 5:15] = True
+        outline = outline_mask_from_filled(mask)
+        painted = draw_red_outline(rgb, outline)
+        self.assertEqual(tuple(painted[5, 10]), (220, 30, 30))
+        self.assertEqual(tuple(painted[10, 10]), (0, 180, 0))
+
+        jpg = render_scene_rgb_jpeg(visual=rgb, field_outline=outline)
+        self.assertIsNotNone(jpg)
+        arr = np.asarray(Image.open(io.BytesIO(jpg)).convert("RGB"))
+        # JPEG is lossy — red channel should dominate on outline pixels.
+        ys, xs = np.where(outline)
+        sample = arr[ys[0], xs[0]]
+        self.assertGreater(int(sample[0]), int(sample[1]))
+        self.assertGreater(int(sample[0]), int(sample[2]))
+
+
 if __name__ == "__main__":
     unittest.main()

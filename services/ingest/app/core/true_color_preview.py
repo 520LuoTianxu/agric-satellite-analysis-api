@@ -224,6 +224,54 @@ def _rgb_from_bands(
     )
 
 
+
+def outline_mask_from_filled(mask: np.ndarray) -> np.ndarray:
+    """~1px boundary of a filled boolean mask via binary erosion (4-neigh).
+
+    Pure numpy — scipy is not guaranteed in the ingest image.
+    """
+    m = np.asarray(mask, dtype=bool)
+    if m.size == 0:
+        return m.copy()
+    # Interior pixels are True only when self + 4-neighbors are True.
+    interior = m.copy()
+    interior[1:, :] &= m[:-1, :]
+    interior[:-1, :] &= m[1:, :]
+    interior[:, 1:] &= m[:, :-1]
+    interior[:, :-1] &= m[:, 1:]
+    return m & ~interior
+
+
+def draw_red_outline(
+    rgb: np.ndarray,
+    outline: np.ndarray,
+    *,
+    color: tuple[int, int, int] = (220, 30, 30),
+) -> np.ndarray:
+    """Paint outline pixels bright red on HxWx3 uint8 (copy-on-write)."""
+    out = np.asarray(rgb)
+    if out.ndim != 3 or out.shape[-1] < 3:
+        return out
+    o = np.asarray(outline, dtype=bool)
+    if o.shape != out.shape[:2]:
+        logger.warning(
+            "outline_shape_mismatch",
+            outline_shape=list(o.shape),
+            rgb_shape=list(out.shape[:2]),
+        )
+        return out
+    if not np.any(o):
+        return out
+    painted = out.copy()
+    if painted.dtype != np.uint8:
+        painted = np.clip(painted, 0, 255).astype(np.uint8)
+    cr, cg, cb = (int(color[0]), int(color[1]), int(color[2]))
+    painted[o, 0] = cr
+    painted[o, 1] = cg
+    painted[o, 2] = cb
+    return painted
+
+
 def render_field_rgb_png(
     bands: dict[str, np.ndarray],
     field_mask: np.ndarray,
@@ -262,6 +310,12 @@ def render_field_rgb_png(
     r = np.where(mask, r, 0).astype(np.uint8)
     g = np.where(mask, g, 0).astype(np.uint8)
     b = np.where(mask, b, 0).astype(np.uint8)
+    try:
+        edge = outline_mask_from_filled(mask)
+        rgb_u8 = draw_red_outline(np.dstack([r, g, b]), edge)
+        r, g, b = rgb_u8[..., 0], rgb_u8[..., 1], rgb_u8[..., 2]
+    except Exception as exc:  # noqa: BLE001 — outline must not break preview
+        logger.warning("field_rgb_outline_failed", error=str(exc))
     alpha = np.where(mask, 255, 0).astype(np.uint8)
     rgba = np.dstack([r, g, b, alpha])
     img = Image.fromarray(rgba, mode="RGBA")
@@ -274,9 +328,15 @@ def render_scene_rgb_jpeg(
     bands: dict[str, np.ndarray] | None = None,
     *,
     visual: np.ndarray | bytes | None = None,
+    field_outline: np.ndarray | None = None,
     quality: int = 85,
 ) -> bytes | None:
-    """Opaque true-color JPEG for scene-context / large preview (no mask punch-out)."""
+    """Opaque true-color JPEG for scene-context / large preview (no mask punch-out).
+
+    When ``field_outline`` is a boolean mask (or filled mask — caller may pass
+    either outline or filled; filled is thinned here if denser than edge), a
+    thin bright-red parcel boundary is drawn before JPEG encode.
+    """
     r = g = b = None
     if visual is not None:
         vis = _normalize_visual_rgb(visual)
@@ -302,7 +362,18 @@ def render_scene_rgb_jpeg(
     if r is None:
         return None
 
-    rgb = np.dstack([r, g, b])
+    rgb = np.dstack([r, g, b]).astype(np.uint8, copy=False)
+    if field_outline is not None:
+        try:
+            o = np.asarray(field_outline, dtype=bool)
+            # Accept filled mask or precomputed outline; thin if denser than edge.
+            if o.shape == rgb.shape[:2] and np.any(o):
+                # Heuristic: if >2% of pixels are True, treat as filled → outline.
+                if float(np.count_nonzero(o)) > 0.02 * o.size:
+                    o = outline_mask_from_filled(o)
+                rgb = draw_red_outline(rgb, o)
+        except Exception as exc:  # noqa: BLE001 — outline must not break preview
+            logger.warning("scene_rgb_outline_failed", error=str(exc))
     img = Image.fromarray(rgb, mode="RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
@@ -319,6 +390,7 @@ def upload_field_rgb_preview(
     visual: np.ndarray | bytes | None = None,
     scene_bands: dict[str, np.ndarray] | None = None,
     scene_visual: np.ndarray | bytes | None = None,
+    scene_field_mask: np.ndarray | None = None,
 ) -> dict[str, str | None]:
     """Render + upload parcel PNG and optional large scene JPEG.
 
@@ -328,6 +400,8 @@ def upload_field_rgb_preview(
     - ``scene_visual`` / ``scene_bands``: padded landscape window for large_rgb.
       When neither is provided, falls back to parcel ``bands`` (better stretch
       than nothing, but not true landscape context).
+    - ``scene_field_mask``: filled bool parcel mask on the scene grid; used to
+      derive a thin red outline on ``large_rgb``.
     """
     empty: dict[str, str | None] = {
         "rgb_oss_key": None,
@@ -348,7 +422,20 @@ def upload_field_rgb_preview(
         large_src = scene_bands if scene_bands is not None else (
             None if large_visual is not None else bands
         )
-        jpg = render_scene_rgb_jpeg(large_src, visual=large_visual)
+        scene_outline = None
+        if scene_field_mask is not None:
+            try:
+                scene_outline = outline_mask_from_filled(scene_field_mask)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "scene_field_outline_failed",
+                    land_id=land_id,
+                    date=date_str,
+                    error=str(exc),
+                )
+        jpg = render_scene_rgb_jpeg(
+            large_src, visual=large_visual, field_outline=scene_outline
+        )
         if jpg:
             large_key = scene_rgb_oss_key(land_id, date_str, sensor)
             storage.put_bytes(large_key, jpg, content_type="image/jpeg")

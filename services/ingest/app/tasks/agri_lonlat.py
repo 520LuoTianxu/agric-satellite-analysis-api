@@ -504,8 +504,11 @@ def _process_one_optical_scene(
         # Padded landscape window for large_rgb (field_rgb stays on parcel grid).
         scene_visual = None
         scene_bands = None
+        scene_field_mask = None
         try:
             from app.core.true_color_preview import compute_scene_preview_grid
+            from rasterio.features import geometry_mask
+            from shapely.geometry import shape as shapely_shape
 
             # Use unbuffered field extent (bounds already include ~0.001° parcel pad).
             field_extent = (
@@ -517,6 +520,21 @@ def _process_one_optical_scene(
             scene_transform, scene_shape, scene_bounds = compute_scene_preview_grid(
                 field_extent
             )
+            try:
+                geom = shapely_shape(field_geom_geojson)
+                scene_field_mask = geometry_mask(
+                    [geom],
+                    out_shape=scene_shape,
+                    transform=scene_transform,
+                    invert=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — outline soft-fail
+                logger.warning(
+                    "scene_field_mask_failed",
+                    scene_id=scene_id,
+                    error=str(exc),
+                )
+                scene_field_mask = None
             if visual_href:
                 try:
                     scene_visual = read_rgb_windowed(
@@ -658,6 +676,7 @@ def _process_one_optical_scene(
             field_mask=field_mask,
             scene_bands=scene_bands,
             scene_visual=scene_visual,
+            scene_field_mask=scene_field_mask,
         )
         mark_scene_progress(
             job_id,
