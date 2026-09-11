@@ -24,25 +24,50 @@ UNCRTAINTS_CHECKPOINT_DIR=/models/uncrtaints
 UNCRTAINTS_HOME=/opt/UnCRtainTS
 UNCRTAINTS_CHECKPOINT_NAME=diagonal_1
 DECLOUD_BACKEND=uncrtaints
+DECLOUD_MODE=batch
 DECLOUD_CLOUD_MIN_PCT=30
 DECLOUD_STAC_CLOUD_MAX_PCT=90
 DECLOUD_INPUT_T=3
 DECLOUD_USE_SAR=1
 ```
 
-Restart the ingest worker. Optical jobs then:
+`DECLOUD_MODE=batch` is the default when the feature is on. `per_scene` is a
+fallback that only fires after neighbor windows are already in the local cache.
 
-- search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 90; still weekly-best cloud)
-- write the raw S2 lonlat product as today
-- if **parcel** cloud (in-polygon SCL / clear flags) > 30% **or** STAC scene
-  cloud > 30%, enqueue `app.tasks.decloud_uncrtaints.process_parcel_decloud`
+Restart the ingest worker.
 
-That task reads **only the field polygon window** (never a full Sentinel scene):
-current cloudy S2 12 L2A bands (B10 filled with zeros), nearest other S2 dates
-to make `input_t=3`, and nearest S1 VV/VH from Planetary Computer.
+## Sequence (new vs old)
 
-Bands are windowed from remote COGs into RAM. The product JSON is uploaded with
-`put_bytes`. No per-scene raster is kept on local disk after the scene finishes.
+**Old (phase 1):** each raw S2 write immediately enqueued
+`process_parcel_decloud`. That task searched STAC again for plus/minus 45-day
+neighbors, often before enough dates existed, then published a weak or empty
+cloud-removed product too early.
+
+**New (batch, default):**
+
+1. Search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 90; still weekly-best
+   cloud) for the job date range.
+2. Download **parcel windows only** (never a full Sentinel scene). When decloud
+   is on, the optical job also pulls the extra L2A bands UnCRtainTS needs and
+   stores each window in scratch keyed by land, date, and sensor.
+3. Write the **raw** S2 lonlat product and publish its OSS + MQ as each scene
+   finishes (progress). Raw rows are never deleted.
+4. After every raw scene in the job is stored, enqueue
+   `decloud_parcel_batch`. That task buffers remaining S2 neighbors
+   (plus/minus 45 days) and matching S1 windows, then waits until at least
+   `DECLOUD_INPUT_T` usable S2 windows exist.
+5. Only then run UnCRtainTS on cloudy targets and publish decloud OSS + MQ.
+   Cloudy-date official picks therefore wait until decloud finishes or is
+   skipped (`neighbors_not_ready` does not write a product).
+
+`DECLOUD_MODE=per_scene` may still enqueue `process_parcel_decloud` for one
+date, but only when the cache already has enough neighbors. Dates that are
+still short go to the same batch path.
+
+The batch (or per-scene) reconstruct uses the cached stack: current cloudy S2
+12 L2A bands (B10 filled with zeros), nearest other S2 dates to make
+`input_t=3`, and nearest S1 VV/VH from Planetary Computer. Product JSON is
+uploaded with `put_bytes`.
 
 ## Products
 
@@ -115,7 +140,16 @@ CI unit tests mock nothing of the net: they score the gate with scalars only
 
 ## Retrigger
 
+One date (uses cache first, then STAC if the window is missing):
+
 ```
 celery -A app.worker call app.tasks.decloud_uncrtaints.process_parcel_decloud \
   --args '["<field-uuid>", "<land_id>", "2024-07-15"]'
+```
+
+A whole job range (buffer neighbors, then decloud every cloudy target):
+
+```
+celery -A app.worker call app.tasks.decloud_uncrtaints.decloud_parcel_batch \
+  --args '["<field-uuid>", "<land_id>", "2024-06-01", "2024-08-31"]'
 ```

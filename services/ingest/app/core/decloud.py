@@ -6,6 +6,9 @@ Product rules:
 - Additive: never overwrite raw S2 lonlat rows.
 - Trigger when scene/parcel cloud > DECLOUD_CLOUD_MIN_PCT (default 30).
 - STAC search/ingest cap is DECLOUD_STAC_CLOUD_MAX_PCT (default 90).
+- When enabled, default ``DECLOUD_MODE=batch``: buffer many parcel windows,
+  then decloud; do not publish the official cloudy-date product as soon as
+  one raw scene finishes.
 - Store as sensor=S2 with scene_id suffix ``_decloud`` and
   pixel_data.source = ``uncrtaints_decloud``.
 - Official drought / timeseries / land metrics accept only quality ``good``.
@@ -15,7 +18,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from datetime import date, timedelta
+from typing import Any, Literal
 
 from app.core.agri_classify import (
     CLOUD_MAX_PCT,
@@ -29,11 +33,23 @@ from app.core.agri_classify import (
 
 DecloudQuality = Literal["good", "fair", "bad"]
 DecloudBackend = Literal["uncrtaints", "dummy"]
+DecloudMode = Literal["batch", "per_scene"]
 
 DEFAULT_CLOUD_MIN_PCT = CLOUD_MAX_PCT
 DEFAULT_STAC_CLOUD_MAX_PCT = 90.0
 DEFAULT_INPUT_T = 3
 DEFAULT_CHECKPOINT_NAME = "diagonal_1"
+DEFAULT_MODE: DecloudMode = "batch"
+DEFAULT_LOOKBACK_DAYS = 45
+
+# Extra L2A assets agri optical indices do not already pull (B10 is zeros).
+# Keys match UnCRtainTS S2_L2A_ASSET_MAP / Element84 sentinel-2-l2a.
+DECLOUD_EXTRA_S2_ASSETS: dict[str, tuple[str, ...]] = {
+    "B01": ("coastal", "B01"),
+    "B06": ("rededge2", "B06"),
+    "B8A": ("nir08", "B8A"),
+    "B09": ("nir09", "B09"),
+}
 
 # Quality heuristics (0-1 reflectance units) from the parcel-window pilot.
 RGB_BRIGHT_BAD = 0.45
@@ -111,6 +127,208 @@ def decloud_input_t() -> int:
 def decloud_use_sar() -> bool:
     explicit = _parse_bool_env("DECLOUD_USE_SAR")
     return True if explicit is None else explicit
+
+
+def decloud_mode() -> DecloudMode:
+    """When enabled, default is batch-after-buffer (not per-scene STAC scrape)."""
+    raw = (os.environ.get("DECLOUD_MODE") or DEFAULT_MODE).strip().lower()
+    if raw in ("per_scene", "per-scene", "scene", "immediate"):
+        return "per_scene"
+    return "batch"
+
+
+def decloud_lookback_days() -> int:
+    return max(1, _parse_int_env("DECLOUD_LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS))
+
+
+def decloud_s2_extra_assets() -> dict[str, tuple[str, ...]]:
+    """STAC extras so the optical job can cache a full UnCRtainTS L2A window."""
+    return dict(DECLOUD_EXTRA_S2_ASSETS)
+
+
+def batch_neighbors_ready(usable_s2: int, input_t: int | None = None) -> bool:
+    """True when the local window cache has enough S2 dates for ``input_t``."""
+    need = decloud_input_t() if input_t is None else max(1, int(input_t))
+    return int(usable_s2) >= need
+
+
+def should_enqueue_per_scene_decloud(
+    *,
+    mode: str | None = None,
+    cached_neighbor_count: int,
+    input_t: int | None = None,
+) -> bool:
+    """Per-scene Celery hop only in per_scene mode when neighbors are already cached."""
+    resolved = decloud_mode() if mode is None else str(mode).strip().lower()
+    if resolved in ("per-scene", "scene", "immediate"):
+        resolved = "per_scene"
+    if resolved != "per_scene":
+        return False
+    return batch_neighbors_ready(cached_neighbor_count, input_t)
+
+
+def _iso_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip()
+    return text[:10] if text else None
+
+
+def cloudy_targets_from_raw(
+    raw_results: list[dict[str, Any]] | None,
+    *,
+    cloud_min_pct: float | None = None,
+) -> list[dict[str, Any]]:
+    """Cloudy raw lonlat rows that still need an additive decloud attempt."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in raw_results or []:
+        if not row:
+            continue
+        date_str = _iso_date(row.get("date"))
+        if not date_str or date_str in seen:
+            continue
+        if not should_trigger_decloud(
+            cloud_cover_over_30=row.get("cloud_cover_over_30"),
+            parcel_cloud_cover_pct=row.get("parcel_cloud_cover_pct"),
+            cloud_cover=row.get("cloud_cover"),
+            cloud_min_pct=cloud_min_pct,
+        ):
+            continue
+        seen.add(date_str)
+        out.append(
+            {
+                "date": date_str,
+                "raw_scene_id": row.get("scene_id") or row.get("raw_scene_id"),
+                "stac_cloud": row.get("cloud_cover", row.get("stac_cloud")),
+                "parcel_cloud": row.get(
+                    "parcel_cloud_cover_pct", row.get("parcel_cloud")
+                ),
+                "cloud_over_30": row.get("cloud_cover_over_30", row.get("cloud_over_30")),
+            }
+        )
+    return out
+
+
+@dataclass(frozen=True)
+class DecloudPlan:
+    """What to do after raw lonlat is stored for a job.
+
+    Raw is always kept. Decloud OSS/MQ is held until a batch (or a per-scene
+    hop that already has cached neighbors) can run.
+    """
+
+    store_raw: bool
+    per_scene_dates: tuple[str, ...]
+    batch: bool
+    batch_targets: tuple[dict[str, Any], ...]
+    hold_decloud_dates: tuple[str, ...]
+
+
+def plan_decloud_after_raw(
+    *,
+    enabled: bool,
+    mode: str | None = None,
+    raw_results: list[dict[str, Any]] | None,
+    cached_neighbor_counts: dict[str, int] | None = None,
+    input_t: int | None = None,
+    cloud_min_pct: float | None = None,
+) -> DecloudPlan:
+    """Decide per-scene vs batch decloud after raw products are stored.
+
+    Batch (default): never enqueue per-scene; one job-level batch after the
+    buffer has enough temporal context.
+    Per-scene: immediate hop only when ``input_t`` neighbors are already
+    cached; otherwise those dates still go to batch.
+    """
+    targets = (
+        cloudy_targets_from_raw(raw_results, cloud_min_pct=cloud_min_pct)
+        if enabled
+        else []
+    )
+    if not enabled or not targets:
+        return DecloudPlan(True, (), False, (), ())
+
+    resolved = (mode or decloud_mode()).strip().lower()
+    if resolved in ("per-scene", "scene", "immediate"):
+        resolved = "per_scene"
+    counts = cached_neighbor_counts or {}
+    need = decloud_input_t() if input_t is None else max(1, int(input_t))
+
+    if resolved != "per_scene":
+        hold = tuple(t["date"] for t in targets)
+        return DecloudPlan(True, (), True, tuple(targets), hold)
+
+    ready: list[str] = []
+    delayed: list[dict[str, Any]] = []
+    for target in targets:
+        date_str = target["date"]
+        if should_enqueue_per_scene_decloud(
+            mode="per_scene",
+            cached_neighbor_count=int(counts.get(date_str, 0) or 0),
+            input_t=need,
+        ):
+            ready.append(date_str)
+        else:
+            delayed.append(target)
+    hold = tuple(t["date"] for t in delayed)
+    return DecloudPlan(
+        True,
+        tuple(ready),
+        bool(delayed),
+        tuple(delayed),
+        hold,
+    )
+
+
+def pick_temporal_scenes(
+    scenes: list[dict[str, Any]],
+    target: date,
+    input_t: int,
+) -> list[dict[str, Any]]:
+    """Target plus nearest other S2 dates, length ``input_t`` (repeat if needed)."""
+    if not scenes:
+        return []
+    need = max(1, int(input_t))
+    target_scene = None
+    others: list[dict[str, Any]] = []
+    for sc in scenes:
+        sc_date = sc.get("date")
+        if isinstance(sc_date, str):
+            sc_date = date.fromisoformat(sc_date[:10])
+        if sc_date == target:
+            target_scene = sc
+        else:
+            others.append(sc)
+    if target_scene is None:
+        target_scene = min(
+            scenes,
+            key=lambda s: abs((_scene_date(s) - target).days),
+        )
+        others = [s for s in scenes if s is not target_scene]
+    others.sort(key=lambda s: abs((_scene_date(s) - target).days))
+    neighbors = others[: max(0, need - 1)]
+    neighbors.sort(key=lambda s: _scene_date(s))
+    # Reconstruct the last timestep (UnCRtainTS mean[0, -1] and dummy backend).
+    ordered = neighbors + [target_scene]
+    while len(ordered) < need:
+        ordered.insert(0, ordered[0])
+    return ordered[:need]
+
+
+def _scene_date(scene: dict[str, Any]) -> date:
+    value = scene.get("date")
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def neighbor_window(target: date, lookback_days: int | None = None) -> tuple[date, date]:
+    days = decloud_lookback_days() if lookback_days is None else max(1, int(lookback_days))
+    delta = timedelta(days=days)
+    return target - delta, target + delta
 
 
 def uncrtaints_checkpoint_dir() -> str:
@@ -281,24 +499,36 @@ def score_decloud(inp: DecloudQualityInputs) -> DecloudQualityResult:
 
 
 __all__ = [
+    "DECLOUD_EXTRA_S2_ASSETS",
     "DECLOUD_QUALITY_GOOD",
     "DECLOUD_SCENE_ID_SUFFIX",
     "DECLOUD_SOURCE",
+    "DecloudMode",
+    "DecloudPlan",
     "DecloudQuality",
     "DecloudQualityInputs",
     "DecloudQualityResult",
+    "batch_neighbors_ready",
+    "cloudy_targets_from_raw",
     "decloud_backend",
     "decloud_cloud_min_pct",
     "decloud_enabled",
     "decloud_input_t",
+    "decloud_lookback_days",
+    "decloud_mode",
     "decloud_oss_sensor",
+    "decloud_s2_extra_assets",
     "decloud_scene_id",
     "decloud_stac_cloud_max_pct",
     "decloud_use_sar",
     "is_decloud_product",
     "is_official_optical_product",
+    "neighbor_window",
     "official_s2_sql",
+    "pick_temporal_scenes",
+    "plan_decloud_after_raw",
     "score_decloud",
+    "should_enqueue_per_scene_decloud",
     "should_trigger_decloud",
     "uncrtaints_checkpoint_dir",
     "uncrtaints_checkpoint_name",

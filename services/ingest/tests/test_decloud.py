@@ -10,13 +10,20 @@ from unittest.mock import patch
 from app.core.decloud import (
     DECLOUD_SOURCE,
     DecloudQualityInputs,
+    batch_neighbors_ready,
+    cloudy_targets_from_raw,
     decloud_backend,
     decloud_cloud_min_pct,
     decloud_enabled,
+    decloud_mode,
     decloud_oss_sensor,
+    decloud_s2_extra_assets,
     decloud_scene_id,
     decloud_stac_cloud_max_pct,
+    pick_temporal_scenes,
+    plan_decloud_after_raw,
     score_decloud,
+    should_enqueue_per_scene_decloud,
     should_trigger_decloud,
 )
 from app.core.agri_classify import (
@@ -49,6 +56,21 @@ class DecloudFlagTests(unittest.TestCase):
     def test_backend_dummy(self) -> None:
         with patch.dict(os.environ, {"DECLOUD_BACKEND": "dummy"}):
             self.assertEqual(decloud_backend(), "dummy")
+
+    def test_mode_defaults_to_batch(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DECLOUD_MODE", None)
+            self.assertEqual(decloud_mode(), "batch")
+
+    def test_mode_per_scene(self) -> None:
+        with patch.dict(os.environ, {"DECLOUD_MODE": "per_scene"}):
+            self.assertEqual(decloud_mode(), "per_scene")
+
+    def test_extra_s2_assets_are_parcel_bands(self) -> None:
+        extras = decloud_s2_extra_assets()
+        self.assertIn("B01", extras)
+        self.assertIn("B8A", extras)
+        self.assertNotIn("B10", extras)
 
     def test_product_identity_is_additive(self) -> None:
         self.assertEqual(
@@ -240,6 +262,204 @@ class OfficialGateTests(unittest.TestCase):
         self.assertIn("decloud_quality", sql)
         self.assertIn("'good'", sql)
         self.assertIn("_decloud", sql)
+
+
+class BatchPlanTests(unittest.TestCase):
+    """Raw is stored first; official cloudy-date decloud waits for neighbors."""
+
+    _cloudy_raw = {
+        "date": "2024-07-15",
+        "scene_id": "stac_bridge_2024-07-15_S2",
+        "cloud_cover": 55.0,
+        "cloud_cover_over_30": True,
+        "parcel_cloud_cover_pct": 42.0,
+    }
+    _clear_raw = {
+        "date": "2024-07-08",
+        "scene_id": "stac_bridge_2024-07-08_S2",
+        "cloud_cover": 8.0,
+        "cloud_cover_over_30": False,
+        "parcel_cloud_cover_pct": 12.0,
+    }
+
+    def test_disabled_stores_raw_only(self) -> None:
+        plan = plan_decloud_after_raw(
+            enabled=False,
+            mode="batch",
+            raw_results=[self._cloudy_raw],
+            cached_neighbor_counts={"2024-07-15": 3},
+            input_t=3,
+        )
+        self.assertTrue(plan.store_raw)
+        self.assertFalse(plan.batch)
+        self.assertEqual(plan.per_scene_dates, ())
+        self.assertEqual(plan.hold_decloud_dates, ())
+
+    def test_batch_holds_decloud_until_job_buffer(self) -> None:
+        plan = plan_decloud_after_raw(
+            enabled=True,
+            mode="batch",
+            raw_results=[self._clear_raw, self._cloudy_raw],
+            cached_neighbor_counts={"2024-07-15": 1, "2024-07-08": 1},
+            input_t=3,
+        )
+        self.assertTrue(plan.store_raw)
+        self.assertEqual(plan.per_scene_dates, ())
+        self.assertTrue(plan.batch)
+        self.assertEqual([t["date"] for t in plan.batch_targets], ["2024-07-15"])
+        self.assertEqual(plan.hold_decloud_dates, ("2024-07-15",))
+
+    def test_batch_still_waits_when_neighbors_already_cached(self) -> None:
+        """Default path is one batch after all raw, not per-scene scrape."""
+        plan = plan_decloud_after_raw(
+            enabled=True,
+            mode="batch",
+            raw_results=[self._cloudy_raw],
+            cached_neighbor_counts={"2024-07-15": 4},
+            input_t=3,
+        )
+        self.assertEqual(plan.per_scene_dates, ())
+        self.assertTrue(plan.batch)
+        self.assertIn("2024-07-15", plan.hold_decloud_dates)
+
+    def test_per_scene_only_when_neighbors_cached(self) -> None:
+        plan = plan_decloud_after_raw(
+            enabled=True,
+            mode="per_scene",
+            raw_results=[self._cloudy_raw],
+            cached_neighbor_counts={"2024-07-15": 3},
+            input_t=3,
+        )
+        self.assertEqual(plan.per_scene_dates, ("2024-07-15",))
+        self.assertFalse(plan.batch)
+        self.assertEqual(plan.hold_decloud_dates, ())
+
+    def test_per_scene_falls_back_to_batch_without_neighbors(self) -> None:
+        plan = plan_decloud_after_raw(
+            enabled=True,
+            mode="per_scene",
+            raw_results=[self._cloudy_raw],
+            cached_neighbor_counts={"2024-07-15": 1},
+            input_t=3,
+        )
+        self.assertEqual(plan.per_scene_dates, ())
+        self.assertTrue(plan.batch)
+        self.assertEqual(plan.hold_decloud_dates, ("2024-07-15",))
+
+    def test_clear_raw_is_not_a_decloud_target(self) -> None:
+        targets = cloudy_targets_from_raw([self._clear_raw, self._cloudy_raw])
+        self.assertEqual([t["date"] for t in targets], ["2024-07-15"])
+
+    def test_neighbors_ready_requires_input_t(self) -> None:
+        self.assertFalse(batch_neighbors_ready(2, 3))
+        self.assertTrue(batch_neighbors_ready(3, 3))
+        self.assertFalse(
+            should_enqueue_per_scene_decloud(
+                mode="batch", cached_neighbor_count=5, input_t=3
+            )
+        )
+        self.assertTrue(
+            should_enqueue_per_scene_decloud(
+                mode="per_scene", cached_neighbor_count=3, input_t=3
+            )
+        )
+
+    def test_pick_temporal_repeats_when_short(self) -> None:
+        from datetime import date
+
+        scenes = [
+            {"date": date(2024, 7, 1), "id": "a"},
+            {"date": date(2024, 7, 15), "id": "b"},
+        ]
+        picked = pick_temporal_scenes(scenes, date(2024, 7, 15), 3)
+        self.assertEqual(len(picked), 3)
+        self.assertEqual(picked[-1]["id"], "b")
+
+    def test_pick_temporal_keeps_target_last(self) -> None:
+        from datetime import date
+
+        scenes = [
+            {"date": date(2024, 7, 1), "id": "before"},
+            {"date": date(2024, 7, 15), "id": "target"},
+            {"date": date(2024, 7, 22), "id": "after"},
+        ]
+        picked = pick_temporal_scenes(scenes, date(2024, 7, 15), 3)
+        self.assertEqual([p["id"] for p in picked], ["before", "after", "target"])
+
+    def test_fair_decloud_plan_does_not_mark_official(self) -> None:
+        """Planner never publishes; quality gate still blocks fair/bad."""
+        result = score_decloud(
+            DecloudQualityInputs(
+                rgb_mean=0.40,
+                rgb_mean_raw=0.41,
+                rgb_std=0.07,
+                rgb_std_raw=0.08,
+                ndvi_mean=0.35,
+                neighbor_ndvi_mean=0.40,
+            )
+        )
+        self.assertFalse(result.is_official)
+        self.assertNotEqual(result.quality, "good")
+
+
+class WindowCacheTests(unittest.TestCase):
+    def test_catalog_roundtrip_and_neighbor_count(self) -> None:
+        import tempfile
+        from datetime import date
+
+        from app.core.decloud_cache import (
+            get_window_meta,
+            neighbor_counts_for_dates,
+            put_window_meta,
+            usable_s2_count,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DECLOUD_CACHE_DIR": tmp}):
+                put_window_meta(
+                    land_id="13691",
+                    date_str="2024-07-08",
+                    sensor="S2",
+                    cloud_cover=10.0,
+                    stac_id="s2-a",
+                    band_hrefs={"B04": "s3://x/B04.tif"},
+                )
+                put_window_meta(
+                    land_id="13691",
+                    date_str=date(2024, 7, 15),
+                    sensor="S2",
+                    cloud_cover=55.0,
+                    band_hrefs={"B04": "s3://x/B04b.tif"},
+                )
+                put_window_meta(
+                    land_id="13691",
+                    date_str="2024-07-15",
+                    sensor="S1",
+                    band_hrefs={"vv": "s3://x/vv.tif"},
+                )
+                got = get_window_meta("13691", "2024-07-15", "S2")
+                self.assertIsNotNone(got)
+                self.assertEqual(got["cloud_cover"], 55.0)
+                self.assertEqual(usable_s2_count("13691", "2024-07-15", 45), 2)
+                counts = neighbor_counts_for_dates(
+                    "13691", ["2024-07-15"], lookback_days=45
+                )
+                self.assertGreaterEqual(counts["2024-07-15"], 2)
+
+    def test_missing_hrefs_without_array_are_not_usable(self) -> None:
+        import tempfile
+
+        from app.core.decloud_cache import list_cached_s2, put_window_meta
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DECLOUD_CACHE_DIR": tmp}):
+                put_window_meta(
+                    land_id="1",
+                    date_str="2024-01-01",
+                    sensor="S2",
+                    has_array=False,
+                )
+                self.assertEqual(list_cached_s2("1"), [])
 
 
 class UncrtaintsCheckpointTests(unittest.TestCase):
