@@ -177,7 +177,7 @@ def main() -> int:
             png = render_png(b02, b03, b04, field_mask.astype(bool))
             img_key = field_rgb_oss_key(LAND_ID, d)
             storage.put_bytes(img_key, png, content_type="image/png")
-            img_url = storage.public_url(img_key)
+            img_url = storage.presigned_get(img_key)
 
             # patch OSS JSON
             if key_json:

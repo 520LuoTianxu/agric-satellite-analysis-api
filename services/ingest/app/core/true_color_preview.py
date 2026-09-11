@@ -84,7 +84,8 @@ def upload_field_rgb_preview(
         key = field_rgb_oss_key(land_id, date_str, sensor)
         storage = get_storage()
         storage.put_bytes(key, png, content_type="image/png")
-        url = storage.public_url(key)
+        # Private bucket: browser needs signed GET (20y), not bare public_url.
+        url = storage.presigned_get(key)
         return {"rgb_oss_key": key, "rgb_url": url, "large_rgb_url": None}
     except Exception as exc:  # noqa: BLE001 — preview must not fail ingest
         logger.warning(

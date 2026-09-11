@@ -220,13 +220,31 @@ def _clear_scene_media_urls(d: dict[str, Any]) -> None:
     d["s2_heatmap_url"] = None
 
 
+def _sign_preview_url(key: str | None, fallback: str | None = None) -> str | None:
+    """Private-bucket browser URL: prefer 20y signed GET from ``rgb_oss_key``."""
+    if isinstance(key, str) and key.strip():
+        try:
+            return get_parcel_product_storage().presigned_get(key.strip())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rgb_presign_failed key=%s err=%s", key[:120], exc)
+    if isinstance(fallback, str) and fallback.strip():
+        # Already-signed URLs (contain Signature= / X-Amz-Signature) pass through.
+        return fallback.strip()
+    return None
+
+
 def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) -> None:
     """Fill preview URLs. DB columns (already on ``d``) win over OSS JSON media."""
     db_rgb = d.get("rgb_url")
     db_large = d.get("large_rgb_url")
+    db_key = d.get("rgb_oss_key")
     if media:
         d["rgb_url"] = db_rgb or media.get("rgb_url")
         d["large_rgb_url"] = db_large or media.get("large_rgb_url")
+        if not db_key:
+            db_key = media.get("rgb_oss_key")
+            if db_key:
+                d["rgb_oss_key"] = db_key
         d["heatmap_url"] = media.get("heatmap_url")
         d["s2_heatmap_url"] = media.get("s2_heatmap_url")
     else:
@@ -236,6 +254,13 @@ def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) ->
         else:
             d["heatmap_url"] = None
             d["s2_heatmap_url"] = None
+    # Always re-sign from stable key so private ACL buckets work in <img>.
+    signed = _sign_preview_url(
+        d.get("rgb_oss_key") if isinstance(d.get("rgb_oss_key"), str) else db_key,
+        d.get("rgb_url"),
+    )
+    if signed:
+        d["rgb_url"] = signed
 
 
 async def _agri_ready(db: AsyncSession) -> None:
