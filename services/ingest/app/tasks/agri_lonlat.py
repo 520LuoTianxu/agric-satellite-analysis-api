@@ -20,11 +20,19 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import structlog
 from geoalchemy2.shape import to_shape
+from rasterio.warp import Resampling
 from shapely.geometry import mapping
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.core.agri_classify import scene_cloud_fields
+from app.core.agri_classify import (
+    PARCEL_CLOUD_SOURCE_LONLAT,
+    PARCEL_CLOUD_SOURCE_SCL,
+    SCL_CLOUD_CLASSES,
+    parcel_cloud_from_counts,
+    parcel_cloud_from_lonlat_pixels,
+    scene_cloud_fields,
+)
 from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
@@ -33,10 +41,10 @@ from app.tasks.pipeline import (
     RETRY_DELAYS,
     complete_step,
     compute_target_grid,
-    compute_zonal_stats,
     existing_agri_scene_dates,
     filter_scenes_skip_existing,
     get_db_session,
+    read_band_windowed,
     read_bands_windowed_parallel,
     search_scenes_for_defs,
     update_job_progress,
@@ -56,6 +64,30 @@ INDEX_KEY_TO_PIXEL = {
     "cire": "CIre",
     "mndwi": "MNDWI",
 }
+
+# Element84 / ESA SCL asset names. Optional; missing SCL falls back to STAC.
+SCL_STAC_ASSETS = ("scl", "SCL")
+
+
+def parcel_cloud_from_scl_window(
+    scl: np.ndarray | None,
+    field_mask: np.ndarray | None,
+) -> float | None:
+    """In-polygon SCL cloud/shadow fraction. Ignores nodata and window padding."""
+    if scl is None or field_mask is None:
+        return None
+    if scl.shape != field_mask.shape:
+        return None
+    inside = field_mask & np.isfinite(scl)
+    if not np.any(inside):
+        return None
+    classes = np.rint(scl[inside]).astype(np.int16)
+    valid = classes > 0
+    n_valid = int(np.count_nonzero(valid))
+    if n_valid <= 0:
+        return None
+    cloudy = np.isin(classes, tuple(SCL_CLOUD_CLASSES)) & valid
+    return parcel_cloud_from_counts(int(np.count_nonzero(cloudy)), n_valid)
 
 
 def agri_optical_index_defs():
@@ -258,7 +290,9 @@ def emit_optical_lonlat(
     scene: dict,
     index_arrays: dict[str, np.ndarray],
     transform,
-    ndvi_quality: float | None,
+    parcel_cloud: float | None,
+    parcel_cloud_source: str | None = None,
+    scl: np.ndarray | None = None,
     mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Sample lonlat_v1, upload OSS JSON, publish one MQ (PG write on producer)."""
@@ -271,7 +305,9 @@ def emit_optical_lonlat(
     if "NDVI" not in index_arrays:
         return None
     t_sample = time.perf_counter()
-    pixels = _sample_lonlat(geom4326, index_arrays, transform, "EPSG:4326")
+    pixels = _sample_lonlat(
+        geom4326, index_arrays, transform, "EPSG:4326", scl=scl
+    )
     sample_ms = int((time.perf_counter() - t_sample) * 1000)
     if not pixels:
         logger.info(
@@ -281,6 +317,14 @@ def emit_optical_lonlat(
             scene_id=scene.get("id"),
         )
         return None
+
+    source = parcel_cloud_source
+    parcel = parcel_cloud
+    if parcel is None:
+        lonlat_cloud = parcel_cloud_from_lonlat_pixels(pixels)
+        if lonlat_cloud is not None and any(p.get("clear") == 0 for p in pixels):
+            parcel = lonlat_cloud
+            source = PARCEL_CLOUD_SOURCE_LONLAT
 
     def _avg_triple(pix_key: str):
         if pix_key not in index_arrays:
@@ -299,29 +343,22 @@ def emit_optical_lonlat(
         if isinstance(scene["date"], date)
         else str(scene["date"])[:10]
     )
-    # Stable id so new runs update rows previously written by the OSS COG bridge.
+    # Stable id so new writes update rows previously written by the OSS COG bridge.
     scene_id = f"stac_bridge_{date_str}_S2"
     cloud_f, cloud_over_30, parcel_cloud_raw = scene_cloud_fields(
-        scene.get("cloud_cover"), ndvi_quality
+        scene.get("cloud_cover"), parcel
     )
-    parcel_cloud = (
+    parcel_out = (
         _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
     )
-    if parcel_cloud is None and cloud_over_30:
-        logger.info(
-            "agri_lonlat_skip_parcel_cloud",
-            field_id=field_id_str,
-            date=date_str,
-            scene_id=scene.get("id"),
-            stac_cloud=cloud_f,
-            reason="stac_cloud_over_30",
-        )
 
     pixel_data = {
         "format": "lonlat_v1",
         "source": "stac_direct",
         "pixels": pixels,
     }
+    if source:
+        pixel_data["parcel_cloud_source"] = source
     row = {
         "land_id": meta["land_id"],
         "tile_id": meta["tile_id"],
@@ -330,7 +367,7 @@ def emit_optical_lonlat(
         "land_name": meta["land_name"],
         "cloud_cover": cloud_f,
         "cloud_cover_over_30": cloud_over_30,
-        "parcel_cloud_cover_pct": parcel_cloud,
+        "parcel_cloud_cover_pct": parcel_out,
         "pixel_count": len(pixels),
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"
@@ -378,7 +415,8 @@ def emit_optical_lonlat(
         "json_url": json_url,
         "cloud_cover": cloud_f,
         "cloud_cover_over_30": cloud_over_30,
-        "parcel_cloud_cover_pct": parcel_cloud,
+        "parcel_cloud_cover_pct": parcel_out,
+        "parcel_cloud_source": source,
         "scene_id": scene_id,
         "stac_id": scene.get("id"),
     }
@@ -424,13 +462,24 @@ def _process_one_optical_scene(
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
+        hrefs = dict(scene.get("band_hrefs") or {})
+        scl_href = hrefs.pop("SCL", None)
         bands = read_bands_windowed_parallel(
-            scene["band_hrefs"],
+            hrefs,
             bounds,
             target_shape,
             target_transform,
             scene_workers=scene_workers,
         )
+        scl = None
+        if scl_href:
+            scl = read_band_windowed(
+                scl_href,
+                bounds,
+                target_shape,
+                target_transform,
+                resampling=Resampling.nearest,
+            )
         download_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "download_bands")
 
@@ -466,7 +515,8 @@ def _process_one_optical_scene(
             complete_step(session, job, "write_cog")
 
         t0 = time.perf_counter()
-        ndvi_stats = compute_zonal_stats(index_arrays["NDVI"])
+        parcel_from_scl = parcel_cloud_from_scl_window(scl, field_mask)
+        parcel_source = PARCEL_CLOUD_SOURCE_SCL if parcel_from_scl is not None else None
         update_job_progress(session, job, "write_lonlat")
         result = emit_optical_lonlat(
             meta=agri_meta,
@@ -475,7 +525,9 @@ def _process_one_optical_scene(
             scene=scene,
             index_arrays=index_arrays,
             transform=target_transform,
-            ndvi_quality=ndvi_stats.get("quality_score"),
+            parcel_cloud=parcel_from_scl,
+            parcel_cloud_source=parcel_source,
+            scl=scl,
             mq_task_id=mq_task_id,
         )
         if result:
@@ -594,6 +646,7 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             index_defs,
             index_label="agri_optical",
             max_cloud_cover=extra_cloud,
+            extra_assets={"SCL": SCL_STAC_ASSETS},
         )
         skipped_existing = 0
         if not force:

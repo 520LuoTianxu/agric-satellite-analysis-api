@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.core.agri_classify import CLOUD_MAX_PCT, official_s2_sql
+from app.core.agri_classify import CLOUD_MAX_PCT, cloud_pct, official_s2_sql
 from app.core.agri_tags import parse_agri_land_id
 from app.models.tables import (
     Field,
@@ -115,9 +115,7 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
     out: list[dict] = []
     for r in rows:
         d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])
-        cloud = r["parcel_cloud_cover_pct"]
-        if cloud is None:
-            cloud = r["cloud_cover"]
+        cloud = cloud_pct(r["parcel_cloud_cover_pct"], r["cloud_cover"])
         # quality heuristic: lower cloud => higher quality
         q = 0.5
         if cloud is not None:

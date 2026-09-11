@@ -1,0 +1,16 @@
+-- Legacy agri.parcel_scene_products.parcel_cloud_cover_pct from zonal
+-- quality_score (finite pixels / padded window). Small fields cluster near
+-- 82.45 and are not cloud. New ingest writes SCL / lonlat-clear cloud and
+-- sets pixel_data.parcel_cloud_source. Tooltips and official pick already
+-- fall back to STAC cloud_cover when the stored parcel looks like this
+-- artifact. Run only if you want to null the old numbers.
+
+-- UPDATE agri.parcel_scene_products
+-- SET parcel_cloud_cover_pct = NULL
+-- WHERE sensor = 'S2'
+--   AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
+--   AND COALESCE(pixel_data->>'parcel_cloud_source', '') = ''
+--   AND parcel_cloud_cover_pct >= 70
+--   AND cloud_cover IS NOT NULL
+--   AND cloud_cover <= 40
+--   AND (parcel_cloud_cover_pct - cloud_cover) >= 40;

@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from datetime import date as date_cls
 from typing import Any, Literal, TypedDict
 
 DroughtClass = Literal[
@@ -24,6 +25,33 @@ CLOUD_MAX_PCT = 30.0
 WEAK_NDVI_LT = 0.25
 # Growing-season window for official drought (June-September). Override per call.
 PHENOLOGY_MONTHS = (6, 7, 8, 9)
+
+# ESA SCL classes treated as cloud/shadow inside the field (not nodata=0).
+# 3=cloud shadow, 8=medium cloud, 9=high cloud, 10=thin cirrus.
+SCL_CLOUD_CLASSES = frozenset({3, 8, 9, 10})
+
+# How parcel_cloud_cover_pct was computed. Trusted sources are in-polygon.
+# Missing / unknown = legacy zonal quality_score (window fill), untrustworthy.
+PARCEL_CLOUD_SOURCE_SCL = "scl"
+PARCEL_CLOUD_SOURCE_LONLAT = "lonlat_clear"
+PARCEL_CLOUD_SOURCES_TRUSTED = frozenset(
+    {PARCEL_CLOUD_SOURCE_SCL, PARCEL_CLOUD_SOURCE_LONLAT}
+)
+
+# Legacy window-fill artifact: parcel = (1 - finite/window)*100.
+# Small padded parcels cluster ~70-90% while STAC eo:cloud_cover varies.
+# Only applied when parcel_cloud_source is not a trusted in-polygon source.
+LEGACY_PARCEL_CLOUD_MIN = 70.0
+LEGACY_STAC_CLOUD_MAX = 40.0
+LEGACY_PARCEL_STAC_GAP = 40.0
+# If almost all lonlat pixels are clear but stored parcel cloud is high, prefer STAC.
+CLEAR_PIXEL_FRACTION_TRUST = 0.9
+SUSPICIOUS_PARCEL_VS_CLEAR = 50.0
+
+# Official pick: compare raw vs good decloud to nearby clear dates.
+NEARBY_CLEAR_DAYS = 45
+BORDERLINE_PARCEL_MIN = 20.0
+BORDERLINE_PARCEL_MAX = 40.0
 
 # NDDI-primary drought bands for agri parcels (keep in sync with
 # apps/web/src/lib/agri-classify.ts). Citations:
@@ -107,6 +135,7 @@ class OpticalObs(TypedDict, total=False):
     decloud_quality: str | None
     cloud_cover: float | None
     parcel_cloud_cover_pct: float | None
+    parcel_cloud_source: str | None
     cloud_cover_over_30: bool | None
 
 
@@ -151,38 +180,154 @@ def classify_drought(
     return "normal"
 
 
+def _cloud_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if _finite(f) else None
+
+
+def is_scl_cloudy_class(value: Any) -> bool:
+    """True when an SCL class is cloud, shadow, or cirrus (not vegetation/soil)."""
+    try:
+        code = int(round(float(value)))
+    except (TypeError, ValueError):
+        return False
+    return code in SCL_CLOUD_CLASSES
+
+
+def parcel_cloud_from_counts(
+    cloudy_pixels: int,
+    valid_pixels: int,
+) -> float | None:
+    """In-polygon cloud %. ``valid_pixels`` is the field-mask count, not window size."""
+    if valid_pixels <= 0:
+        return None
+    cloudy = max(0, int(cloudy_pixels))
+    valid = int(valid_pixels)
+    return max(0.0, min(100.0, 100.0 * cloudy / valid))
+
+
+def parcel_cloud_from_lonlat_pixels(pixels: Any) -> float | None:
+    """Fraction of lonlat pixels with clear==0. None if no pixels or no clear flag."""
+    if not isinstance(pixels, list) or not pixels:
+        return None
+    n = 0
+    cloudy = 0
+    saw_flag = False
+    for p in pixels:
+        if not isinstance(p, dict):
+            continue
+        n += 1
+        if "clear" in p:
+            saw_flag = True
+            if p.get("clear") == 0:
+                cloudy += 1
+    if n <= 0 or not saw_flag:
+        return None
+    return parcel_cloud_from_counts(cloudy, n)
+
+
+def lonlat_clear_fraction(pixels: Any) -> float | None:
+    """clear==1 share among lonlat pixels that carry a clear flag."""
+    if not isinstance(pixels, list) or not pixels:
+        return None
+    n = 0
+    clear = 0
+    for p in pixels:
+        if not isinstance(p, dict) or "clear" not in p:
+            continue
+        n += 1
+        if p.get("clear") == 1:
+            clear += 1
+    if n <= 0:
+        return None
+    return clear / n
+
+
+def parcel_cloud_is_legacy_window_fill(
+    parcel_cloud_cover_pct: float | None,
+    cloud_cover: float | None,
+    *,
+    parcel_cloud_source: str | None = None,
+    clear_frac: float | None = None,
+) -> bool:
+    """True when stored parcel cloud looks like padded-window quality, not SCL.
+
+    Old writes used ``(1 - zonal_quality_score) * 100`` over the full padded
+    array, so small fields sat near ~82.5% on every date. Trusted SCL / lonlat
+    sources are never treated as this artifact.
+    """
+    src = (parcel_cloud_source or "").strip().lower()
+    if src in PARCEL_CLOUD_SOURCES_TRUSTED:
+        return False
+    parcel = _cloud_float(parcel_cloud_cover_pct)
+    stac = _cloud_float(cloud_cover)
+    if (
+        clear_frac is not None
+        and _finite(clear_frac)
+        and clear_frac >= CLEAR_PIXEL_FRACTION_TRUST
+        and parcel is not None
+        and parcel > SUSPICIOUS_PARCEL_VS_CLEAR
+    ):
+        return True
+    if parcel is None or stac is None:
+        return False
+    return (
+        parcel >= LEGACY_PARCEL_CLOUD_MIN
+        and stac <= LEGACY_STAC_CLOUD_MAX
+        and (parcel - stac) >= LEGACY_PARCEL_STAC_GAP
+    )
+
+
+def effective_cloud_pct(
+    parcel_cloud_cover_pct: float | None,
+    cloud_cover: float | None,
+    *,
+    parcel_cloud_source: str | None = None,
+    clear_frac: float | None = None,
+) -> float | None:
+    """Cloud % for tooltips / official filters: real parcel, else STAC.
+
+    Legacy window-fill parcel values are treated as missing.
+    """
+    parcel = _cloud_float(parcel_cloud_cover_pct)
+    stac = _cloud_float(cloud_cover)
+    if parcel_cloud_is_legacy_window_fill(
+        parcel,
+        stac,
+        parcel_cloud_source=parcel_cloud_source,
+        clear_frac=clear_frac,
+    ):
+        return stac
+    if parcel is not None:
+        return parcel
+    return stac
+
+
 def scene_cloud_fields(
     stac_cloud: float | None,
-    ndvi_quality: float | None,
+    parcel_cloud: float | None,
     *,
     cloud_max_pct: float = CLOUD_MAX_PCT,
 ) -> tuple[float | None, bool, float | None]:
     """Return (cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct).
 
-    When STAC scene cloud > cloud_max_pct, skip parcel cloud metrics
-    (leave parcel_cloud_cover_pct None) and flag over_30 from STAC.
+    ``parcel_cloud`` is in-polygon cloud % (SCL or lonlat clear flags). It is
+    not zonal ``quality_score`` and must not be ``(1 - window_fill) * 100``.
+    STAC ``eo:cloud_cover`` is always stored in ``cloud_cover``.
+    ``cloud_cover_over_30`` uses the parcel metric when present, else STAC.
     """
-    stac: float | None = None
-    if stac_cloud is not None:
-        try:
-            stac_f = float(stac_cloud)
-        except (TypeError, ValueError):
-            stac_f = None
-        if stac_f is not None and _finite(stac_f):
-            stac = stac_f
-    if stac is not None and stac > cloud_max_pct:
-        return stac, True, None
-
-    parcel: float | None = None
-    if ndvi_quality is not None:
-        try:
-            qf = float(ndvi_quality)
-        except (TypeError, ValueError):
-            qf = None
-        else:
-            if _finite(qf):
-                parcel = max(0.0, min(100.0, (1.0 - qf) * 100.0))
-    over = bool(parcel is not None and parcel > cloud_max_pct)
+    stac = _cloud_float(stac_cloud)
+    parcel = _cloud_float(parcel_cloud)
+    if parcel is not None:
+        parcel = max(0.0, min(100.0, parcel))
+        over = parcel > cloud_max_pct
+    else:
+        over = bool(stac is not None and stac > cloud_max_pct)
     return stac, over, parcel
 
 
@@ -303,14 +448,19 @@ def is_clear_scene(
     cloud_cover_over_30: bool | None,
     *,
     cloud_max_pct: float = CLOUD_MAX_PCT,
+    parcel_cloud_source: str | None = None,
+    clear_frac: float | None = None,
 ) -> bool:
-    """Optical clear filter: prefer parcel_cloud_cover_pct else cloud_cover."""
-    if cloud_cover_over_30 is True:
-        return False
-    cloud = (
-        parcel_cloud_cover_pct if parcel_cloud_cover_pct is not None else cloud_cover
+    """Optical clear filter: real parcel cloud, else STAC. Legacy fill is ignored."""
+    cloud = effective_cloud_pct(
+        parcel_cloud_cover_pct,
+        cloud_cover,
+        parcel_cloud_source=parcel_cloud_source,
+        clear_frac=clear_frac,
     )
-    if cloud is not None and _finite(cloud) and float(cloud) > cloud_max_pct:
+    if cloud is not None:
+        return float(cloud) <= cloud_max_pct
+    if cloud_cover_over_30 is True:
         return False
     return True
 
@@ -336,11 +486,14 @@ def is_official_optical_product(
     cloud_cover: float | None = None,
     cloud_cover_over_30: bool | None = None,
     cloud_max_pct: float = CLOUD_MAX_PCT,
+    parcel_cloud_source: str | None = None,
+    clear_frac: float | None = None,
 ) -> bool:
     """Whether a scene may feed drought / timeseries / land metrics.
 
-    Raw S2 still uses the cloud > 30% skip. Decloud rows are official only
-    when quality is ``good``. ``fair`` / ``bad`` stay stored for audit.
+    Raw S2 still uses the cloud > 30% skip (real parcel, else STAC).
+    Decloud rows are official only when quality is ``good``.
+    ``fair`` / ``bad`` stay stored for audit.
     """
     if is_decloud_product(source, scene_id):
         return (decloud_quality or "").strip().lower() == DECLOUD_QUALITY_GOOD
@@ -349,6 +502,8 @@ def is_official_optical_product(
         cloud_cover,
         cloud_cover_over_30,
         cloud_max_pct=cloud_max_pct,
+        parcel_cloud_source=parcel_cloud_source,
+        clear_frac=clear_frac,
     )
 
 
@@ -357,16 +512,34 @@ def official_s2_sql(
     *,
     cloud_param: str = "cloud_max",
 ) -> str:
-    """SQL predicate: clear raw S2, or good-quality decloud only."""
+    """SQL predicate: clear raw S2, or good-quality decloud only.
+
+    Raw cloud uses in-polygon parcel % when ``parcel_cloud_source`` is scl /
+    lonlat_clear. Legacy window-fill parcel (~82% on small padded fields) falls
+    back to STAC ``cloud_cover``. ``cloud_cover_over_30`` is not used alone
+    because old writes set it from that fill ratio.
+    """
     a = f"{alias}." if alias else ""
+    trusted = ",".join(f"'{s}'" for s in sorted(PARCEL_CLOUD_SOURCES_TRUSTED))
+    effective = f"""(
+        CASE
+          WHEN {a}pixel_data->>'parcel_cloud_source' IN ({trusted})
+          THEN coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover)
+          WHEN {a}parcel_cloud_cover_pct IS NOT NULL
+               AND {a}cloud_cover IS NOT NULL
+               AND {a}parcel_cloud_cover_pct >= {LEGACY_PARCEL_CLOUD_MIN}
+               AND {a}cloud_cover <= {LEGACY_STAC_CLOUD_MAX}
+               AND ({a}parcel_cloud_cover_pct - {a}cloud_cover)
+                   >= {LEGACY_PARCEL_STAC_GAP}
+          THEN {a}cloud_cover
+          ELSE coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover)
+        END
+      )"""
     return f"""(
       (
         COALESCE({a}pixel_data->>'source', '') <> '{DECLOUD_SOURCE}'
         AND COALESCE({a}scene_id, '') NOT LIKE '%{DECLOUD_SCENE_ID_SUFFIX}'
-        AND NOT (
-          coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover) > :{cloud_param}
-          OR {a}cloud_cover_over_30 IS TRUE
-        )
+        AND NOT ({effective} > :{cloud_param})
       )
       OR (
         (
@@ -400,64 +573,225 @@ def is_drought_season(
 def cloud_pct(
     parcel_cloud_cover_pct: float | None,
     cloud_cover: float | None,
+    *,
+    parcel_cloud_source: str | None = None,
+    clear_frac: float | None = None,
 ) -> float | None:
-    if parcel_cloud_cover_pct is not None and _finite(float(parcel_cloud_cover_pct)):
-        return float(parcel_cloud_cover_pct)
-    if cloud_cover is not None and _finite(float(cloud_cover)):
-        return float(cloud_cover)
-    return None
+    return effective_cloud_pct(
+        parcel_cloud_cover_pct,
+        cloud_cover,
+        parcel_cloud_source=parcel_cloud_source,
+        clear_frac=clear_frac,
+    )
 
 
-def pick_official_optical(scenes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Pick one S2 product for a date: clear raw, else good decloud.
+def _scene_cloud_pct(scene: dict[str, Any]) -> float | None:
+    return effective_cloud_pct(
+        scene.get("parcel_cloud_cover_pct"),
+        scene.get("cloud_cover"),
+        parcel_cloud_source=scene.get("parcel_cloud_source"),
+        clear_frac=_num(scene.get("clear_frac")),
+    )
 
-    fair/bad decloud is never chosen. Caller should pass same-date scenes.
+
+def _scene_iso_date(scene: dict[str, Any]) -> str:
+    raw = scene.get("date")
+    if raw is None:
+        return ""
+    if isinstance(raw, date_cls):
+        return raw.isoformat()
+    return str(raw)[:10]
+
+
+def _parse_iso_date(date_str: str | None) -> date_cls | None:
+    if not date_str:
+        return None
+    try:
+        return date_cls.fromisoformat(str(date_str)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _scene_ndvi(scene: dict[str, Any]) -> float | None:
+    return _num(scene.get("ndvi", scene.get("ndvi_avg")))
+
+
+def _scene_ndmi(scene: dict[str, Any]) -> float | None:
+    return _num(scene.get("ndmi", scene.get("ndmi_avg")))
+
+
+def _cloud_sort_key(scene: dict[str, Any]) -> tuple[float, str]:
+    pct = _scene_cloud_pct(scene)
+    return (pct if pct is not None else 999.0, str(scene.get("scene_id") or ""))
+
+
+def _is_raw_scene(scene: dict[str, Any]) -> bool:
+    return not is_decloud_product(scene.get("source"), scene.get("scene_id"))
+
+
+def _official_kwargs(scene: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": scene.get("source"),
+        "scene_id": scene.get("scene_id"),
+        "decloud_quality": scene.get("decloud_quality"),
+        "parcel_cloud_cover_pct": scene.get("parcel_cloud_cover_pct"),
+        "cloud_cover": scene.get("cloud_cover"),
+        "cloud_cover_over_30": scene.get("cloud_cover_over_30"),
+        "parcel_cloud_source": scene.get("parcel_cloud_source"),
+        "clear_frac": _num(scene.get("clear_frac")),
+    }
+
+
+def nearby_clear_index_medians(
+    neighbors: list[dict[str, Any]] | None,
+    target_date: str,
+    *,
+    window_days: int = NEARBY_CLEAR_DAYS,
+) -> tuple[float | None, float | None]:
+    """Median NDVI/NDMI of nearby clear raw dates (±window_days, else same month).
+
+    Neighbors must be other dates. Used so raw vs good decloud can pick the
+    product closer to recent clear canopy, not a cloudy NDVI dip.
+    """
+    target = _parse_iso_date(target_date)
+    if target is None or not neighbors:
+        return None, None
+    windowed: list[tuple[float, float | None]] = []
+    same_month: list[tuple[float, float | None]] = []
+    for s in neighbors:
+        if not _is_raw_scene(s):
+            continue
+        ds = _scene_iso_date(s)
+        d = _parse_iso_date(ds)
+        if d is None or d == target:
+            continue
+        if not is_official_optical_product(**_official_kwargs(s)):
+            continue
+        ndvi = _scene_ndvi(s)
+        if ndvi is None:
+            continue
+        rec = (ndvi, _scene_ndmi(s))
+        if abs((d - target).days) <= window_days:
+            windowed.append(rec)
+        if d.month == target.month:
+            same_month.append(rec)
+    pool = windowed or same_month
+    if not pool:
+        return None, None
+    ndvi_med = _median([p[0] for p in pool])
+    ndmi_vals = [p[1] for p in pool if p[1] is not None]
+    ndmi_med = _median(ndmi_vals) if ndmi_vals else None
+    return ndvi_med, ndmi_med
+
+
+def _needs_closer_to_truth(raw: dict[str, Any]) -> bool:
+    """Borderline parcel, or STAC-clear while in-polygon parcel is cloudy."""
+    parcel = _cloud_float(raw.get("parcel_cloud_cover_pct"))
+    stac = _cloud_float(raw.get("cloud_cover"))
+    if parcel_cloud_is_legacy_window_fill(
+        parcel,
+        stac,
+        parcel_cloud_source=raw.get("parcel_cloud_source"),
+        clear_frac=_num(raw.get("clear_frac")),
+    ):
+        return False
+    if parcel is None:
+        return False
+    if BORDERLINE_PARCEL_MIN < parcel <= BORDERLINE_PARCEL_MAX:
+        return True
+    if parcel > CLOUD_MAX_PCT and stac is not None and stac <= CLOUD_MAX_PCT:
+        return True
+    return False
+
+
+def _truth_sort_key(
+    scene: dict[str, Any],
+    ndvi_med: float | None,
+    ndmi_med: float | None,
+) -> tuple[float, float, int, str]:
+    ndvi = _scene_ndvi(scene)
+    ndmi = _scene_ndmi(scene)
+    d_ndvi = (
+        abs(ndvi - ndvi_med) if ndvi is not None and ndvi_med is not None else 999.0
+    )
+    d_ndmi = (
+        abs(ndmi - ndmi_med) if ndmi is not None and ndmi_med is not None else 999.0
+    )
+    # Tie-break: prefer raw over decloud, then stable scene_id.
+    decloud_rank = 0 if _is_raw_scene(scene) else 1
+    return (d_ndvi, d_ndmi, decloud_rank, str(scene.get("scene_id") or ""))
+
+
+def pick_official_optical(
+    scenes: list[dict[str, Any]],
+    *,
+    neighbors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Pick one S2 product for a date.
+
+    Rules (fair/bad decloud never chosen):
+    1. Truly clear raw (real parcel cloud <= 30%, or STAC if parcel missing /
+       legacy fill): prefer raw.
+    2. Cloudy raw (real parcel > 30%) and good decloud exists: prefer good
+       decloud, unless step 3 applies.
+    3. Both exist and raw is borderline (parcel 20-40%) *or* STAC is clear
+       while parcel is cloudy: pick the product whose NDVI (then NDMI) is
+       closer to the median of nearby clear raw dates (±45d, else same month).
+       Tie-break: raw, then scene_id.
     """
     if not scenes:
         return None
-    official: list[dict[str, Any]] = []
-    for s in scenes:
-        if is_official_optical_product(
-            source=s.get("source"),
-            scene_id=s.get("scene_id"),
-            decloud_quality=s.get("decloud_quality"),
-            parcel_cloud_cover_pct=s.get("parcel_cloud_cover_pct"),
-            cloud_cover=s.get("cloud_cover"),
-            cloud_cover_over_30=s.get("cloud_cover_over_30"),
-        ):
-            official.append(s)
-    raw_off = [
+    raw_scenes = [s for s in scenes if _is_raw_scene(s)]
+    good_decloud = [
         s
-        for s in official
-        if not is_decloud_product(s.get("source"), s.get("scene_id"))
+        for s in scenes
+        if not _is_raw_scene(s)
+        and (
+            str(s.get("decloud_quality") or "").strip().lower() == DECLOUD_QUALITY_GOOD
+        )
     ]
-    pool = raw_off or official
-    if not pool:
-        return None
+    best_raw = sorted(raw_scenes, key=_cloud_sort_key)[0] if raw_scenes else None
+    best_decloud = (
+        sorted(good_decloud, key=_cloud_sort_key)[0] if good_decloud else None
+    )
+    raw_clear = bool(
+        best_raw is not None
+        and is_official_optical_product(**_official_kwargs(best_raw))
+    )
 
-    def _key(s: dict[str, Any]) -> tuple[float, str]:
-        pct = cloud_pct(s.get("parcel_cloud_cover_pct"), s.get("cloud_cover"))
-        return (pct if pct is not None else 999.0, str(s.get("scene_id") or ""))
+    if best_raw is not None and best_decloud is None:
+        return best_raw if raw_clear else None
+    if best_raw is None:
+        return best_decloud
 
-    return sorted(pool, key=_key)[0]
+    compare = _needs_closer_to_truth(best_raw)
+    if compare:
+        ndvi_med, ndmi_med = nearby_clear_index_medians(
+            neighbors, _scene_iso_date(best_raw)
+        )
+        if ndvi_med is not None:
+            return sorted(
+                [best_raw, best_decloud],
+                key=lambda s: _truth_sort_key(s, ndvi_med, ndmi_med),
+            )[0]
+    if raw_clear:
+        return best_raw
+    return best_decloud
 
 
-def pick_optical_for_ndvi(scenes: list[dict[str, Any]]) -> dict[str, Any] | None:
+def pick_optical_for_ndvi(
+    scenes: list[dict[str, Any]],
+    *,
+    neighbors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     """Official product if any; else raw (including cloudy). Never fair/bad decloud."""
-    picked = pick_official_optical(scenes)
+    picked = pick_official_optical(scenes, neighbors=neighbors)
     if picked is not None:
         return picked
-    raw = [
-        s for s in scenes if not is_decloud_product(s.get("source"), s.get("scene_id"))
-    ]
+    raw = [s for s in scenes if _is_raw_scene(s)]
     if not raw:
         return None
-
-    def _key(s: dict[str, Any]) -> tuple[float, str]:
-        pct = cloud_pct(s.get("parcel_cloud_cover_pct"), s.get("cloud_cover"))
-        return (pct if pct is not None else 999.0, str(s.get("scene_id") or ""))
-
-    return sorted(raw, key=_key)[0]
+    return sorted(raw, key=_cloud_sort_key)[0]
 
 
 def optical_tooltip_fields(scene: dict[str, Any] | None) -> dict[str, Any]:
@@ -481,22 +815,13 @@ def optical_tooltip_fields(scene: dict[str, Any] | None) -> dict[str, Any]:
     scene_id = scene.get("scene_id")
     quality = scene.get("decloud_quality")
     return {
-        "cloud_cover": cloud_pct(
-            scene.get("parcel_cloud_cover_pct"), scene.get("cloud_cover")
-        ),
+        "cloud_cover": _scene_cloud_pct(scene),
         "decloud_quality": quality,
         "decloud_reasons": [str(r) for r in reasons if r],
         "product_source": source,
         "scene_id": scene_id,
         "is_decloud": is_decloud_product(source, scene_id),
-        "is_official": is_official_optical_product(
-            source=source,
-            scene_id=scene_id,
-            decloud_quality=quality,
-            parcel_cloud_cover_pct=scene.get("parcel_cloud_cover_pct"),
-            cloud_cover=scene.get("cloud_cover"),
-            cloud_cover_over_30=scene.get("cloud_cover_over_30"),
-        ),
+        "is_official": is_official_optical_product(**_official_kwargs(scene)),
     }
 
 

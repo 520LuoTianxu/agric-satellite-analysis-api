@@ -117,6 +117,13 @@ class SceneProductOut(BaseModel):
     cloud_cover: float | None = None
     cloud_cover_over_30: bool | None = None
     parcel_cloud_cover_pct: float | None = None
+    parcel_cloud_source: str | None = Field(
+        default=None,
+        description=(
+            "How parcel_cloud_cover_pct was computed: scl or lonlat_clear. "
+            "Missing means a legacy window-fill value that may not be cloud."
+        ),
+    )
     source: str | None = Field(
         default=None,
         description=(

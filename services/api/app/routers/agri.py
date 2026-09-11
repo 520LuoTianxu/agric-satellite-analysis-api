@@ -55,6 +55,7 @@ _SCENE_COLS = """
     pixel_data->>'decloud_quality' AS decloud_quality,
     NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score,
     pixel_data->'decloud_reasons' AS decloud_reasons,
+    pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
     NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
 """
 

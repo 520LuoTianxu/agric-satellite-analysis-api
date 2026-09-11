@@ -44,7 +44,7 @@ STAC_API_URL = os.environ.get(
 STAC_COLLECTION = "sentinel-2-l2a"
 # STAC eo:cloud_cover filter (scene-level). Stricter than the 30% agri
 # product skip (parcel_cloud_cover_pct / drought display). Keep search
-# conservative; emit_optical still skips parcel-cloud metrics above 30%.
+# conservative unless decloud raises the cap (see DECLOUD_STAC_CLOUD_MAX_PCT).
 MAX_CLOUD_COVER = 20
 # GDAL environment for reading remote COGs
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -268,6 +268,23 @@ def _resolve_band_hrefs(item, index_defs: list[IndexDef]) -> dict[str, str] | No
     return {k: v for k, v in band_hrefs.items() if v is not None}
 
 
+def _resolve_extra_asset_hrefs(
+    item: Any,
+    extra_assets: dict[str, tuple[str, ...]] | None,
+) -> dict[str, str]:
+    """Optional STAC assets (e.g. SCL). Missing extras do not drop the scene."""
+    if not extra_assets:
+        return {}
+    out: dict[str, str] = {}
+    for key, names in extra_assets.items():
+        for asset_name in names:
+            asset = item.assets.get(asset_name)
+            if asset and getattr(asset, "href", None):
+                out[key] = asset.href
+                break
+    return out
+
+
 def search_scenes_for_defs(
     field_geom_geojson: dict,
     date_from: date,
@@ -276,6 +293,7 @@ def search_scenes_for_defs(
     *,
     index_label: str | None = None,
     max_cloud_cover: float | None = None,
+    extra_assets: dict[str, tuple[str, ...]] | None = None,
 ) -> list[dict]:
     """Search Element84 STAC and resolve HREFs for the union of index bands."""
     if not index_defs:
@@ -299,6 +317,7 @@ def search_scenes_for_defs(
         date_from=str(date_from),
         date_to=str(date_to),
         elapsed_ms=int((time.perf_counter() - t0) * 1000),
+        max_cloud_cover=cloud_lt,
     )
     if not items:
         return []
@@ -319,6 +338,7 @@ def search_scenes_for_defs(
         item = entry["item"]
         band_hrefs = _resolve_band_hrefs(item, index_defs)
         if band_hrefs:
+            band_hrefs.update(_resolve_extra_asset_hrefs(item, extra_assets))
             scenes.append(
                 {
                     "id": item.id,
@@ -346,12 +366,18 @@ def search_scenes(
 
 
 def read_band_windowed(
-    href: str, bounds: tuple, target_shape: tuple, target_transform
+    href: str,
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    *,
+    resampling: Resampling = Resampling.bilinear,
 ) -> np.ndarray:
     """Read a band from a remote COG, windowed to field extent.
 
     Caller must treat this as one GDAL dataset open. Band workers each call
     this under their own ``rasterio.Env()`` (this function opens one).
+    Categorical layers (SCL) must pass ``resampling=Resampling.nearest``.
     """
     with rasterio.Env():
         with rasterio.open(href) as src:
@@ -367,7 +393,7 @@ def read_band_windowed(
                 src_crs=src.crs,
                 dst_transform=target_transform,
                 dst_crs="EPSG:4326",
-                resampling=Resampling.bilinear,
+                resampling=resampling,
             )
             return dst
 
