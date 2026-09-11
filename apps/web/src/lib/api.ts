@@ -604,6 +604,34 @@ export const cropsApi = {
     list: () => apiFetch<CropOption[]>("/crops"),
 };
 
+export type AssessmentDimensionKey =
+    | "crop"
+    | "soil"
+    | "vigor"
+    | "weather"
+    | "wet_safety"
+    | "drought_safety";
+
+export interface AssessmentScorecardDimension {
+    key: AssessmentDimensionKey;
+    score: number;
+    light: string | null;
+    weight: string | null;
+}
+
+export interface AssessmentScorecard {
+    job_id: string;
+    overall: {
+        score: number;
+        grade: string | null;
+        light: string | null;
+        one_liner: string | null;
+    };
+    dimensions: AssessmentScorecardDimension[];
+    confidence: { score: number } | null;
+    generated_at: string | null;
+}
+
 export const assessmentApi = {
     generate: (fieldId: string, body?: { crop_type?: string }) =>
         apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
@@ -612,6 +640,10 @@ export const assessmentApi = {
         }),
     latestMeta: (fieldId: string) =>
         apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
+    latestScorecard: (fieldId: string) =>
+        apiFetch<AssessmentScorecard>(
+            `/fields/${fieldId}/assessment-report/latest/scorecard`,
+        ),
     downloadLatest: async (fieldId: string) => {
         const res = await fetch(
             `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,

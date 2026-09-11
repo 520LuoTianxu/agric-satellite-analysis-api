@@ -13,6 +13,7 @@ from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.models.tables import Job
+from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.service import generate_assessment_pdf
 from app.worker import celery_app
 
@@ -22,7 +23,8 @@ def _update_job(
     job: Job,
     status: str,
     progress: dict | None = None,
-    error: str | None = None):
+    error: str | None = None,
+):
     job.status = status
     if progress is not None:
         job.progress_json = progress
@@ -84,7 +86,8 @@ def _resolve_job(session, job_id: str | None) -> Job | None:
     name="app.tasks.assessment_report.generate_assessment_report",
     bind=True,
     max_retries=1,
-    default_retry_delay=30)
+    default_retry_delay=30,
+)
 def generate_assessment_report(
     self,
     job_id: str | None = None,
@@ -182,9 +185,8 @@ def generate_assessment_report(
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         object_key = f"reports/default/{field_id_str}/assessment-{ts}.pdf"
         upload_result = upload_file_via_storage(
-            object_key,
-            str(pdf_path),
-            content_type="application/pdf")
+            object_key, str(pdf_path), content_type="application/pdf"
+        )
         public_url = None
         if isinstance(upload_result, dict):
             public_url = upload_result.get("public_url")
@@ -228,6 +230,7 @@ def generate_assessment_report(
                     for s in (flood.get("scenes") or [])
                 ],
             }
+        public_scorecard = scorecard_public_view(result.get("scorecard"))
         progress = {
             "stage": "done",
             "percent": 100,
@@ -243,7 +246,7 @@ def generate_assessment_report(
             "indices_source": result.get("indices_source"),
             "content_type": "application/pdf",
             "flood_evidence": flood_summary,
-            "scorecard": result.get("scorecard"),
+            "scorecard": public_scorecard,
             "rs": {
                 "absolute_open_water_scenes": (result.get("rs") or {}).get(
                     "absolute_open_water_scenes"
@@ -285,6 +288,7 @@ def generate_assessment_report(
             "one_liner": result.get("one_liner"),
             "area_mu": result.get("area_mu"),
             "content_type": "application/pdf",
+            "scorecard": public_scorecard,
         }
         if job_id_str:
             mq_payload["job_id"] = job_id_str

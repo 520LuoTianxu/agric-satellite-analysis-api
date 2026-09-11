@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Field land report tab now shows a six-dimension hexagon of crop, soil, season vigor, weather, flood safety, and drought safety from that field's latest successful report. Generate the report first if no scores are shown; older reports without stored scores need a new generate.
+
 ### Changed
 - Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.
 - The agri time-series panel marks historical drought days on the chart and date list.
