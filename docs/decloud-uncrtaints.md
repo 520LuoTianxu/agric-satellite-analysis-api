@@ -92,11 +92,18 @@ After reconstruct, a heuristic scores the parcel window:
 - spatial std collapse (over-smoothed)
 - NDVI far below clear neighbors in a +/- 45 day window
 
-Only **`good`** may enter official drought, growth timeseries, land-assessment
-RS inputs, overview drought/weak-growth, and share optical series.
+Only **`good`** may enter official drought, land-assessment
+RS inputs, overview drought/weak-growth, and share optical drought series.
 
-`fair` and `bad` are stored for audit. Existing cloud>30% drought filters also
-skip them (`cloud_cover_over_30` stays true).
+`fair` and `bad` are **always stored** (OSS + MQ upsert) whenever a
+reconstruction produced a usable array, even if lonlat sampling found few
+or weak pixels. Existing cloud>30% drought filters also skip them
+(`cloud_cover_over_30` stays true; `decloud_quality` is not `good`).
+Tooltips mark them as de-cloud that may be unreliable.
+
+NDVI and similar growth charts additionally compare raw vs **good** decloud
+against nearby clear-raw phenology. A good reconstruct that does not match
+the crop calendar / neighbor canopy loses to raw.
 
 ## Parcel cloud (not window fill)
 
@@ -115,7 +122,7 @@ Optional cleanup SQL: `scripts/legacy-parcel-cloud-cover.sql`.
 
 ## Official pick (raw vs good decloud)
 
-Both products stay stored. Official NDVI / drought pick:
+Both products stay stored. Drought / land metrics:
 
 1. Truly clear raw (real parcel cloud <= 30%, or STAC when parcel is missing or
    legacy fill): prefer raw.
@@ -125,7 +132,13 @@ Both products stay stored. Official NDVI / drought pick:
    parcel is cloudy: pick the product whose NDVI (then NDMI) is closer to the
    median of nearby clear raw dates (plus/minus 45 days, else same calendar
    month). Tie-break: raw, then `scene_id`.
-4. Fair/bad decloud never enter official series.
+4. Fair/bad decloud never enter official drought series.
+
+NDVI / EVI / similar growth charts use a physiology-aware pick: same neighbor
+baseline as step 3, applied whenever both raw and good decloud exist, plus a
+growing-season sanity check (Jun-Sep NDVI far below a green neighbor canopy
+is treated as a poor reconstruct). Raw wins ties and wins when it matches
+phenology better than a "good" decloud.
 
 ## Smoke tests (no weights)
 

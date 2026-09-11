@@ -133,7 +133,10 @@ class SceneProductOut(BaseModel):
     )
     decloud_quality: str | None = Field(
         default=None,
-        description="good | fair | bad. Only good feeds official drought metrics.",
+        description=(
+            "good | fair | bad. Only good feeds official drought metrics. "
+            "Fair/bad are stored and marked possibly unreliable."
+        ),
     )
     decloud_score: float | None = None
     decloud_reasons: list[str] | None = Field(

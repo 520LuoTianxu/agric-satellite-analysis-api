@@ -52,6 +52,12 @@ SUSPICIOUS_PARCEL_VS_CLEAR = 50.0
 NEARBY_CLEAR_DAYS = 45
 BORDERLINE_PARCEL_MIN = 20.0
 BORDERLINE_PARCEL_MAX = 40.0
+# NDVI / growth pick (not drought): prefer the product whose canopy index
+# matches nearby clear-raw phenology. A "good" reconstruct that sits far
+# from the seasonal baseline loses to raw when raw fits better.
+PHYSIOLOGY_NDVI_ABSURD_GAP = 0.20
+PHYSIOLOGY_GROWING_NDVI_FLOOR = 0.15
+PHYSIOLOGY_GREEN_NEIGHBOR_NDVI = 0.40
 
 # NDDI-primary drought bands for agri parcels (keep in sync with
 # apps/web/src/lib/agri-classify.ts). Citations:
@@ -493,7 +499,7 @@ def is_official_optical_product(
 
     Raw S2 still uses the cloud > 30% skip (real parcel, else STAC).
     Decloud rows are official only when quality is ``good``.
-    ``fair`` / ``bad`` stay stored for audit.
+    ``fair`` / ``bad`` are stored for audit and never enter drought.
     """
     if is_decloud_product(source, scene_id):
         return (decloud_quality or "").strip().lower() == DECLOUD_QUALITY_GOOD
@@ -722,6 +728,56 @@ def _truth_sort_key(
     return (d_ndvi, d_ndmi, decloud_rank, str(scene.get("scene_id") or ""))
 
 
+def _physiology_sort_key(
+    scene: dict[str, Any],
+    ndvi_med: float | None,
+    ndmi_med: float | None,
+    target_date: str,
+) -> tuple[int, float, float, int, str]:
+    """Lower is better for NDVI/growth pick vs nearby clear phenology."""
+    ndvi = _scene_ndvi(scene)
+    ndmi = _scene_ndmi(scene)
+    d_ndvi = (
+        abs(ndvi - ndvi_med) if ndvi is not None and ndvi_med is not None else 999.0
+    )
+    d_ndmi = (
+        abs(ndmi - ndmi_med) if ndmi is not None and ndmi_med is not None else 999.0
+    )
+    absurd = 0
+    if ndvi is not None and ndvi_med is not None:
+        if abs(ndvi - ndvi_med) >= PHYSIOLOGY_NDVI_ABSURD_GAP:
+            absurd = 1
+        month = month_from_date(target_date)
+        if (
+            month is not None
+            and month in PHENOLOGY_MONTHS
+            and ndvi_med >= PHYSIOLOGY_GREEN_NEIGHBOR_NDVI
+            and ndvi < PHYSIOLOGY_GROWING_NDVI_FLOOR
+        ):
+            absurd = 1
+    decloud_rank = 0 if _is_raw_scene(scene) else 1
+    return (absurd, d_ndvi, d_ndmi, decloud_rank, str(scene.get("scene_id") or ""))
+
+
+def _raw_fits_phenology_better(
+    raw: dict[str, Any],
+    decloud: dict[str, Any],
+) -> bool:
+    """Without neighbors: keep raw if it looks like canopy and decloud does not."""
+    target = _scene_iso_date(raw) or _scene_iso_date(decloud)
+    month = month_from_date(target)
+    raw_ndvi = _scene_ndvi(raw)
+    dec_ndvi = _scene_ndvi(decloud)
+    if raw_ndvi is None or dec_ndvi is None:
+        return False
+    in_season = month is not None and month in PHENOLOGY_MONTHS
+    if in_season:
+        raw_ok = PHYSIOLOGY_GROWING_NDVI_FLOOR <= raw_ndvi <= 0.95
+        dec_bad = dec_ndvi < PHYSIOLOGY_GROWING_NDVI_FLOOR
+        return raw_ok and dec_bad
+    return False
+
+
 def pick_official_optical(
     scenes: list[dict[str, Any]],
     *,
@@ -784,14 +840,45 @@ def pick_optical_for_ndvi(
     *,
     neighbors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Official product if any; else raw (including cloudy). Never fair/bad decloud."""
+    """Growth-series pick: physiology-aware raw vs good decloud.
+
+    Never uses fair/bad decloud (those stay stored and marked unreliable).
+    When both raw and good decloud exist, prefer the product whose NDVI
+    (then NDMI) is closer to nearby clear-raw seasonal baseline, and that
+    is not absurd versus the crop calendar (Jun-Sep green canopy). Tie-break
+    raw. Drought / land metrics still use ``pick_official_optical``.
+    """
+    if not scenes:
+        return None
+    raw_scenes = [s for s in scenes if _is_raw_scene(s)]
+    good_decloud = [
+        s
+        for s in scenes
+        if not _is_raw_scene(s)
+        and (
+            str(s.get("decloud_quality") or "").strip().lower() == DECLOUD_QUALITY_GOOD
+        )
+    ]
+    best_raw = sorted(raw_scenes, key=_cloud_sort_key)[0] if raw_scenes else None
+    best_decloud = (
+        sorted(good_decloud, key=_cloud_sort_key)[0] if good_decloud else None
+    )
+    if best_raw is not None and best_decloud is not None:
+        target = _scene_iso_date(best_raw) or _scene_iso_date(best_decloud)
+        ndvi_med, ndmi_med = nearby_clear_index_medians(neighbors, target)
+        if ndvi_med is not None:
+            return sorted(
+                [best_raw, best_decloud],
+                key=lambda s: _physiology_sort_key(s, ndvi_med, ndmi_med, target),
+            )[0]
+        if _raw_fits_phenology_better(best_raw, best_decloud):
+            return best_raw
     picked = pick_official_optical(scenes, neighbors=neighbors)
     if picked is not None:
         return picked
-    raw = [s for s in scenes if _is_raw_scene(s)]
-    if not raw:
-        return None
-    return sorted(raw, key=_cloud_sort_key)[0]
+    if best_raw is not None:
+        return best_raw
+    return None
 
 
 def optical_tooltip_fields(scene: dict[str, Any] | None) -> dict[str, Any]:
@@ -805,6 +892,7 @@ def optical_tooltip_fields(scene: dict[str, Any] | None) -> dict[str, Any]:
             "scene_id": None,
             "is_decloud": False,
             "is_official": False,
+            "may_be_unreliable": False,
         }
     reasons = scene.get("decloud_reasons") or []
     if isinstance(reasons, str):
@@ -814,14 +902,17 @@ def optical_tooltip_fields(scene: dict[str, Any] | None) -> dict[str, Any]:
     source = scene.get("source")
     scene_id = scene.get("scene_id")
     quality = scene.get("decloud_quality")
+    is_decloud = is_decloud_product(source, scene_id)
+    q = (quality or "").strip().lower()
     return {
         "cloud_cover": _scene_cloud_pct(scene),
         "decloud_quality": quality,
         "decloud_reasons": [str(r) for r in reasons if r],
         "product_source": source,
         "scene_id": scene_id,
-        "is_decloud": is_decloud_product(source, scene_id),
+        "is_decloud": is_decloud,
         "is_official": is_official_optical_product(**_official_kwargs(scene)),
+        "may_be_unreliable": is_decloud and q != DECLOUD_QUALITY_GOOD,
     }
 
 

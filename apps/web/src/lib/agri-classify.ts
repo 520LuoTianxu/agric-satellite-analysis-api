@@ -25,6 +25,10 @@ export const SUSPICIOUS_PARCEL_VS_CLEAR = 50;
 export const NEARBY_CLEAR_DAYS = 45;
 export const BORDERLINE_PARCEL_MIN = 20;
 export const BORDERLINE_PARCEL_MAX = 40;
+/** NDVI/growth pick vs nearby clear-raw phenology (not used for drought). */
+export const PHYSIOLOGY_NDVI_ABSURD_GAP = 0.2;
+export const PHYSIOLOGY_GROWING_NDVI_FLOOR = 0.15;
+export const PHYSIOLOGY_GREEN_NEIGHBOR_NDVI = 0.4;
 
 export const NDDI_MILD_MIN = 0.3;
 export const NDDI_MODERATE_MIN = 0.4;
@@ -96,6 +100,7 @@ export type OpticalTooltipFields = {
     sceneId: string | null;
     isDecloud: boolean;
     isOfficial: boolean;
+    mayBeUnreliable: boolean;
 };
 
 const S1_ORBIT_OFFSET: Record<string, number> = { S1A: 73, S1B: 27, S1C: 172 };
@@ -266,6 +271,33 @@ function needsCloserToTruth(raw: OpticalSceneLike): boolean {
     return false;
 }
 
+function physiologySortKey(
+    scene: OpticalSceneLike,
+    ndviMed: number | null,
+    ndmiMed: number | null,
+    targetDate: string,
+): [number, number, number, number, string] {
+    const ndvi = finiteNum(scene.ndvi_avg);
+    const ndmi = finiteNum(scene.ndmi_avg);
+    const dNdvi = ndvi != null && ndviMed != null ? Math.abs(ndvi - ndviMed) : 999;
+    const dNdmi = ndmi != null && ndmiMed != null ? Math.abs(ndmi - ndmiMed) : 999;
+    let absurd = 0;
+    if (ndvi != null && ndviMed != null) {
+        if (Math.abs(ndvi - ndviMed) >= PHYSIOLOGY_NDVI_ABSURD_GAP) absurd = 1;
+        const month = monthFromDate(targetDate);
+        if (
+            month != null &&
+            (PHENOLOGY_MONTHS as readonly number[]).includes(month) &&
+            ndviMed >= PHYSIOLOGY_GREEN_NEIGHBOR_NDVI &&
+            ndvi < PHYSIOLOGY_GROWING_NDVI_FLOOR
+        ) {
+            absurd = 1;
+        }
+    }
+    const decloudRank = isDecloudProduct(scene) ? 1 : 0;
+    return [absurd, dNdvi, dNdmi, decloudRank, String(scene.scene_id ?? "")];
+}
+
 function truthSortKey(
     scene: OpticalSceneLike,
     ndviMed: number | null,
@@ -277,6 +309,18 @@ function truthSortKey(
     const dNdmi = ndmi != null && ndmiMed != null ? Math.abs(ndmi - ndmiMed) : 999;
     const decloudRank = isDecloudProduct(scene) ? 1 : 0;
     return [dNdvi, dNdmi, decloudRank, String(scene.scene_id ?? "")];
+}
+
+function rawFitsPhenologyBetter(raw: OpticalSceneLike, decloud: OpticalSceneLike): boolean {
+    const target = sceneIsoDate(raw) || sceneIsoDate(decloud);
+    const month = monthFromDate(target);
+    const rawNdvi = finiteNum(raw.ndvi_avg);
+    const decNdvi = finiteNum(decloud.ndvi_avg);
+    if (rawNdvi == null || decNdvi == null) return false;
+    const inSeason = month != null && (PHENOLOGY_MONTHS as readonly number[]).includes(month);
+    if (!inSeason) return false;
+    const rawOk = rawNdvi >= PHYSIOLOGY_GROWING_NDVI_FLOOR && rawNdvi <= 0.95;
+    return rawOk && decNdvi < PHYSIOLOGY_GROWING_NDVI_FLOOR;
 }
 
 export type PickOpticalOpts<T extends OpticalSceneLike> = {
@@ -320,20 +364,46 @@ export function pickOfficialOptical<T extends OpticalSceneLike>(
     return bestDecloud;
 }
 
-/** Official if present; else raw (cloudy). Never fair/bad decloud. */
+/** Growth series: physiology-aware raw vs good decloud. Never fair/bad. */
 export function pickOpticalForNdvi<T extends OpticalSceneLike>(
     scenes: T[],
     opts?: PickOpticalOpts<T>,
 ): T | null {
-    const official = pickOfficialOptical(scenes, opts);
-    if (official) return official;
-    const raw = scenes.filter((s) => !isDecloudProduct(s));
-    if (!raw.length) return null;
-    return [...raw].sort((a, b) => {
+    if (!scenes.length) return null;
+    const byCloud = (a: T, b: T) => {
         const [pa, ia] = cloudSortKey(a);
         const [pb, ib] = cloudSortKey(b);
         return pa - pb || ia.localeCompare(ib);
-    })[0]!;
+    };
+    const rawScenes = scenes.filter((s) => !isDecloudProduct(s));
+    const goodDecloud = scenes.filter(
+        (s) => isDecloudProduct(s) && s.decloud_quality === "good",
+    );
+    const bestRaw = rawScenes.length ? [...rawScenes].sort(byCloud)[0]! : null;
+    const bestDecloud = goodDecloud.length ? [...goodDecloud].sort(byCloud)[0]! : null;
+    if (bestRaw && bestDecloud) {
+        const target = sceneIsoDate(bestRaw) || sceneIsoDate(bestDecloud);
+        const { ndvi, ndmi } = nearbyClearIndexMedians(opts?.neighbors, target);
+        if (ndvi != null) {
+            const candidates: T[] = [bestRaw, bestDecloud];
+            return candidates.sort((a, b) => {
+                const ka = physiologySortKey(a, ndvi, ndmi, target);
+                const kb = physiologySortKey(b, ndvi, ndmi, target);
+                return (
+                    ka[0] - kb[0] ||
+                    ka[1] - kb[1] ||
+                    ka[2] - kb[2] ||
+                    ka[3] - kb[3] ||
+                    ka[4].localeCompare(kb[4])
+                );
+            })[0]!;
+        }
+        if (rawFitsPhenologyBetter(bestRaw, bestDecloud)) return bestRaw;
+    }
+    const official = pickOfficialOptical(scenes, opts);
+    if (official) return official;
+    if (!rawScenes.length) return null;
+    return [...rawScenes].sort(byCloud)[0]!;
 }
 
 export function opticalTooltipFields(scene: OpticalSceneLike | null | undefined): OpticalTooltipFields {
@@ -346,6 +416,7 @@ export function opticalTooltipFields(scene: OpticalSceneLike | null | undefined)
             sceneId: null,
             isDecloud: false,
             isOfficial: false,
+            mayBeUnreliable: false,
         };
     }
     const rawReasons = scene.decloud_reasons;
@@ -354,14 +425,17 @@ export function opticalTooltipFields(scene: OpticalSceneLike | null | undefined)
         : typeof rawReasons === "string" && rawReasons
           ? [rawReasons]
           : [];
+    const isDecloud = isDecloudProduct(scene);
+    const quality = scene.decloud_quality ?? null;
     return {
         cloudCover: sceneCloudPct(scene),
-        decloudQuality: scene.decloud_quality ?? null,
+        decloudQuality: quality,
         decloudReasons: reasons,
         productSource: scene.source ?? null,
         sceneId: scene.scene_id ?? null,
-        isDecloud: isDecloudProduct(scene),
+        isDecloud,
         isOfficial: isOfficialOpticalScene(scene),
+        mayBeUnreliable: isDecloud && quality !== "good",
     };
 }
 

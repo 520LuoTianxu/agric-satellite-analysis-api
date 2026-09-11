@@ -198,7 +198,7 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
     const byDate = new Map<string, AgriSceneProduct[]>();
     for (const s of scenes) {
         if (s.sensor !== meta.sensor) continue;
-        if (isDecloudProduct(s) && s.decloud_quality !== "good") continue;
+        if (key === "drought" && isDecloudProduct(s) && s.decloud_quality !== "good") continue;
         const arr = byDate.get(s.date) ?? [];
         arr.push(s);
         byDate.set(s.date, arr);
@@ -236,8 +236,61 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
             decloud_reasons: tip.decloudReasons,
             product_source: tip.productSource,
             scene_id: tip.sceneId,
+            may_be_unreliable: tip.mayBeUnreliable,
         });
     });
+    return out;
+}
+
+function decloudQualityChip(
+    quality: string | null | undefined,
+    t: (key: string) => string,
+): string {
+    if (quality === "good") return ` · ${t("decloudChip_good")}`;
+    if (quality === "fair") return ` · ${t("decloudChip_fair")}`;
+    if (quality === "bad") return ` · ${t("decloudChip_bad")}`;
+    return "";
+}
+
+function collectDecloudAltStats(
+    scenes: AgriSceneProduct[],
+    key: SeriesKey,
+    mainStats: FieldStat[],
+): FieldStat[] {
+    const meta = SERIES_META[key];
+    if (key === "drought" || meta.sensor !== "S2") return [];
+    const avgKey = meta.chartKey;
+    if (!avgKey) return [];
+    const pickedIds = new Set(mainStats.map((s) => s.scene_id).filter(Boolean));
+    const out: FieldStat[] = [];
+    for (const s of scenes) {
+        if (s.sensor !== "S2" || !isDecloudProduct(s)) continue;
+        if (s.scene_id && pickedIds.has(s.scene_id)) continue;
+        const v = s[avgKey];
+        if (typeof v !== "number" || Number.isNaN(v)) continue;
+        const tip = opticalTooltipFields(s);
+        out.push({
+            id: `agri-${key}-decloud-alt-${s.date}-${s.scene_id ?? out.length}`,
+            field_id: "",
+            date: s.date,
+            mean: v,
+            median: v,
+            min: v,
+            max: v,
+            p10: v,
+            p90: v,
+            stddev: null,
+            quality_score: null,
+            created_at: "",
+            cloud_cover: tip.cloudCover,
+            decloud_quality: tip.decloudQuality,
+            decloud_reasons: tip.decloudReasons,
+            product_source: tip.productSource,
+            scene_id: tip.sceneId,
+            decloud_alt: true,
+            may_be_unreliable: tip.mayBeUnreliable,
+        });
+    }
     return out;
 }
 
@@ -827,6 +880,10 @@ export default function AgriTimeseriesPanel({
     }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
     const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
+    const decloudAltStats = useMemo(
+        () => collectDecloudAltStats(scenes, series, stats),
+        [scenes, series, stats],
+    );
 
     const availableKeys = useMemo(
         () => BUTTON_ORDER.filter((key) => seriesIsAvailable(key, scenes)),
@@ -995,6 +1052,11 @@ export default function AgriTimeseriesPanel({
         if (cloudCoverPct != null) return cloudCoverPct > DROUGHT_CLOUD_MAX_PCT;
         return selectedScene.cloud_cover_over_30 === true;
     }, [selectedScene, cloudCoverPct]);
+
+    const selectedDecloudAlt = useMemo(() => {
+        if (!selectedDate) return null;
+        return decloudAltStats.find((s) => s.date === selectedDate) ?? null;
+    }, [selectedDate, decloudAltStats]);
 
     const sceneMeanByDate = useMemo(() => {
         const out: Record<string, number | null> = {};
@@ -1318,6 +1380,7 @@ export default function AgriTimeseriesPanel({
                             {stats.length > 0 ? (
                                 <NdviChart
                                     stats={stats}
+                                    decloudAltStats={decloudAltStats}
                                     selectedDate={selectedDate}
                                     onDateSelect={(d) => selectDateExplicit(d)}
                                     height={220}
@@ -1355,13 +1418,11 @@ export default function AgriTimeseriesPanel({
                                 {cloudCoverPct != null
                                     ? ` · ${t("cloudCover", { percent: Math.round(cloudCoverPct) })}`
                                     : ""}
-                                {selectedScene?.decloud_quality === "good"
-                                    ? ` · ${t("decloudChip_good")}`
-                                    : selectedScene?.decloud_quality === "fair"
-                                      ? ` · ${t("decloudChip_fair")}`
-                                      : selectedScene?.decloud_quality === "bad"
-                                        ? ` · ${t("decloudChip_bad")}`
-                                        : ""}
+                                {decloudQualityChip(
+                                    selectedScene?.decloud_quality ??
+                                        selectedDecloudAlt?.decloud_quality,
+                                    t,
+                                )}
                                 {series === "flood" && selectedDate && isSpringFloodMonth(selectedDate)
                                     ? ` · ${t("floodSpringNote")}`
                                     : ""}

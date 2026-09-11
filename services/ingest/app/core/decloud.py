@@ -11,7 +11,8 @@ Product rules:
   one raw scene finishes.
 - Store as sensor=S2 with scene_id suffix ``_decloud`` and
   pixel_data.source = ``uncrtaints_decloud``.
-- Official drought / timeseries / land metrics accept only quality ``good``.
+- Store fair/bad reconstructions too (audit). Official drought / land
+  metrics still accept only quality ``good``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from app.core.agri_classify import (
@@ -498,6 +500,135 @@ def score_decloud(inp: DecloudQualityInputs) -> DecloudQualityResult:
     return DecloudQualityResult(quality, round(score, 4), reasons)
 
 
+def should_persist_decloud_product(
+    *,
+    has_reconstruction: bool,
+    pixel_count: int = 0,
+    has_finite_index: bool = False,
+) -> bool:
+    """Whether OSS/MQ should receive a ``_decloud`` row.
+
+    Persist whenever UnCRtainTS produced a reconstruction, including fair/bad
+    and sparse/weak pixels. Empty lonlat after a harsh quality path is not a
+    skip if zonal means or any pixel exist. Skip only when there is nothing
+    to store (no reconstruct array at all).
+    """
+    return bool(has_reconstruction) or pixel_count > 0 or has_finite_index
+
+
+def decloud_drought_exclusion_flags(
+    is_official: bool,
+) -> tuple[bool, float]:
+    """``(cloud_cover_over_30, parcel_cloud_cover_pct)`` for a decloud row.
+
+    Fair/bad stay out of drought SQL (quality != good) and the legacy
+    cloud>30 filter (over_30 True, parcel 100).
+    """
+    if is_official:
+        return False, 0.0
+    return True, 100.0
+
+
+def decloud_pixel_payload(
+    *,
+    quality: str,
+    score: float,
+    reasons: list[str] | None,
+    raw_scene_id: str | None,
+    pixels: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """lonlat_v1 object stored on the decloud product (quality always present)."""
+    return {
+        "format": "lonlat_v1",
+        "source": DECLOUD_SOURCE,
+        "decloud_quality": quality,
+        "decloud_score": score,
+        "decloud_reasons": list(reasons or []),
+        "raw_scene_id": raw_scene_id,
+        "pixels": pixels,
+    }
+
+
+def geojson_ring_centroid(
+    geom: dict[str, Any] | None,
+) -> tuple[float, float] | None:
+    """Average vertex of the outer ring. Stdlib; good enough for a stub pixel."""
+    if not isinstance(geom, dict):
+        return None
+    gtype = geom.get("type")
+    coords = geom.get("coordinates")
+    rings: list[Any] = []
+    if gtype == "Point" and isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        try:
+            return float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            return None
+    if gtype == "Polygon" and coords:
+        rings = [coords[0]] if coords else []
+    elif gtype == "MultiPolygon" and coords:
+        rings = [part[0] for part in coords if part]
+    xs: list[float] = []
+    ys: list[float] = []
+    for ring in rings:
+        if not isinstance(ring, (list, tuple)):
+            continue
+        for pt in ring:
+            if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                continue
+            try:
+                xs.append(float(pt[0]))
+                ys.append(float(pt[1]))
+            except (TypeError, ValueError):
+                continue
+    if not xs:
+        return None
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def fallback_lonlat_pixels(
+    *,
+    pixels: list[dict[str, Any]] | None,
+    index_avgs: dict[str, float | None],
+    lon: float | None,
+    lat: float | None,
+    allow_zero_stub: bool = False,
+) -> list[dict[str, Any]]:
+    """Keep sampled pixels; otherwise one centroid pixel from zonal means."""
+    if pixels:
+        return list(pixels)
+    if lon is None or lat is None:
+        return []
+    finite = {
+        key: value
+        for key, value in index_avgs.items()
+        if value is not None and value == value
+    }
+    if not finite:
+        if not allow_zero_stub:
+            return []
+        finite = {"NDVI": 0.0}
+    pix: dict[str, Any] = {
+        "lon": round(float(lon), 6),
+        "lat": round(float(lat), 6),
+        "clear": 0,
+    }
+    pix.update(finite)
+    if "NDVI" not in pix:
+        pix["NDVI"] = 0.0
+    return [pix]
+
+
+def window_array_tmp_path(path: Path) -> Path:
+    """Sibling temp path that still ends in ``.npz``.
+
+    ``numpy.savez_compressed`` appends ``.npz`` when the name does not already
+    end with that suffix, so ``foo.npz.tmp`` is written as ``foo.npz.tmp.npz``
+    and the subsequent replace misses the file. Include the pid so two
+    workers writing the same date do not share a temp name.
+    """
+    return path.with_name(f"{path.stem}.{os.getpid()}.writing.npz")
+
+
 __all__ = [
     "DECLOUD_EXTRA_S2_ASSETS",
     "DECLOUD_QUALITY_GOOD",
@@ -529,7 +660,13 @@ __all__ = [
     "plan_decloud_after_raw",
     "score_decloud",
     "should_enqueue_per_scene_decloud",
+    "should_persist_decloud_product",
     "should_trigger_decloud",
+    "decloud_drought_exclusion_flags",
+    "decloud_pixel_payload",
+    "fallback_lonlat_pixels",
+    "geojson_ring_centroid",
+    "window_array_tmp_path",
     "uncrtaints_checkpoint_dir",
     "uncrtaints_checkpoint_name",
     "uncrtaints_home",

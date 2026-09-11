@@ -4,8 +4,10 @@ Field timeseries, heatmaps, overview, and land-assessment optical inputs share
 these rules. Implementation: `services/api/app/core/agri_classify.py` (mirrored
 in ingest) and `apps/web/src/lib/agri-classify.ts`.
 
-Decloud stays optional (`DECLOUD_ENABLED` default off). Raw S2 rows are never
-deleted. Fair/bad decloud products are stored for audit only.
+Fair/bad decloud products are stored for audit only and never enter drought
+or other official land metrics. NDVI and similar growth charts compare raw
+versus good decloud against nearby clear-raw phenology and prefer raw when
+it fits the crop calendar better.
 
 ## Official optical product
 
@@ -22,9 +24,16 @@ For a calendar date:
    while parcel is cloudy, pick the product whose NDVI (then NDMI) is closer
    to the median of nearby clear raw dates (plus/minus 45 days, else same
    month). Tie-break: raw, then scene id.
-4. Fair/bad decloud never enter official NDVI, drought, overview, or land RS.
-5. Cloudy raw without a good decloud may still plot on the NDVI chart (tooltip
-   says cloudy / no de-cloud) but drought skips it (`unreliable`).
+4. Fair/bad decloud never enter official drought, overview, or land RS.
+5. **NDVI / growth series** (`pick_optical_for_ndvi`): when both raw and a
+   **good** decloud exist, pick the product whose NDVI (then NDMI) is closer
+   to the median of nearby clear raw dates, and that is not absurd versus
+   the growing-season canopy (June-September: NDVI far below a green
+   neighbor baseline loses). Tie-break: raw. Fair/bad decloud never become
+   the plotted official point; they may appear as marked "may be unreliable"
+   overlays.
+6. Cloudy raw without a good decloud may still plot on the NDVI chart
+   (tooltip says cloudy / no de-cloud) but drought skips it (`unreliable`).
 
 Cloud-removal search default is 90% STAC cloud (`DECLOUD_STAC_CLOUD_MAX_PCT`).
 Decloud runs when parcel cloud > 30% **or** STAC cloud > 30%, up to that max.
