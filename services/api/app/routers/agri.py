@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.agri_classify import parse_s1_relative_orbit
 from app.core.database import get_db
 from app.core.storage import get_parcel_product_storage
 from app.middleware.auth import OrgContext, require_roles
@@ -52,7 +53,9 @@ _SCENE_COLS = """
     generated_at_shanghai, ingested_at,
     pixel_data->>'source' AS source,
     pixel_data->>'decloud_quality' AS decloud_quality,
-    NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score
+    NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score,
+    pixel_data->'decloud_reasons' AS decloud_reasons,
+    NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
 """
 
 
@@ -67,12 +70,36 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
             "boundary_geojson",
             "source_properties",
             "pixel_data",
+            "decloud_reasons",
         ) and isinstance(v, str):
             try:
                 d[k] = json.loads(v)
             except json.JSONDecodeError:
                 pass
+    _enrich_scene_product(d)
     return d
+
+
+def _enrich_scene_product(d: dict[str, Any]) -> None:
+    """Normalize decloud_reasons and fill relative_orbit from scene_id."""
+    reasons = d.get("decloud_reasons")
+    if isinstance(reasons, str):
+        try:
+            reasons = json.loads(reasons)
+        except json.JSONDecodeError:
+            reasons = [reasons] if reasons else []
+    if reasons is None:
+        d["decloud_reasons"] = None
+    elif isinstance(reasons, list):
+        d["decloud_reasons"] = [str(x) for x in reasons if x is not None]
+    else:
+        d["decloud_reasons"] = [str(reasons)]
+
+    rel = d.get("relative_orbit")
+    if rel is None and d.get("sensor") == "S1":
+        parsed = parse_s1_relative_orbit(d.get("scene_id"))
+        if parsed is not None:
+            d["relative_orbit"] = parsed
 
 
 def _normalize_lonlat_pixels(raw_pixels: Any) -> list[dict[str, Any]]:

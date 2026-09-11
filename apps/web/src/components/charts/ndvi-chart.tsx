@@ -16,6 +16,8 @@ import { CanvasRenderer } from "echarts/renderers";
 import type { FieldStat, IndexType, WeatherDaily } from "@/lib/api";
 import { INDEX_CONFIG } from "@/lib/api";
 import { tokenColor } from "@/lib/design-tokens";
+import { useTranslations } from "next-intl";
+import { DECLOUD_SOURCE } from "@/lib/agri-classify";
 import {
     axisLabel,
     baseTooltip,
@@ -100,6 +102,7 @@ export default function NdviChart({
     bareThreshold = 0.25,
     eventMarks,
 }: NdviChartProps) {
+    const t = useTranslations("ndviChart");
     const config = INDEX_CONFIG[indexType];
     const seriesName = `Mean ${config.label}`;
     const isSar = indexType === "VV" || indexType === "VH";
@@ -156,6 +159,11 @@ export default function NdviChart({
                 value: [d, v] as [string, number | null],
                 itemStyle: { color, opacity },
                 symbolSize,
+                cloudCover: s.cloud_cover ?? null,
+                decloudQuality: s.decloud_quality ?? null,
+                decloudReasons: s.decloud_reasons ?? [],
+                productSource: s.product_source ?? null,
+                sceneId: s.scene_id ?? null,
             };
         });
 
@@ -263,9 +271,15 @@ export default function NdviChart({
                 axisPointer: { type: "cross" as const },
                 formatter: (params: any) => {
                     if (!Array.isArray(params) || params.length === 0) return "";
-                    // Group by date from all series hitting this axis pointer
                     const date = params[0]?.axisValueLabel || params[0]?.value?.[0] || "";
                     const lines = [`<b>${date}</b>`];
+                    let extras: {
+                        cloudCover?: number | null;
+                        decloudQuality?: string | null;
+                        decloudReasons?: string[];
+                        productSource?: string | null;
+                        sceneId?: string | null;
+                    } | null = null;
                     for (const p of params) {
                         if (p.seriesName === "p10" || p.seriesName === "p90") continue;
                         const val = Array.isArray(p.value) ? p.value[1] : p.value;
@@ -274,6 +288,24 @@ export default function NdviChart({
                         const unit = isIndex ? (isSar ? " dB" : "") : " mm";
                         const digits = isIndex ? (isSar ? 2 : 3) : 1;
                         lines.push(`${p.marker} ${p.seriesName}: ${Number(val).toFixed(digits)}${unit}`);
+                        if (isIndex && p.data && typeof p.data === "object") {
+                            extras = p.data;
+                        }
+                    }
+                    if (!isSar && hasOpticalTooltip(extras)) {
+                        lines.push(formatCloudLine(extras?.cloudCover, t));
+                        lines.push(
+                            formatDecloudLine(
+                                {
+                                    quality: extras?.decloudQuality,
+                                    reasons: extras?.decloudReasons,
+                                    source: extras?.productSource,
+                                    sceneId: extras?.sceneId,
+                                    cloudCover: extras?.cloudCover,
+                                },
+                                t,
+                            ),
+                        );
                     }
                     return lines.join("<br/>");
                 },
@@ -362,7 +394,7 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks]);
+    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, t]);
 
     const onEvents = useMemo(
         () => ({
@@ -398,4 +430,69 @@ export default function NdviChart({
             lazyUpdate
         />
     );
+}
+
+function hasOpticalTooltip(extras: {
+    cloudCover?: number | null;
+    decloudQuality?: string | null;
+    productSource?: string | null;
+    sceneId?: string | null;
+} | null): boolean {
+    if (!extras) return false;
+    if (typeof extras.cloudCover === "number" && Number.isFinite(extras.cloudCover)) return true;
+    return Boolean(extras.decloudQuality || extras.productSource || extras.sceneId);
+}
+
+const DECLOUD_REASON_KEYS = new Set([
+    "rgb_still_bright",
+    "rgb_bright",
+    "tiny_rgb_delta",
+    "spatial_std_collapse",
+    "spatial_std_low",
+    "ndvi_far_below_neighbors",
+    "ndvi_below_neighbors",
+    "non_finite_reconstruction",
+]);
+
+export function formatCloudLine(
+    cloudCover: number | null | undefined,
+    t: (key: string, values?: Record<string, string | number>) => string,
+): string {
+    if (typeof cloudCover === "number" && Number.isFinite(cloudCover)) {
+        return t("cloud", { percent: Math.round(cloudCover) });
+    }
+    return t("cloudNA");
+}
+
+export function formatDecloudLine(
+    info: {
+        quality?: string | null;
+        reasons?: string[] | null;
+        source?: string | null;
+        sceneId?: string | null;
+        cloudCover?: number | null;
+    },
+    t: (key: string, values?: Record<string, string | number>) => string,
+): string {
+    const isDecloud =
+        info.source === DECLOUD_SOURCE ||
+        (typeof info.sceneId === "string" && info.sceneId.endsWith("_decloud"));
+    const reasonText = (info.reasons ?? [])
+        .map((r) => (DECLOUD_REASON_KEYS.has(r) ? t(`reason_${r}`) : r))
+        .filter(Boolean)
+        .join("; ");
+    if (isDecloud) {
+        const q = (info.quality || "").toLowerCase();
+        if (q === "good") return t("decloudGood");
+        if (q === "fair") return t("decloudFair", { reason: reasonText || t("reasonUnknown") });
+        if (q === "bad") return t("decloudBad", { reason: reasonText || t("reasonUnknown") });
+        return t("decloudNA");
+    }
+    if (typeof info.cloudCover === "number" && Number.isFinite(info.cloudCover) && info.cloudCover > 30) {
+        return t("decloudNone");
+    }
+    if (typeof info.cloudCover === "number" && Number.isFinite(info.cloudCover)) {
+        return t("decloudClear");
+    }
+    return t("decloudNA");
 }

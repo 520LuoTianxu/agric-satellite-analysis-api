@@ -37,6 +37,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
 from app.core.index_cogs import write_index_cogs_enabled
+from app.core.agri_classify import parse_s1_relative_orbit
 from app.core.s1_stac import (
     S1_STAC_COLLECTION,
     open_s1_stac_client,
@@ -176,12 +177,14 @@ def search_s1_scenes(
             score += 3
         entry = weekly.get(week_str)
         if entry is None or score > entry["score"]:
+            rel_orbit = props.get("sat:relative_orbit") or props.get("relative_orbit")
             weekly[week_str] = {
                 "item": item,
                 "date": item_date,
                 "score": score,
                 "vv_href": vv_href,
                 "vh_href": vh_href,
+                "relative_orbit": rel_orbit,
             }
     if skipped_no_vvvh:
         logger.info(
@@ -199,6 +202,7 @@ def search_s1_scenes(
                 "date": e["date"],
                 "vv_href": e["vv_href"],
                 "vh_href": e["vh_href"],
+                "relative_orbit": e.get("relative_orbit"),
             }
         )
     return scenes
@@ -359,13 +363,17 @@ def _upsert_agri_s1(
     vv_stats: dict,
     vh_stats: dict,
     mq_task_id: str | None = None,
+    relative_orbit: int | None = None,
 ) -> str | None:
     """Upload S1 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
 
     Returns public JSON URL when upload+publish succeed.
     """
     date_str = scene_date.isoformat()
+    rel = parse_s1_relative_orbit(scene_id, relative_orbit)
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
+    if rel is not None:
+        pixel_data["relative_orbit"] = rel
     json_oss_key = None
     json_url = None
     json_upload_ms = 0
@@ -673,6 +681,7 @@ def _process_one_s1_scene(
                     vv_stats,
                     vh_stats,
                     mq_task_id=mq_task_id,
+                    relative_orbit=scene.get("relative_orbit"),
                 )
                 published = True
                 logger.info(

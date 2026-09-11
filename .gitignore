@@ -44,6 +44,7 @@ docs/*
 !docs/TaskList.md
 !docs/agri-first-data.md
 !docs/decloud-uncrtaints.md
+!docs/agri-drought-flood.md
 
 # ── Logs / Temp ──────────────────────────────────────────────────────
 *.log

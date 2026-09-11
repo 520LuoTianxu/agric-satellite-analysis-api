@@ -59,7 +59,7 @@ Agri parcels bind soil/weather by tagging the OpenFarm field:
 tags_json: ["agri:13691", "source:agri.land_parcels", ...]
 ```
 
-UI uses `parseAgriLandId(tags)` for RS (`/v1/agri/...`) and the field UUID for soil/weather (`/v1/fields/{id}/soil`, weather APIs).
+UI uses `parseAgriLandId(tags)` for RS (`/v1/agri/...`) and the field UUID for soil/weather (`/v1/fields/{id}/soil`, weather APIs). Drought and flood date classes plus NDVI tooltip cloud / de-cloud text are in `docs/agri-drought-flood.md`.
 
 On field create (including agri-tagged):
 

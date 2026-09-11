@@ -10,9 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Field land report tab now shows a six-dimension hexagon of crop, soil, season vigor, weather, flood safety, and drought safety from that field's latest successful report. Generate the report first if no scores are shown; older reports without stored scores need a new generate.
 - Sentinel-1 agri ingest now defaults to Microsoft Planetary Computer (`sentinel-1-grd`, SAS-signed Azure assets) instead of Element84 requester-pays S3. Optical S2 still uses `STAC_API_URL`.
 - Optional cloud-removal step for cloudy crop-field satellite scenes. It is off by default. When turned on, a second product is stored next to the raw scene. Only high-quality results are used for drought and similar official metrics; lower-quality results are kept for audit. Raw cloudy scenes are not overwritten.
+- Mean NDVI chart tooltips now show cloud cover and a short de-cloud quality note (clear raw, good, fair, or poor) for the product actually plotted that day.
 
 ### Changed
 - Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.
+- Field drought days now use the growing season (June-September by default) and a two-part rule: dry NDDI (or a dry same-month percentile) plus either dry NDMI or a drop in NDVI versus that month's median. Cloudy or poor de-cloud dates are skipped.
+- Field flood days now use Sentinel-1 VV against a per-orbit baseline (low VV, a drop versus that orbit's median, and a VH helper). Near-threshold dates are marked watch. Spring detections may be irrigation puddles, not disaster flood.
 - The agri time-series panel marks historical drought days on the chart and date list.
 - Agri field satellite refresh now writes color-spot data directly after computing indices. It no longer stores large index image files in object storage. Existing stored images are left as-is; new runs do not add more.
 - Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 16 per job by default), so a field backfill finishes faster without adding more Celery workers.
