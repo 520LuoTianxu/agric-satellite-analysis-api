@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed
+- Cloud-removal now loads the official UnCRtainTS weights correctly. Earlier loads missed the network prefix and the usual checkpoint filename, so reconstructions were wrong.
 - Sentinel-1 agri scenes download via Planetary Computer SAS-signed Azure assets (no AWS requester-pays keys). Earlier unsigned Element84/S3 reads returned 403 and jobs often finished with zero scenes saved.
 - Background workers reconnect after a brief Redis interruption instead of sitting idle until the worker is restarted.
 - Linking satellite index products to a field after backfill no longer fails on an internal formatting error.

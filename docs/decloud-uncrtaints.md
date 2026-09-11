@@ -12,7 +12,8 @@ Default is **off**. Download machines without GPU or model weights are unchanged
    set `UNCRTAINTS_HOME` to that clone (so `src.backbones.uncrtaints` imports).
 2. Download the `diagonal_1` checkpoint (use_sar, input_t=3). Do **not** commit
    weights to git. Point `UNCRTAINTS_CHECKPOINT_DIR` at the directory that
-   contains the `.pth` / `.pt` file (or the `diagonal_1` subfolder).
+   contains `model.pth.tar` plus sibling `conf.json` (or the `diagonal_1`
+   subfolder). `.pth` / `.pt` / `.ckpt` files are still accepted.
 3. On the ingest worker, optionally `pip install torch` (CUDA build if you have
    a GPU). The worker picks CUDA when available and CPU otherwise.
 4. Set ingest env (see `.env.example` and compose passthrough):

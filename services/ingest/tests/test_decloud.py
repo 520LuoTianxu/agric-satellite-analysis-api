@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.core.decloud import (
@@ -214,6 +215,242 @@ class OfficialGateTests(unittest.TestCase):
         self.assertIn("decloud_quality", sql)
         self.assertIn("'good'", sql)
         self.assertIn("_decloud", sql)
+
+
+class UncrtaintsCheckpointTests(unittest.TestCase):
+    """Loader tests with fake weights. CI ingest has no torch/numpy extras."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._added_modules = _stub_optional_modules()
+        from app.core import uncrtaints as uncrtaints_mod
+
+        cls.u = uncrtaints_mod
+
+    def test_strip_netg_prefix_drops_wrapper_keys(self) -> None:
+        stripped = self.u._strip_netg_prefix(
+            {
+                "netG.in_conv.weight": 1,
+                "netG.out_block.0.weight": 2,
+                "module.netG.in_block.0.weight": 3,
+                "criterion.foo": 9,
+            }
+        )
+        self.assertEqual(
+            stripped,
+            {
+                "in_conv.weight": 1,
+                "out_block.0.weight": 2,
+                "in_block.0.weight": 3,
+            },
+        )
+
+    def test_rename_in_out_blocks_digit_minus_one(self) -> None:
+        renamed = self.u._rename_in_out_blocks(
+            {"in_block1.conv.weight": 1, "out_block1.proj.bias": 2, "in_conv.weight": 3}
+        )
+        self.assertEqual(
+            renamed,
+            {
+                "in_block.0.conv.weight": 1,
+                "out_block.0.proj.bias": 2,
+                "in_conv.weight": 3,
+            },
+        )
+
+    def test_resolve_prefers_pth_tar_under_experiment_dir(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp = root / "diagonal_1"
+            exp.mkdir()
+            (exp / "other.pth").write_bytes(b"pth")
+            target = exp / "model.pth.tar"
+            target.write_bytes(b"tar")
+            with patch.dict(
+                os.environ,
+                {
+                    "UNCRTAINTS_CHECKPOINT_DIR": str(root),
+                    "UNCRTAINTS_CHECKPOINT_NAME": "diagonal_1",
+                },
+            ):
+                self.assertEqual(self.u._resolve_checkpoint_file(), target)
+            with patch.dict(
+                os.environ,
+                {
+                    "UNCRTAINTS_CHECKPOINT_DIR": str(exp),
+                    "UNCRTAINTS_CHECKPOINT_NAME": "diagonal_1",
+                },
+            ):
+                self.assertEqual(self.u._resolve_checkpoint_file(), target)
+            with patch.dict(
+                os.environ,
+                {"UNCRTAINTS_CHECKPOINT_DIR": str(target)},
+            ):
+                self.assertEqual(self.u._resolve_checkpoint_file(), target)
+
+    def test_load_strips_netg_and_reads_conf(self) -> None:
+        import json
+        import sys
+        import tempfile
+        import types
+        from pathlib import Path
+
+        class FakeGenerator:
+            last_kwargs: dict = {}
+            last_state: dict = {}
+            load_calls: list = []
+
+            def __init__(self, **kwargs):
+                type(self).last_kwargs = kwargs
+                self.expected = {"in_conv.weight", "out_block.0.weight"}
+
+            def load_state_dict(self, state, strict=False):
+                type(self).load_calls.append(dict(state))
+                type(self).last_state = dict(state)
+                missing = [k for k in self.expected if k not in state]
+                unexpected = [k for k in state if k not in self.expected]
+                return missing, unexpected
+
+            def to(self, device):
+                return self
+
+            def eval(self):
+                return self
+
+        FakeGenerator.load_calls = []
+
+        class FakeTorch:
+            @staticmethod
+            def load(path, map_location=None):
+                del path, map_location
+                return {
+                    "epoch": 12,
+                    "state_dict": {
+                        "netG.in_conv.weight": 1,
+                        "netG.out_block.0.weight": 2,
+                        "criterion.loss.weight": 9,
+                    },
+                }
+
+        src_mod = types.ModuleType("src")
+        bb_mod = types.ModuleType("src.backbones")
+        u_mod = types.ModuleType("src.backbones.uncrtaints")
+        u_mod.UNCRTAINTS = FakeGenerator
+        extra = {
+            "torch": FakeTorch,
+            "src": src_mod,
+            "src.backbones": bb_mod,
+            "src.backbones.uncrtaints": u_mod,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            exp = Path(tmp) / "diagonal_1"
+            exp.mkdir()
+            (exp / "model.pth.tar").write_bytes(b"fake")
+            (exp / "conf.json").write_text(
+                json.dumps(
+                    {
+                        "encoder_widths": "[128]",
+                        "decoder_widths": "[128,128,128,128,128]",
+                        "out_conv": "[13]",
+                        "mean_nonLinearity": True,
+                        "var_nonLinearity": "softplus",
+                        "agg_mode": "att_group",
+                        "encoder_norm": "group",
+                        "decoder_norm": "batch",
+                        "n_head": 16,
+                        "d_model": 256,
+                        "d_k": 4,
+                        "pad_value": 0,
+                        "padding_mode": "reflect",
+                        "positional_encoding": True,
+                        "covmode": "diag",
+                        "scale_by": 10.0,
+                        "separate_out": False,
+                        "use_v": False,
+                        "block_type": "mbconv",
+                        "pretrain": False,
+                    }
+                )
+            )
+            env = {
+                "UNCRTAINTS_CHECKPOINT_DIR": str(exp),
+                "UNCRTAINTS_CHECKPOINT_NAME": "diagonal_1",
+                "UNCRTAINTS_HOME": "",
+                "DECLOUD_USE_SAR": "1",
+                "DECLOUD_INPUT_T": "3",
+            }
+            with patch.dict(sys.modules, extra), patch.dict(os.environ, env):
+                infer = self.u.UncrtainTSInferencer(device="cpu")
+
+        self.assertIsInstance(infer.model, FakeGenerator)
+        self.assertEqual(FakeGenerator.last_kwargs["encoder_widths"], [128])
+        self.assertEqual(FakeGenerator.last_kwargs["out_conv"], [26])
+        self.assertEqual(FakeGenerator.last_kwargs["block_type"], "mbconv")
+        self.assertFalse(FakeGenerator.last_kwargs["is_mono"])
+        self.assertEqual(
+            FakeGenerator.last_state,
+            {"in_conv.weight": 1, "out_block.0.weight": 2},
+        )
+        self.assertTrue(
+            all(not k.startswith("netG.") for k in FakeGenerator.last_state)
+        )
+        self.assertEqual(len(FakeGenerator.load_calls), 1)
+
+    def test_in_block_rename_fallback_loads_cleanly(self) -> None:
+        class FakeGenerator:
+            def __init__(self):
+                self.expected = {"in_block.0.conv.weight"}
+
+            def load_state_dict(self, state, strict=False):
+                missing = [k for k in self.expected if k not in state]
+                unexpected = [k for k in state if k not in self.expected]
+                return missing, unexpected
+
+        warnings: list[tuple] = []
+
+        def _warn(*args, **kwargs):
+            warnings.append((args, kwargs))
+
+        with patch.object(self.u.logger, "warning", _warn):
+            missing, unexpected = self.u._load_state_into_generator(
+                FakeGenerator(),
+                {"netG.in_block1.conv.weight": 1},
+                Path("model.pth.tar"),
+            )
+        self.assertEqual(missing, [])
+        self.assertEqual(unexpected, [])
+        self.assertEqual(warnings, [])
+
+
+def _stub_optional_modules() -> list[str]:
+    """CI ingest job does not install numpy/structlog; stub only if missing."""
+    import sys
+    import types
+
+    added: list[str] = []
+    if "numpy" not in sys.modules:
+        numpy_mod = types.ModuleType("numpy")
+        numpy_mod.ndarray = type("ndarray", (), {})  # type: ignore[attr-defined]
+        numpy_mod.float32 = float  # type: ignore[attr-defined]
+        sys.modules["numpy"] = numpy_mod
+        added.append("numpy")
+    if "structlog" not in sys.modules:
+        structlog_mod = types.ModuleType("structlog")
+
+        class _Log:
+            def warning(self, *args, **kwargs):
+                return None
+
+            def info(self, *args, **kwargs):
+                return None
+
+        structlog_mod.get_logger = lambda: _Log()  # type: ignore[attr-defined]
+        sys.modules["structlog"] = structlog_mod
+        added.append("structlog")
+    return added
 
 
 if __name__ == "__main__":
