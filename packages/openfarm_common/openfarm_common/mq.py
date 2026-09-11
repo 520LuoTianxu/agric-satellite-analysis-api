@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
@@ -49,24 +52,86 @@ def _params(url: str | None = None) -> pika.URLParameters:
     return params
 
 
-# pika BlockingConnection is not thread-safe. Keep one cached connection per
-# thread so scene-parallel publishes do not redo CloudAMQP TLS every scene
-# (~2s each was dominating lonlat write time).
-_tls = __import__("threading").local()
+# CloudAMQP plan caps concurrent connections (often 20 for the whole vhost).
+# Scene-parallel ingest used thread-local conns (8 workers × 2 celery children
+# ≈ 16) and still blew the cap when S1/optical overlapped with mq_consumer.
+# Publish hot path now shares ONE process-wide connection under a lock.
+_publish_lock = threading.RLock()
+_shared: dict[str, Any] = {
+    "conn": None,
+    "conn_key": None,
+    "process_channel": None,
+    "download_channel": None,
+    "process_queue": None,
+    "download_queue": None,
+}
+
+# Keep a thread-local only for mq_connection(reuse=True) legacy callers.
+_tls = threading.local()
+
+
+def _publish_max_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("CLOUDAMQP_PUBLISH_MAX_ATTEMPTS", "5")))
+    except ValueError:
+        return 5
+
+
+def _is_connection_limit_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "connection limit" in text or "not_allowed" in text
+
+
+def _close_quiet(obj: Any) -> None:
+    if obj is None:
+        return
+    try:
+        if getattr(obj, "is_open", False):
+            obj.close()
+    except Exception:
+        pass
+
+
+def _invalidate_shared_publisher() -> None:
+    """Drop process-wide publish conn/channels (caller must hold _publish_lock)."""
+    _close_quiet(_shared.get("process_channel"))
+    _close_quiet(_shared.get("download_channel"))
+    _close_quiet(_shared.get("conn"))
+    _shared["process_channel"] = None
+    _shared["download_channel"] = None
+    _shared["conn"] = None
+    _shared["conn_key"] = None
+    _shared["process_queue"] = None
+    _shared["download_queue"] = None
+
+
+def _reset_shared_publisher_for_tests() -> None:
+    with _publish_lock:
+        _invalidate_shared_publisher()
+
+
+def _shared_connection(url: str | None = None) -> BlockingConnection:
+    """Return the process-wide publish connection (caller holds _publish_lock)."""
+    key = url or ""
+    conn = _shared.get("conn")
+    if conn is not None and _shared.get("conn_key") == key and getattr(conn, "is_open", False):
+        return conn
+    _invalidate_shared_publisher()
+    conn = pika.BlockingConnection(_params(url))
+    _shared["conn"] = conn
+    _shared["conn_key"] = key
+    return conn
 
 
 def _cached_connection(url: str | None = None) -> BlockingConnection:
+    """Thread-local cache for mq_connection(reuse=True) non-publish callers."""
     key = url or ""
     conn = getattr(_tls, "conn", None)
     conn_key = getattr(_tls, "conn_key", None)
     if conn is not None and conn_key == key and getattr(conn, "is_open", False):
         return conn
     if conn is not None:
-        try:
-            if conn.is_open:
-                conn.close()
-        except Exception:
-            pass
+        _close_quiet(conn)
     conn = pika.BlockingConnection(_params(url))
     _tls.conn = conn
     _tls.conn_key = key
@@ -77,8 +142,11 @@ def _cached_connection(url: str | None = None) -> BlockingConnection:
 def mq_connection(url: str | None = None, *, reuse: bool = False):
     """Yield a BlockingConnection.
 
-    ``reuse=True`` keeps a thread-local connection open (publish hot path).
-    Default still opens+closes for one-shot callers.
+    ``reuse=True`` keeps a thread-local connection open.
+    Prefer ``publish_result`` / ``publish_task`` for the hot path — those use
+    a process-wide shared connection so scene threads cannot exhaust the
+    CloudAMQP connection cap.
+    Default still opens+closes for one-shot callers (e.g. consume_forever).
     """
     if reuse:
         yield _cached_connection(url)
@@ -87,11 +155,7 @@ def mq_connection(url: str | None = None, *, reuse: bool = False):
     try:
         yield conn
     finally:
-        try:
-            if conn.is_open:
-                conn.close()
-        except Exception:
-            pass
+        _close_quiet(conn)
 
 
 def declare_queues(
@@ -132,6 +196,66 @@ def publish_json(
     )
 
 
+def _publish_locked(
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    url: str | None,
+    queue: str | None,
+) -> str:
+    """Publish JSON on the process-wide connection. Returns target queue name."""
+    attempts = _publish_max_attempts()
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        with _publish_lock:
+            try:
+                conn = _shared_connection(url)
+                if kind == "process":
+                    ch = _shared.get("process_channel")
+                    if ch is None or not getattr(ch, "is_open", False):
+                        ch = conn.channel()
+                        _, rq = declare_queues(ch)
+                        _shared["process_queue"] = rq
+                        _shared["process_channel"] = ch
+                    target = (
+                        queue
+                        or _shared.get("process_queue")
+                        or settings.cloudamqp_process_queue
+                    )
+                else:
+                    ch = _shared.get("download_channel")
+                    if ch is None or not getattr(ch, "is_open", False):
+                        ch = conn.channel()
+                        tq, _ = declare_queues(ch)
+                        _shared["download_queue"] = tq
+                        _shared["download_channel"] = ch
+                    target = (
+                        queue
+                        or _shared.get("download_queue")
+                        or settings.cloudamqp_download_queue
+                    )
+                publish_json(ch, target, payload)
+                return target
+            except Exception as exc:
+                last_exc = exc
+                _invalidate_shared_publisher()
+                retryable = _is_connection_limit_error(exc) or "connection" in str(exc).lower()
+                if attempt < attempts and retryable:
+                    logger.warning(
+                        "mq_publish_retry kind=%s attempt=%s/%s err=%s",
+                        kind,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                else:
+                    raise
+        # Backoff outside the lock so other publishers can proceed after reconnect.
+        time.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
+    assert last_exc is not None
+    raise last_exc
+
+
 def publish_task(
     message: TaskMessage | dict[str, Any],
     *,
@@ -142,36 +266,12 @@ def publish_task(
     if isinstance(message, dict):
         message = TaskMessage.model_validate(message)
     payload = message.model_dump(mode="json")
-    with mq_connection(url, reuse=True) as conn:
-        ch = getattr(_tls, "download_channel", None)
-        if ch is None or not getattr(ch, "is_open", False):
-            ch = conn.channel()
-            tq, _ = declare_queues(ch)
-            _tls.download_queue = tq
-            _tls.download_channel = ch
-        target = queue or getattr(_tls, "download_queue", None) or settings.cloudamqp_download_queue
-        try:
-            publish_json(ch, target, payload)
-        except Exception:
-            try:
-                if ch is not None and getattr(ch, "is_open", False):
-                    ch.close()
-            except Exception:
-                pass
-            _tls.download_channel = None
-            try:
-                c = getattr(_tls, "conn", None)
-                if c is not None and getattr(c, "is_open", False):
-                    c.close()
-            except Exception:
-                pass
-            _tls.conn = None
-            raise
+    target = _publish_locked(kind="download", payload=payload, url=url, queue=queue)
     logger.info(
         "mq_task_published task_id=%s type=%s queue=%s broker=%s",
         message.task_id,
         message.type,
-        queue or settings.cloudamqp_download_queue,
+        target,
         connection_label(url),
     )
 
@@ -182,43 +282,20 @@ def publish_result(
     url: str | None = None,
     queue: str | None = None,
 ) -> None:
-    """Publish a ResultMessage to the process queue."""
+    """Publish a ResultMessage to the process queue.
+
+    Uses one process-wide AMQP connection serialized by a lock so scene-parallel
+    threads cannot open one TLS connection each (CloudAMQP connection cap).
+    """
     if isinstance(message, dict):
         message = ResultMessage.model_validate(message)
     payload = message.model_dump(mode="json")
-    with mq_connection(url, reuse=True) as conn:
-        ch = getattr(_tls, "process_channel", None)
-        if ch is None or not getattr(ch, "is_open", False):
-            ch = conn.channel()
-            _, rq = declare_queues(ch)
-            _tls.process_queue = rq
-            _tls.process_channel = ch
-            _tls.queues_declared = True
-        target = queue or getattr(_tls, "process_queue", None) or settings.cloudamqp_process_queue
-        try:
-            publish_json(ch, target, payload)
-        except Exception:
-            # Drop cached channel/conn so the next publish reconnects cleanly.
-            try:
-                if ch is not None and getattr(ch, "is_open", False):
-                    ch.close()
-            except Exception:
-                pass
-            _tls.process_channel = None
-            _tls.queues_declared = False
-            try:
-                conn = getattr(_tls, "conn", None)
-                if conn is not None and getattr(conn, "is_open", False):
-                    conn.close()
-            except Exception:
-                pass
-            _tls.conn = None
-            raise
+    target = _publish_locked(kind="process", payload=payload, url=url, queue=queue)
     logger.info(
         "mq_result_published task_id=%s status=%s queue=%s broker=%s",
         message.task_id,
         message.status,
-        queue or settings.cloudamqp_process_queue,
+        target,
         connection_label(url),
     )
 
@@ -326,4 +403,5 @@ __all__ = [
     "publish_json",
     "publish_result",
     "publish_task",
+    "_reset_shared_publisher_for_tests",
 ]
