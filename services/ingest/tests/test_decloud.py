@@ -461,6 +461,109 @@ class WindowCacheTests(unittest.TestCase):
                 )
                 self.assertEqual(list_cached_s2("1"), [])
 
+    def test_write_window_array_roundtrip_no_double_suffix(self) -> None:
+        """savez must receive a .npz name so numpy does not write *.npz.tmp.npz."""
+        import json
+        import sys
+        import tempfile
+        from types import ModuleType
+
+        class _NpzFile:
+            def __init__(self, data: dict) -> None:
+                self.files = list(data)
+                self._data = data
+
+            def __enter__(self) -> "_NpzFile":
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+            def __getitem__(self, key: str) -> object:
+                return self._data[key]
+
+        savez_paths: list[str] = []
+
+        def savez_compressed(file: object, **packed: object) -> None:
+            target = Path(os.fspath(file))
+            savez_paths.append(str(target))
+            if not str(target).endswith(".npz"):
+                target = Path(str(target) + ".npz")
+            target.write_text(json.dumps(packed), encoding="utf-8")
+
+        def load(file: object) -> _NpzFile:
+            return _NpzFile(
+                json.loads(Path(os.fspath(file)).read_text(encoding="utf-8"))
+            )
+
+        fake_np = ModuleType("numpy")
+        fake_np.asarray = lambda v: v  # type: ignore[attr-defined]
+        fake_np.savez_compressed = savez_compressed  # type: ignore[attr-defined]
+        fake_np.load = load  # type: ignore[attr-defined]
+
+        from app.core.decloud_cache import (
+            array_path,
+            read_window_array,
+            write_window_array,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DECLOUD_CACHE_DIR": tmp}):
+                with patch.dict(sys.modules, {"numpy": fake_np}):
+                    path = write_window_array(
+                        "4745", "2026-09-02", "S2", stack=[0.1, 0.2]
+                    )
+                    self.assertIsNotNone(path)
+                    assert path is not None
+                    expected = array_path("4745", "2026-09-02", "S2")
+                    self.assertEqual(path, expected)
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.name, "2026-09-02_S2.npz")
+                    self.assertTrue(savez_paths)
+                    self.assertTrue(savez_paths[0].endswith(".npz"))
+                    self.assertNotIn(".npz.tmp", Path(savez_paths[0]).name)
+
+                    names = [p.name for p in Path(tmp).rglob("*") if p.is_file()]
+                    self.assertNotIn("2026-09-02_S2.npz.tmp", names)
+                    self.assertNotIn("2026-09-02_S2.npz.tmp.npz", names)
+                    self.assertFalse(
+                        any(
+                            n.endswith(".npz.tmp") or n.endswith(".npz.tmp.npz")
+                            for n in names
+                        )
+                    )
+                    self.assertFalse(any(".tmp.npz" in n for n in names))
+
+                    got = read_window_array("4745", "2026-09-02", "S2")
+                    self.assertIsNotNone(got)
+                    self.assertEqual(got["stack"], [0.1, 0.2])
+
+    def test_write_window_array_cleans_temp_on_failure(self) -> None:
+        import sys
+        import tempfile
+        from types import ModuleType
+
+        def savez_compressed(file: object, **_packed: object) -> None:
+            Path(os.fspath(file)).write_text("partial", encoding="utf-8")
+            raise OSError("simulated write failure")
+
+        fake_np = ModuleType("numpy")
+        fake_np.asarray = lambda v: v  # type: ignore[attr-defined]
+        fake_np.savez_compressed = savez_compressed  # type: ignore[attr-defined]
+
+        from app.core.decloud_cache import array_path, write_window_array
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DECLOUD_CACHE_DIR": tmp}):
+                with patch.dict(sys.modules, {"numpy": fake_np}):
+                    with self.assertRaises(OSError):
+                        write_window_array("4745", "2026-09-02", "S2", stack=[1])
+                    names = [p.name for p in Path(tmp).rglob("*") if p.is_file()]
+                    self.assertFalse(any(".tmp" in n for n in names))
+                    self.assertFalse(
+                        array_path("4745", "2026-09-02", "S2").is_file()
+                    )
+
 
 class UncrtaintsCheckpointTests(unittest.TestCase):
     """Loader tests with fake weights. CI ingest has no torch/numpy extras."""

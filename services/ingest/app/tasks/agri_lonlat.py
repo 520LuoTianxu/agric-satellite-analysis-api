@@ -491,14 +491,24 @@ def _process_one_optical_scene(
                 if hasattr(scene_date, "isoformat")
                 else str(scene_date)[:10]
             )
-            cache_optical_s2_window(
-                land_id=str(agri_meta["land_id"]),
-                date_str=date_str,
-                bands=bands,
-                band_hrefs=scene.get("band_hrefs"),
-                cloud_cover=scene.get("cloud_cover"),
-                stac_id=scene.get("id"),
-            )
+            try:
+                cache_optical_s2_window(
+                    land_id=str(agri_meta["land_id"]),
+                    date_str=date_str,
+                    bands=bands,
+                    band_hrefs=scene.get("band_hrefs"),
+                    cloud_cover=scene.get("cloud_cover"),
+                    stac_id=scene.get("id"),
+                )
+            except Exception as exc:
+                # Decloud scratch cache is best-effort; lonlat OSS/MQ still publish.
+                logger.warning(
+                    "decloud_cache_window_failed",
+                    land_id=str(agri_meta["land_id"]),
+                    date=date_str,
+                    scene_id=scene.get("id"),
+                    error=str(exc),
+                )
         download_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(session, job, "download_bands")
 

@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed
+- Optical Sentinel-2 scenes are still saved when the optional cloud-removal scratch cache cannot write a temporary array file.
 - NDVI date tooltips no longer show a stuck ~82% field cloud on small fields. That number was empty space around the field, not cloud. Tooltips now use in-field cloud, or the satellite scene cloud when an old stored value looks wrong.
 - Cloud-removal now loads the official UnCRtainTS weights correctly. Earlier loads missed the network prefix and the usual checkpoint filename, so reconstructions were wrong.
 - Sentinel-1 agri scenes download via Planetary Computer SAS-signed Azure assets (no AWS requester-pays keys). Earlier unsigned Element84/S3 reads returned 403 and jobs often finished with zero scenes saved.
