@@ -207,6 +207,41 @@ export const NDDI_MODERATE_MIN = 0.4;
 export const NDDI_SEVERE_MIN = 0.5;
 export const NDMI_FALLBACK_SEVERE = -0.2;
 export const DROUGHT_CLOUD_MAX_PCT = 30;
+export const DECLOUD_SOURCE = "uncrtaints_decloud";
+
+export function isDecloudProduct(scene: {
+    source?: string | null;
+    scene_id?: string | null;
+}): boolean {
+    if (scene.source === DECLOUD_SOURCE) return true;
+    return typeof scene.scene_id === "string" && scene.scene_id.endsWith("_decloud");
+}
+
+/** Raw clear S2, or good-quality decloud. fair/bad decloud is audit-only. */
+export function isOfficialOpticalScene(scene: {
+    source?: string | null;
+    scene_id?: string | null;
+    decloud_quality?: string | null;
+    cloud_cover_over_30?: boolean | null;
+    cloud_cover?: number | null;
+    parcel_cloud_cover_pct?: number | null;
+}): boolean {
+    if (isDecloudProduct(scene)) {
+        return scene.decloud_quality === "good";
+    }
+    if (scene.cloud_cover_over_30 === true) return false;
+    if (scene.cloud_cover_over_30 === false) return true;
+    if (typeof scene.cloud_cover === "number" && Number.isFinite(scene.cloud_cover)) {
+        return scene.cloud_cover <= DROUGHT_CLOUD_MAX_PCT;
+    }
+    if (
+        typeof scene.parcel_cloud_cover_pct === "number" &&
+        Number.isFinite(scene.parcel_cloud_cover_pct)
+    ) {
+        return scene.parcel_cloud_cover_pct <= DROUGHT_CLOUD_MAX_PCT;
+    }
+    return false;
+}
 
 export function computeNddi(ndvi: number, ndmi: number): number | null {
     if (!Number.isFinite(ndvi) || !Number.isFinite(ndmi)) return null;

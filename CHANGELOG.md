@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Field land report tab now shows a six-dimension hexagon of crop, soil, season vigor, weather, flood safety, and drought safety from that field's latest successful report. Generate the report first if no scores are shown; older reports without stored scores need a new generate.
 - Sentinel-1 agri ingest now defaults to Microsoft Planetary Computer (`sentinel-1-grd`, SAS-signed Azure assets) instead of Element84 requester-pays S3. Optical S2 still uses `STAC_API_URL`.
+- Optional cloud-removal step for cloudy crop-field satellite scenes. It is off by default. When turned on, a second product is stored next to the raw scene. Only high-quality results are used for drought and similar official metrics; lower-quality results are kept for audit. Raw cloudy scenes are not overwritten.
 
 ### Changed
 - Agri drought maps now follow NDDI first (Gu et al. 2007). Healthy green canopy is much less likely to show as mild or severe drought. Dates with cloud cover above 30% are left out of drought.

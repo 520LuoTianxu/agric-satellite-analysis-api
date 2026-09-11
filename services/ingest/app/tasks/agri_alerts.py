@@ -57,7 +57,9 @@ def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
             text(
                 """
             SELECT date, cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
-                   ndvi_avg, evi_avg, ndmi_avg, ndre_avg, cire_avg, mndwi_avg
+                   ndvi_avg, evi_avg, ndmi_avg, ndre_avg, cire_avg, mndwi_avg,
+                   scene_id, pixel_data->>'source' AS source,
+                   pixel_data->>'decloud_quality' AS decloud_quality
             FROM agri.parcel_scene_products
             WHERE land_id = :lid AND sensor = 'S2'
             ORDER BY date ASC
@@ -71,17 +73,16 @@ def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
 
 
 def _is_clear(scene: dict[str, Any]) -> bool:
-    if scene.get("cloud_cover_over_30") is False:
-        return True
-    if scene.get("cloud_cover_over_30") is True:
-        return False
-    cc = scene.get("cloud_cover")
-    if isinstance(cc, (int, float)):
-        return float(cc) <= 30
-    pct = scene.get("parcel_cloud_cover_pct")
-    if isinstance(pct, (int, float)):
-        return float(pct) <= 30
-    return False
+    from app.core.agri_classify import is_official_optical_product
+
+    return is_official_optical_product(
+        source=scene.get("source"),
+        scene_id=scene.get("scene_id"),
+        decloud_quality=scene.get("decloud_quality"),
+        parcel_cloud_cover_pct=scene.get("parcel_cloud_cover_pct"),
+        cloud_cover=scene.get("cloud_cover"),
+        cloud_cover_over_30=scene.get("cloud_cover_over_30"),
+    )
 
 
 def _pick_eval_scene(

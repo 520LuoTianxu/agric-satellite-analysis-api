@@ -117,6 +117,18 @@ class SceneProductOut(BaseModel):
     cloud_cover: float | None = None
     cloud_cover_over_30: bool | None = None
     parcel_cloud_cover_pct: float | None = None
+    source: str | None = Field(
+        default=None,
+        description=(
+            "pixel_data.source: stac_direct for raw S2, uncrtaints_decloud "
+            "for the additive cloud-removal product."
+        ),
+    )
+    decloud_quality: str | None = Field(
+        default=None,
+        description="good | fair | bad. Only good feeds official drought metrics.",
+    )
+    decloud_score: float | None = None
     json_oss_key: str | None = None
     pixel_data_url: str | None = None
     pixel_count: int | None = None

@@ -168,6 +168,8 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
             FROM agri.parcel_scene_products
             WHERE land_id = :land_id
               AND sensor = :sensor
+              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
+              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
             """
         ),
         {"land_id": str(land_id), "sensor": sensor},
@@ -273,18 +275,20 @@ def search_scenes_for_defs(
     index_defs: list[IndexDef],
     *,
     index_label: str | None = None,
+    max_cloud_cover: float | None = None,
 ) -> list[dict]:
     """Search Element84 STAC and resolve HREFs for the union of index bands."""
     if not index_defs:
         return []
     label = index_label or ",".join(d.key for d in index_defs)
+    cloud_lt = MAX_CLOUD_COVER if max_cloud_cover is None else float(max_cloud_cover)
     t0 = time.perf_counter()
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        query={"eo:cloud_cover": {"lt": MAX_CLOUD_COVER}},
+        query={"eo:cloud_cover": {"lt": cloud_lt}},
         max_items=100,
     )
     items = list(search.items())

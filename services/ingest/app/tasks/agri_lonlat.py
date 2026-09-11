@@ -122,10 +122,14 @@ def publish_optical_lonlat_to_oss_mq(
     *,
     mq_task_id: str | None = None,
     field_id: str | None = None,
+    oss_sensor: str = "S2",
+    extra_extras: dict[str, Any] | None = None,
 ) -> str | None:
     """Upload S2 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
 
     Producer mq_result_writer pulls the OSS URL and writes agri.parcel_scene_products.
+    ``oss_sensor`` only changes the object key / MQ label (e.g. ``S2_decloud``).
+    The stored row stays ``sensor='S2'`` so existing clients keep working.
     """
     from openfarm_common.mq_results import (
         publish_task_result,
@@ -135,7 +139,7 @@ def publish_optical_lonlat_to_oss_mq(
 
     pixel_obj = row.pop("_pixel_data_obj", None)
     t_json = time.perf_counter()
-    key = scene_json_oss_key(row["land_id"], row["date"], "S2")
+    key = scene_json_oss_key(row["land_id"], row["date"], oss_sensor)
     product = {
         "land_id": row["land_id"],
         "tile_id": row["tile_id"],
@@ -150,6 +154,11 @@ def publish_optical_lonlat_to_oss_mq(
         "generated_at_shanghai": row["generated_at_shanghai"],
         "pixel_data_url": row["pixel_data_url"],
         "json_oss_key": key,
+        "source": row.get("_source") or (pixel_obj or {}).get("source") or "stac_direct",
+        "decloud_quality": row.get("_decloud_quality")
+        or (pixel_obj or {}).get("decloud_quality"),
+        "decloud_score": row.get("_decloud_score")
+        or (pixel_obj or {}).get("decloud_score"),
         "ndvi_avg": row["ndvi_avg"],
         "ndvi_min": row["ndvi_min"],
         "ndvi_max": row["ndvi_max"],
@@ -173,18 +182,29 @@ def publish_optical_lonlat_to_oss_mq(
     key, json_url = upload_scene_product_json(
         land_id=row["land_id"],
         date_str=row["date"],
-        sensor="S2",
+        sensor=oss_sensor,
         product=product,
     )
     json_upload_ms = int((time.perf_counter() - t_json) * 1000)
     row["json_oss_key"] = key
 
-    label = f"{row['date']}_S2"
+    label = f"{row['date']}_{oss_sensor}"
     parent = (mq_task_id or "").strip() or None
     result_task_id = (
         f"{parent}:{label}" if parent else f"agri-scene:{row['land_id']}:{label}"
     )
     t_mq = time.perf_counter()
+    extras: dict[str, Any] = {
+        "kind": "parcel_scene_product",
+        "sensor": "S2",
+        "date": row["date"],
+        "scene_id": row["scene_id"],
+        "parent_mq_task_id": parent,
+        "json_oss_key": key,
+        "source": product.get("source"),
+    }
+    if extra_extras:
+        extras.update(extra_extras)
     publish_task_result(
         task_id=result_task_id,
         status="success",
@@ -193,14 +213,7 @@ def publish_optical_lonlat_to_oss_mq(
         oss_urls={label: json_url},
         collect_parcel_urls=False,
         upload_summary_if_empty=False,
-        extras={
-            "kind": "parcel_scene_product",
-            "sensor": "S2",
-            "date": row["date"],
-            "scene_id": row["scene_id"],
-            "parent_mq_task_id": parent,
-            "json_oss_key": key,
-        },
+        extras=extras,
     )
     mq_publish_ms = int((time.perf_counter() - t_mq) * 1000)
     logger.info(
@@ -363,6 +376,11 @@ def emit_optical_lonlat(
         "pixels": len(pixels),
         "json_oss_key": row.get("json_oss_key"),
         "json_url": json_url,
+        "cloud_cover": cloud_f,
+        "cloud_cover_over_30": cloud_over_30,
+        "parcel_cloud_cover_pct": parcel_cloud,
+        "scene_id": scene_id,
+        "stac_id": scene.get("id"),
     }
 
 
@@ -460,6 +478,19 @@ def _process_one_optical_scene(
             ndvi_quality=ndvi_stats.get("quality_score"),
             mq_task_id=mq_task_id,
         )
+        if result:
+            from app.tasks.decloud_uncrtaints import enqueue_parcel_decloud
+
+            enqueue_parcel_decloud(
+                field_id=field_id_str,
+                land_id=str(agri_meta["land_id"]),
+                date_str=str(result["date"]),
+                mq_task_id=mq_task_id,
+                raw_scene_id=result.get("scene_id"),
+                stac_cloud=result.get("cloud_cover"),
+                parcel_cloud=result.get("parcel_cloud_cover_pct"),
+                cloud_over_30=result.get("cloud_cover_over_30"),
+            )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         complete_step(
             session,
@@ -553,12 +584,16 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
 
         update_job_progress(session, job, "scene_search")
         t_search = time.perf_counter()
+        from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
+
+        extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
         scenes = search_scenes_for_defs(
             field_geom_geojson,
             date_from,
             date_to,
             index_defs,
             index_label="agri_optical",
+            max_cloud_cover=extra_cloud,
         )
         skipped_existing = 0
         if not force:

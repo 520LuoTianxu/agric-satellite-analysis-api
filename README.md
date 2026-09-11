@@ -172,7 +172,7 @@ This fork treats the Aliyun **`agri`** PostgreSQL schema as the primary product 
 | S1/S2 产品时序 | `agri.parcel_scene_products` | `GET /v1/agri/lands/{land_id}/scenes` |
 
 Seed / import: see [`scripts/agri_seed/README.md`](scripts/agri_seed/README.md) (`make agri-seed`).  
-OpenFarm `/v1/farms` and `/v1/fields` remain available but are **legacy** for this product direction. Scene list APIs return S2 optical index averages and S1 VV/VH without `pixel_data` unless `?include_pixels=1`.
+OpenFarm `/v1/farms` and `/v1/fields` remain available but are **legacy** for this product direction. Scene list APIs return S2 optical index averages and S1 VV/VH without `pixel_data` unless `?include_pixels=1`. Optional UnCRtainTS cloud removal (off by default) is documented in [`docs/decloud-uncrtaints.md`](docs/decloud-uncrtaints.md).
 
 ## Architecture / 架构
 

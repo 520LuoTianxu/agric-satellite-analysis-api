@@ -23,6 +23,7 @@ from app.core.agri_classify import (
     classify_flood,
     is_flood_alert,
     is_open_water_flood,
+    official_s2_sql,
 )
 from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
@@ -452,10 +453,7 @@ async def _compute_live_stats(
                     WHERE {region_wh}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
-                      AND NOT (
-                          coalesce(s.parcel_cloud_cover_pct, s.cloud_cover) > :cloud_max
-                          OR s.cloud_cover_over_30 IS TRUE
-                      )
+                      AND {official_s2_sql("s")}
                     ORDER BY s.land_id, s.date DESC
                     """
                 ),
@@ -534,10 +532,7 @@ async def _compute_live_stats(
                       AND s.date >= :from_d AND s.date <= :to_d
                       AND {month_wh}
                       AND s.ndvi_avg IS NOT NULL
-                      AND NOT (
-                          coalesce(s.parcel_cloud_cover_pct, s.cloud_cover) > :cloud_max
-                          OR s.cloud_cover_over_30 IS TRUE
-                      )
+                      AND {official_s2_sql("s")}
                     GROUP BY s.land_id
                     HAVING avg(s.ndvi_avg) < :weak_ndvi
                     """
@@ -924,10 +919,7 @@ async def overview_weak_parcels(
         AND s.date >= :from_d AND s.date <= :to_d
         AND {month_wh}
         AND s.ndvi_avg IS NOT NULL
-        AND NOT (
-            coalesce(s.parcel_cloud_cover_pct, s.cloud_cover) > :cloud_max
-            OR s.cloud_cover_over_30 IS TRUE
-        )
+        AND {official_s2_sql("s")}
     """
 
     total_row = (

@@ -43,6 +43,7 @@ docs/*
 !docs/design/
 !docs/TaskList.md
 !docs/agri-first-data.md
+!docs/decloud-uncrtaints.md
 
 # ── Logs / Temp ──────────────────────────────────────────────────────
 *.log

@@ -18,6 +18,8 @@ STAC (Sentinel-2 L2A / Sentinel-1 GRD)
   → upload lonlat JSON to OSS
   → publish one MQ result per scene (producer mq_result_writer pulls OSS → upserts PG)
   → optional compact JSON object under OSS_PREFIX
+  → if DECLOUD_ENABLED and cloud > 30%: parcel-window UnCRtainTS decloud
+     (additive lonlat product; only quality=good is official)
 ```
 
 `bridge_after_backfill` only waits for those jobs and publishes the MQ result. It does **not** HEAD/GET `cogs/{org}/{field}/{date}/ndvi.tif`. The OSS TIF scanner (`bridge_stac_cogs_to_agri_lonlat`) is a one-shot migration tool (`agri_bridge` / `mode=bridge_only`).
@@ -28,6 +30,7 @@ Env knobs (ingest worker):
 | --- | --- | --- |
 | `WRITE_INDEX_COGS` | unset | Agri: no index rasters. Classic fields: COGs on. `0` never, `1` always. |
 | `UPLOAD_SCENE_JSON` | `1` | Compact lonlat JSON to `OSS_PREFIX` (not rasters). |
+| `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window decloud. Additive product; only quality `good` enters official drought metrics. See `docs/decloud-uncrtaints.md`. |
 
 ## Remote sensing (truth)
 
