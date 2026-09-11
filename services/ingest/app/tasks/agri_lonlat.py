@@ -37,6 +37,12 @@ from app.core.agri_classify import (
 from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
+from app.core.job_progress_redis import (
+    flush_to_job,
+    incr_done,
+    mark_scene_progress,
+    set_total,
+)
 from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
@@ -452,24 +458,15 @@ def _process_one_optical_scene(
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
-    from app.models.tables import Job
-
-    session = get_db_session()
+    """Process one S2 scene. Progress is Redis-only (no per-step Postgres)."""
+    scene_id = scene.get("id")
     try:
-        job = session.get(Job, uuid.UUID(job_id))
-        if job is None:
-            logger.error("job_not_found_in_agri_optical_worker", job_id=job_id)
-            return None
-
-        update_job_progress(
-            session,
-            job,
+        mark_scene_progress(
+            job_id,
             "download_bands",
-            {
-                "scene": idx + 1,
-                "total_scenes": total_scenes,
-                "scene_id": scene["id"],
-            },
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
@@ -521,9 +518,14 @@ def _process_one_optical_scene(
                     error=str(exc),
                 )
         download_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(session, job, "download_bands")
+        mark_scene_progress(
+            job_id,
+            "compute_indices",
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
+        )
 
-        update_job_progress(session, job, "compute_indices")
         t0 = time.perf_counter()
         index_arrays: dict[str, np.ndarray] = {}
         for index_def in index_defs:
@@ -534,11 +536,16 @@ def _process_one_optical_scene(
             pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
             index_arrays[pix_key] = arr
         compute_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(session, job, "compute_indices")
 
         write_cog_ms = 0
         if write_cogs:
-            update_job_progress(session, job, "write_cog")
+            mark_scene_progress(
+                job_id,
+                "write_cog",
+                scene=idx + 1,
+                total_scenes=total_scenes,
+                scene_id=scene_id,
+            )
             t0 = time.perf_counter()
             for index_def in index_defs:
                 pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
@@ -552,12 +559,18 @@ def _process_one_optical_scene(
                     index_def.key,
                 )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
-            complete_step(session, job, "write_cog")
 
-        t0 = time.perf_counter()
+        # Progress must not sit inside write_lonlat_ms timing.
         parcel_from_scl = parcel_cloud_from_scl_window(scl, field_mask)
         parcel_source = PARCEL_CLOUD_SOURCE_SCL if parcel_from_scl is not None else None
-        update_job_progress(session, job, "write_lonlat")
+        mark_scene_progress(
+            job_id,
+            "write_lonlat",
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
+        )
+        t0 = time.perf_counter()
         result = emit_optical_lonlat(
             meta=agri_meta,
             geom4326=field_geom_geojson,
@@ -571,12 +584,7 @@ def _process_one_optical_scene(
             mq_task_id=mq_task_id,
         )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(
-            session,
-            job,
-            "write_lonlat",
-            {"pixels": (result or {}).get("pixels"), "date": str(scene["date"])},
-        )
+        incr_done(job_id, failed=False)
         logger.info(
             "scene_timing",
             sensor="S2",
@@ -598,13 +606,8 @@ def _process_one_optical_scene(
             scene_id=scene.get("id"),
             error=str(e),
         )
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        incr_done(job_id, failed=True)
         return None
-    finally:
-        session.close()
 
 
 @celery_app.task(
@@ -776,16 +779,25 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             workers=workers,
             band_gdal_cap=band_max_workers(),
         )
+        set_total(job_id, len(scenes), workers=workers)
         update_job_progress(
             session,
             job,
             "process_scenes",
             {"total_scenes": len(scenes), "workers": workers},
         )
+        flush_to_job(
+            session,
+            job,
+            extra={"total_scenes": len(scenes), "workers": workers},
+            current_step="process_scenes",
+        )
 
         upserted = 0
         raw_results: list[dict[str, Any]] = []
         t_process = time.perf_counter()
+        flush_every = max(1, workers)
+        completed_n = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -819,10 +831,16 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                         scene_id=scene.get("id"),
                         error=str(e),
                     )
+                    completed_n += 1
+                    if completed_n % flush_every == 0:
+                        flush_to_job(session, job, current_step="process_scenes")
                     continue
+                completed_n += 1
                 if result is not None:
                     upserted += 1
                     raw_results.append(result)
+                if completed_n % flush_every == 0:
+                    flush_to_job(session, job, current_step="process_scenes")
 
         logger.info(
             "scene_parallel_done",
@@ -845,6 +863,12 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             "process_scenes",
             {"scenes_upserted": upserted, "workers": workers},
         )
+        flush_to_job(
+            session,
+            job,
+            extra={"scenes_upserted": upserted, "workers": workers},
+            complete_process_scenes=True,
+        )
 
         decloud_schedule: dict[str, Any] | None = None
         if decloud_enabled() and raw_results:
@@ -863,22 +887,27 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
 
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
-        progress = job.progress_json or {}
-        progress["current_step"] = "complete"
-        progress["scenes_upserted"] = upserted
-        progress["total_scenes"] = len(scenes)
-        progress["skipped_existing"] = skipped_existing
-        progress["write_cogs"] = write_cogs
+        final_extra: dict[str, Any] = {
+            "current_step": "complete",
+            "scenes_upserted": upserted,
+            "total_scenes": len(scenes),
+            "skipped_existing": skipped_existing,
+            "write_cogs": write_cogs,
+        }
         if decloud_schedule:
-            progress["decloud"] = {
+            final_extra["decloud"] = {
                 "mode": decloud_schedule.get("mode"),
                 "batch": decloud_schedule.get("batch"),
                 "per_scene": decloud_schedule.get("per_scene"),
                 "hold_decloud_dates": decloud_schedule.get("hold_decloud_dates"),
             }
-        job.progress_json = progress
-        flag_modified(job, "progress_json")
-        session.commit()
+        flush_to_job(
+            session,
+            job,
+            extra=final_extra,
+            current_step="complete",
+            complete_process_scenes=True,
+        )
 
         logger.info(
             "agri_optical_job_completed",
@@ -901,7 +930,15 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                 job.status = "failed"
                 job.error = str(e)
                 job.finished_at = datetime.now(timezone.utc)
-                session.commit()
+                try:
+                    flush_to_job(
+                        session,
+                        job,
+                        extra={"error": str(e)[:500]},
+                        current_step="failed",
+                    )
+                except Exception:
+                    session.commit()
         except Exception:
             pass
         retry_num = self.request.retries
