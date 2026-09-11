@@ -7,6 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    import numpy as _numpy_probe  # noqa: F401
+except ImportError:
+    pass
+
 from app.core.decloud import (
     DECLOUD_SOURCE,
     DecloudQualityInputs,
@@ -14,17 +19,23 @@ from app.core.decloud import (
     cloudy_targets_from_raw,
     decloud_backend,
     decloud_cloud_min_pct,
+    decloud_drought_exclusion_flags,
     decloud_enabled,
     decloud_mode,
     decloud_oss_sensor,
+    decloud_pixel_payload,
     decloud_s2_extra_assets,
     decloud_scene_id,
     decloud_stac_cloud_max_pct,
+    fallback_lonlat_pixels,
+    geojson_ring_centroid,
     pick_temporal_scenes,
     plan_decloud_after_raw,
     score_decloud,
     should_enqueue_per_scene_decloud,
+    should_persist_decloud_product,
     should_trigger_decloud,
+    window_array_tmp_path,
 )
 from app.core.agri_classify import (
     is_decloud_product,
@@ -387,7 +398,7 @@ class BatchPlanTests(unittest.TestCase):
         self.assertEqual([p["id"] for p in picked], ["before", "after", "target"])
 
     def test_fair_decloud_plan_does_not_mark_official(self) -> None:
-        """Planner never publishes; quality gate still blocks fair/bad."""
+        """Fair/bad stay stored; quality gate only blocks official drought use."""
         result = score_decloud(
             DecloudQualityInputs(
                 rgb_mean=0.40,
@@ -400,6 +411,94 @@ class BatchPlanTests(unittest.TestCase):
         )
         self.assertFalse(result.is_official)
         self.assertNotEqual(result.quality, "good")
+        self.assertTrue(
+            should_persist_decloud_product(
+                has_reconstruction=True,
+                pixel_count=0,
+                has_finite_index=True,
+            )
+        )
+
+
+class PersistProductTests(unittest.TestCase):
+    """Fair/bad reconstructions are stored; drought still skips them."""
+
+    def test_persist_when_reconstruction_exists_even_without_pixels(self) -> None:
+        self.assertTrue(
+            should_persist_decloud_product(
+                has_reconstruction=True, pixel_count=0, has_finite_index=False
+            )
+        )
+        self.assertFalse(
+            should_persist_decloud_product(
+                has_reconstruction=False, pixel_count=0, has_finite_index=False
+            )
+        )
+
+    def test_fair_bad_drought_flags_keep_cloud_over_30(self) -> None:
+        over_30, parcel = decloud_drought_exclusion_flags(False)
+        self.assertTrue(over_30)
+        self.assertGreaterEqual(parcel, 30.0)
+        self.assertFalse(
+            is_official_optical_product(
+                source=DECLOUD_SOURCE,
+                scene_id="stac_bridge_2024-07-01_S2_decloud",
+                decloud_quality="fair",
+                cloud_cover_over_30=over_30,
+                parcel_cloud_cover_pct=parcel,
+            )
+        )
+        self.assertFalse(
+            is_official_optical_product(
+                source=DECLOUD_SOURCE,
+                scene_id="stac_bridge_2024-07-01_S2_decloud",
+                decloud_quality="bad",
+                cloud_cover_over_30=True,
+                parcel_cloud_cover_pct=100.0,
+            )
+        )
+
+    def test_pixel_payload_includes_quality_and_reasons(self) -> None:
+        payload = decloud_pixel_payload(
+            quality="bad",
+            score=0.2,
+            reasons=["ndvi_far_below_neighbors"],
+            raw_scene_id="stac_bridge_2024-07-01_S2",
+            pixels=[{"lon": 1.0, "lat": 2.0, "NDVI": 0.1, "clear": 0}],
+        )
+        self.assertEqual(payload["decloud_quality"], "bad")
+        self.assertEqual(payload["decloud_reasons"], ["ndvi_far_below_neighbors"])
+        self.assertEqual(payload["source"], DECLOUD_SOURCE)
+        self.assertEqual(payload["pixels"][0]["NDVI"], 0.1)
+
+    def test_fallback_pixels_from_zonal_means(self) -> None:
+        pixels = fallback_lonlat_pixels(
+            pixels=[],
+            index_avgs={"NDVI": 0.12, "NDMI": 0.02},
+            lon=116.4,
+            lat=39.9,
+        )
+        self.assertEqual(len(pixels), 1)
+        self.assertEqual(pixels[0]["NDVI"], 0.12)
+        stub = fallback_lonlat_pixels(
+            pixels=[],
+            index_avgs={},
+            lon=116.4,
+            lat=39.9,
+            allow_zero_stub=True,
+        )
+        self.assertEqual(stub[0]["NDVI"], 0.0)
+
+    def test_geojson_centroid(self) -> None:
+        geom = {
+            "type": "Polygon",
+            "coordinates": [
+                [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]]
+            ],
+        }
+        lon, lat = geojson_ring_centroid(geom)
+        self.assertAlmostEqual(lon, 0.8)
+        self.assertAlmostEqual(lat, 0.8)
 
 
 class WindowCacheTests(unittest.TestCase):
@@ -460,6 +559,15 @@ class WindowCacheTests(unittest.TestCase):
                     has_array=False,
                 )
                 self.assertEqual(list_cached_s2("1"), [])
+
+    def test_npz_tmp_path_still_ends_with_npz(self) -> None:
+        path = Path("/tmp/cache/2024-07-15_S2.npz")
+        tmp = window_array_tmp_path(path)
+        self.assertTrue(str(tmp).endswith(".npz"))
+        self.assertNotEqual(tmp, path)
+        self.assertFalse(str(tmp).endswith(".npz.tmp"))
+        self.assertIn(".writing.npz", tmp.name)
+        self.assertIn(str(os.getpid()), tmp.name)
 
     def test_write_window_array_roundtrip_no_double_suffix(self) -> None:
         """savez must receive a .npz name so numpy does not write *.npz.tmp.npz."""
@@ -522,13 +630,16 @@ class WindowCacheTests(unittest.TestCase):
                     self.assertTrue(savez_paths)
                     self.assertTrue(savez_paths[0].endswith(".npz"))
                     self.assertNotIn(".npz.tmp", Path(savez_paths[0]).name)
+                    self.assertIn(".writing.npz", Path(savez_paths[0]).name)
 
                     names = [p.name for p in Path(tmp).rglob("*") if p.is_file()]
                     self.assertNotIn("2026-09-02_S2.npz.tmp", names)
                     self.assertNotIn("2026-09-02_S2.npz.tmp.npz", names)
                     self.assertFalse(
                         any(
-                            n.endswith(".npz.tmp") or n.endswith(".npz.tmp.npz")
+                            n.endswith(".npz.tmp")
+                            or n.endswith(".npz.tmp.npz")
+                            or n.endswith(".writing.npz")
                             for n in names
                         )
                     )
@@ -559,10 +670,35 @@ class WindowCacheTests(unittest.TestCase):
                     with self.assertRaises(OSError):
                         write_window_array("4745", "2026-09-02", "S2", stack=[1])
                     names = [p.name for p in Path(tmp).rglob("*") if p.is_file()]
-                    self.assertFalse(any(".tmp" in n for n in names))
+                    self.assertFalse(
+                        any(".tmp" in n or n.endswith(".writing.npz") for n in names)
+                    )
                     self.assertFalse(
                         array_path("4745", "2026-09-02", "S2").is_file()
                     )
+
+    def test_write_window_array_roundtrip_when_numpy_available(self) -> None:
+        import tempfile
+
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy missing")
+        if not hasattr(np, "savez_compressed"):
+            self.skipTest("numpy stub has no savez_compressed")
+
+        from app.core.decloud_cache import read_window_array, write_window_array
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"DECLOUD_CACHE_DIR": tmp}):
+                arr = np.zeros((2, 3, 3), dtype="float32")
+                path = write_window_array("42", "2024-07-15", "S2", stack=arr)
+                self.assertIsNotNone(path)
+                self.assertTrue(str(path).endswith(".npz"))
+                self.assertFalse(str(path).endswith(".npz.tmp.npz"))
+                loaded = read_window_array("42", "2024-07-15", "S2")
+                self.assertIsNotNone(loaded)
+                self.assertIn("stack", loaded)
 
 
 class UncrtaintsCheckpointTests(unittest.TestCase):

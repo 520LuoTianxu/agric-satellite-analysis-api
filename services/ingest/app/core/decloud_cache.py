@@ -13,7 +13,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from app.core.decloud import decloud_lookback_days, neighbor_window
+from app.core.decloud import (
+    decloud_lookback_days,
+    neighbor_window,
+    window_array_tmp_path,
+)
 
 _SENSORS = frozenset({"S2", "S1"})
 
@@ -227,7 +231,7 @@ def write_window_array(
     # savez_compressed appends .npz unless the name already ends with it.
     # path.with_suffix(".npz.tmp") became foo.npz.tmp, so numpy wrote
     # foo.npz.tmp.npz and replace() looked for the missing foo.npz.tmp.
-    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
+    tmp = window_array_tmp_path(path)
     try:
         np.savez_compressed(tmp, **packed)
         tmp.replace(path)
@@ -274,5 +278,6 @@ __all__ = [
     "put_window_meta",
     "read_window_array",
     "usable_s2_count",
+    "window_array_tmp_path",
     "write_window_array",
 ]

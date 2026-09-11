@@ -359,8 +359,13 @@ def _sample_lonlat(
     crs,
     *,
     scl: np.ndarray | None = None,
+    require_finite_ndvi: bool = True,
 ) -> list[dict[str, Any]]:
-    """Emit lonlat_v1 pixels for cells inside polygon with finite NDVI."""
+    """Emit lonlat_v1 pixels for cells inside polygon with finite NDVI.
+
+    ``require_finite_ndvi=False`` keeps weak/non-finite NDVI cells (filled as
+    0) so a reconstruction can still be stored when quality is fair/bad.
+    """
     from app.core.agri_classify import is_scl_cloudy_class
 
     if "NDVI" not in bands:
@@ -382,6 +387,8 @@ def _sample_lonlat(
     rows, cols = np.where(finite)
     if rows.size == 0:
         rows, cols = np.where(np.isfinite(ndvi))
+    if rows.size == 0 and not require_finite_ndvi:
+        rows, cols = np.where(inside)
     if rows.size == 0:
         return []
 
@@ -420,8 +427,11 @@ def _sample_lonlat(
             v = bands[key][r, c]
             if not np.isfinite(v):
                 if key == "NDVI":
-                    ok = False
-                    break
+                    if require_finite_ndvi:
+                        ok = False
+                        break
+                    pix[key] = 0.0
+                    continue
                 continue
             pix[key] = _round6(v)
         if ok and "NDVI" in pix:

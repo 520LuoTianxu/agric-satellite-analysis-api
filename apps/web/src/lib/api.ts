@@ -350,6 +350,10 @@ export interface FieldStat {
     /** stac_direct or uncrtaints_decloud */
     product_source?: string | null;
     scene_id?: string | null;
+    /** Unused decloud product for the same date (marked overlay, not the official line). */
+    decloud_alt?: boolean;
+    /** Fair/bad decloud: stored but may be unreliable. */
+    may_be_unreliable?: boolean;
 }
 
 export interface NdviJob {

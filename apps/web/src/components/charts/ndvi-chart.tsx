@@ -3,7 +3,7 @@
 import React, { useMemo } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import * as echarts from "echarts/core";
-import { LineChart, BarChart } from "echarts/charts";
+import { LineChart, BarChart, ScatterChart } from "echarts/charts";
 import {
     GridComponent,
     TooltipComponent,
@@ -34,6 +34,7 @@ import {
 echarts.use([
     LineChart,
     BarChart,
+    ScatterChart,
     GridComponent,
     TooltipComponent,
     LegendComponent,
@@ -63,6 +64,8 @@ export type ChartEventMark = {
 
 interface NdviChartProps {
     stats: FieldStat[];
+    /** Unused decloud products (fair/bad or unused good) as marked overlays. */
+    decloudAltStats?: FieldStat[];
     /** Currently selected date (highlights point) */
     selectedDate?: string | null;
     /** Callback when a chart point is clicked */
@@ -90,6 +93,7 @@ interface NdviChartProps {
 
 export default function NdviChart({
     stats,
+    decloudAltStats,
     selectedDate,
     onDateSelect,
     height = 200,
@@ -147,23 +151,48 @@ export default function NdviChart({
             if (d === selectedDate) {
                 color = tokenColor("--danger");
                 symbolSize = 10;
+            } else if (s.may_be_unreliable) {
+                color = tokenColor("--warning");
+                opacity = 0.85;
+                symbolSize = 8;
             } else if (bare) {
-                color = "#9ca3af";
+                color = tokenColor("--muted-foreground");
                 opacity = 0.6;
                 symbolSize = 7;
             } else if (!inSeason && !isSar) {
-                color = "#94a3b8";
+                color = tokenColor("--muted-foreground");
                 opacity = 0.45;
             }
             return {
                 value: [d, v] as [string, number | null],
                 itemStyle: { color, opacity },
+                symbol: s.may_be_unreliable ? "diamond" : "circle",
                 symbolSize,
                 cloudCover: s.cloud_cover ?? null,
                 decloudQuality: s.decloud_quality ?? null,
                 decloudReasons: s.decloud_reasons ?? [],
                 productSource: s.product_source ?? null,
                 sceneId: s.scene_id ?? null,
+                mayBeUnreliable: Boolean(s.may_be_unreliable),
+            };
+        });
+        const altName = t("decloudAltSeries");
+        const altData = (decloudAltStats ?? []).map((s) => {
+            const unreliable = s.may_be_unreliable || s.decloud_quality !== "good";
+            return {
+                value: [s.date, s.mean ?? null] as [string, number | null],
+                itemStyle: {
+                    color: tokenColor(unreliable ? "--warning" : "--caution"),
+                    opacity: 0.9,
+                },
+                symbol: "diamond",
+                symbolSize: s.date === selectedDate ? 10 : 7,
+                cloudCover: s.cloud_cover ?? null,
+                decloudQuality: s.decloud_quality ?? null,
+                decloudReasons: s.decloud_reasons ?? [],
+                productSource: s.product_source ?? null,
+                sceneId: s.scene_id ?? null,
+                mayBeUnreliable: Boolean(unreliable),
             };
         });
 
@@ -256,11 +285,18 @@ export default function NdviChart({
                   }
                 : undefined;
 
+        const hasAlt = altData.length > 0;
+        const showLegend = hasWeather || hasAlt;
+        const legendData = [
+            seriesName,
+            ...(hasAlt ? [altName] : []),
+            ...(hasWeather ? ["Precip (mm)", "ET₀ (mm)"] : []),
+        ];
         return {
-            grid: { top: hasWeather ? 36 : 18, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
-            legend: hasWeather
+            grid: { top: showLegend ? 36 : 18, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
+            legend: showLegend
                 ? {
-                    data: [seriesName, "Precip (mm)", "ET₀ (mm)"],
+                    data: legendData,
                     top: 0,
                     ...legendStyle(),
                 }
@@ -280,32 +316,34 @@ export default function NdviChart({
                         productSource?: string | null;
                         sceneId?: string | null;
                     } | null = null;
+                    const extraLines: string[] = [];
                     for (const p of params) {
                         if (p.seriesName === "p10" || p.seriesName === "p90") continue;
                         const val = Array.isArray(p.value) ? p.value[1] : p.value;
                         if (val == null) continue;
-                        const isIndex = p.seriesName === seriesName;
+                        const isIndex = p.seriesName === seriesName || p.seriesName === altName;
                         const unit = isIndex ? (isSar ? " dB" : "") : " mm";
                         const digits = isIndex ? (isSar ? 2 : 3) : 1;
                         lines.push(`${p.marker} ${p.seriesName}: ${Number(val).toFixed(digits)}${unit}`);
                         if (isIndex && p.data && typeof p.data === "object") {
-                            extras = p.data;
+                            if (p.seriesName === seriesName) extras = p.data;
+                            extraLines.push(
+                                formatDecloudLine(
+                                    {
+                                        quality: p.data.decloudQuality,
+                                        reasons: p.data.decloudReasons,
+                                        source: p.data.productSource,
+                                        sceneId: p.data.sceneId,
+                                        cloudCover: p.data.cloudCover,
+                                    },
+                                    t,
+                                ),
+                            );
                         }
                     }
-                    if (!isSar && hasOpticalTooltip(extras)) {
+                    if (!isSar && (hasOpticalTooltip(extras) || extraLines.length)) {
                         lines.push(formatCloudLine(extras?.cloudCover, t));
-                        lines.push(
-                            formatDecloudLine(
-                                {
-                                    quality: extras?.decloudQuality,
-                                    reasons: extras?.decloudReasons,
-                                    source: extras?.productSource,
-                                    sceneId: extras?.sceneId,
-                                    cloudCover: extras?.cloudCover,
-                                },
-                                t,
-                            ),
-                        );
+                        for (const line of extraLines) lines.push(line);
                     }
                     return lines.join("<br/>");
                 },
@@ -368,6 +406,17 @@ export default function NdviChart({
                     markArea: markAreaOption,
                     markPoint: markPointOption,
                 },
+                ...(hasAlt
+                    ? [
+                        {
+                            name: altName,
+                            type: "scatter",
+                            data: altData,
+                            z: 5,
+                            tooltip: { trigger: "item" as const },
+                        },
+                    ]
+                    : []),
                 // Weather overlay: daily precipitation bars on actual dates
                 ...(hasWeather
                     ? [
@@ -394,19 +443,22 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, t]);
+    }, [stats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, t]);
 
     const onEvents = useMemo(
         () => ({
             click: (params: any) => {
-                if (params.seriesName === seriesName && params.value != null) {
+                const ok =
+                    params.seriesName === seriesName ||
+                    params.seriesName === t("decloudAltSeries");
+                if (ok && params.value != null) {
                     const raw = params.value;
                     const date = Array.isArray(raw) ? raw[0] : (raw?.value ? raw.value[0] : null);
                     if (date) onDateSelect?.(String(date));
                 }
             },
         }),
-        [onDateSelect, seriesName],
+        [onDateSelect, seriesName, t],
     );
 
     if (stats.length === 0) {
@@ -486,7 +538,7 @@ export function formatDecloudLine(
         if (q === "good") return t("decloudGood");
         if (q === "fair") return t("decloudFair", { reason: reasonText || t("reasonUnknown") });
         if (q === "bad") return t("decloudBad", { reason: reasonText || t("reasonUnknown") });
-        return t("decloudNA");
+        return t("decloudUnreliable", { reason: reasonText || t("reasonUnknown") });
     }
     if (typeof info.cloudCover === "number" && Number.isFinite(info.cloudCover) && info.cloudCover > 30) {
         return t("decloudNone");

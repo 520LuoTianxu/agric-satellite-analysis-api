@@ -12,6 +12,7 @@ rows are never overwritten.
 
 Official drought / timeseries / land metrics must use quality ``good`` only
 (see ``app.core.decloud.score_decloud`` and ``is_official_optical_product``).
+Fair and bad reconstructions are still written to OSS/MQ for audit.
 """
 
 from __future__ import annotations
@@ -34,17 +35,22 @@ from app.core.decloud import (
     batch_neighbors_ready,
     cloudy_targets_from_raw,
     decloud_cloud_min_pct,
+    decloud_drought_exclusion_flags,
     decloud_enabled,
     decloud_input_t,
     decloud_lookback_days,
     decloud_mode,
     decloud_oss_sensor,
+    decloud_pixel_payload,
     decloud_scene_id,
     decloud_use_sar,
+    fallback_lonlat_pixels,
+    geojson_ring_centroid,
     neighbor_window,
     pick_temporal_scenes,
     plan_decloud_after_raw,
     score_decloud,
+    should_persist_decloud_product,
     should_trigger_decloud,
 )
 from app.core.decloud_cache import (
@@ -362,9 +368,13 @@ def _read_s1_for_dates(
 
 def _index_arrays_from_reflectance(
     rec_01: np.ndarray,
-    field_mask: np.ndarray,
+    field_mask: np.ndarray | None,
 ) -> dict[str, np.ndarray]:
-    """Recompute agri optical indices from reconstructed 13-band [0, 1] S2."""
+    """Recompute agri optical indices from reconstructed 13-band S2 (DN).
+
+    ``field_mask`` is optional. Publishing samples the polygon itself; masking
+    first can wipe every cell on a small parcel and yield ``no_pixels``.
+    """
     name_to_idx = {
         "B01": 0,
         "B02": 1,
@@ -386,7 +396,8 @@ def _index_arrays_from_reflectance(
         needed = {b: bands[b] for b in index_def.bands if b in bands}
         arr = index_def.formula(needed)
         arr[~np.isfinite(arr)] = np.nan
-        arr[~field_mask] = np.nan
+        if field_mask is not None:
+            arr[~field_mask] = np.nan
         index_arrays[INDEX_KEY_TO_PIXEL[key]] = arr
     return index_arrays
 
@@ -455,6 +466,7 @@ def _publish_decloud_product(
 ) -> dict[str, Any] | None:
     from app.tasks.agri_lonlat import publish_optical_lonlat_to_oss_mq
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
+        EMIT_PIXEL_KEYS,
         _round6,
         _sample_lonlat,
         _stats,
@@ -462,6 +474,44 @@ def _publish_decloud_product(
 
     pixels = _sample_lonlat(geom4326, index_arrays, transform, "EPSG:4326")
     if not pixels:
+        pixels = _sample_lonlat(
+            geom4326,
+            index_arrays,
+            transform,
+            "EPSG:4326",
+            require_finite_ndvi=False,
+        )
+
+    def _avg_triple(pix_key: str):
+        if pix_key not in index_arrays:
+            return None, None, None
+        return _stats(index_arrays[pix_key])
+
+    index_avgs = {key: _avg_triple(key)[0] for key in EMIT_PIXEL_KEYS}
+    if not pixels:
+        centroid = geojson_ring_centroid(geom4326)
+        lon, lat = centroid if centroid else (None, None)
+        pixels = fallback_lonlat_pixels(
+            pixels=pixels,
+            index_avgs=index_avgs,
+            lon=lon,
+            lat=lat,
+            allow_zero_stub=True,
+        )
+        logger.info(
+            "decloud_pixels_fallback",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            pixels=len(pixels),
+            quality=quality.quality,
+        )
+
+    has_finite_index = any(v is not None for v in index_avgs.values())
+    if not should_persist_decloud_product(
+        has_reconstruction=True,
+        pixel_count=len(pixels),
+        has_finite_index=has_finite_index,
+    ):
         logger.info(
             "decloud_no_pixels",
             land_id=meta.get("land_id"),
@@ -469,21 +519,15 @@ def _publish_decloud_product(
         )
         return None
 
-    def _avg_triple(pix_key: str):
-        if pix_key not in index_arrays:
-            return None, None, None
-        return _stats(index_arrays[pix_key])
-
     official = quality.is_official
-    pixel_data = {
-        "format": "lonlat_v1",
-        "source": DECLOUD_SOURCE,
-        "decloud_quality": quality.quality,
-        "decloud_score": quality.score,
-        "decloud_reasons": quality.reasons,
-        "raw_scene_id": raw_scene_id,
-        "pixels": pixels,
-    }
+    over_30, parcel_excl = decloud_drought_exclusion_flags(official)
+    pixel_data = decloud_pixel_payload(
+        quality=quality.quality,
+        score=quality.score,
+        reasons=quality.reasons,
+        raw_scene_id=raw_scene_id,
+        pixels=pixels,
+    )
     row = {
         "land_id": meta["land_id"],
         "tile_id": meta["tile_id"],
@@ -492,11 +536,11 @@ def _publish_decloud_product(
         "land_name": meta["land_name"],
         "cloud_cover": stac_cloud,
         # fair/bad stay excluded from existing cloud>30 drought filters.
-        "cloud_cover_over_30": False if official else True,
+        "cloud_cover_over_30": over_30,
         "parcel_cloud_cover_pct": (
             0.0
             if official
-            else (_round6(parcel_cloud) if parcel_cloud is not None else 100.0)
+            else (_round6(parcel_cloud) if parcel_cloud is not None else parcel_excl)
         ),
         "pixel_count": len(pixels),
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
@@ -795,11 +839,18 @@ def _decloud_one_from_buffer(
         )
         return {"status": "skipped", "reason": "unavailable", "detail": str(exc)}
 
-    index_arrays = _index_arrays_from_reflectance(rec_01 * 10000.0, field_mask)
+    # Sample/publish without pre-masking so weak reconstructions still store.
+    index_arrays = _index_arrays_from_reflectance(rec_01 * 10000.0, None)
     rgb_mean, rgb_raw, rgb_std, rgb_std_raw = _rgb_stats(
         rec_01, s2_stack[-1], field_mask
     )
-    ndvi_stats = compute_zonal_stats(index_arrays.get("NDVI", rec_01[7]))
+    ndvi_for_quality = index_arrays.get("NDVI")
+    if ndvi_for_quality is not None:
+        ndvi_q = np.array(ndvi_for_quality, copy=True)
+        ndvi_q[~field_mask] = np.nan
+    else:
+        ndvi_q = rec_01[7]
+    ndvi_stats = compute_zonal_stats(ndvi_q)
     neighbor = _neighbor_ndvi(session, land_id, target)
     if neighbor is None:
         neighbor = _neighbor_ndvi_from_cache(land_id, target)
@@ -969,7 +1020,7 @@ def decloud_parcel_batch(
     """Buffer S2 (+ S1) parcel windows for the job, then decloud cloudy dates.
 
     Official cloudy-date OSS/MQ is published only after neighbors are in the
-    local cache. Fair/bad products stay stored and non-official.
+    local cache. Fair/bad products are stored and flagged non-official.
     """
     if not decloud_enabled():
         return {"status": "skipped", "reason": "decloud_disabled"}

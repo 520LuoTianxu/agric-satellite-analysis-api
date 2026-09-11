@@ -355,6 +355,109 @@ class ProductPickTests(unittest.TestCase):
         picked = pick_official_optical([raw, decloud], neighbors=neighbors)
         self.assertEqual(picked["scene_id"], raw["scene_id"])
 
+    def test_ndvi_pick_prefers_physiological_raw_over_good_decloud(self) -> None:
+        """Cloudy raw that matches neighbors beats a 'good' reconstruct that does not."""
+        raw = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-15_S2",
+            "date": "2026-07-15",
+            "cloud_cover": 62.0,
+            "parcel_cloud_cover_pct": 70.0,
+            "parcel_cloud_source": "scl",
+            "cloud_cover_over_30": True,
+            "ndvi_avg": 0.68,
+            "ndmi_avg": 0.28,
+        }
+        decloud = {
+            "source": "uncrtaints_decloud",
+            "scene_id": "stac_bridge_2026-07-15_S2_decloud",
+            "date": "2026-07-15",
+            "cloud_cover": 62.0,
+            "parcel_cloud_cover_pct": 0.0,
+            "decloud_quality": "good",
+            "ndvi_avg": 0.18,
+            "ndmi_avg": 0.04,
+        }
+        neighbors = [
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-01_S2",
+                "date": "2026-07-01",
+                "cloud_cover": 8.0,
+                "parcel_cloud_cover_pct": 5.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.70,
+                "ndmi_avg": 0.30,
+            },
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-20_S2",
+                "date": "2026-07-20",
+                "cloud_cover": 6.0,
+                "parcel_cloud_cover_pct": 4.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.72,
+                "ndmi_avg": 0.29,
+            },
+        ]
+        drought = pick_official_optical([raw, decloud], neighbors=neighbors)
+        self.assertEqual(drought["scene_id"], decloud["scene_id"])
+        ndvi = pick_optical_for_ndvi([raw, decloud], neighbors=neighbors)
+        self.assertEqual(ndvi["scene_id"], raw["scene_id"])
+
+    def test_ndvi_pick_uses_good_decloud_when_raw_is_cloud_dip(self) -> None:
+        raw = {
+            "source": "stac_direct",
+            "scene_id": "stac_bridge_2026-07-15_S2",
+            "date": "2026-07-15",
+            "cloud_cover": 62.0,
+            "parcel_cloud_cover_pct": 70.0,
+            "parcel_cloud_source": "scl",
+            "cloud_cover_over_30": True,
+            "ndvi_avg": 0.16,
+            "ndmi_avg": 0.02,
+        }
+        decloud = {
+            "source": "uncrtaints_decloud",
+            "scene_id": "stac_bridge_2026-07-15_S2_decloud",
+            "date": "2026-07-15",
+            "cloud_cover": 62.0,
+            "parcel_cloud_cover_pct": 0.0,
+            "decloud_quality": "good",
+            "ndvi_avg": 0.71,
+            "ndmi_avg": 0.28,
+        }
+        neighbors = [
+            {
+                "source": "stac_direct",
+                "scene_id": "stac_bridge_2026-07-01_S2",
+                "date": "2026-07-01",
+                "cloud_cover": 8.0,
+                "parcel_cloud_cover_pct": 5.0,
+                "parcel_cloud_source": "scl",
+                "ndvi_avg": 0.70,
+                "ndmi_avg": 0.30,
+            }
+        ]
+        ndvi = pick_optical_for_ndvi([raw, decloud], neighbors=neighbors)
+        self.assertEqual(ndvi["scene_id"], decloud["scene_id"])
+
+    def test_tooltip_fair_decloud_is_unreliable(self) -> None:
+        tip = optical_tooltip_fields(
+            {
+                "source": "uncrtaints_decloud",
+                "scene_id": "stac_bridge_2026-07-15_S2_decloud",
+                "decloud_quality": "fair",
+                "decloud_reasons": ["ndvi_far_below_neighbors"],
+                "cloud_cover_over_30": True,
+                "parcel_cloud_cover_pct": 100.0,
+            }
+        )
+        self.assertTrue(tip["is_decloud"])
+        self.assertFalse(tip["is_official"])
+        self.assertTrue(tip["may_be_unreliable"])
+        self.assertEqual(tip["decloud_quality"], "fair")
+
 
 class SceneCloudFieldsTests(unittest.TestCase):
     def test_parcel_metric_used_for_over_30_not_stac_alone(self) -> None:
