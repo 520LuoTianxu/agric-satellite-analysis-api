@@ -376,7 +376,8 @@ def render_scene_rgb_jpeg(
             logger.warning("scene_rgb_outline_failed", error=str(exc))
     img = Image.fromarray(rgb, mode="RGB")
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    # 4:4:4 — default 4:2:0 chroma subsampling erases ~1px red outlines.
+    img.save(buf, format="JPEG", quality=quality, optimize=True, subsampling=0)
     return buf.getvalue()
 
 
