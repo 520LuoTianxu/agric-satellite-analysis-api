@@ -68,11 +68,16 @@ class S1StacTests(unittest.TestCase):
         self.assertIn("planetary-computer", hint)
 
     def test_sign_s1_href_calls_pc_when_mpc(self) -> None:
+        from unittest.mock import MagicMock
+
         from app.core import s1_stac
 
+        fake_pc = MagicMock()
+        fake_pc.sign.return_value = "https://signed/x"
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("S1_STAC_API_URL", None)
-            with patch("planetary_computer.sign", return_value="https://signed/x") as m:
+            # CI ingest tests do not install planetary-computer; inject a stub module.
+            with patch.dict("sys.modules", {"planetary_computer": fake_pc}):
                 out = s1_stac.sign_s1_href("https://raw/x")
         self.assertEqual(out, "https://signed/x")
-        m.assert_called_once_with("https://raw/x")
+        fake_pc.sign.assert_called_once_with("https://raw/x")

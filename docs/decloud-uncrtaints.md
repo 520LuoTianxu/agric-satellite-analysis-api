@@ -39,6 +39,9 @@ That task reads **only the field polygon window** (never a full Sentinel scene):
 current cloudy S2 12 L2A bands (B10 filled with zeros), nearest other S2 dates
 to make `input_t=3`, and nearest S1 VV/VH from Planetary Computer.
 
+Bands are windowed from remote COGs into RAM. The product JSON is uploaded with
+`put_bytes`. No per-scene raster is kept on local disk after the scene finishes.
+
 ## Products
 
 | | Raw | Decloud |
