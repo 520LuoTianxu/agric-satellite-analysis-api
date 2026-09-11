@@ -99,3 +99,83 @@ def test_publish_retries_on_connection_limit_then_succeeds():
     assert attempts["n"] == 3
     # reconnect after each failure + final success path may open more than 1
     assert opens[0] >= 1
+
+
+def test_is_retryable_publish_error_covers_broken_pipe_and_stream_lost():
+    assert mq._is_retryable_publish_error(BrokenPipeError(32, "Broken pipe"))
+    assert mq._is_retryable_publish_error(
+        Exception("Stream connection lost: BrokenPipeError(32, 'Broken pipe')")
+    )
+    assert mq._is_retryable_publish_error(ConnectionResetError("Connection reset by peer"))
+    assert mq._is_retryable_publish_error(TimeoutError("timed out"))
+    assert mq._is_retryable_publish_error(
+        Exception('ConnectionClosedByBroker: (530) "NOT_ALLOWED - connection limit (20) is reached"')
+    )
+    assert not mq._is_retryable_publish_error(ValueError("bad payload"))
+
+
+def test_publish_retries_on_broken_pipe_then_succeeds():
+    opens = [0]
+    attempts = {"n": 0}
+
+    def flaky_publish(ch, queue, payload, *, persistent=True):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise Exception("Stream connection lost: BrokenPipeError(32, 'Broken pipe')")
+
+    with (
+        patch.object(mq, "settings") as settings,
+        patch.object(mq.pika, "BlockingConnection", side_effect=_fake_blocking_connection_factory(opens)),
+        patch.object(mq, "declare_queues", return_value=("openfarm_download", "openfarm_process")),
+        patch.object(mq, "publish_json", side_effect=flaky_publish),
+        patch.object(mq.time, "sleep", return_value=None),
+    ):
+        settings.cloudamqp_url = "amqps://u:p@example/vhost"
+        settings.cloudamqp_download_queue = "openfarm_download"
+        settings.cloudamqp_process_queue = "openfarm_process"
+
+        mq.publish_result(
+            ResultMessage(
+                task_id="broken-pipe",
+                status="success",
+                oss_urls={"a": "https://example.com/a.json"},
+            )
+        )
+
+    assert attempts["n"] == 2
+    assert opens[0] >= 1
+
+
+def test_publish_retries_on_plain_broken_pipe_errno():
+    """Broken pipe message often lacks the word 'connection'."""
+    opens = [0]
+    attempts = {"n": 0}
+
+    def flaky_publish(ch, queue, payload, *, persistent=True):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    with (
+        patch.object(mq, "settings") as settings,
+        patch.object(mq.pika, "BlockingConnection", side_effect=_fake_blocking_connection_factory(opens)),
+        patch.object(mq, "declare_queues", return_value=("openfarm_download", "openfarm_process")),
+        patch.object(mq, "publish_json", side_effect=flaky_publish),
+        patch.object(mq.time, "sleep", return_value=None),
+    ):
+        settings.cloudamqp_url = "amqps://u:p@example/vhost"
+        settings.cloudamqp_download_queue = "openfarm_download"
+        settings.cloudamqp_process_queue = "openfarm_process"
+
+        mq.publish_task(
+            {
+                "task_id": "bp-errno",
+                "type": "weather_backfill",
+                "field_id": "f1",
+                "land_id": None,
+                "extras": {},
+            }
+        )
+
+    assert attempts["n"] == 2
+

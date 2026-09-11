@@ -80,6 +80,18 @@ function lightLabel(
     return fallback || "";
 }
 
+
+function isUsableCrop(raw: string | null | undefined): boolean {
+    if (raw == null) return false;
+    const s = String(raw).trim();
+    if (!s) return false;
+    const lower = s.toLowerCase();
+    if (lower === "unknown" || lower === "-" || lower === "null" || lower === "undefined") {
+        return false;
+    }
+    return true;
+}
+
 function isCropRequiredError(err: any): boolean {
     const d = err?.detail ?? err?.message;
     if (d && typeof d === "object" && d.code === "crop_required") return true;
@@ -93,14 +105,14 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const [loading, setLoading] = useState(true);
     const [generating, setGenerating] = useState(false);
     const [downloading, setDownloading] = useState(false);
-    const [boundCrop, setBoundCrop] = useState(cropType || "");
+    const [boundCrop, setBoundCrop] = useState(() => (isUsableCrop(cropType) ? String(cropType).trim() : ""));
     const [pickCrop, setPickCrop] = useState("");
     const [scorecard, setScorecard] = useState<AssessmentScorecard | null>(null);
     const [scorecardState, setScorecardState] = useState<ScorecardState>("loading");
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
-        setBoundCrop(cropType || "");
+        setBoundCrop(isUsableCrop(cropType) ? String(cropType).trim() : "");
     }, [cropType]);
 
     const refreshMeta = useCallback(async () => {
@@ -200,26 +212,28 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     };
 
     const handleGenerate = async () => {
-        if (!boundCrop) {
-            if (!pickCrop) {
+        // Treat unusable/invalid bound crop as unbound and force the gate.
+        if (!isUsableCrop(boundCrop)) {
+            if (!isUsableCrop(pickCrop)) {
                 toast.error(t("cropRequired"));
                 return;
             }
-            await runGenerate(pickCrop);
+            await runGenerate(pickCrop.trim());
             return;
         }
         await runGenerate();
     };
 
     const handleBindOnly = async () => {
-        if (!pickCrop) {
+        if (!isUsableCrop(pickCrop)) {
             toast.error(t("cropRequired"));
             return;
         }
         try {
-            await fieldsApi.update(fieldId, { crop_type: pickCrop });
-            setBoundCrop(pickCrop);
-            onCropBound?.(pickCrop);
+            const key = pickCrop.trim();
+            await fieldsApi.update(fieldId, { crop_type: key });
+            setBoundCrop(key);
+            onCropBound?.(key);
             toast.success(t("cropBound"));
         } catch (e: any) {
             toast.error(e?.message || t("cropBindFailed"));
@@ -248,7 +262,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const hasPdf = latest?.status === "succeeded" && Boolean(progress.object_key);
     const inFlight =
         generating || latest?.status === "pending" || latest?.status === "running";
-    const needsCrop = !boundCrop;
+    const needsCrop = !isUsableCrop(boundCrop);
 
     return (
         <div className="p-4 space-y-4">
