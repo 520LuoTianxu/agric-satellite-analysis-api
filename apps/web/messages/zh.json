@@ -346,6 +346,8 @@
     "scoutingPlaceholder": "田间调查记录将在 Milestone 3 提供。",
     "sharePlaceholder": "分享链接将在 Milestone 3 提供。",
     "cloudCover": "云量 {percent}%",
+    "parcelCloudCover": "地块云量 {percent}%",
+    "sceneCloudCover": "整景云量 {percent}%",
     "tabLandReport": "选地报告"
   },
   "alertsTab": {
@@ -910,6 +912,8 @@
     "pixelsMeta": " · {pixels} 像素",
     "meanMeta": " · 均≈{mean}",
     "cloudCover": "云量 {percent}%",
+    "parcelCloudCover": "地块云量 {percent}%",
+    "sceneCloudCover": "整景云量 {percent}%",
     "droughtDaysCount": "晴空 {clear} 日中 {drought} 日干旱",
     "cloudSkipDrought": "云量超过 30%，该日不计算干旱",
     "outOfSeasonDrought": "不在生育季（6–9 月），该日不计算干旱",

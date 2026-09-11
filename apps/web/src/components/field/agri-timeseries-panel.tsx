@@ -43,6 +43,7 @@ import {
     opticalTooltipFields,
     pickOfficialOptical,
     pickOpticalForNdvi,
+    sceneCloudDisplay,
     sceneCloudPct,
 } from "@/lib/agri-classify";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -241,6 +242,18 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
         });
     });
     return out;
+}
+
+function formatCloudCoverLabel(
+    pct: number | null | undefined,
+    source: "parcel" | "stac" | null | undefined,
+    t: (key: string, values?: Record<string, string | number>) => string,
+): string {
+    if (pct == null || !Number.isFinite(pct)) return "";
+    const rounded = Math.round(pct);
+    if (source === "parcel") return t("parcelCloudCover", { percent: rounded });
+    if (source === "stac") return t("sceneCloudCover", { percent: rounded });
+    return t("cloudCover", { percent: rounded });
 }
 
 function decloudQualityChip(
@@ -1022,9 +1035,9 @@ export default function AgriTimeseriesPanel({
         return dates.size;
     }, [scenes]);
 
-    const cloudPctByDate = useMemo(() => {
+    const cloudByDate = useMemo(() => {
         const sensor = sensorForIndex(series);
-        const out: Record<string, number | null> = {};
+        const out: Record<string, { pct: number | null; source: "parcel" | "stac" | null }> = {};
         for (const d of allDates) {
             const group = scenes.filter((s) => s.sensor === sensor && s.date === d);
             const picked =
@@ -1033,10 +1046,15 @@ export default function AgriTimeseriesPanel({
                         ? pickOfficialOptical(group, { neighbors: scenes })
                         : pickOpticalForNdvi(group, { neighbors: scenes })
                     : group[0];
-            out[d] = sceneCloudPct(picked);
+            out[d] = sceneCloudDisplay(picked ?? null);
         }
         return out;
     }, [allDates, scenes, series]);
+    const cloudPctByDate = useMemo(() => {
+        const out: Record<string, number | null> = {};
+        for (const [d, v] of Object.entries(cloudByDate)) out[d] = v.pct;
+        return out;
+    }, [cloudByDate]);
 
     const selectedBare = useMemo(() => {
         if (!selectedDate || (series !== "ndvi" && series !== "drought" && series !== "evi")) return false;
@@ -1074,10 +1092,13 @@ export default function AgriTimeseriesPanel({
         return matches[0] ?? null;
     }, [scenes, selectedDate, series]);
 
-    const cloudCoverPct = useMemo(() => {
-        if (!selectedScene || sensorForIndex(series) !== "S2") return null;
-        return sceneCloudPct(selectedScene);
+    const selectedCloud = useMemo(() => {
+        if (!selectedScene || sensorForIndex(series) !== "S2") {
+            return { pct: null as number | null, source: null as "parcel" | "stac" | null };
+        }
+        return sceneCloudDisplay(selectedScene);
     }, [selectedScene, series]);
+    const cloudCoverPct = selectedCloud.pct;
 
     const cloudCoverOver30 = useMemo(() => {
         if (!selectedScene) return false;
@@ -1480,7 +1501,7 @@ export default function AgriTimeseriesPanel({
                                     ? t("heatmapDate", { date: selectedDate, mode: AGRI_MODE_LABELS[series] })
                                     : t("pickDate")}
                                 {cloudCoverPct != null
-                                    ? ` · ${t("cloudCover", { percent: Math.round(cloudCoverPct) })}`
+                                    ? ` · ${formatCloudCoverLabel(cloudCoverPct, selectedCloud.source, t)}`
                                     : ""}
                                 {decloudQualityChip(
                                     selectedScene?.decloud_quality ??
@@ -1591,7 +1612,8 @@ export default function AgriTimeseriesPanel({
                                                 </SelectTrigger>
                                                 <SelectContent className="max-h-72">
                                                     {allDates.map((date) => {
-                                                        const pct = cloudPctByDate[date];
+                                                        const cloud = cloudByDate[date];
+                                                        const pct = cloud?.pct ?? null;
                                                         const droughtCls = droughtByDate[date];
                                                         const floodCls = floodByDate.get(date);
                                                         const droughtBit = droughtCls
@@ -1614,10 +1636,11 @@ export default function AgriTimeseriesPanel({
                                                                             : t("floodChip_moderate")
                                                                   }`
                                                                 : "";
-                                                        const label =
+                                                        const cloudBit =
                                                             pct != null
-                                                                ? `${date} · ${t("cloudCover", { percent: Math.round(pct) })}${droughtBit}${floodBit}`
-                                                                : `${date}${droughtBit}${floodBit}`;
+                                                                ? ` · ${formatCloudCoverLabel(pct, cloud?.source, t)}`
+                                                                : "";
+                                                        const label = `${date}${cloudBit}${droughtBit}${floodBit}`;
                                                         return (
                                                             <SelectItem
                                                                 key={date}

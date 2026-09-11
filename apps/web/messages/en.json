@@ -346,6 +346,8 @@
     "scoutingPlaceholder": "Scouting notes will be available in Milestone 3.",
     "sharePlaceholder": "Share links will be available in Milestone 3.",
     "cloudCover": "{percent}% cloud",
+    "parcelCloudCover": "parcel cloud {percent}%",
+    "sceneCloudCover": "scene cloud {percent}%",
     "tabLandReport": "Land report"
   },
   "alertsTab": {
@@ -910,6 +912,8 @@
     "pixelsMeta": " · {pixels} pixels",
     "meanMeta": " · mean≈{mean}",
     "cloudCover": "cloud {percent}%",
+    "parcelCloudCover": "parcel cloud {percent}%",
+    "sceneCloudCover": "scene cloud {percent}%",
     "droughtDaysCount": "{drought} drought days of {clear} clear scenes",
     "cloudSkipDrought": "Cloud cover over 30%; drought is not computed for this date",
     "outOfSeasonDrought": "Outside the growing season (Jun-Sep); drought is not computed for this date",

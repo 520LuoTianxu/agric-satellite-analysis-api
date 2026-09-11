@@ -192,6 +192,9 @@ def publish_optical_lonlat_to_oss_mq(
         "generated_at_shanghai": row["generated_at_shanghai"],
         "pixel_data_url": row["pixel_data_url"],
         "json_oss_key": key,
+        "rgb_url": row.get("rgb_url"),
+        "large_rgb_url": row.get("large_rgb_url"),
+        "rgb_oss_key": row.get("rgb_oss_key"),
         "source": row.get("_source") or (pixel_obj or {}).get("source") or "stac_direct",
         "decloud_quality": row.get("_decloud_quality")
         or (pixel_obj or {}).get("decloud_quality"),
@@ -300,6 +303,9 @@ def emit_optical_lonlat(
     parcel_cloud_source: str | None = None,
     scl: np.ndarray | None = None,
     mq_task_id: str | None = None,
+    rgb_url: str | None = None,
+    large_rgb_url: str | None = None,
+    rgb_oss_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Sample lonlat_v1, upload OSS JSON, publish one MQ (PG write on producer)."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
@@ -390,6 +396,9 @@ def emit_optical_lonlat(
             "%Y-%m-%d %H:%M:%S%z"
         ),
         "pixel_data_url": f"stac-direct://field/{field_id_str}/{date_str}",
+        "rgb_url": rgb_url,
+        "large_rgb_url": large_rgb_url,
+        "rgb_oss_key": rgb_oss_key,
         "ndvi_avg": ndvi_avg,
         "ndvi_min": ndvi_min,
         "ndvi_max": ndvi_max,
@@ -472,6 +481,7 @@ def _process_one_optical_scene(
         t0 = time.perf_counter()
         hrefs = dict(scene.get("band_hrefs") or {})
         scl_href = hrefs.pop("SCL", None)
+        hrefs.pop("visual", None)  # optional RGB composite; true-color uses B02/B03/B04
         bands = read_bands_windowed_parallel(
             hrefs,
             bounds,
@@ -563,6 +573,20 @@ def _process_one_optical_scene(
         # Progress must not sit inside write_lonlat_ms timing.
         parcel_from_scl = parcel_cloud_from_scl_window(scl, field_mask)
         parcel_source = PARCEL_CLOUD_SOURCE_SCL if parcel_from_scl is not None else None
+        scene_date = scene.get("date")
+        date_str_rgb = (
+            scene_date.isoformat()
+            if hasattr(scene_date, "isoformat")
+            else str(scene_date)[:10]
+        )
+        from app.core.true_color_preview import upload_field_rgb_preview
+
+        rgb_meta = upload_field_rgb_preview(
+            land_id=str(agri_meta["land_id"]),
+            date_str=date_str_rgb,
+            bands=bands,
+            field_mask=field_mask,
+        )
         mark_scene_progress(
             job_id,
             "write_lonlat",
@@ -582,6 +606,9 @@ def _process_one_optical_scene(
             parcel_cloud_source=parcel_source,
             scl=scl,
             mq_task_id=mq_task_id,
+            rgb_url=rgb_meta.get("rgb_url"),
+            large_rgb_url=rgb_meta.get("large_rgb_url"),
+            rgb_oss_key=rgb_meta.get("rgb_oss_key"),
         )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         incr_done(job_id, failed=False)
@@ -669,7 +696,12 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
 
         extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
-        extra_assets: dict[str, tuple[str, ...]] = {"SCL": SCL_STAC_ASSETS}
+        # SCL for parcel cloud; B02/B03/B04 already required by EVI/MNDWI/NDVI
+        # for true-color previews. Optional visual asset when Element84 provides it.
+        extra_assets: dict[str, tuple[str, ...]] = {
+            "SCL": SCL_STAC_ASSETS,
+            "visual": ("visual", "true_color", "TCI"),
+        }
         if decloud_enabled():
             from app.core.decloud import decloud_s2_extra_assets
 

@@ -346,6 +346,8 @@
     "scoutingPlaceholder": "Las notas de campo estarán disponibles en el Hito 3.",
     "sharePlaceholder": "Los enlaces compartidos estarán disponibles en el Hito 3.",
     "cloudCover": "{percent}% nubes",
+    "parcelCloudCover": "nubes parcela {percent}%",
+    "sceneCloudCover": "nubes escena {percent}%",
     "tabLandReport": "Informe de tierra"
   },
   "alertsTab": {
@@ -910,6 +912,8 @@
     "pixelsMeta": " · {pixels} píxeles",
     "meanMeta": " · media≈{mean}",
     "cloudCover": "nubes {percent}%",
+    "parcelCloudCover": "nubes parcela {percent}%",
+    "sceneCloudCover": "nubes escena {percent}%",
     "droughtDaysCount": "{drought} días de sequía de {clear} escenas despejadas",
     "cloudSkipDrought": "Nubosidad > 30%; no se calcula sequía para esta fecha",
     "outOfSeasonDrought": "Fuera de temporada (jun-sep); no se calcula sequía para esta fecha",
