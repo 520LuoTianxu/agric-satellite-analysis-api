@@ -37,7 +37,7 @@ For a calendar date:
 6. Cloudy raw without a good decloud may still plot on the NDVI chart
    (tooltip says cloudy / no de-cloud) but drought skips it (`unreliable`).
 
-Cloud-removal search default is 90% STAC cloud (`DECLOUD_STAC_CLOUD_MAX_PCT`).
+Cloud-removal search default is 100% STAC cloud (`DECLOUD_STAC_CLOUD_MAX_PCT`).
 Decloud runs when parcel cloud > 30% **or** STAC cloud > 30%, up to that max.
 
 ## Drought (scene / date class)

@@ -62,10 +62,10 @@ class DecloudFlagTests(unittest.TestCase):
             os.environ.pop("DECLOUD_CLOUD_MIN_PCT", None)
             self.assertEqual(decloud_cloud_min_pct(), 30.0)
 
-    def test_stac_max_default_is_90(self) -> None:
+    def test_stac_max_default_is_100(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DECLOUD_STAC_CLOUD_MAX_PCT", None)
-            self.assertEqual(decloud_stac_cloud_max_pct(), 90.0)
+            self.assertEqual(decloud_stac_cloud_max_pct(), 100.0)
 
     def test_backend_dummy(self) -> None:
         with patch.dict(os.environ, {"DECLOUD_BACKEND": "dummy"}):
@@ -128,9 +128,11 @@ class TriggerTests(unittest.TestCase):
             )
         )
 
-    def test_stac_85_triggers_95_does_not(self) -> None:
+    def test_stac_85_and_95_and_100_trigger_over_100_does_not(self) -> None:
         self.assertTrue(should_trigger_decloud(cloud_cover=85.0))
-        self.assertFalse(should_trigger_decloud(cloud_cover=95.0))
+        self.assertTrue(should_trigger_decloud(cloud_cover=95.0))
+        self.assertTrue(should_trigger_decloud(cloud_cover=100.0))
+        self.assertFalse(should_trigger_decloud(cloud_cover=100.1))
 
 
 class QualityScoreTests(unittest.TestCase):
