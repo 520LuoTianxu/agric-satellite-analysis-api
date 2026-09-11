@@ -501,21 +501,73 @@ def _process_one_optical_scene(
                 target_transform,
                 resampling=Resampling.nearest,
             )
-        visual_rgb = None
-        if visual_href:
-            try:
-                visual_rgb = read_rgb_windowed(
-                    visual_href,
-                    bounds,
-                    target_shape,
-                    target_transform,
-                )
-            except Exception as exc:  # noqa: BLE001 — preview soft-fail
-                logger.warning(
-                    "visual_rgb_download_failed",
-                    scene_id=scene_id,
-                    error=str(exc),
-                )
+        # Padded landscape window for large_rgb (field_rgb stays on parcel grid).
+        scene_visual = None
+        scene_bands = None
+        try:
+            from app.core.true_color_preview import compute_scene_preview_grid
+
+            # Use unbuffered field extent (bounds already include ~0.001° parcel pad).
+            field_extent = (
+                bounds[0] + 0.001,
+                bounds[1] + 0.001,
+                bounds[2] - 0.001,
+                bounds[3] - 0.001,
+            )
+            scene_transform, scene_shape, scene_bounds = compute_scene_preview_grid(
+                field_extent
+            )
+            if visual_href:
+                try:
+                    scene_visual = read_rgb_windowed(
+                        visual_href,
+                        scene_bounds,
+                        scene_shape,
+                        scene_transform,
+                    )
+                except Exception as exc:  # noqa: BLE001 — preview soft-fail
+                    logger.warning(
+                        "scene_visual_download_failed",
+                        scene_id=scene_id,
+                        error=str(exc),
+                    )
+            if scene_visual is None:
+                # Fallback: B04/B03/B02 over the padded window.
+                rgb_hrefs = {
+                    k: hrefs[k]
+                    for k in ("B04", "B03", "B02")
+                    if k in hrefs
+                }
+                # hrefs already popped visual/SCL; spectral bands remain.
+                # Re-read from original scene hrefs if needed.
+                if len(rgb_hrefs) < 3:
+                    orig = dict(scene.get("band_hrefs") or {})
+                    rgb_hrefs = {
+                        k: orig[k]
+                        for k in ("B04", "B03", "B02")
+                        if k in orig
+                    }
+                if len(rgb_hrefs) == 3:
+                    try:
+                        scene_bands = read_bands_windowed_parallel(
+                            rgb_hrefs,
+                            scene_bounds,
+                            scene_shape,
+                            scene_transform,
+                            scene_workers=1,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "scene_bands_download_failed",
+                            scene_id=scene_id,
+                            error=str(exc),
+                        )
+        except Exception as exc:  # noqa: BLE001 — preview must not fail ingest
+            logger.warning(
+                "scene_preview_grid_failed",
+                scene_id=scene_id,
+                error=str(exc),
+            )
         from app.core.decloud import decloud_enabled
 
         if decloud_enabled():
@@ -604,7 +656,8 @@ def _process_one_optical_scene(
             date_str=date_str_rgb,
             bands=bands,
             field_mask=field_mask,
-            visual=visual_rgb,
+            scene_bands=scene_bands,
+            scene_visual=scene_visual,
         )
         mark_scene_progress(
             job_id,

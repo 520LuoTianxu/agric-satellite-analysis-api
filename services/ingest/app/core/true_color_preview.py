@@ -42,6 +42,60 @@ def _img_root() -> str:
     return "s1s2_parcel/img"
 
 
+
+def compute_scene_preview_grid(
+    field_bounds: tuple[float, float, float, float],
+    *,
+    pad_km: float = 1.5,
+    target_min_px: int = 512,
+    target_max_px: int = 1024,
+    pixel_size: float = 0.0001,
+) -> tuple[Any, tuple[int, int], tuple[float, float, float, float]]:
+    """Padded lon/lat grid for opaque scene-context true-color (~1–2 km).
+
+    Returns ``(transform, (height, width), bounds)`` in EPSG:4326.
+    """
+    import math
+
+    from rasterio.transform import from_bounds
+
+    minx, miny, maxx, maxy = [float(v) for v in field_bounds]
+    lat_c = 0.5 * (miny + maxy)
+    cos_lat = max(0.2, abs(math.cos(math.radians(lat_c))))
+    pad_lat = float(pad_km) / 111.0
+    pad_lon = float(pad_km) / (111.0 * cos_lat)
+    minx -= pad_lon
+    maxx += pad_lon
+    miny -= pad_lat
+    maxy += pad_lat
+
+    width = max(int((maxx - minx) / pixel_size), 1)
+    height = max(int((maxy - miny) / pixel_size), 1)
+    longest = max(width, height)
+    if longest > target_max_px:
+        scale = target_max_px / longest
+        width = max(int(width * scale), 1)
+        height = max(int(height * scale), 1)
+    elif longest < target_min_px:
+        # Grow pad until the longer side reaches target_min_px.
+        scale = target_min_px / max(longest, 1)
+        cx, cy = 0.5 * (minx + maxx), 0.5 * (miny + maxy)
+        half_w = 0.5 * (maxx - minx) * scale
+        half_h = 0.5 * (maxy - miny) * scale
+        minx, maxx = cx - half_w, cx + half_w
+        miny, maxy = cy - half_h, cy + half_h
+        width = max(int((maxx - minx) / pixel_size), 1)
+        height = max(int((maxy - miny) / pixel_size), 1)
+        longest = max(width, height)
+        if longest > target_max_px:
+            scale = target_max_px / longest
+            width = max(int(width * scale), 1)
+            height = max(int(height * scale), 1)
+
+    transform = from_bounds(minx, miny, maxx, maxy, width, height)
+    return transform, (height, width), (minx, miny, maxx, maxy)
+
+
 def _as_reflectance(arr: np.ndarray) -> np.ndarray:
     """Map DN or reflectance to ~0–1 reflectance.
 
@@ -264,11 +318,16 @@ def upload_field_rgb_preview(
     sensor: str = "S2",
     visual: np.ndarray | bytes | None = None,
     scene_bands: dict[str, np.ndarray] | None = None,
+    scene_visual: np.ndarray | bytes | None = None,
 ) -> dict[str, str | None]:
     """Render + upload parcel PNG and optional large scene JPEG.
 
     Returns rgb_oss_key / rgb_url / large_rgb_url (nulls on soft failure).
-    ``scene_bands`` defaults to ``bands`` (already windowed with parcel pad).
+
+    - ``visual``: optional parcel-aligned RGB for field_rgb only.
+    - ``scene_visual`` / ``scene_bands``: padded landscape window for large_rgb.
+      When neither is provided, falls back to parcel ``bands`` (better stretch
+      than nothing, but not true landscape context).
     """
     empty: dict[str, str | None] = {
         "rgb_oss_key": None,
@@ -285,14 +344,16 @@ def upload_field_rgb_preview(
             out["rgb_oss_key"] = key
             out["rgb_url"] = storage.presigned_get(key)
 
-        large_src = scene_bands if scene_bands is not None else bands
-        jpg = render_scene_rgb_jpeg(large_src, visual=visual)
+        large_visual = scene_visual if scene_visual is not None else None
+        large_src = scene_bands if scene_bands is not None else (
+            None if large_visual is not None else bands
+        )
+        jpg = render_scene_rgb_jpeg(large_src, visual=large_visual)
         if jpg:
             large_key = scene_rgb_oss_key(land_id, date_str, sensor)
             storage.put_bytes(large_key, jpg, content_type="image/jpeg")
             out["large_rgb_url"] = storage.presigned_get(large_key)
             if out["rgb_oss_key"] is None:
-                # Still record a key family for debugging when only large succeeded.
                 out["rgb_oss_key"] = large_key
 
         return out
