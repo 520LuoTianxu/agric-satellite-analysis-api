@@ -418,7 +418,7 @@ _admin = require_roles("owner", "admin")
     response_model=BackfillIndicesResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-@limiter.limit("1/minute")
+@limiter.limit("5/minute")
 async def backfill_field_indices(
     request: Request,
     field_id: uuid.UUID,
