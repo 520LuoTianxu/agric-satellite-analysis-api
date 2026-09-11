@@ -42,6 +42,7 @@ _SCENE_COLS = """
     land_id, tile_id, date, sensor, scene_id, land_name,
     cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
     json_oss_key, pixel_data_url, pixel_count,
+    rgb_url, large_rgb_url, rgb_oss_key,
     ndvi_avg, ndvi_min, ndvi_max,
     evi_avg, evi_min, evi_max,
     ndmi_avg, ndmi_min, ndmi_max,
@@ -220,13 +221,21 @@ def _clear_scene_media_urls(d: dict[str, Any]) -> None:
 
 
 def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) -> None:
+    """Fill preview URLs. DB columns (already on ``d``) win over OSS JSON media."""
+    db_rgb = d.get("rgb_url")
+    db_large = d.get("large_rgb_url")
     if media:
-        d["rgb_url"] = media.get("rgb_url")
-        d["large_rgb_url"] = media.get("large_rgb_url")
+        d["rgb_url"] = db_rgb or media.get("rgb_url")
+        d["large_rgb_url"] = db_large or media.get("large_rgb_url")
         d["heatmap_url"] = media.get("heatmap_url")
         d["s2_heatmap_url"] = media.get("s2_heatmap_url")
     else:
-        _clear_scene_media_urls(d)
+        # Keep DB rgb_* ; clear only heatmap fields that live solely on OSS JSON.
+        if not db_rgb and not db_large:
+            _clear_scene_media_urls(d)
+        else:
+            d["heatmap_url"] = None
+            d["s2_heatmap_url"] = None
 
 
 async def _agri_ready(db: AsyncSession) -> None:
