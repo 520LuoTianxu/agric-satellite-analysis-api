@@ -180,29 +180,33 @@ def _iso_date(value: Any) -> str | None:
 
 
 def _months_from_window(window: dict) -> set[int]:
-    """Parse one growing-season window: months[] and/or start_month..end_month (wrap)."""
-    out: set[int] = set()
-    for m in window.get("months") or []:
-        try:
-            mi = int(m)
-        except (TypeError, ValueError):
-            continue
-        if 1 <= mi <= 12:
-            out.add(mi)
-    sm, em = window.get("start_month"), window.get("end_month")
-    if sm is not None and em is not None:
-        try:
-            sm_i, em_i = int(sm), int(em)
-        except (TypeError, ValueError):
-            sm_i = em_i = 0
-        if 1 <= sm_i <= 12 and 1 <= em_i <= 12:
-            if sm_i <= em_i:
-                out.update(range(sm_i, em_i + 1))
-            else:
-                # e.g. winter wheat Oct→May
-                out.update(range(sm_i, 13))
-                out.update(range(1, em_i + 1))
-    return out
+    """Parse one growing-season window: months, month range, or start_date/end_date."""
+    try:
+        from openfarm_common.growing_seasons import months_from_window
+
+        return months_from_window(window)
+    except Exception:
+        out: set[int] = set()
+        for m in window.get("months") or []:
+            try:
+                mi = int(m)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= mi <= 12:
+                out.add(mi)
+        sm, em = window.get("start_month"), window.get("end_month")
+        if sm is not None and em is not None:
+            try:
+                sm_i, em_i = int(sm), int(em)
+            except (TypeError, ValueError):
+                sm_i = em_i = 0
+            if 1 <= sm_i <= 12 and 1 <= em_i <= 12:
+                if sm_i <= em_i:
+                    out.update(range(sm_i, em_i + 1))
+                else:
+                    out.update(range(sm_i, 13))
+                    out.update(range(1, em_i + 1))
+        return out
 
 
 def normalize_season_months(
