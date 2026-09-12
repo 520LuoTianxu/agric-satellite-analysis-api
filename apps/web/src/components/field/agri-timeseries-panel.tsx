@@ -76,6 +76,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Loader2, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { reverseDescScenesPage } from "@/lib/agri-scenes-page";
 import { AgriIndexGlossary } from "@/components/field/agri-index-glossary";
 import { toast } from "sonner";
 import { haToMu } from "@/lib/area";
@@ -582,14 +583,27 @@ export default function AgriTimeseriesPanel({
         gradePrefetchDoneRef.current = null;
         (async () => {
             try {
-                const [sum, s2, s1] = await Promise.all([
+                // Newest page first: order=desc&limit=500, then reverse to ascending for charts.
+                // Avoids offset=0 (oldest page) dropping 2026 when total > 500.
+                const SCENE_PAGE_LIMIT = 500;
+                const [sum, s2Desc, s1Desc] = await Promise.all([
                     agriApi.scenesSummary(landId),
-                    agriApi.scenes(landId, { sensor: "S2", limit: 500 }),
-                    agriApi.scenes(landId, { sensor: "S1", limit: 500 }),
+                    agriApi.scenes(landId, {
+                        sensor: "S2",
+                        limit: SCENE_PAGE_LIMIT,
+                        order: "desc",
+                    }),
+                    agriApi.scenes(landId, {
+                        sensor: "S1",
+                        limit: SCENE_PAGE_LIMIT,
+                        order: "desc",
+                    }),
                 ]);
                 if (cancelled) return;
                 setSummary(sum);
-                const all = [...s2.items, ...s1.items];
+                const s2Items = reverseDescScenesPage(s2Desc.items);
+                const s1Items = reverseDescScenesPage(s1Desc.items);
+                const all = [...s2Items, ...s1Items];
                 setScenes(all);
                 const hasS2 = sum.sensors.some((s) => s.sensor === "S2" && s.count > 0);
                 const nextSeries: SeriesKey = modeProp ?? (hasS2 ? "ndvi" : "vv");

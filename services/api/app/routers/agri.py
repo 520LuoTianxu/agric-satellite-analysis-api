@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -494,10 +494,24 @@ async def list_land_scenes(
             "else try OSS via json_oss_key; else legacy grid pixel_data (db_grid)."
         ),
     ),
-    limit: int = Query(100, ge=1, le=500),
+    order: Literal["asc", "desc"] = Query(
+        "asc",
+        description=(
+            "Sort by date (then sensor, scene_id). For timeseries UI prefer "
+            "order=desc&limit=500 then reverse client-side, or "
+            "order=asc&offset=max(0,total-limit)."
+        ),
+    ),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    """S1/S2 time series for a 地块. Returns index averages for growth curves."""
+    """S1/S2 time series for a 地块. Returns index averages for growth curves.
+
+    Timeseries UI should load the newest window first: ``order=desc&limit=500``
+    then reverse items ascending for charts, or
+    ``order=asc&offset=max(0, total-limit)``. Single-day heatmap fetches
+    (``from``/``to`` same day) can keep the default ``asc``.
+    """
     await _agri_ready(db)
     exists = (
         await db.execute(
@@ -524,6 +538,7 @@ async def list_land_scenes(
         where.append("date <= :date_to")
         params["date_to"] = date_to
     wh = " AND ".join(where)
+    order_sql = "DESC" if order == "desc" else "ASC"
 
     total = (
         await db.execute(
@@ -539,7 +554,7 @@ async def list_land_scenes(
                 SELECT {cols}
                 FROM agri.parcel_scene_products
                 WHERE {wh}
-                ORDER BY date ASC, sensor ASC, scene_id ASC
+                ORDER BY date {order_sql}, sensor {order_sql}, scene_id {order_sql}
                 LIMIT :limit OFFSET :offset
                 """
             ),
