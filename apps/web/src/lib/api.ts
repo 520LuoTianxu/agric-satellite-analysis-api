@@ -1238,7 +1238,37 @@ export const agriApi = {
         apiFetch<AgriLandScenesSummary>(
             `/agri/lands/${encodeURIComponent(landId)}/scenes/summary`,
         ),
+    harvestDetect: (
+        landId: string,
+        opts: {
+            start_date?: string;
+            end_date?: string;
+            crops?: string[];
+            label?: string;
+        } = {},
+    ) => {
+        const params = new URLSearchParams();
+        if (opts.start_date) params.set("start_date", opts.start_date);
+        if (opts.end_date) params.set("end_date", opts.end_date);
+        if (opts.crops?.length) params.set("crops", opts.crops.join(","));
+        if (opts.label) params.set("label", opts.label);
+        const q = params.toString();
+        return apiFetch<HarvestDetectResult>(
+            `/agri/lands/${encodeURIComponent(landId)}/harvest-detect${q ? `?${q}` : ""}`,
+        );
+    },
 };
+
+export interface HarvestDetectResult {
+    land_id: string;
+    status: "detected" | "uncertain" | "no_growth" | string;
+    harvest_date?: string | null;
+    confidence?: string | null;
+    scene_id?: string | null;
+    evidence?: Record<string, unknown>;
+    alternates?: Record<string, unknown>[];
+    window?: Record<string, unknown>;
+}
 
 
 // ── China overview (全国态势) ──────────────────────────────────────

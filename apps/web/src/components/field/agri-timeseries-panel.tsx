@@ -13,6 +13,7 @@ import {
     type CropOption,
     type FieldStat,
     type GrowingSeasonWindow,
+    type HarvestDetectResult,
     type IndexType,
 } from "@/lib/api";
 import { useTranslations } from "next-intl";
@@ -469,6 +470,8 @@ export default function AgriTimeseriesPanel({
     const [cropCatalog, setCropCatalog] = useState<CropOption[]>([]);
     /** Growing-season windows for this pull (rotation = multi; intercrop = crops length 2). */
     const [seasonWindows, setSeasonWindows] = useState<SeasonWindowDraft[]>([]);
+    const [harvestResult, setHarvestResult] = useState<HarvestDetectResult | null>(null);
+    const [harvestLoading, setHarvestLoading] = useState(false);
     const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -760,6 +763,38 @@ export default function AgriTimeseriesPanel({
         setSeasonWindows((prev) => prev.filter((w) => w.id !== id));
     };
 
+    const runHarvestDetect = async () => {
+        if (!landId) return;
+        setHarvestLoading(true);
+        try {
+            const w = seasonWindows[0];
+            const res = await agriApi.harvestDetect(landId, {
+                start_date: w?.start_date,
+                end_date: w?.end_date,
+                crops: w?.crops,
+                label: w?.label || undefined,
+            });
+            setHarvestResult(res);
+            if (res.status === "detected" && res.harvest_date) {
+                setSelectedDate(res.harvest_date);
+                toast.success(t("harvestDetected"));
+            } else if (res.status === "no_growth") {
+                toast(t("harvestNoGrowth"));
+            } else {
+                toast(t("harvestUncertain"));
+            }
+        } catch (e: any) {
+            setHarvestResult({
+                land_id: landId,
+                status: "uncertain",
+                evidence: { reason: "soft_fail", error: e?.detail || e?.message },
+            });
+            toast(t("harvestUncertain"));
+        } finally {
+            setHarvestLoading(false);
+        }
+    };
+
     const handleRefreshRs = async () => {
         setRefreshDateOpen(false);
         setBackfilling(true);
@@ -870,7 +905,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message(t("outOfSeasonDrought"), {
+                        toast(t("outOfSeasonDrought"), {
                             description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -881,7 +916,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message(t("cloudSkipDrought"), {
+                        toast(t("cloudSkipDrought"), {
                             description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -894,7 +929,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message("该日期无像素数据，无法渲染色斑图", {
+                        toast("该日期无像素数据，无法渲染色斑图", {
                             description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -943,7 +978,7 @@ export default function AgriTimeseriesPanel({
                 );
                 publishHeatmap(img);
                 if (!img && enabledRef.current) {
-                    toast.message("色斑图未绘制任何像素", {
+                    toast("色斑图未绘制任何像素", {
                         description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                     });
                 }
@@ -998,7 +1033,7 @@ export default function AgriTimeseriesPanel({
             const sensor = sensorForIndex(series);
             const scene = scenes.find((s) => s.sensor === sensor && s.date === date);
             if (sceneLooksCloudyOrLowVeg(scene, series)) {
-                toast.message("该日多为云或植被指数极低，色膜偏红属正常", {
+                toast("该日多为云或植被指数极低，色膜偏红属正常", {
                     description: `${date} · ${AGRI_MODE_LABELS[series]}`,
                 });
             }
@@ -1137,6 +1172,24 @@ export default function AgriTimeseriesPanel({
                     level: cls === "flood_severe" ? ("high" as const) : cls === "flood_moderate" ? ("medium" as const) : ("low" as const),
                 })),
         [floodByDate],
+    );
+
+    const harvestEventMarks = useMemo(() => {
+        if (harvestResult?.status === "detected" && harvestResult.harvest_date) {
+            return [
+                {
+                    date: harvestResult.harvest_date,
+                    label: "收获",
+                    level: "high" as const,
+                },
+            ];
+        }
+        return [];
+    }, [harvestResult]);
+
+    const ndviEventMarks = useMemo(
+        () => [...droughtEventMarks, ...harvestEventMarks],
+        [droughtEventMarks, harvestEventMarks],
     );
 
     const droughtDayCount = droughtEventMarks.length;
@@ -1601,7 +1654,7 @@ export default function AgriTimeseriesPanel({
                                     <div className="flex flex-wrap items-center gap-1.5">
                                         <span className="text-[11px] font-medium text-foreground">当日长势等级</span>
                                         <Badge variant="secondary" className="text-[10px]">
-                                            {cropOption?.season_label_zh || "夏玉米季（6–9月）"}
+                                            {cropOption?.season_label_zh || cropOption?.name_zh || "作物生育季"}
                                         </Badge>
                                         {selectedBare && (
                                             <Badge variant="destructive" className="text-[10px]">
@@ -1631,6 +1684,29 @@ export default function AgriTimeseriesPanel({
                                 </div>
                             </>
                         )}
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                disabled={!landId || harvestLoading}
+                                onClick={() => void runHarvestDetect()}
+                            >
+                                {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                                {t("harvestDetect")}
+                            </Button>
+                            <span className="text-[10px] text-muted-foreground">{t("harvestDetectHint")}</span>
+                            {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
+                                <Badge variant="default" className="text-[10px]">
+                                    {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
+                                </Badge>
+                            ) : harvestResult ? (
+                                <Badge variant="secondary" className="text-[10px]">
+                                    {harvestResult.status}
+                                </Badge>
+                            ) : null}
+                        </div>
                         <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2">
                             {stats.length > 0 ? (
                                 <NdviChart
@@ -1655,7 +1731,7 @@ export default function AgriTimeseriesPanel({
                                     }
                                     eventMarks={
                                         series === "drought" || series === "ndvi" || series === "ndmi"
-                                            ? droughtEventMarks
+                                            ? ndviEventMarks
                                             : series === "flood" || series === "vv"
                                               ? floodEventMarks
                                               : undefined
