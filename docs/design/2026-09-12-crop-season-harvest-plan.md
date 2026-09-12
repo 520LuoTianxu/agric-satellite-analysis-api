@@ -10,8 +10,8 @@
 
 | File | Change |
 |------|--------|
-| `services/ingest/app/core/crops.py` (+ api mirror if any) | `corn_spring` / `corn_summer`; alias `corn`→summer |
-| `apps/web` crop list / refresh RS UI | Crop + preset + custom start/end dates |
+| `services/ingest/app/core/crops.py` (+ api mirror if any) | Keep `corn` default 6–9; aliases 春/夏玉米→corn; no spring/summer keys |
+| `apps/web` refresh RS UI | List of windows: date range + crops[] (≤2) + presets |
 | `services/api` backfill body | Pass `crop_key` + date windows |
 | `services/ingest` decloud/drought season checks | Consume normalized windows |
 | `services/ingest/app/core/harvest_detect.py` (new) | NDVI drop detector |
@@ -19,26 +19,27 @@
 | `apps/web` timeseries | Marker for harvest_date |
 | tests | Unit tests for seasons + detector |
 
-## Task 1: Crop catalog
+## Task 1: Crop catalog (clarified)
 
-- Add `corn_spring` (default months 4–8, peak 6–7), `corn_summer` (6–9, peak 7–8)
-- Alias `corn` → `corn_summer` in normalize
-- Labels ZH/EN; list_crops exposes both
+- Do **not** add `corn_spring` / `corn_summer` keys
+- Keep `corn` default season 6–9; aliases 春玉米/夏玉米 → corn
+- Soften corn season label to generic 玉米季（默认…）
 - Tests for normalize + get_crop_season
 - Commit
 
 ## Task 2: Window normalize helper
 
-- `normalize_growing_seasons(raw, *, year=None) -> list[{start_date,end_date,label}]`
+- `normalize_growing_seasons(raw, *, year=None) -> list[{start_date,end_date,crops,label?}]`
 - Accept months[] / start_month-end_month / start_date-end_date
+- Normalize legacy `crop` → `crops: [crop]`; enforce ≤2 crops/window
 - Shared module used by API + ingest
 - Tests
 - Commit
 
 ## Task 3: Refresh RS UI + API
 
-- UI: select crop (spring/summer corn); date range inputs; multi-window
-- API publish includes crop_key + normalized growing_seasons
+- UI: list of windows; each: date range + multi-select crops (≤2); presets for 春/夏玉米 dates
+- API: GrowingSeasonWindow.crops[]; validate ≤2/window; forward normalized growing_seasons
 - Commit
 
 ## Task 4: Pipeline consumes windows
