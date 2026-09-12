@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     resend_from_email: str = "OpenFarm <noreply@openfarm.app>"
     app_url: str = "http://localhost:3000"
 
+    # Alibaba Bailian (season growth AI narrative)
+    bailian_api_key: str = ""
+    bailian_base_url: str = (
+        "https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    )
+    bailian_model: str = "qwen3.7flash"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

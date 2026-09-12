@@ -5,6 +5,7 @@ import {
     assessmentApi,
     fieldsApi,
     jobsApi,
+    seasonGrowthApi,
     ApiError,
     type AssessmentDimensionKey,
     type AssessmentScorecard,
@@ -23,6 +24,7 @@ import {
     Loader2,
     RefreshCw,
     AlertTriangle,
+    Sprout,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -111,6 +113,27 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const [scorecardState, setScorecardState] = useState<ScorecardState>("loading");
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // ── Season growth report ──────────────────────────────────────────
+    const ts = useTranslations("seasonGrowthReport");
+    const [sgLatest, setSgLatest] = useState<NdviJob | null>(null);
+    const [sgLoading, setSgLoading] = useState(true);
+    const [sgGenerating, setSgGenerating] = useState(false);
+    const [sgDownloading, setSgDownloading] = useState(false);
+    const [sgStart, setSgStart] = useState(() => {
+        const y = new Date().getFullYear();
+        return `${y}-06-01`;
+    });
+    const [sgEnd, setSgEnd] = useState(() => {
+        const y = new Date().getFullYear();
+        return `${y}-09-30`;
+    });
+    const [sgCrop, setSgCrop] = useState("");
+    const [sgLabel, setSgLabel] = useState("");
+    const [sgFiles, setSgFiles] = useState<File[]>([]);
+    const [sgUploading, setSgUploading] = useState(false);
+    const sgPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+
     useEffect(() => {
         setBoundCrop(isUsableCrop(cropType) ? String(cropType).trim() : "");
     }, [cropType]);
@@ -139,13 +162,117 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
         }
     }, [fieldId]);
 
+    const refreshSgMeta = useCallback(async () => {
+        try {
+            const job = await seasonGrowthApi.latestMeta(fieldId);
+            setSgLatest(job);
+            return job;
+        } catch {
+            setSgLatest(null);
+            return null;
+        } finally {
+            setSgLoading(false);
+        }
+    }, [fieldId]);
+
     useEffect(() => {
         refreshMeta();
         refreshScorecard();
+        refreshSgMeta();
         return () => {
             if (pollRef.current) clearInterval(pollRef.current);
+            if (sgPollRef.current) clearInterval(sgPollRef.current);
         };
-    }, [refreshMeta, refreshScorecard]);
+    }, [refreshMeta, refreshScorecard, refreshSgMeta]);
+
+    const stopSgPoll = () => {
+        if (sgPollRef.current) {
+            clearInterval(sgPollRef.current);
+            sgPollRef.current = null;
+        }
+    };
+
+    const startSgPoll = (jobId: string) => {
+        stopSgPoll();
+        sgPollRef.current = setInterval(async () => {
+            try {
+                const job = await jobsApi.get(jobId);
+                setSgLatest(job);
+                if (job.status === "succeeded") {
+                    stopSgPoll();
+                    setSgGenerating(false);
+                    toast.success(ts("generateDone"));
+                } else if (job.status === "failed") {
+                    stopSgPoll();
+                    setSgGenerating(false);
+                    toast.error(job.error || ts("generateFailed"));
+                }
+            } catch {
+                /* keep polling */
+            }
+        }, 2000);
+    };
+
+    const handleSgGenerate = async () => {
+        if (!sgStart || !sgEnd) {
+            toast.error(ts("datesRequired"));
+            return;
+        }
+        setSgGenerating(true);
+        try {
+            let material_keys: string[] = [];
+            if (sgFiles.length) {
+                setSgUploading(true);
+                for (const f of sgFiles) {
+                    const up = await seasonGrowthApi.uploadMaterial(fieldId, f);
+                    if (up.key) material_keys.push(up.key);
+                }
+                setSgUploading(false);
+            }
+            const crops = sgCrop.trim() ? [sgCrop.trim()] : [];
+            const job = await seasonGrowthApi.generate(fieldId, {
+                start_date: sgStart,
+                end_date: sgEnd,
+                crops,
+                label: sgLabel.trim() || undefined,
+                material_keys,
+            });
+            setSgLatest(job);
+            if (job.status === "succeeded") {
+                setSgGenerating(false);
+                toast.success(ts("generateDone"));
+                return;
+            }
+            if (job.status === "failed") {
+                setSgGenerating(false);
+                toast.error(job.error || ts("generateFailed"));
+                return;
+            }
+            toast.message(ts("generateStarted"));
+            startSgPoll(job.id);
+        } catch (e: any) {
+            setSgGenerating(false);
+            setSgUploading(false);
+            toast.error(e?.detail?.message || e?.message || ts("generateFailed"));
+        }
+    };
+
+    const handleSgDownload = async () => {
+        setSgDownloading(true);
+        try {
+            await seasonGrowthApi.downloadLatest(fieldId);
+        } catch (e: any) {
+            toast.error(e?.message || ts("downloadFailed"));
+        } finally {
+            setSgDownloading(false);
+        }
+    };
+
+    const sgProgress = sgLatest?.progress_json || {};
+    const sgOneLiner = sgProgress.one_liner as string | undefined;
+    const sgHasPdf = sgLatest?.status === "succeeded" && Boolean(sgProgress.object_key);
+    const sgInFlight =
+        sgGenerating || sgLatest?.status === "pending" || sgLatest?.status === "running";
 
     const stopPoll = () => {
         if (pollRef.current) {
@@ -482,6 +609,162 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                     </div>
                 </>
             )}
+
+            {/* ── 生育期长势报告 ─────────────────────────────────────── */}
+            <div className="border-t pt-4 space-y-3">
+                <div className="space-y-1">
+                    <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <Sprout className="h-4 w-4" />
+                        {ts("title")}
+                    </h3>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                        {ts("description")}
+                    </p>
+                </div>
+
+                {sgLoading ? (
+                    <Skeleton className="h-24 w-full" />
+                ) : (
+                    <>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <label className="text-xs space-y-1">
+                                <span className="text-muted-foreground">{ts("startDate")}</span>
+                                <input
+                                    type="date"
+                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                    value={sgStart}
+                                    onChange={(e) => setSgStart(e.target.value)}
+                                />
+                            </label>
+                            <label className="text-xs space-y-1">
+                                <span className="text-muted-foreground">{ts("endDate")}</span>
+                                <input
+                                    type="date"
+                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                    value={sgEnd}
+                                    onChange={(e) => setSgEnd(e.target.value)}
+                                />
+                            </label>
+                        </div>
+                        <div className="space-y-1">
+                            <span className="text-xs text-muted-foreground">{ts("cropOptional")}</span>
+                            <CropSelect
+                                value={sgCrop}
+                                onChange={setSgCrop}
+                                placeholder={ts("selectCrop")}
+                            />
+                        </div>
+                        <label className="text-xs space-y-1 block">
+                            <span className="text-muted-foreground">{ts("labelOptional")}</span>
+                            <input
+                                type="text"
+                                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                value={sgLabel}
+                                placeholder={ts("labelPlaceholder")}
+                                onChange={(e) => setSgLabel(e.target.value)}
+                            />
+                        </label>
+                        <label className="text-xs space-y-1 block">
+                            <span className="text-muted-foreground">{ts("materials")}</span>
+                            <input
+                                type="file"
+                                multiple
+                                className="block w-full text-xs"
+                                onChange={(e) =>
+                                    setSgFiles(Array.from(e.target.files || []))
+                                }
+                            />
+                            {sgFiles.length > 0 && (
+                                <p className="text-[11px] text-muted-foreground">
+                                    {ts("filesSelected", { count: sgFiles.length })}
+                                </p>
+                            )}
+                        </label>
+
+                        <div className="flex flex-wrap gap-2">
+                            <Button
+                                size="sm"
+                                onClick={handleSgGenerate}
+                                disabled={sgInFlight || sgUploading}
+                            >
+                                {sgInFlight || sgUploading ? (
+                                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                                ) : (
+                                    <RefreshCw className="h-4 w-4 mr-1.5" />
+                                )}
+                                {sgUploading
+                                    ? ts("uploading")
+                                    : sgInFlight
+                                      ? ts("generating")
+                                      : ts("generate")}
+                            </Button>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={handleSgDownload}
+                                disabled={!sgHasPdf || sgDownloading}
+                            >
+                                {sgDownloading ? (
+                                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                                ) : (
+                                    <Download className="h-4 w-4 mr-1.5" />
+                                )}
+                                {ts("download")}
+                            </Button>
+                        </div>
+
+                        {sgLatest && (
+                            <div className="rounded-lg border bg-card p-3 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs text-muted-foreground">
+                                        {ts("status")}
+                                    </span>
+                                    <Badge variant="secondary" className="text-xs">
+                                        {sgLatest.status === "succeeded" && (
+                                            <CheckCircle2 className="h-3 w-3 mr-1 text-success" />
+                                        )}
+                                        {sgLatest.status === "failed" && (
+                                            <AlertTriangle className="h-3 w-3 mr-1 text-destructive" />
+                                        )}
+                                        {(sgLatest.status === "pending" ||
+                                            sgLatest.status === "running") && (
+                                            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                        )}
+                                        {ts(`status_${sgLatest.status}` as any, {
+                                            default: sgLatest.status,
+                                        })}
+                                    </Badge>
+                                </div>
+                                {sgOneLiner && (
+                                    <p className="text-xs text-muted-foreground leading-relaxed">
+                                        {sgOneLiner}
+                                    </p>
+                                )}
+                                {sgLatest.status === "failed" && sgLatest.error && (
+                                    <p className="text-xs text-destructive">{sgLatest.error}</p>
+                                )}
+                                {sgLatest.finished_at && sgLatest.status === "succeeded" && (
+                                    <p className="text-[11px] text-muted-foreground">
+                                        {ts("generatedAt", {
+                                            time: new Date(sgLatest.finished_at).toLocaleString(),
+                                        })}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
+                        {!sgLatest && (
+                            <p className="text-xs text-muted-foreground">{ts("empty")}</p>
+                        )}
+
+                        <div className="rounded-md bg-surface-2 p-3 text-[11px] text-muted-foreground leading-relaxed">
+                            <p>{ts("noteFacts")}</p>
+                            <p>{ts("noteLlm")}</p>
+                        </div>
+                    </>
+                )}
+            </div>
+
         </div>
     );
 }

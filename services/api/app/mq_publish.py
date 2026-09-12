@@ -133,6 +133,25 @@ def _fallback_celery(
             kwargs={},
             queue="ingest",
         )
+    elif type == "season_growth_report":
+        job_id = extras.get("job_id")
+        if not job_id:
+            raise HTTPException(
+                status_code=503,
+                detail="MQ_FALLBACK_CELERY season_growth_report requires extras.job_id",
+            )
+        kwargs = {
+            "job_id": str(job_id),
+            "field_id": fid,
+        }
+        for key in ("start_date", "end_date", "crops", "label", "material_keys"):
+            if extras.get(key) is not None:
+                kwargs[key] = extras[key]
+        send_task(
+            "app.tasks.season_growth_report.generate_season_growth_report",
+            kwargs=kwargs,
+            queue="ingest",
+        )
     else:
         raise HTTPException(
             status_code=503,

@@ -16,6 +16,7 @@ from app.routers import (
     agri,
     alerts,
     assessment,
+    season_growth,
     crops,
     farms,
     fields,
@@ -89,6 +90,7 @@ app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(fields.router, prefix=PREFIX, tags=["fields"])
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
+app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])
 app.include_router(agri.router, prefix=PREFIX)  # agri-first: 项目区/地块/S1·S2
 app.include_router(monitoring.router, prefix=PREFIX, tags=["monitoring"])

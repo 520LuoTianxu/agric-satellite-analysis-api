@@ -705,6 +705,64 @@ export const assessmentApi = {
 };
 
 
+
+export interface SeasonGrowthGenerateBody {
+    start_date: string;
+    end_date: string;
+    crops?: string[];
+    label?: string;
+    material_keys?: string[];
+}
+
+export interface SeasonGrowthMaterialUpload {
+    key: string;
+    url: string | null;
+    filename: string | null;
+    bytes: number | null;
+}
+
+export const seasonGrowthApi = {
+    generate: (fieldId: string, body: SeasonGrowthGenerateBody) =>
+        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report`, {
+            method: "POST",
+            body: JSON.stringify(body),
+        }),
+    latestMeta: (fieldId: string) =>
+        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report/latest/meta`),
+    uploadMaterial: async (fieldId: string, file: File) => {
+        const formData = new FormData();
+        formData.append("file", file);
+        return apiFetch<SeasonGrowthMaterialUpload>(
+            `/fields/${fieldId}/season-growth-report/materials`,
+            { method: "POST", body: formData },
+        );
+    },
+    downloadLatest: async (fieldId: string) => {
+        const res = await fetch(
+            `${getApiBase()}/fields/${fieldId}/season-growth-report/latest`,
+        );
+        if (!res.ok) {
+            const detail = await res.text();
+            throw new Error(detail || `Download failed (${res.status})`);
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        let filename = "生育期长势分析报告.pdf";
+        const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i.exec(cd);
+        if (m) {
+            filename = decodeURIComponent(m[1] || m[2]);
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    },
+};
+
 export const alertsApi = {
     list: (opts: { status?: string; severity?: string; limit?: number; offset?: number } = {}) => {
         const params = new URLSearchParams();

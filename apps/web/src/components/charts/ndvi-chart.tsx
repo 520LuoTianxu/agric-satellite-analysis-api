@@ -520,7 +520,7 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [displayStats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, viewKey, showObservations, showEvents, onlyRealistic, t]);
+    }, [displayStats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, viewKey, showObservations, showEvents, t]);
 
     const onEvents = useMemo(
         () => ({

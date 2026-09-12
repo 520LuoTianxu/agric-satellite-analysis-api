@@ -14,6 +14,7 @@ INGEST_INCLUDES = [
     "app.tasks.agri_alerts",
     "app.tasks.sentinel1",
     "app.tasks.assessment_report",
+    "app.tasks.season_growth_report",
     "app.tasks.overview_preagg",
 ]
 
