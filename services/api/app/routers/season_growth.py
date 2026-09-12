@@ -58,7 +58,9 @@ async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -
     return field
 
 
-def _window_key(start: str, end: str, crops: list[str] | None, label: str | None) -> str:
+def _window_key(
+    start: str, end: str, crops: list[str] | None, label: str | None
+) -> str:
     crops_s = ",".join(sorted(crops or []))
     return f"{start}|{end}|{crops_s}|{label or ''}"
 
@@ -231,7 +233,7 @@ async def get_latest_season_growth_report(
     data = storage.get_bytes(object_key)
     filename = progress.get("filename") or "生育期长势分析报告.pdf"
     disp = (
-        f"attachment; filename=\"season-growth.pdf\"; "
+        f'attachment; filename="season-growth.pdf"; '
         f"filename*=UTF-8''{quote(filename)}"
     )
     headers = {
