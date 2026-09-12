@@ -423,6 +423,8 @@ function defaultRsDateFrom(): string {
     return d.toISOString().slice(0, 10);
 }
 
+const MAX_SEASON_WINDOWS = 3;
+
 type SeasonWindowDraft = {
     id: string;
     start_date: string;
@@ -749,6 +751,9 @@ export default function AgriTimeseriesPanel({
             };
         }
         setSeasonWindows((prev) => {
+            if (prev.length >= MAX_SEASON_WINDOWS) {
+                return prev; // max 3 rotation windows per year
+            }
             const others = distinctCropsInWindows(prev);
             for (const c of draft.crops) {
                 if (!others.includes(c) && others.length >= 2) {
@@ -1407,15 +1412,17 @@ export default function AgriTimeseriesPanel({
                                 <p className="text-[10px] text-muted-foreground leading-snug">
                                     {t("refreshRsSeasonsHint")}
                                 </p>
-                                <p className="text-[10px] text-muted-foreground">{t("refreshRsMaxCrops")}</p>
+                                <p className="text-[10px] text-muted-foreground">{t("refreshRsMaxCrops")}
+                                </p>
+                                <p className="text-[10px] text-muted-foreground">{t("refreshRsMaxWindows")}</p>
                                 <div className="flex flex-wrap gap-1.5 pt-0.5">
-                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" onClick={() => addSeasonWindow("spring_corn")}>
+                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("spring_corn")}>
                                         {t("refreshRsPresetSpringCorn")}
                                     </Button>
-                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" onClick={() => addSeasonWindow("summer_corn")}>
+                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("summer_corn")}>
                                         {t("refreshRsPresetSummerCorn")}
                                     </Button>
-                                    <Button type="button" size="sm" variant="outline" className="h-7 text-xs" onClick={() => addSeasonWindow("blank")}>
+                                    <Button type="button" size="sm" variant="outline" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("blank")}>
                                         <Plus className="h-3 w-3 mr-1" />
                                         {t("refreshRsWindowAdd")}
                                     </Button>

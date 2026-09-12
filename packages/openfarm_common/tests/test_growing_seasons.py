@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from openfarm_common.growing_seasons import (
+    MAX_WINDOWS,
     months_from_window,
     normalize_growing_seasons,
     union_season_months,
@@ -106,6 +107,20 @@ class NormalizeGrowingSeasonsTests(unittest.TestCase):
 class ValidateCropsTests(unittest.TestCase):
     def test_validate_ok(self) -> None:
         validate_growing_seasons_crops([{"crops": ["corn", "soybean"]}])
+
+
+
+class MaxWindowsTests(unittest.TestCase):
+    def test_max_three_windows(self) -> None:
+        self.assertEqual(MAX_WINDOWS, 3)
+        raw = [
+            {"start_date": f"2025-{m:02d}-01", "end_date": f"2025-{m:02d}-28", "crops": ["corn"]}
+            for m in (4, 6, 8, 10)
+        ]
+        with self.assertRaises(ValueError):
+            normalize_growing_seasons(raw)
+        ok = normalize_growing_seasons(raw[:3])
+        self.assertEqual(len(ok), 3)
 
 
 if __name__ == "__main__":
