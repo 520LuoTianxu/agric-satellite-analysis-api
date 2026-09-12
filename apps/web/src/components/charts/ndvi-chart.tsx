@@ -380,39 +380,52 @@ export default function NdviChart({
                     secondaryValueAxis({ name: "mm", nameTextStyle: axisLabel() }),
                 ]
                 : valueAxis({ min: yMin, max: yMax }),
-            dataZoom: [
-                {
-                    type: "inside" as const,
-                    start: (() => {
-                        if (stats.length < 2) return 0;
-                        const times = stats
-                            .map((s) => Date.parse(s.date))
-                            .filter((t) => Number.isFinite(t));
-                        if (times.length < 2) return 0;
+            dataZoom: (() => {
+                // Default window: last 24 months ending at tMax; full range when span ≤ 24 months.
+                // Keep inside + slider in sync so the slider thumb matches the visible window.
+                let start = 0;
+                let end = 100;
+                if (stats.length >= 2) {
+                    const times = stats
+                        .map((s) => Date.parse(s.date))
+                        .filter((t) => Number.isFinite(t));
+                    if (times.length >= 2) {
                         const tMin = Math.min(...times);
                         const tMax = Math.max(...times);
                         const span = tMax - tMin;
-                        const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
-                        if (span <= YEAR_MS) return 0;
-                        const viewStart = tMax - YEAR_MS;
-                        return ((viewStart - tMin) / span) * 100;
-                    })(),
-                    end: 100,
-                    ...(zoomRef.current?.key === viewKey ? { start: zoomRef.current.start, end: zoomRef.current.end } : {}),
-                    zoomOnMouseWheel: false,
-                    moveOnMouseWheel: false,
-                },
-                {
-                    type: "slider" as const,
-                    bottom: 8,
-                    height: 18,
-                    borderColor: "transparent",
-                    fillerColor: "rgba(22,163,74,0.12)",
-                    dataBackground: { lineStyle: { color: indexLineColor(indexType), opacity: 0.4 }, areaStyle: { color: "rgba(22,163,74,0.06)" } },
-                    showDetail: false,
-                    brushSelect: false,
-                },
-            ],
+                        const MONTHS_24_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+                        if (span > MONTHS_24_MS) {
+                            const viewStart = tMax - MONTHS_24_MS;
+                            start = ((viewStart - tMin) / span) * 100;
+                        }
+                    }
+                }
+                if (zoomRef.current?.key === viewKey) {
+                    start = zoomRef.current.start;
+                    end = zoomRef.current.end;
+                }
+                return [
+                    {
+                        type: "inside" as const,
+                        start,
+                        end,
+                        zoomOnMouseWheel: false,
+                        moveOnMouseWheel: false,
+                    },
+                    {
+                        type: "slider" as const,
+                        start,
+                        end,
+                        bottom: 8,
+                        height: 18,
+                        borderColor: "transparent",
+                        fillerColor: "rgba(22,163,74,0.12)",
+                        dataBackground: { lineStyle: { color: indexLineColor(indexType), opacity: 0.4 }, areaStyle: { color: "rgba(22,163,74,0.06)" } },
+                        showDetail: false,
+                        brushSelect: false,
+                    },
+                ];
+            })(),
             series: [
                 // p10 band (invisible base)
                 {
@@ -449,8 +462,8 @@ export default function NdviChart({
                     itemStyle: { color: indexLineColor(indexType) },
                     lineStyle: { color: indexLineColor(indexType), width: 1.8 },
                     showSymbol: showObservations || stats.length <= 3,
-                    // 样本很多时用 LTTB 保留峰谷形态，避免密集日期把趋势线画成毛刺。
-                    sampling: stats.length > 90 ? "lttb" : undefined,
+                    // Do not LTTB-sample agri timeseries: downsampling on a time axis can
+                    // drop/misrender the recent tail (e.g. hide 2026 points).
                     markLine: {
                         silent: true,
                         symbol: ["none", "none"],
