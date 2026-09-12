@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 import structlog
 
@@ -79,6 +79,21 @@ def backfill_indices_for_field(
                 "status": "error",
                 "detail": "Field not found",
             }
+
+        # MQ 至少一次投递可能让同一地块同时启动两个编排任务；事务锁让
+        # 重复消息在首个任务提交后再检查 sentinel，避免重复创建下载分片。
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"backfill:{field_id}"},
+        )
+        if sentinel_job_id:
+            existing_sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
+            if existing_sentinel and existing_sentinel.status in {"completed", "failed"}:
+                return {
+                    "field_id": field_id,
+                    "status": "already_handled",
+                    "sentinel_job_id": sentinel_job_id,
+                }
 
         from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
 

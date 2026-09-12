@@ -25,6 +25,8 @@ _client_lock = threading.Lock()
 _client: Any = None
 _client_failed = False
 _warned_unavailable = False
+_retry_after = 0.0
+_RETRY_SECONDS = 30.0
 
 
 def progress_key(job_id: str | Any) -> str:
@@ -39,13 +41,13 @@ def _redis_url() -> str:
 
 def _get_client():
     """Lazy Redis client; None when Redis is unavailable (degraded mode)."""
-    global _client, _client_failed, _warned_unavailable
-    if _client_failed:
+    global _client, _client_failed, _warned_unavailable, _retry_after
+    if _client_failed and time.monotonic() < _retry_after:
         return None
     if _client is not None:
         return _client
     with _client_lock:
-        if _client_failed:
+        if _client_failed and time.monotonic() < _retry_after:
             return None
         if _client is not None:
             return _client
@@ -60,9 +62,13 @@ def _get_client():
             )
             client.ping()
             _client = client
+            _client_failed = False
+            _warned_unavailable = False
             return _client
         except Exception as exc:
             _client_failed = True
+            # 连接失败只降级一个冷却窗口，避免一次抖动导致永久失去实时进度。
+            _retry_after = time.monotonic() + _RETRY_SECONDS
             if not _warned_unavailable:
                 _warned_unavailable = True
                 logger.warning(
@@ -72,13 +78,27 @@ def _get_client():
             return None
 
 
+def _connection_failed(client, event: str, exc: Exception) -> None:
+    """同一轮连接故障只记录一次，并阻止场景线程在 Redis 故障期间持续重试。"""
+    global _client, _client_failed, _retry_after, _warned_unavailable
+    with _client_lock:
+        if _client is not client:
+            return
+        _client = None
+        _client_failed = True
+        _warned_unavailable = True
+        _retry_after = time.monotonic() + _RETRY_SECONDS
+    logger.warning(event, error=str(exc))
+
+
 def reset_client_for_tests() -> None:
     """Clear cached client / failure flag (unit tests only)."""
-    global _client, _client_failed, _warned_unavailable
+    global _client, _client_failed, _warned_unavailable, _retry_after
     with _client_lock:
         _client = None
         _client_failed = False
         _warned_unavailable = False
+        _retry_after = 0.0
 
 
 def _touch_ttl(client, key: str, ttl: int = DEFAULT_TTL_SECONDS) -> None:
@@ -114,7 +134,7 @@ def set_total(
         _touch_ttl(client, key)
         return True
     except Exception as exc:
-        logger.warning("job_progress_redis_set_total_failed", error=str(exc))
+        _connection_failed(client, "job_progress_redis_set_total_failed", exc)
         return False
 
 
@@ -151,7 +171,7 @@ def mark_scene_progress(
         _touch_ttl(client, key)
         return True
     except Exception as exc:
-        logger.warning("job_progress_redis_mark_failed", error=str(exc))
+        _connection_failed(client, "job_progress_redis_mark_failed", exc)
         return False
 
 
@@ -171,7 +191,7 @@ def incr_done(job_id: str | Any, *, failed: bool = False) -> int | None:
         results = pipe.execute()
         return int(results[0])
     except Exception as exc:
-        logger.warning("job_progress_redis_incr_failed", error=str(exc))
+        _connection_failed(client, "job_progress_redis_incr_failed", exc)
         return None
 
 
@@ -196,7 +216,7 @@ def read_progress(job_id: str | Any) -> dict[str, Any] | None:
                 out[k] = v
         return out
     except Exception as exc:
-        logger.warning("job_progress_redis_read_failed", error=str(exc))
+        _connection_failed(client, "job_progress_redis_read_failed", exc)
         return None
 
 
@@ -208,7 +228,7 @@ def clear_progress(job_id: str | Any) -> bool:
         client.delete(progress_key(job_id))
         return True
     except Exception as exc:
-        logger.warning("job_progress_redis_clear_failed", error=str(exc))
+        _connection_failed(client, "job_progress_redis_clear_failed", exc)
         return False
 
 
@@ -218,7 +238,8 @@ def apply_redis_to_progress(
 ) -> dict[str, Any]:
     """Merge a Redis snapshot into a progress_json-compatible dict (pure)."""
     out = dict(progress or {})
-    if not snap:
+    # Redis 快照可能晚于最终落库，不能把已结束任务的阶段回退为下载中。
+    if not snap or out.get("current_step") in {"complete", "completed", "failed", "cancelled"}:
         return out
 
     total = snap.get("total")

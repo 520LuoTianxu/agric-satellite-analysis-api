@@ -23,6 +23,7 @@ from fastapi import (
 from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiPolygon, shape
 from shapely.validation import explain_validity
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -433,6 +434,13 @@ async def backfill_field_indices(
     if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
+    # 同一地块的重复点击/多窗口请求必须串行检查，否则两个事务都可能通过
+    # active_count 检查并各自创建一整套下载任务。
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"backfill:{field_id}"},
+    )
+
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
 
     is_agri = is_agri_tagged(field.tags_json)
@@ -476,7 +484,9 @@ async def backfill_field_indices(
         raw_gs = getattr(body, "growing_seasons", None)
         if raw_gs:
             raw_list = [
-                gs.model_dump(exclude_none=True) if hasattr(gs, "model_dump") else dict(gs)
+                gs.model_dump(exclude_none=True)
+                if hasattr(gs, "model_dump")
+                else dict(gs)
                 for gs in raw_gs
             ]
             try:

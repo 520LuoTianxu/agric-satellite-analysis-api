@@ -985,40 +985,40 @@ export default function FieldDetailPage() {
                 </div>
                 <div className={cn("flex h-full flex-col overflow-hidden rounded-xl", MAP_CHROME)}>
                     <Tabs defaultValue="info" value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
-                        {/* 四列固定排布，避免窄侧栏出现单个页签孤立换行。 */}
-                        <TabsList variant="underline" className="grid shrink-0 grid-cols-4 gap-x-2 gap-y-1 bg-background/95 px-3 py-2">
+                        {/* 页签保持紧凑单行，窄侧栏允许横向滚动，不挤占内容高度。 */}
+                        <TabsList variant="underline" className="flex shrink-0 flex-nowrap gap-3 overflow-x-auto bg-background/95 px-3 py-1">
                             <TabsTrigger
                                 value="info"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabInfo")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="ndvi"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabNdvi")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="weather"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabWeather")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="soil"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabSoil")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="alerts"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 <span className="relative">
                                     {t("tabAlerts")}
@@ -1030,21 +1030,21 @@ export default function FieldDetailPage() {
                             <TabsTrigger
                                 value="land-report"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabLandReport")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="scouting"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabScouting")}
                             </TabsTrigger>
                             <TabsTrigger
                                 value="share"
                                 variant="underline"
-                                className="text-[13px]"
+                                className="shrink-0 pb-2 pt-2 text-[11px]"
                             >
                                 {t("tabShare")}
                             </TabsTrigger>
@@ -1116,19 +1116,19 @@ export default function FieldDetailPage() {
                                 </div>
                             ) : (
                                 <>
-                                    <TabsContent value="info" className="mt-0 p-4 space-y-3">
+                                    <TabsContent value="info" className="mt-0 p-3 space-y-3">
                                         {/* Field header card */}
-                                        <div className="rounded-xl border border-border/60 bg-card p-4">
-                                            <h2 className="text-base font-bold">{field.name}</h2>
+                                        <div className="rounded-lg bg-card p-3">
+                                            <h2 className="text-sm font-semibold">{field.name}</h2>
                                             <p className="text-xs text-muted-foreground mt-0.5">
                                                 {field.area_ha != null ? formatAreaMu(field.area_ha) : ""}
-                                                {field.crop_type && ` · ${field.crop_type}`}
+                                                {field.crop_type && field.crop_type !== "unknown" && ` · ${field.crop_type}`}
                                                 {field.season && ` · ${field.season}`}
                                             </p>
                                         </div>
 
                                         {/* Field details card */}
-                                        <div className="rounded-xl border border-border/60 bg-card p-4">
+                                        <div className="rounded-lg bg-card p-3">
                                             <dl className="grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-3">
                                                 <InfoRow label={t("name")} value={field.name} />
                                                 <InfoRow
@@ -1139,7 +1139,7 @@ export default function FieldDetailPage() {
                                                 />
                                                 <InfoRow
                                                     label={t("cropType")}
-                                                    value={field.crop_type || "-"}
+                                                    value={field.crop_type && field.crop_type !== "unknown" ? field.crop_type : t("cropUnset")}
                                                 />
                                                 <InfoRow
                                                     label={t("season")}
@@ -1201,7 +1201,7 @@ export default function FieldDetailPage() {
                                     <TabsContent
                                         value="ndvi"
                                         forceMount
-                                        className="mt-0 p-4 data-[state=inactive]:hidden data-[state=inactive]:!hidden"
+                                        className="mt-0 p-3 data-[state=inactive]:hidden data-[state=inactive]:!hidden"
                                     >
                                         <NdviTab
                                             fieldId={fieldId}
@@ -1219,7 +1219,7 @@ export default function FieldDetailPage() {
                                         />
                                     </TabsContent>
 
-                                    <TabsContent value="alerts" className="mt-0 p-4">
+                                    <TabsContent value="alerts" className="mt-0 p-3">
                                         <AlertsTab fieldId={fieldId} onOpenCountChange={setOpenAlertCount} />
                                     </TabsContent>
 
@@ -1237,11 +1237,11 @@ export default function FieldDetailPage() {
                                         <ScoutingTab fieldId={fieldId} mapInstance={mapInstance} activeTab={activeTab} />
                                     </TabsContent>
 
-                                    <TabsContent value="weather" className="mt-0 p-4">
+                                    <TabsContent value="weather" className="mt-0 p-3">
                                         <WeatherTab fieldId={fieldId} />
                                     </TabsContent>
 
-                                    <TabsContent value="soil" className="mt-0 p-4">
+                                    <TabsContent value="soil" className="mt-0 p-3">
                                         <SoilTab fieldId={fieldId} mapInstance={mapInstance} activeTab={activeTab} />
                                     </TabsContent>
 
@@ -1262,7 +1262,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
     return (
         <div className="min-w-0 rounded-lg bg-muted/35 px-3 py-2.5">
             <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-            <dd className="mt-1 break-words text-sm font-medium leading-relaxed">{value}</dd>
+            <dd className="mt-1 break-words text-xs font-medium leading-relaxed">{value}</dd>
         </div>
     );
 }

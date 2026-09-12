@@ -11,6 +11,7 @@ from unittest.mock import patch
 from app.core.band_parallel import (
     band_max_workers,
     effective_band_workers,
+    gdal_read_slot,
     reset_band_gdal_limit,
     run_parallel_band_jobs,
 )
@@ -63,6 +64,29 @@ class RunParallelBandJobsTests(unittest.TestCase):
     def test_empty_dict(self) -> None:
         self.assertEqual(run_parallel_band_jobs({}, lambda k, v: v), {})
 
+    def test_direct_reads_share_pool_limit_and_release_on_error(self) -> None:
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def direct_read():
+            with gdal_read_slot():
+                entered.set()
+            finished.set()
+
+        with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "1"}):
+            reset_band_gdal_limit()
+            with self.assertRaises(ValueError):
+                with gdal_read_slot():
+                    # 池内回调会再次进入读取函数，单名额时也必须能复用当前名额。
+                    result = run_parallel_band_jobs({"a": 1}, lambda k, v: v)
+                    self.assertEqual(result, {"a": 1})
+                    worker = threading.Thread(target=direct_read, daemon=True)
+                    worker.start()
+                    self.assertFalse(entered.wait(0.05))
+                    raise ValueError("read failed")
+            self.assertTrue(finished.wait(2))
+            worker.join(timeout=2)
+
     def test_preserves_key_order(self) -> None:
         with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "8"}):
             reset_band_gdal_limit()
@@ -84,9 +108,7 @@ class RunParallelBandJobsTests(unittest.TestCase):
         with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "8"}):
             reset_band_gdal_limit()
             t0 = time.perf_counter()
-            out = run_parallel_band_jobs(
-                {"a": 1, "b": 2, "c": 3}, _fn, scene_workers=1
-            )
+            out = run_parallel_band_jobs({"a": 1, "b": 2, "c": 3}, _fn, scene_workers=1)
             wall = time.perf_counter() - t0
         self.assertEqual(out, {"a": 1, "b": 2, "c": 3})
         self.assertEqual(len(started), 3)

@@ -460,10 +460,11 @@ class ProductPickTests(unittest.TestCase):
 
 
 class SceneCloudFieldsTests(unittest.TestCase):
-    def test_parcel_metric_used_for_over_30_not_stac_alone(self) -> None:
+    def test_large_stac_parcel_gap_uses_conservative_cloud_flag(self) -> None:
         cloud, over, parcel = scene_cloud_fields(42.0, 5.0)
         self.assertEqual(cloud, 42.0)
-        self.assertFalse(over)
+        # 与目录云量差距过大时按 STAC 保守标记，但保留原始地块指标。
+        self.assertTrue(over)
         self.assertEqual(parcel, 5.0)
 
     def test_parcel_over_30_flags_without_dropping_stac(self) -> None:
@@ -539,9 +540,11 @@ class SceneCloudFieldsTests(unittest.TestCase):
         self.assertAlmostEqual(cloud or 0.0, 99.981987)
         self.assertTrue(over)
         self.assertIsNone(parcel)
-        # A real clear hole under a moderately cloudy scene is still 0.
+        # 41% 与地块 0% 的差距触发已上线的保守口径，不再当作清晰景。
         self.assertFalse(parcel_cloud_is_untrusted_clear(0.0, 41.0))
-        self.assertEqual(effective_cloud_pct(0.0, 41.0, parcel_cloud_source="scl"), 0.0)
+        self.assertEqual(
+            effective_cloud_pct(0.0, 41.0, parcel_cloud_source="scl"), 41.0
+        )
 
     def test_good_decloud_zero_parcel_falls_back_to_stac(self) -> None:
         from app.core.agri_classify import effective_cloud_pct
@@ -593,4 +596,3 @@ class SceneCloudFieldsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

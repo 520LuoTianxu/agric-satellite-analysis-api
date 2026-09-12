@@ -687,8 +687,6 @@ async def land_scenes_summary(
     return LandScenesSummaryOut(land_id=land_id, total=total, sensors=sensors)
 
 
-
-
 @router.get(
     "/lands/{land_id}/harvest-detect",
     response_model=HarvestDetectOut,
@@ -739,13 +737,19 @@ async def harvest_detect_for_land(
 
         windows = normalize_growing_seasons(
             [raw_window] if raw_window else [],
-            validate_crop_limits=bool(raw_window.get("crops") or raw_window.get("crop")),
+            validate_crop_limits=bool(
+                raw_window.get("crops") or raw_window.get("crop")
+            ),
         )
-        window = windows[0] if windows else {
-            k: raw_window[k]
-            for k in ("start_date", "end_date", "crops", "label")
-            if raw_window.get(k) is not None
-        }
+        window = (
+            windows[0]
+            if windows
+            else {
+                k: raw_window[k]
+                for k in ("start_date", "end_date", "crops", "label")
+                if raw_window.get(k) is not None
+            }
+        )
 
         from app.core.date_utils import _as_date
         from app.core.harvest_detect import detect_harvest

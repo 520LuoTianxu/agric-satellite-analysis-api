@@ -348,7 +348,8 @@
     "cloudCover": "{percent}% nubes",
     "parcelCloudCover": "nubes parcela {percent}%",
     "sceneCloudCover": "nubes escena {percent}%",
-    "tabLandReport": "Informe de tierra"
+    "tabLandReport": "Informe de tierra",
+    "cropUnset": "Sin definir"
   },
   "alertsTab": {
     "noAlerts": "Sin alertas",
@@ -885,19 +886,22 @@
     "pointLegendGreen": "Puntos verdes: NDVI oficial en temporada (crudo o des-nube good)",
     "pointLegendGray": "Puntos grises: oficial atenuado — fuera de temporada, o NDVI bajo en pico (suelo/débil)",
     "pointLegendYellow": "Rombo amarillo: des-nube alternativo (fair/bad, poco fiable) — solo comparar",
-    "pointLegendSelected": "Punto rojo grande: fecha seleccionada"
+    "pointLegendSelected": "Punto rojo: fecha seleccionada",
+    "empty": "Sin datos de {index}",
+    "showObservations": "Observaciones y alternativas sin nubes",
+    "showEvents": "Marcadores de riesgo"
   },
   "agriPanel": {
-    "title": "Serie temporal Agri RS · mapa de calor",
-    "subtitle": "Parcela land_id={landId}{scenes} · prioriza lonlat_v1",
+    "title": "Monitoreo satelital",
+    "subtitle": "Crecimiento e historial del campo{scenes}",
     "scenesCount": " · {total} escenas",
     "loading": "Cargando escenas agri…",
-    "loadFailed": "Error al cargar la serie temporal agri",
-    "empty": "No hay escenas S1/S2 para esta parcela en la muestra local. El límite está importado; clima/suelo pueden usar la geometría.",
+    "loadFailed": "No se pudieron cargar los datos. Reintenta.",
+    "empty": "Aún no hay imágenes. Selecciona Actualizar imágenes para obtener datos. El clima y el suelo siguen disponibles.",
     "hideHeatmap": "Ocultar mapa de calor",
     "showHeatmap": "Mostrar mapa de calor",
     "rendering": " · renderizando…",
-    "refreshRs": "Volver a obtener teledetección",
+    "refreshRs": "Actualizar imágenes",
     "refreshRsTitle": "Descargar bandas, calcular índices y escribir agri lonlat_v1 (sin TIF de índice)",
     "refreshRsDateTitle": "Elegir fecha de inicio",
     "refreshRsDateDesc": "Descarga óptica y radar desde esta fecha hasta hoy (fragmentos de ~90 días). El progreso cuenta fragmentos, no escenas.",
@@ -949,7 +953,17 @@
     "harvestDetectHint": "Según teledetección, no es un pronóstico",
     "harvestDetected": "La RS ya muestra post-cosecha en esta fecha",
     "harvestUncertain": "Cosecha incierta",
-    "harvestNoGrowth": "Sin crecimiento claro"
+    "harvestNoGrowth": "Sin crecimiento claro",
+    "retry": "Reintentar",
+    "dataDetails": "Detalles de datos",
+    "harvestFailed": "Falló la detección. Inténtalo de nuevo.",
+    "heatmapFailed": "No se pudo cargar la imagen",
+    "confidenceHigh": "Confianza alta",
+    "confidenceMedium": "Confianza media",
+    "confidenceLow": "Confianza baja",
+    "confidenceUnknown": "Confianza desconocida",
+    "harvestNoGrowthShort": "Sin crecimiento claro",
+    "harvestUncertainShort": "Evidencia insuficiente"
   },
   "landReportTab": {
     "title": "Informe de evaluación de tierra",
@@ -1056,6 +1070,7 @@
     "droughtSourceCache": "caché preagregada",
     "exportStats": "Exportar estadísticas",
     "exportWeak": "Exportar parcelas débiles",
-    "exportFailed": "Error al exportar"
+    "exportFailed": "Error al exportar",
+    "retry": "Reintentar"
   }
 }

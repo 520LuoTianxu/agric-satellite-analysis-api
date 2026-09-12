@@ -29,9 +29,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install openfarm_common
-        run: pip install -e packages/openfarm_common
+        run: pip install -e packages/openfarm_common pytest
       - name: Unit tests
-        run: python -m unittest discover -s packages/openfarm_common/tests -v
+        run: python -m pytest packages/openfarm_common/tests -q
 
   ingest:
     name: Ingest - unit tests
@@ -41,7 +41,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Unit tests (no extra deps)
+      - name: Install shared task dependencies
+        run: pip install -e packages/openfarm_common numpy pillow
+      - name: Unit tests
         run: PYTHONPATH=services/ingest python -m unittest discover -s services/ingest/tests -v
 
   web:

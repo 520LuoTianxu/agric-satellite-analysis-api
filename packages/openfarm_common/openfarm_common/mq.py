@@ -194,6 +194,8 @@ def declare_queues(
     pq = process_queue or result_queue or settings.cloudamqp_process_queue
     channel.queue_declare(queue=dq, durable=True)
     channel.queue_declare(queue=pq, durable=True)
+    # 等 broker 确认持久化接收后再返回，重试消息发布失败时保留原消息未确认。
+    channel.confirm_delivery()
     return dq, pq
 
 
@@ -208,6 +210,7 @@ def publish_json(
     channel.basic_publish(
         exchange="",
         routing_key=queue,
+        mandatory=True,
         body=body,
         properties=pika.BasicProperties(
             delivery_mode=2 if persistent else 1,
@@ -389,13 +392,13 @@ def consume_forever(
                     retry,
                 )
             else:
-                # Ack original + republish with incremented x-retry-count
-                # (nack+requeue does not bump headers / x-death).
+                # 确认重试消息已被代理接收后才确认原消息，发送失败时保留原消息待重新投递。
                 headers = dict(properties.headers or {})
                 headers["x-retry-count"] = retry + 1
                 ch.basic_publish(
                     exchange="",
                     routing_key=queue,
+                    mandatory=True,
                     body=body,
                     properties=pika.BasicProperties(
                         delivery_mode=2,

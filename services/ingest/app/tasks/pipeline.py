@@ -30,7 +30,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
-from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
+from app.core.band_parallel import run_parallel_band_jobs, band_max_workers, gdal_read_slot
 from app.core.config import settings, scene_max_workers
 from app.tasks.indices import IndexDef
 
@@ -404,7 +404,8 @@ def read_band_windowed(
     this under their own ``rasterio.Env()`` (this function opens one).
     Categorical layers (SCL) must pass ``resampling=Resampling.nearest``.
     """
-    with rasterio.Env():
+    # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
+    with gdal_read_slot(), rasterio.Env():
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
             window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
@@ -452,7 +453,8 @@ def read_rgb_windowed(
     Returns HxWx3 float32 (or None if the asset has fewer than 3 bands).
     Element84 ``visual`` is typically uint8 RGB; values are preserved.
     """
-    with rasterio.Env():
+    # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
+    with gdal_read_slot(), rasterio.Env():
         with rasterio.open(href) as src:
             if src.count < 3:
                 return None

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import * as echarts from "echarts/core";
 import { LineChart, BarChart, ScatterChart } from "echarts/charts";
@@ -109,6 +109,11 @@ export default function NdviChart({
     eventMarks,
 }: NdviChartProps) {
     const t = useTranslations("ndviChart");
+    // 选择日期只更新高亮，不重置用户已经选择的时间窗口；数据范围改变时重新适配。
+    const viewKey = `${indexType}:${stats[0]?.date ?? ""}:${stats[stats.length - 1]?.date ?? ""}`;
+    const zoomRef = useRef<{ key: string; start: number; end: number } | null>(null);
+    const [showObservations, setShowObservations] = useState(false);
+    const [showEvents, setShowEvents] = useState(false);
     const config = INDEX_CONFIG[indexType];
     const seriesName = config.label;
     const isSar = indexType === "VV" || indexType === "VH";
@@ -152,15 +157,15 @@ export default function NdviChart({
             let symbolSize = isSar && stats.length <= 3 ? 8 : 4;
             if (d === selectedDate) {
                 color = tokenColor("--danger");
-                symbolSize = 10;
+                symbolSize = 8;
             } else if (s.may_be_unreliable) {
                 color = tokenColor("--warning");
                 opacity = 0.85;
-                symbolSize = 8;
+                symbolSize = 5;
             } else if (bare) {
                 color = tokenColor("--muted-foreground");
                 opacity = 0.6;
-                symbolSize = 7;
+                symbolSize = 4;
             } else if (!inSeason && !isSar) {
                 color = tokenColor("--muted-foreground");
                 opacity = 0.45;
@@ -260,34 +265,35 @@ export default function NdviChart({
             : undefined;
 
         const valueByDate = new Map(stats.map((s) => [s.date, s.mean]));
-        const markPointOption =
-            eventMarks && eventMarks.length
-                ? {
-                      silent: true,
-                      symbol: "pin",
-                      symbolSize: 28,
-                      label: { show: false },
-                      data: eventMarks.map((m) => {
-                          const v =
-                              m.value != null && Number.isFinite(m.value)
-                                  ? m.value
-                                  : (valueByDate.get(m.date) ?? 0);
-                          const color =
-                              m.level === "high"
-                                  ? tokenColor("--sev-high")
-                                  : m.level === "medium"
-                                    ? tokenColor("--sev-medium")
-                                    : tokenColor("--sev-low");
-                          return {
-                              name: m.label,
-                              coord: [m.date, v],
-                              itemStyle: { color },
-                          };
-                      }),
-                  }
-                : undefined;
+        // 默认仅突出选中日期；风险标记按日期去重并按需显示，避免大量图钉遮住趋势。
+        const visibleMarks = showEvents
+            ? [...new Map((eventMarks ?? []).filter((m) => m.date !== selectedDate).map((m) => [m.date, m])).values()]
+            : [];
+        const selectedValue = selectedDate ? valueByDate.get(selectedDate) : null;
+        const markPointOption = {
+            symbol: "circle",
+            symbolSize: 6,
+            label: { show: false },
+            data: [
+                ...visibleMarks.flatMap((m) => {
+                    const value = m.value ?? valueByDate.get(m.date);
+                    if (value == null || !Number.isFinite(value)) return [];
+                    return [{
+                        name: m.label,
+                        coord: [m.date, value],
+                        itemStyle: { color: tokenColor(m.level === "high" ? "--sev-high" : m.level === "medium" ? "--sev-medium" : "--sev-low") },
+                    }];
+                }),
+                ...(selectedDate && selectedValue != null && Number.isFinite(selectedValue) ? [{
+                    name: t("pointLegendSelected"),
+                    coord: [selectedDate, selectedValue],
+                    symbolSize: 8,
+                    itemStyle: { color: tokenColor("--danger"), borderColor: tokenColor("--background"), borderWidth: 2 },
+                }] : []),
+            ],
+        };
 
-        const hasAlt = altData.length > 0;
+        const hasAlt = showObservations && altData.length > 0;
         const showLegend = hasWeather || hasAlt;
         const legendData = [
             seriesName,
@@ -392,6 +398,7 @@ export default function NdviChart({
                         return ((viewStart - tMin) / span) * 100;
                     })(),
                     end: 100,
+                    ...(zoomRef.current?.key === viewKey ? { start: zoomRef.current.start, end: zoomRef.current.end } : {}),
                     zoomOnMouseWheel: false,
                     moveOnMouseWheel: false,
                 },
@@ -441,7 +448,9 @@ export default function NdviChart({
                     connectNulls: false,
                     itemStyle: { color: indexLineColor(indexType) },
                     lineStyle: { color: indexLineColor(indexType), width: 1.8 },
-                    showSymbol: true,
+                    showSymbol: showObservations || stats.length <= 3,
+                    // 样本很多时用 LTTB 保留峰谷形态，避免密集日期把趋势线画成毛刺。
+                    sampling: stats.length > 90 ? "lttb" : undefined,
                     markLine: {
                         silent: true,
                         symbol: ["none", "none"],
@@ -489,10 +498,16 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, t]);
+    }, [stats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, viewKey, showObservations, showEvents, t]);
 
     const onEvents = useMemo(
         () => ({
+            datazoom: (event: { start?: number; end?: number; batch?: { start?: number; end?: number }[] }) => {
+                const value = event.batch?.[0] ?? event;
+                if (typeof value.start === "number" && typeof value.end === "number") {
+                    zoomRef.current = { key: viewKey, start: value.start, end: value.end };
+                }
+            },
             click: (params: any) => {
                 const ok =
                     params.seriesName === seriesName ||
@@ -504,7 +519,7 @@ export default function NdviChart({
                 }
             },
         }),
-        [onDateSelect, seriesName, t],
+        [onDateSelect, seriesName, viewKey, t],
     );
 
     if (stats.length === 0) {
@@ -513,7 +528,7 @@ export default function NdviChart({
                 className="flex items-center justify-center text-xs text-muted-foreground"
                 style={{ height }}
             >
-                No {config.label} data yet.
+                {t("empty", { index: config.label })}
             </div>
         );
     }
@@ -533,12 +548,22 @@ export default function NdviChart({
                 notMerge
                 lazyUpdate
             />
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[11px] text-muted-foreground">
+                <label className="inline-flex cursor-pointer items-center gap-1.5">
+                    <input type="checkbox" className="accent-primary" checked={showObservations} onChange={(e) => setShowObservations(e.target.checked)} />
+                    {t("showObservations")}
+                </label>
+                {!!eventMarks?.length && <label className="inline-flex cursor-pointer items-center gap-1.5">
+                    <input type="checkbox" className="accent-primary" checked={showEvents} onChange={(e) => setShowEvents(e.target.checked)} />
+                    {t("showEvents")}
+                </label>}
+            </div>
             {!isSar ? (
-                <details className="rounded-lg bg-muted/35 px-3 py-2 text-xs text-muted-foreground">
-                    <summary className="cursor-pointer text-xs font-medium">
+                <details className="rounded-lg bg-muted/35 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                    <summary className="cursor-pointer text-[11px] font-medium">
                         {t("pointLegendTitle")}
                     </summary>
-                    <ul className="mt-2 grid gap-2 text-xs text-muted-foreground leading-relaxed">
+                    <ul className="mt-2 grid gap-1.5 text-[11px] text-muted-foreground leading-relaxed">
                         <li className="flex items-start gap-1.5">
                             <span
                                 className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"

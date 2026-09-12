@@ -257,8 +257,11 @@ export default function OverviewPage() {
         setToDate(w.to);
     }, [seasonMonths, preset]);
 
+    const statsRequestRef = useRef(0);
     const loadStats = useCallback(
         async (d: DrillState, from: string, to: string, cropKey: string) => {
+            // 快速切换时间或区域时只接受最后一次请求，避免旧响应覆盖当前筛选。
+            const request = ++statsRequestRef.current;
             setLoading(true);
             setError(null);
             try {
@@ -270,16 +273,14 @@ export default function OverviewPage() {
                     to,
                     crop: cropKey || undefined,
                 });
+                if (request !== statsRequestRef.current) return;
                 setStats(res);
             } catch (e: unknown) {
-                const msg =
-                    e && typeof e === "object" && "detail" in e
-                        ? String((e as { detail: unknown }).detail)
-                        : t("loadFailed");
-                setError(msg || t("loadFailed"));
+                if (request !== statsRequestRef.current) return;
+                setError(t("loadFailed"));
                 setStats(null);
             } finally {
-                setLoading(false);
+                if (request === statsRequestRef.current) setLoading(false);
             }
         },
         [t],
@@ -287,6 +288,7 @@ export default function OverviewPage() {
 
     useEffect(() => {
         void loadStats(drill, fromDate, toDate, crop);
+        return () => { statsRequestRef.current += 1; };
     }, [drill, fromDate, toDate, crop, loadStats]);
 
     const [exporting, setExporting] = useState(false);
@@ -864,7 +866,10 @@ export default function OverviewPage() {
                 <div className="flex flex-col gap-1.5 overflow-y-auto text-xs">
                     {error && (
                         <Card className="border-destructive/40">
-                            <CardContent className="px-2 py-1.5 text-xs text-destructive">{error}</CardContent>
+                            <CardContent role="alert" className="space-y-2 px-3 py-2 text-xs">
+                                <p>{error}</p>
+                                <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => void loadStats(drill, fromDate, toDate, crop)}>{t("retry")}</Button>
+                            </CardContent>
                         </Card>
                     )}
 

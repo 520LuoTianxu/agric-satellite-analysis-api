@@ -113,8 +113,10 @@ class JointStretchTests(unittest.TestCase):
         self.assertFalse(bool(outline[5, 5]))
         self.assertTrue(bool(outline[3, 5]))
         self.assertTrue(bool(outline[8, 5]))
-        # Outline should be much thinner than filled.
-        self.assertLess(int(outline.sum()), int(mask.sum()) // 2)
+        # 6×6 方块的一像素内边框应恰好为 36−16=20，不能要求小于面积的一半。
+        expected = mask.copy()
+        expected[4:8, 4:8] = False
+        np.testing.assert_array_equal(outline, expected)
 
     def test_draw_red_outline_paints_bright_red(self) -> None:
         from app.core.true_color_preview import draw_red_outline, outline_mask_from_filled

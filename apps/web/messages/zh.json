@@ -348,7 +348,8 @@
     "cloudCover": "云量 {percent}%",
     "parcelCloudCover": "地块云量 {percent}%",
     "sceneCloudCover": "整景云量 {percent}%",
-    "tabLandReport": "选地报告"
+    "tabLandReport": "选地报告",
+    "cropUnset": "未设置"
   },
   "alertsTab": {
     "noAlerts": "暂无预警",
@@ -885,19 +886,22 @@
     "pointLegendGreen": "绿色圆点：生育期内正常官方 NDVI（原景或 good 去云）",
     "pointLegendGray": "灰色圆点：官方点但弱化——非生育期，或峰值月 NDVI 过低（偏裸土/弱长势）",
     "pointLegendYellow": "黄色菱形：去云副产品（fair/bad，未必可靠），仅对比，不作官方/干旱依据",
-    "pointLegendSelected": "红色大点：当前选中日期"
+    "pointLegendSelected": "红色圆点：当前选中日期",
+    "empty": "暂无 {index} 数据",
+    "showObservations": "观测点与去云对照",
+    "showEvents": "风险标记"
   },
   "agriPanel": {
-    "title": "Agri 遥感时序 · 色斑图",
-    "subtitle": "地块 land_id={landId}{scenes} · 优先 DB lonlat_v1 色膜",
+    "title": "遥感监测",
+    "subtitle": "查看地块长势与历史变化{scenes}",
     "scenesCount": " · 共 {total} 景",
     "loading": "加载 agri 场景…",
-    "loadFailed": "加载 agri 时序失败",
-    "empty": "本地样例库中该地块暂无 S1/S2 场景。边界已导入；天气/土壤可按地块几何拉取。色斑图与长势曲线需补齐 parcel_scene_products。",
+    "loadFailed": "数据加载失败，请重试",
+    "empty": "暂无遥感影像。可点击“更新影像”获取数据；天气和土壤信息仍可查看。",
     "hideHeatmap": "隐藏色斑图",
     "showHeatmap": "显示色斑图",
     "rendering": " · 渲染中…",
-    "refreshRs": "重新拉取遥感数据",
+    "refreshRs": "更新影像",
     "refreshRsTitle": "下载波段、计算指数并直接写入 agri lonlat_v1（不上传指数 TIF）",
     "refreshRsDateTitle": "选择拉取起始日期",
     "refreshRsDateDesc": "将拉取从该日到今天的光学+雷达数据（按约 90 天分片）。景数不等于分片进度。",
@@ -949,7 +953,17 @@
     "harvestDetectHint": "根据遥感表现检出，不是预报",
     "harvestDetected": "该日遥感已呈收获后表现（不早于上一清晰景）",
     "harvestUncertain": "收获日不确定（官方清晰点不足或云多）",
-    "harvestNoGrowth": "窗内未见明显生长"
+    "harvestNoGrowth": "窗内未见明显生长",
+    "retry": "重试",
+    "dataDetails": "数据详情",
+    "harvestFailed": "检测请求失败，请重试",
+    "heatmapFailed": "当前影像加载失败",
+    "confidenceHigh": "高置信度",
+    "confidenceMedium": "中置信度",
+    "confidenceLow": "低置信度",
+    "confidenceUnknown": "置信度未知",
+    "harvestNoGrowthShort": "未见明显生长",
+    "harvestUncertainShort": "证据不足"
   },
   "landReportTab": {
     "title": "选地体检报告",
@@ -1056,6 +1070,7 @@
     "droughtSourceCache": "预聚合缓存",
     "exportStats": "导出区划统计",
     "exportWeak": "导出弱长势",
-    "exportFailed": "导出失败"
+    "exportFailed": "导出失败",
+    "retry": "重试"
   }
 }

@@ -348,7 +348,8 @@
     "cloudCover": "{percent}% cloud",
     "parcelCloudCover": "parcel cloud {percent}%",
     "sceneCloudCover": "scene cloud {percent}%",
-    "tabLandReport": "Land report"
+    "tabLandReport": "Land report",
+    "cropUnset": "Not set"
   },
   "alertsTab": {
     "noAlerts": "No alerts",
@@ -885,19 +886,22 @@
     "pointLegendGreen": "Green dots: in-season official NDVI (raw or good de-cloud)",
     "pointLegendGray": "Gray dots: official but muted — off-season, or peak-month NDVI too low (bare/weak)",
     "pointLegendYellow": "Yellow diamonds: de-cloud alternate (fair/bad, may be unreliable) — compare only, not official/drought",
-    "pointLegendSelected": "Red large dot: selected date"
+    "pointLegendSelected": "Red dot: selected date",
+    "empty": "No {index} data yet",
+    "showObservations": "Observations & cloud-free alternatives",
+    "showEvents": "Risk markers"
   },
   "agriPanel": {
-    "title": "Agri RS time series · heatmap",
-    "subtitle": "Parcel land_id={landId}{scenes} · prefers DB lonlat_v1 film",
+    "title": "Satellite monitoring",
+    "subtitle": "Field growth and history{scenes}",
     "scenesCount": " · {total} scenes",
     "loading": "Loading agri scenes…",
-    "loadFailed": "Failed to load agri time series",
-    "empty": "No S1/S2 scenes for this parcel in the local sample. Boundary is imported; weather/soil can use geometry. Heatmap and growth curves need parcel_scene_products.",
+    "loadFailed": "Unable to load data. Please retry.",
+    "empty": "No satellite imagery yet. Select Update imagery to fetch data. Weather and soil remain available.",
     "hideHeatmap": "Hide heatmap",
     "showHeatmap": "Show heatmap",
     "rendering": " · rendering…",
-    "refreshRs": "Re-fetch remote sensing",
+    "refreshRs": "Update imagery",
     "refreshRsTitle": "Download bands, compute indices, write agri lonlat_v1 (no index TIF upload)",
     "refreshRsDateTitle": "Choose start date",
     "refreshRsDateDesc": "Pull optical + radar from this date through today (~90-day shards). Progress counts shards, not scenes.",
@@ -949,7 +953,17 @@
     "harvestDetectHint": "From remote-sensing appearance — not a forecast",
     "harvestDetected": "RS already shows post-harvest on this date (not earlier than previous clear scene)",
     "harvestUncertain": "Harvest uncertain (too few clear official points or cloudy)",
-    "harvestNoGrowth": "No clear growth in window"
+    "harvestNoGrowth": "No clear growth in window",
+    "retry": "Retry",
+    "dataDetails": "Data details",
+    "harvestFailed": "Detection request failed. Please retry.",
+    "heatmapFailed": "Unable to load this image",
+    "confidenceHigh": "High confidence",
+    "confidenceMedium": "Medium confidence",
+    "confidenceLow": "Low confidence",
+    "confidenceUnknown": "Unknown confidence",
+    "harvestNoGrowthShort": "No clear growth",
+    "harvestUncertainShort": "Insufficient evidence"
   },
   "landReportTab": {
     "title": "Land assessment report",
@@ -1056,6 +1070,7 @@
     "droughtSourceCache": "pre-agg cache",
     "exportStats": "Export stats CSV",
     "exportWeak": "Export weak parcels",
-    "exportFailed": "Export failed"
+    "exportFailed": "Export failed",
+    "retry": "Retry"
   }
 }

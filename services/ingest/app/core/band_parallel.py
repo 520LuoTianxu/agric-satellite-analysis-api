@@ -25,6 +25,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from typing import Callable, TypeVar
 
 _log = logging.getLogger("openfarm.ingest.band_parallel")
@@ -45,6 +46,7 @@ _DEFAULT_BAND_WORKERS = 16
 _gdal_limit_lock = threading.Lock()
 _gdal_limit: threading.BoundedSemaphore | None = None
 _gdal_limit_n = 0
+_read_local = threading.local()
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -103,6 +105,20 @@ def _gdal_band_limit() -> threading.BoundedSemaphore:
         return _gdal_limit
 
 
+@contextmanager
+def gdal_read_slot():
+    """统一限制所有远程栅格读取；同线程嵌套调用复用名额，避免 cap=1 时死锁。"""
+    if getattr(_read_local, "active", False):
+        yield
+        return
+    with _gdal_band_limit():
+        _read_local.active = True
+        try:
+            yield
+        finally:
+            _read_local.active = False
+
+
 def run_parallel_band_jobs(
     items: dict[K, V],
     fn: Callable[[K, V], R],
@@ -135,16 +151,14 @@ def run_parallel_band_jobs(
         wait_ms = 0
         read_ms = 0
         try:
-            sem = _gdal_band_limit()
             t_wait = time.perf_counter()
-            sem.acquire()
-            wait_ms = int((time.perf_counter() - t_wait) * 1000)
-            try:
+            with gdal_read_slot():
+                wait_ms = int((time.perf_counter() - t_wait) * 1000)
                 t_read = time.perf_counter()
-                return fn(key, value)
-            finally:
-                read_ms = int((time.perf_counter() - t_read) * 1000)
-                sem.release()
+                try:
+                    return fn(key, value)
+                finally:
+                    read_ms = int((time.perf_counter() - t_read) * 1000)
         finally:
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             _band_log(
