@@ -30,6 +30,7 @@ import {
     thresholdMarkLine,
     valueAxis,
 } from "./chart-base";
+import { filterRealisticNdviStats } from "@/lib/ndvi-realistic-filter";
 
 // Register only the modules we need (tree-shake friendly)
 echarts.use([
@@ -109,15 +110,21 @@ export default function NdviChart({
     eventMarks,
 }: NdviChartProps) {
     const t = useTranslations("ndviChart");
-    // 选择日期只更新高亮，不重置用户已经选择的时间窗口；数据范围改变时重新适配。
-    const viewKey = `${indexType}:${stats[0]?.date ?? ""}:${stats[stats.length - 1]?.date ?? ""}`;
-    const zoomRef = useRef<{ key: string; start: number; end: number } | null>(null);
     const [showObservations, setShowObservations] = useState(false);
     const [showEvents, setShowEvents] = useState(false);
+    /** Checked = hide unrealistic / cloud-hole points (default). */
+    const [onlyRealistic, setOnlyRealistic] = useState(true);
+    const displayStats = useMemo(
+        () => (onlyRealistic ? filterRealisticNdviStats(stats, { seasonMonths, peakMonths }) : stats),
+        [onlyRealistic, stats, seasonMonths, peakMonths],
+    );
+    // 选择日期只更新高亮，不重置用户已经选择的时间窗口；数据范围改变时重新适配。
+    const viewKey = `${indexType}:${displayStats[0]?.date ?? ""}:${displayStats[displayStats.length - 1]?.date ?? ""}:r${onlyRealistic ? 1 : 0}`;
+    const zoomRef = useRef<{ key: string; start: number; end: number } | null>(null);
     const config = INDEX_CONFIG[indexType];
     const seriesName = config.label;
     const isSar = indexType === "VV" || indexType === "VH";
-    const dataVals = stats
+    const dataVals = displayStats
         .map((s) => s.mean)
         .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
     let yMin = config.rescaleMin;
@@ -138,14 +145,14 @@ export default function NdviChart({
     }, [weatherData, showWeatherOverlay]);
 
     const option = useMemo(() => {
-        // NDVI data as [date, value] pairs for time axis
-        const bandLowData = stats.map((s) => [s.date, s.p10 ?? null] as [string, number | null]);
-        const bandHighData = stats.map((s) => {
+        // NDVI data as [date, value] pairs for time axis (optionally filtered)
+        const bandLowData = displayStats.map((s) => [s.date, s.p10 ?? null] as [string, number | null]);
+        const bandHighData = displayStats.map((s) => {
             const p90 = s.p90 ?? null;
             const p10 = s.p10 ?? null;
             return [s.date, p90 != null && p10 != null ? p90 - p10 : null] as [string, number | null];
         });
-        const ndviData = stats.map((s) => {
+        const ndviData = displayStats.map((s) => {
             const d = s.date;
             const v = s.mean ?? null;
             const m = Number(String(d).slice(5, 7));
@@ -154,7 +161,7 @@ export default function NdviChart({
             const bare = !isSar && inPeak && typeof v === "number" && v < bareThreshold;
             let color = indexLineColor(indexType);
             let opacity = 1;
-            let symbolSize = isSar && stats.length <= 3 ? 8 : 4;
+            let symbolSize = isSar && displayStats.length <= 3 ? 8 : 4;
             if (d === selectedDate) {
                 color = tokenColor("--danger");
                 symbolSize = 8;
@@ -213,7 +220,7 @@ export default function NdviChart({
             : [];
 
         const years = Array.from(
-            new Set(stats.map((s) => Number(String(s.date).slice(0, 4))).filter((y) => Number.isFinite(y))),
+            new Set(displayStats.map((s) => Number(String(s.date).slice(0, 4))).filter((y) => Number.isFinite(y))),
         ).sort();
 
         const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -264,7 +271,7 @@ export default function NdviChart({
             ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: tokenColor("--muted-foreground") }, data: markAreaData }
             : undefined;
 
-        const valueByDate = new Map(stats.map((s) => [s.date, s.mean]));
+        const valueByDate = new Map(displayStats.map((s) => [s.date, s.mean]));
         // 默认仅突出选中日期；风险标记按日期去重并按需显示，避免大量图钉遮住趋势。
         const visibleMarks = showEvents
             ? [...new Map((eventMarks ?? []).filter((m) => m.date !== selectedDate).map((m) => [m.date, m])).values()]
@@ -386,8 +393,8 @@ export default function NdviChart({
                 // No LTTB — full series stays in option data so recent dates (e.g. 2026) render.
                 let start = 0;
                 let end = 100;
-                if (stats.length >= 2) {
-                    const times = stats
+                if (displayStats.length >= 2) {
+                    const times = displayStats
                         .map((s) => Date.parse(s.date))
                         .filter((t) => Number.isFinite(t));
                     if (times.length >= 2) {
@@ -463,7 +470,7 @@ export default function NdviChart({
                     connectNulls: false,
                     itemStyle: { color: indexLineColor(indexType) },
                     lineStyle: { color: indexLineColor(indexType), width: 1.8 },
-                    showSymbol: showObservations || stats.length <= 3,
+                    showSymbol: showObservations || displayStats.length <= 3,
                     // Do not LTTB-sample agri timeseries: downsampling on a time axis can
                     // drop/misrender the recent tail (e.g. hide 2026 points).
                     markLine: {
@@ -513,7 +520,7 @@ export default function NdviChart({
                     : []),
             ],
         };
-    }, [stats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, viewKey, showObservations, showEvents, t]);
+    }, [displayStats, decloudAltStats, selectedDate, config, seriesName, weatherSorted, indexType, yMin, yMax, isSar, seasonMonths, peakMonths, stageBands, bareThreshold, eventMarks, viewKey, showObservations, showEvents, onlyRealistic, t]);
 
     const onEvents = useMemo(
         () => ({
@@ -572,6 +579,10 @@ export default function NdviChart({
                     <input type="checkbox" className="accent-primary" checked={showEvents} onChange={(e) => setShowEvents(e.target.checked)} />
                     {t("showEvents")}
                 </label>}
+                <label className="inline-flex cursor-pointer items-center gap-1.5">
+                    <input type="checkbox" className="accent-primary" checked={onlyRealistic} onChange={(e) => setOnlyRealistic(e.target.checked)} />
+                    {t("onlyRealistic")}
+                </label>
             </div>
             {!isSar ? (
                 <details className="rounded-lg bg-muted/35 px-2.5 py-1.5 text-[11px] text-muted-foreground">
