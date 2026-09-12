@@ -614,10 +614,15 @@ export const jobsApi = {
 
 export interface GrowingSeasonWindow {
     label?: string;
+    /** 1–2 crop keys for this window (2 = intercrop). */
+    crops?: string[];
+    /** @deprecated use crops[] */
     crop?: string;
     months?: number[];
     start_month?: number;
     end_month?: number;
+    start_date?: string;
+    end_date?: string;
 }
 
 export interface CropOption {
