@@ -747,14 +747,20 @@ async def harvest_detect_for_land(
             if raw_window.get(k) is not None
         }
 
+        from app.core.date_utils import _as_date
+        from app.core.harvest_detect import detect_harvest
+
         params: dict[str, Any] = {"land_id": land_id}
         where = ["land_id = :land_id", "sensor = 'S2'", "ndvi_avg IS NOT NULL"]
-        if window.get("start_date"):
+        # asyncpg needs datetime.date, not ISO strings from normalize_growing_seasons
+        date_from = _as_date(window.get("start_date"))
+        if date_from is not None:
             where.append("date >= :date_from")
-            params["date_from"] = window["start_date"]
-        if window.get("end_date"):
+            params["date_from"] = date_from
+        date_to = _as_date(window.get("end_date"))
+        if date_to is not None:
             where.append("date <= :date_to")
-            params["date_to"] = window["end_date"]
+            params["date_to"] = date_to
         wh = " AND ".join(where)
         rows = (
             await db.execute(
@@ -772,7 +778,6 @@ async def harvest_detect_for_land(
         ).fetchall()
 
         from app.core.agri_classify import is_official_optical_product
-        from app.core.harvest_detect import detect_harvest
 
         points: list[dict[str, Any]] = []
         for r in rows:
