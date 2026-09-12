@@ -432,7 +432,7 @@ def render_stages_panel(
     # Compact 2×2 — less whitespace than prior 9.2×8.0 + large padding
     fig, axes = plt.subplots(2, 2, figsize=(7.6, 6.4), dpi=140)
     fig.suptitle(
-        "夏玉米不同生育阶段对比（真彩底图+绿度叠色 / 或色斑）",
+        "作物不同生育阶段对比（真彩底图+绿度叠色 / 或色斑）",
         fontsize=11,
         y=0.995,
     )

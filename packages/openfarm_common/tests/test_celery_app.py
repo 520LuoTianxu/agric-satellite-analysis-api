@@ -6,6 +6,7 @@ import socket
 import unittest
 
 from openfarm_common.celery_app import (
+    TASK_ROUTES,
     celery_app_config,
     celery_redis_transport_options,
     create_celery_app,
@@ -87,6 +88,14 @@ class CeleryRedisTransportTests(unittest.TestCase):
         self.assertEqual(
             app.conf.broker_connection_max_retries,
             expected["broker_connection_max_retries"],
+        )
+
+
+    def test_decloud_tasks_route_to_decloud_queue(self) -> None:
+        """Download-machine runs UnCRtainTS on -Q decloud, not ingest."""
+        self.assertEqual(
+            TASK_ROUTES["app.tasks.decloud_uncrtaints.*"]["queue"],
+            "decloud",
         )
 
 

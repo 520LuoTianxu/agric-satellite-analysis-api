@@ -13,6 +13,7 @@ import {
     type CropOption,
     type FieldStat,
     type GrowingSeasonWindow,
+    type HarvestDetectResult,
     type IndexType,
 } from "@/lib/api";
 import { useTranslations } from "next-intl";
@@ -43,6 +44,7 @@ import {
     opticalTooltipFields,
     pickOfficialOptical,
     pickOpticalForNdvi,
+    sceneCloudDisplay,
     sceneCloudPct,
 } from "@/lib/agri-classify";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -72,7 +74,7 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, Satellite, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check } from "lucide-react";
+import { Loader2, Eye, EyeOff, RefreshCw, History, MoreHorizontal, Check, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgriIndexGlossary } from "@/components/field/agri-index-glossary";
 import { toast } from "sonner";
@@ -243,6 +245,18 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
     return out;
 }
 
+function formatCloudCoverLabel(
+    pct: number | null | undefined,
+    source: "parcel" | "stac" | null | undefined,
+    t: (key: string, values?: Record<string, string | number>) => string,
+): string {
+    if (pct == null || !Number.isFinite(pct)) return "";
+    const rounded = Math.round(pct);
+    if (source === "parcel") return t("parcelCloudCover", { percent: rounded });
+    if (source === "stac") return t("sceneCloudCover", { percent: rounded });
+    return t("cloudCover", { percent: rounded });
+}
+
 function decloudQualityChip(
     quality: string | null | undefined,
     t: (key: string) => string,
@@ -409,6 +423,35 @@ function defaultRsDateFrom(): string {
     return d.toISOString().slice(0, 10);
 }
 
+const MAX_SEASON_WINDOWS = 3;
+
+type SeasonWindowDraft = {
+    id: string;
+    start_date: string;
+    end_date: string;
+    crops: string[];
+    label: string;
+};
+
+function newWindowId(): string {
+    return `w-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function yearFromIso(iso: string): number {
+    const y = Number(String(iso || "").slice(0, 4));
+    return Number.isFinite(y) && y > 1970 ? y : new Date().getFullYear();
+}
+
+function distinctCropsInWindows(windows: SeasonWindowDraft[]): string[] {
+    const out: string[] = [];
+    for (const w of windows) {
+        for (const c of w.crops) {
+            if (!out.includes(c)) out.push(c);
+        }
+    }
+    return out;
+}
+
 export default function AgriTimeseriesPanel({
     fieldId,
     fieldTags,
@@ -427,8 +470,10 @@ export default function AgriTimeseriesPanel({
     const [refreshDateOpen, setRefreshDateOpen] = useState(false);
     const [refreshDateFrom, setRefreshDateFrom] = useState(defaultRsDateFrom);
     const [cropCatalog, setCropCatalog] = useState<CropOption[]>([]);
-    /** Crop keys selected as growing seasons for this pull (rotation = multi). */
-    const [selectedSeasonKeys, setSelectedSeasonKeys] = useState<string[]>([]);
+    /** Growing-season windows for this pull (rotation = multi; intercrop = crops length 2). */
+    const [seasonWindows, setSeasonWindows] = useState<SeasonWindowDraft[]>([]);
+    const [harvestResult, setHarvestResult] = useState<HarvestDetectResult | null>(null);
+    const [harvestLoading, setHarvestLoading] = useState(false);
     const [backfillProgress, setBackfillProgress] = useState<BackfillStatusResponse | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
     const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -496,7 +541,23 @@ export default function AgriTimeseriesPanel({
                     null;
                 setCropOption(hit);
                 if (hit) {
-                    setSelectedSeasonKeys((prev) => (prev.length ? prev : [hit.key]));
+                    setSeasonWindows((prev) => {
+                        if (prev.length) return prev;
+                        const y = new Date().getFullYear();
+                        const months = hit.season_months?.length ? hit.season_months : [6, 7, 8, 9];
+                        const sm = Math.min(...months);
+                        const em = Math.max(...months);
+                        const endDay = em === 2 ? 28 : [4, 6, 9, 11].includes(em) ? 30 : 31;
+                        return [
+                            {
+                                id: newWindowId(),
+                                start_date: `${y}-${String(sm).padStart(2, "0")}-01`,
+                                end_date: `${y}-${String(em).padStart(2, "0")}-${String(endDay).padStart(2, "0")}`,
+                                crops: [hit.key],
+                                label: hit.season_label_zh || hit.name_zh || hit.name,
+                            },
+                        ];
+                    });
                 }
             })
             .catch(() => {
@@ -618,16 +679,125 @@ export default function AgriTimeseriesPanel({
 
     const openRefreshRsDialog = () => {
         setRefreshDateFrom(defaultRsDateFrom());
-        if (!selectedSeasonKeys.length && cropOption?.key) {
-            setSelectedSeasonKeys([cropOption.key]);
+        if (!seasonWindows.length && cropOption?.key) {
+            const y = yearFromIso(defaultRsDateFrom());
+            const months = cropOption.season_months?.length ? cropOption.season_months : [6, 7, 8, 9];
+            const sm = Math.min(...months);
+            const em = Math.max(...months);
+            const endDay = em === 2 ? 28 : [4, 6, 9, 11].includes(em) ? 30 : 31;
+            setSeasonWindows([
+                {
+                    id: newWindowId(),
+                    start_date: `${y}-${String(sm).padStart(2, "0")}-01`,
+                    end_date: `${y}-${String(em).padStart(2, "0")}-${String(endDay).padStart(2, "0")}`,
+                    crops: [cropOption.key],
+                    label: cropOption.season_label_zh || cropOption.name_zh || cropOption.name,
+                },
+            ]);
         }
         setRefreshDateOpen(true);
     };
 
-    const toggleSeasonKey = (key: string) => {
-        setSelectedSeasonKeys((prev) =>
-            prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
-        );
+    const updateSeasonWindow = (id: string, patch: Partial<SeasonWindowDraft>) => {
+        setSeasonWindows((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+    };
+
+    const toggleWindowCrop = (id: string, cropKey: string) => {
+        setSeasonWindows((prev) => {
+            const target = prev.find((w) => w.id === id);
+            if (!target) return prev;
+            const has = target.crops.includes(cropKey);
+            let nextCrops: string[];
+            if (has) {
+                nextCrops = target.crops.filter((c) => c !== cropKey);
+            } else {
+                if (target.crops.length >= 2) return prev;
+                const others = distinctCropsInWindows(prev.filter((w) => w.id !== id));
+                const distinct = new Set([...others, ...target.crops, cropKey]);
+                if (distinct.size > 2) return prev;
+                nextCrops = [...target.crops, cropKey];
+            }
+            return prev.map((w) => (w.id === id ? { ...w, crops: nextCrops } : w));
+        });
+    };
+
+    const addSeasonWindow = (preset?: "spring_corn" | "summer_corn" | "blank") => {
+        const y = yearFromIso(refreshDateFrom);
+        let draft: SeasonWindowDraft;
+        if (preset === "spring_corn") {
+            draft = {
+                id: newWindowId(),
+                start_date: `${y}-04-01`,
+                end_date: `${y}-08-31`,
+                crops: ["corn"],
+                label: "春玉米",
+            };
+        } else if (preset === "summer_corn") {
+            draft = {
+                id: newWindowId(),
+                start_date: `${y}-06-01`,
+                end_date: `${y}-09-30`,
+                crops: ["corn"],
+                label: "夏玉米",
+            };
+        } else {
+            const key = cropOption?.key || "corn";
+            draft = {
+                id: newWindowId(),
+                start_date: `${y}-06-01`,
+                end_date: `${y}-09-30`,
+                crops: [key],
+                label: "",
+            };
+        }
+        setSeasonWindows((prev) => {
+            if (prev.length >= MAX_SEASON_WINDOWS) {
+                return prev; // max 3 rotation windows per year
+            }
+            const others = distinctCropsInWindows(prev);
+            for (const c of draft.crops) {
+                if (!others.includes(c) && others.length >= 2) {
+                    return prev; // block 3rd distinct crop
+                }
+            }
+            return [...prev, draft];
+        });
+    };
+
+    const removeSeasonWindow = (id: string) => {
+        setSeasonWindows((prev) => prev.filter((w) => w.id !== id));
+    };
+
+    const runHarvestDetect = async () => {
+        if (!landId) return;
+        setHarvestLoading(true);
+        try {
+            const w = seasonWindows[0];
+            const res = await agriApi.harvestDetect(landId, {
+                start_date: w?.start_date,
+                end_date: w?.end_date,
+                crops: w?.crops,
+                label: w?.label || undefined,
+            });
+            setHarvestResult(res);
+            if (res.status === "detected" && res.harvest_date) {
+                setSelectedDate(res.harvest_date);
+                toast.success(t("harvestDetected"));
+            } else if (res.status === "no_growth") {
+                toast(t("harvestNoGrowth"));
+            } else {
+                toast(t("harvestUncertain"));
+            }
+        } catch (e: any) {
+            setHarvestResult({
+                land_id: landId,
+                status: "uncertain",
+                evidence: { reason: "soft_fail", error: e?.detail || e?.message },
+            });
+            toast(t("harvestUncertain"));
+        } finally {
+            setHarvestLoading(false);
+        }
     };
 
     const handleRefreshRs = async () => {
@@ -635,13 +805,13 @@ export default function AgriTimeseriesPanel({
         setBackfilling(true);
         try {
             const today = new Date().toISOString().slice(0, 10);
-            const growing_seasons: GrowingSeasonWindow[] = selectedSeasonKeys
-                .map((key) => cropCatalog.find((c) => c.key === key))
-                .filter((c): c is CropOption => !!c)
-                .map((c) => ({
-                    crop: c.key,
-                    label: c.season_label_zh || c.name_zh || c.name,
-                    months: c.season_months,
+            const growing_seasons: GrowingSeasonWindow[] = seasonWindows
+                .filter((w) => w.start_date && w.end_date && w.crops.length > 0)
+                .map((w) => ({
+                    crops: w.crops.slice(0, 2),
+                    start_date: w.start_date,
+                    end_date: w.end_date,
+                    ...(w.label.trim() ? { label: w.label.trim() } : {}),
                 }));
             await fieldsApi.backfillIndices(fieldId, {
                 force: true,
@@ -740,7 +910,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message(t("outOfSeasonDrought"), {
+                        toast(t("outOfSeasonDrought"), {
                             description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -751,7 +921,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message(t("cloudSkipDrought"), {
+                        toast(t("cloudSkipDrought"), {
                             description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -764,7 +934,7 @@ export default function AgriTimeseriesPanel({
                     setHeatmapMeta(null);
                     publishHeatmap(null);
                     if (enabledRef.current) {
-                        toast.message("该日期无像素数据，无法渲染色斑图", {
+                        toast("该日期无像素数据，无法渲染色斑图", {
                             description: `${meta.sensor} · ${date} · ${AGRI_MODE_LABELS[index]}`,
                         });
                     }
@@ -813,7 +983,7 @@ export default function AgriTimeseriesPanel({
                 );
                 publishHeatmap(img);
                 if (!img && enabledRef.current) {
-                    toast.message("色斑图未绘制任何像素", {
+                    toast("色斑图未绘制任何像素", {
                         description: `${date} · ${AGRI_MODE_LABELS[index]}`,
                     });
                 }
@@ -868,7 +1038,7 @@ export default function AgriTimeseriesPanel({
             const sensor = sensorForIndex(series);
             const scene = scenes.find((s) => s.sensor === sensor && s.date === date);
             if (sceneLooksCloudyOrLowVeg(scene, series)) {
-                toast.message("该日多为云或植被指数极低，色膜偏红属正常", {
+                toast("该日多为云或植被指数极低，色膜偏红属正常", {
                     description: `${date} · ${AGRI_MODE_LABELS[series]}`,
                 });
             }
@@ -1009,6 +1179,24 @@ export default function AgriTimeseriesPanel({
         [floodByDate],
     );
 
+    const harvestEventMarks = useMemo(() => {
+        if (harvestResult?.status === "detected" && harvestResult.harvest_date) {
+            return [
+                {
+                    date: harvestResult.harvest_date,
+                    label: "收获",
+                    level: "high" as const,
+                },
+            ];
+        }
+        return [];
+    }, [harvestResult]);
+
+    const ndviEventMarks = useMemo(
+        () => [...droughtEventMarks, ...harvestEventMarks],
+        [droughtEventMarks, harvestEventMarks],
+    );
+
     const droughtDayCount = droughtEventMarks.length;
     const floodDayCount = [...floodByDate.values()].filter(isFloodDayClass).length;
     const floodWatchCount = [...floodByDate.values()].filter(isFloodWatchClass).length;
@@ -1022,9 +1210,9 @@ export default function AgriTimeseriesPanel({
         return dates.size;
     }, [scenes]);
 
-    const cloudPctByDate = useMemo(() => {
+    const cloudByDate = useMemo(() => {
         const sensor = sensorForIndex(series);
-        const out: Record<string, number | null> = {};
+        const out: Record<string, { pct: number | null; source: "parcel" | "stac" | null }> = {};
         for (const d of allDates) {
             const group = scenes.filter((s) => s.sensor === sensor && s.date === d);
             const picked =
@@ -1033,10 +1221,15 @@ export default function AgriTimeseriesPanel({
                         ? pickOfficialOptical(group, { neighbors: scenes })
                         : pickOpticalForNdvi(group, { neighbors: scenes })
                     : group[0];
-            out[d] = sceneCloudPct(picked);
+            out[d] = sceneCloudDisplay(picked ?? null);
         }
         return out;
     }, [allDates, scenes, series]);
+    const cloudPctByDate = useMemo(() => {
+        const out: Record<string, number | null> = {};
+        for (const [d, v] of Object.entries(cloudByDate)) out[d] = v.pct;
+        return out;
+    }, [cloudByDate]);
 
     const selectedBare = useMemo(() => {
         if (!selectedDate || (series !== "ndvi" && series !== "drought" && series !== "evi")) return false;
@@ -1074,10 +1267,13 @@ export default function AgriTimeseriesPanel({
         return matches[0] ?? null;
     }, [scenes, selectedDate, series]);
 
-    const cloudCoverPct = useMemo(() => {
-        if (!selectedScene || sensorForIndex(series) !== "S2") return null;
-        return sceneCloudPct(selectedScene);
+    const selectedCloud = useMemo(() => {
+        if (!selectedScene || sensorForIndex(series) !== "S2") {
+            return { pct: null as number | null, source: null as "parcel" | "stac" | null };
+        }
+        return sceneCloudDisplay(selectedScene);
     }, [selectedScene, series]);
+    const cloudCoverPct = selectedCloud.pct;
 
     const cloudCoverOver30 = useMemo(() => {
         if (!selectedScene) return false;
@@ -1151,7 +1347,6 @@ export default function AgriTimeseriesPanel({
                 <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 space-y-1">
                         <CardTitle className="flex flex-wrap items-center gap-1.5 text-sm font-semibold tracking-tight">
-                            <Satellite className="h-3.5 w-3.5 shrink-0 text-primary" />
                             <span>{t("title")}</span>
                             <AgriIndexGlossary
                                 initialKey={series}
@@ -1196,7 +1391,7 @@ export default function AgriTimeseriesPanel({
             </CardHeader>
             <CardContent className="p-4 space-y-4">
                 <Dialog open={refreshDateOpen} onOpenChange={setRefreshDateOpen}>
-                    <DialogContent className="sm:max-w-md">
+                    <DialogContent className="sm:max-w-lg">
                         <DialogHeader>
                             <DialogTitle>{t("refreshRsDateTitle")}</DialogTitle>
                             <DialogDescription>{t("refreshRsDateDesc")}</DialogDescription>
@@ -1217,29 +1412,84 @@ export default function AgriTimeseriesPanel({
                                 <p className="text-[10px] text-muted-foreground leading-snug">
                                     {t("refreshRsSeasonsHint")}
                                 </p>
-                                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pt-1">
-                                    {(cropCatalog.length ? cropCatalog : cropOption ? [cropOption] : []).map((c) => {
-                                        const on = selectedSeasonKeys.includes(c.key);
-                                        const months = (c.season_months || []).join("/");
-                                        return (
-                                            <Button
-                                                key={c.key}
-                                                type="button"
-                                                size="sm"
-                                                variant={on ? "default" : "outline"}
-                                                className="h-7 text-xs px-2.5"
-                                                onClick={() => toggleSeasonKey(c.key)}
-                                                title={months ? `${c.name_zh || c.name}: ${months}` : c.name}
-                                            >
-                                                {c.name_zh || c.name}
-                                                {months ? (
-                                                    <span className="opacity-70 ml-1 tabular-nums">{months}</span>
-                                                ) : null}
-                                            </Button>
-                                        );
-                                    })}
+                                <p className="text-[10px] text-muted-foreground">{t("refreshRsMaxCrops")}
+                                </p>
+                                <p className="text-[10px] text-muted-foreground">{t("refreshRsMaxWindows")}</p>
+                                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("spring_corn")}>
+                                        {t("refreshRsPresetSpringCorn")}
+                                    </Button>
+                                    <Button type="button" size="sm" variant="secondary" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("summer_corn")}>
+                                        {t("refreshRsPresetSummerCorn")}
+                                    </Button>
+                                    <Button type="button" size="sm" variant="outline" className="h-7 text-xs" disabled={seasonWindows.length >= MAX_SEASON_WINDOWS} onClick={() => addSeasonWindow("blank")}>
+                                        <Plus className="h-3 w-3 mr-1" />
+                                        {t("refreshRsWindowAdd")}
+                                    </Button>
                                 </div>
-                                {!selectedSeasonKeys.length ? (
+                                <div className="space-y-2 max-h-56 overflow-y-auto pt-1">
+                                    {seasonWindows.map((w, idx) => (
+                                        <div key={w.id} className="rounded-md border border-border/60 p-2 space-y-1.5 bg-muted/20">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="text-[10px] font-medium text-muted-foreground">#{idx + 1}</span>
+                                                <Button type="button" size="sm" variant="ghost" className="h-6 px-1.5 text-xs" onClick={() => removeSeasonWindow(w.id)}>
+                                                    <Trash2 className="h-3 w-3 mr-1" />
+                                                    {t("refreshRsWindowRemove")}
+                                                </Button>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-1.5">
+                                                <div className="grid gap-0.5">
+                                                    <Label className="text-[10px]">{t("refreshRsWindowStart")}</Label>
+                                                    <Input
+                                                        type="date"
+                                                        className="h-8 text-xs"
+                                                        value={w.start_date}
+                                                        onChange={(e) => updateSeasonWindow(w.id, { start_date: e.target.value })}
+                                                    />
+                                                </div>
+                                                <div className="grid gap-0.5">
+                                                    <Label className="text-[10px]">{t("refreshRsWindowEnd")}</Label>
+                                                    <Input
+                                                        type="date"
+                                                        className="h-8 text-xs"
+                                                        value={w.end_date}
+                                                        onChange={(e) => updateSeasonWindow(w.id, { end_date: e.target.value })}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="grid gap-0.5">
+                                                <Label className="text-[10px]">{t("refreshRsWindowCrops")}</Label>
+                                                <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+                                                    {(cropCatalog.length ? cropCatalog : cropOption ? [cropOption] : []).slice(0, 40).map((c) => {
+                                                        const on = w.crops.includes(c.key);
+                                                        return (
+                                                            <Button
+                                                                key={c.key}
+                                                                type="button"
+                                                                size="sm"
+                                                                variant={on ? "default" : "outline"}
+                                                                className="h-6 text-[10px] px-1.5"
+                                                                onClick={() => toggleWindowCrop(w.id, c.key)}
+                                                            >
+                                                                {c.name_zh || c.name}
+                                                            </Button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                            <div className="grid gap-0.5">
+                                                <Label className="text-[10px]">{t("refreshRsWindowLabel")}</Label>
+                                                <Input
+                                                    className="h-8 text-xs"
+                                                    value={w.label}
+                                                    placeholder="春玉米 / 米豆间作"
+                                                    onChange={(e) => updateSeasonWindow(w.id, { label: e.target.value })}
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                {!seasonWindows.length ? (
                                     <p className="text-[10px] text-muted-foreground">{t("refreshRsSeasonsEmpty")}</p>
                                 ) : null}
                             </div>
@@ -1406,6 +1656,29 @@ export default function AgriTimeseriesPanel({
                             </p>
                         )}
                         <div className="rounded-xl border border-border/60 bg-background p-3">
+                        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/35 p-3">
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 shrink-0 text-xs"
+                                disabled={!landId || harvestLoading}
+                                onClick={() => void runHarvestDetect()}
+                            >
+                                {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                                {t("harvestDetect")}
+                            </Button>
+                            <span className="order-last w-full text-xs leading-relaxed text-muted-foreground">{t("harvestDetectHint")}</span>
+                            {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
+                                <Badge variant="secondary" className="ml-auto text-xs tabular-nums">
+                                    {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
+                                </Badge>
+                            ) : harvestResult ? (
+                                <Badge variant="secondary" className="ml-auto text-xs">
+                                    {harvestResult.status}
+                                </Badge>
+                            ) : null}
+                        </div>
                             {stats.length > 0 ? (
                                 <NdviChart
                                     stats={stats}
@@ -1429,7 +1702,7 @@ export default function AgriTimeseriesPanel({
                                     }
                                     eventMarks={
                                         series === "drought" || series === "ndvi" || series === "ndmi"
-                                            ? droughtEventMarks
+                                            ? ndviEventMarks
                                             : series === "flood" || series === "vv"
                                               ? floodEventMarks
                                               : undefined
@@ -1445,7 +1718,7 @@ export default function AgriTimeseriesPanel({
                                     <div className="flex flex-wrap items-center gap-1.5">
                                         <span className="text-[11px] font-medium text-foreground">当日长势等级</span>
                                         <Badge variant="secondary" className="text-[10px]">
-                                            {cropOption?.season_label_zh || "夏玉米季（6–9月）"}
+                                            {cropOption?.season_label_zh || cropOption?.name_zh || "作物生育季"}
                                         </Badge>
                                         {selectedBare && (
                                             <Badge variant="destructive" className="text-[10px]">
@@ -1481,7 +1754,7 @@ export default function AgriTimeseriesPanel({
                                     ? t("heatmapDate", { date: selectedDate, mode: AGRI_MODE_LABELS[series] })
                                     : t("pickDate")}
                                 {cloudCoverPct != null
-                                    ? ` · ${t("cloudCover", { percent: Math.round(cloudCoverPct) })}`
+                                    ? ` · ${formatCloudCoverLabel(cloudCoverPct, selectedCloud.source, t)}`
                                     : ""}
                                 {decloudQualityChip(
                                     selectedScene?.decloud_quality ??
@@ -1592,7 +1865,8 @@ export default function AgriTimeseriesPanel({
                                                 </SelectTrigger>
                                                 <SelectContent className="max-h-72">
                                                     {allDates.map((date) => {
-                                                        const pct = cloudPctByDate[date];
+                                                        const cloud = cloudByDate[date];
+                                                        const pct = cloud?.pct ?? null;
                                                         const droughtCls = droughtByDate[date];
                                                         const floodCls = floodByDate.get(date);
                                                         const droughtBit = droughtCls
@@ -1615,10 +1889,11 @@ export default function AgriTimeseriesPanel({
                                                                             : t("floodChip_moderate")
                                                                   }`
                                                                 : "";
-                                                        const label =
+                                                        const cloudBit =
                                                             pct != null
-                                                                ? `${date} · ${t("cloudCover", { percent: Math.round(pct) })}${droughtBit}${floodBit}`
-                                                                : `${date}${droughtBit}${floodBit}`;
+                                                                ? ` · ${formatCloudCoverLabel(pct, cloud?.source, t)}`
+                                                                : "";
+                                                        const label = `${date}${cloudBit}${droughtBit}${floodBit}`;
                                                         return (
                                                             <SelectItem
                                                                 key={date}

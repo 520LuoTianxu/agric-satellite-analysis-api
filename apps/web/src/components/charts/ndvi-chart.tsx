@@ -377,7 +377,20 @@ export default function NdviChart({
             dataZoom: [
                 {
                     type: "inside" as const,
-                    start: 0,
+                    start: (() => {
+                        if (stats.length < 2) return 0;
+                        const times = stats
+                            .map((s) => Date.parse(s.date))
+                            .filter((t) => Number.isFinite(t));
+                        if (times.length < 2) return 0;
+                        const tMin = Math.min(...times);
+                        const tMax = Math.max(...times);
+                        const span = tMax - tMin;
+                        const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+                        if (span <= YEAR_MS) return 0;
+                        const viewStart = tMax - YEAR_MS;
+                        return ((viewStart - tMin) / span) * 100;
+                    })(),
                     end: 100,
                     zoomOnMouseWheel: false,
                     moveOnMouseWheel: false,

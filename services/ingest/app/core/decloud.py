@@ -180,29 +180,33 @@ def _iso_date(value: Any) -> str | None:
 
 
 def _months_from_window(window: dict) -> set[int]:
-    """Parse one growing-season window: months[] and/or start_month..end_month (wrap)."""
-    out: set[int] = set()
-    for m in window.get("months") or []:
-        try:
-            mi = int(m)
-        except (TypeError, ValueError):
-            continue
-        if 1 <= mi <= 12:
-            out.add(mi)
-    sm, em = window.get("start_month"), window.get("end_month")
-    if sm is not None and em is not None:
-        try:
-            sm_i, em_i = int(sm), int(em)
-        except (TypeError, ValueError):
-            sm_i = em_i = 0
-        if 1 <= sm_i <= 12 and 1 <= em_i <= 12:
-            if sm_i <= em_i:
-                out.update(range(sm_i, em_i + 1))
-            else:
-                # e.g. winter wheat Oct→May
-                out.update(range(sm_i, 13))
-                out.update(range(1, em_i + 1))
-    return out
+    """Parse one growing-season window: months, month range, or start_date/end_date."""
+    try:
+        from openfarm_common.growing_seasons import months_from_window
+
+        return months_from_window(window)
+    except Exception:
+        out: set[int] = set()
+        for m in window.get("months") or []:
+            try:
+                mi = int(m)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= mi <= 12:
+                out.add(mi)
+        sm, em = window.get("start_month"), window.get("end_month")
+        if sm is not None and em is not None:
+            try:
+                sm_i, em_i = int(sm), int(em)
+            except (TypeError, ValueError):
+                sm_i = em_i = 0
+            if 1 <= sm_i <= 12 and 1 <= em_i <= 12:
+                if sm_i <= em_i:
+                    out.update(range(sm_i, em_i + 1))
+                else:
+                    out.update(range(sm_i, 13))
+                    out.update(range(1, em_i + 1))
+        return out
 
 
 def normalize_season_months(
@@ -659,6 +663,41 @@ def decloud_drought_exclusion_flags(
     return True, 100.0
 
 
+def _round_metric(v: float | None, ndigits: int = 6) -> float | None:
+    if v is None:
+        return None
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    if fv != fv or fv in (float("inf"), float("-inf")):
+        return None
+    return round(fv, ndigits)
+
+
+def decloud_quality_metrics(
+    inp: DecloudQualityInputs,
+) -> dict[str, float | None]:
+    """Audit scalars used by ``score_decloud`` (always safe to persist)."""
+    neighbor = inp.neighbor_ndvi_mean
+    ndvi = float(inp.ndvi_mean) if _finite(float(inp.ndvi_mean)) else None
+    neigh = (
+        float(neighbor)
+        if neighbor is not None and _finite(float(neighbor))
+        else None
+    )
+    gap = (neigh - ndvi) if (neigh is not None and ndvi is not None) else None
+    return {
+        "rgb_mean": _round_metric(inp.rgb_mean),
+        "rgb_mean_raw": _round_metric(inp.rgb_mean_raw),
+        "rgb_std": _round_metric(inp.rgb_std),
+        "rgb_std_raw": _round_metric(inp.rgb_std_raw),
+        "ndvi_mean": _round_metric(ndvi),
+        "neighbor_ndvi_mean": _round_metric(neigh),
+        "ndvi_gap": _round_metric(gap),
+    }
+
+
 def decloud_pixel_payload(
     *,
     quality: str,
@@ -666,9 +705,14 @@ def decloud_pixel_payload(
     reasons: list[str] | None,
     raw_scene_id: str | None,
     pixels: list[dict[str, Any]],
+    metrics: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
-    """lonlat_v1 object stored on the decloud product (quality always present)."""
-    return {
+    """lonlat_v1 object stored on the decloud product (quality always present).
+
+    Fair/bad rows are persisted for audit; drought SQL still requires
+    ``decloud_quality=good``. ``decloud_metrics`` keeps the gate inputs.
+    """
+    payload: dict[str, Any] = {
         "format": "lonlat_v1",
         "source": DECLOUD_SOURCE,
         "decloud_quality": quality,
@@ -677,6 +721,9 @@ def decloud_pixel_payload(
         "raw_scene_id": raw_scene_id,
         "pixels": pixels,
     }
+    if metrics:
+        payload["decloud_metrics"] = dict(metrics)
+    return payload
 
 
 def geojson_ring_centroid(
@@ -798,6 +845,7 @@ __all__ = [
     "should_trigger_decloud",
     "decloud_drought_exclusion_flags",
     "decloud_pixel_payload",
+    "decloud_quality_metrics",
     "fallback_lonlat_pixels",
     "geojson_ring_centroid",
     "window_array_tmp_path",

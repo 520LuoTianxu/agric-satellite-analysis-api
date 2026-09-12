@@ -418,7 +418,7 @@ _admin = require_roles("owner", "admin")
     response_model=BackfillIndicesResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-@limiter.limit("1/minute")
+@limiter.limit("5/minute")
 async def backfill_field_indices(
     request: Request,
     field_id: uuid.UUID,
@@ -475,10 +475,24 @@ async def backfill_field_indices(
     if body is not None:
         raw_gs = getattr(body, "growing_seasons", None)
         if raw_gs:
-            growing_seasons = [
+            raw_list = [
                 gs.model_dump(exclude_none=True) if hasattr(gs, "model_dump") else dict(gs)
                 for gs in raw_gs
             ]
+            try:
+                from app.core.growing_seasons import normalize_growing_seasons
+
+                year = None
+                if getattr(body, "date_from", None):
+                    try:
+                        year = int(str(body.date_from)[:4])
+                    except ValueError:
+                        year = None
+                growing_seasons = normalize_growing_seasons(raw_list, year=year)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception:
+                growing_seasons = raw_list
         raw_sm = getattr(body, "season_months", None)
         if raw_sm:
             season_months = []

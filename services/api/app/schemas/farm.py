@@ -110,19 +110,33 @@ class FieldImportResponse(BaseModel):
 
 
 class GrowingSeasonWindow(BaseModel):
-    """One crop season the user selected for RS pull / decloud.
+    """One growing-season window for RS pull / decloud / harvest.
 
-    Rotation: send several windows; backend unions their months.
-    Prefer ``months`` (1-12). Optional ``start_month``/``end_month`` wrap
-    across year boundary (e.g. winter wheat 10→5).
+    Rotation: send several windows. Intercrop: ``crops`` length 2 in one window.
+    Prefer ``start_date``/``end_date``. Also accepts ``months`` or
+    ``start_month``/``end_month`` (wrap OK). Legacy ``crop`` → ``crops``.
     """
 
     label: str | None = None
-    crop: str | None = None
+    crops: list[str] = PydanticField(default_factory=list)
+    crop: str | None = None  # legacy singular
     months: list[int] = PydanticField(default_factory=list)
     start_month: int | None = None
     end_month: int | None = None
+    start_date: str | None = None
+    end_date: str | None = None
 
+    def resolved_crops(self) -> list[str]:
+        out: list[str] = []
+        for c in self.crops or []:
+            s = str(c).strip()
+            if s and s not in out:
+                out.append(s)
+        if self.crop:
+            s = str(self.crop).strip()
+            if s and s not in out:
+                out.append(s)
+        return out
 
 
 class BackfillIndicesRequest(BaseModel):
@@ -132,8 +146,8 @@ class BackfillIndicesRequest(BaseModel):
     # (or date_to); months is ignored for range calculation.
     date_from: str | None = None
     date_to: str | None = None
-    # User-selected growing seasons (rotation = multiple). Union of months
-    # drives which high-cloud scenes are pulled and which dates get decloud.
+    # User-selected growing seasons (rotation = multiple windows).
+    # Each window: dates + crops[1..2]. Union of months drives high-cloud pull/decloud.
     growing_seasons: list[GrowingSeasonWindow] | None = None
     # Flat month list alternative / override merged with growing_seasons.
     season_months: list[int] | None = None

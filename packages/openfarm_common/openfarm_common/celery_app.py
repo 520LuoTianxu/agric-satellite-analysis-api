@@ -21,7 +21,7 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "app.tasks.indices.*": {"queue": "ingest"},
     "app.tasks.agri_bridge.*": {"queue": "ingest"},
     "app.tasks.agri_lonlat.*": {"queue": "ingest"},
-    "app.tasks.decloud_uncrtaints.*": {"queue": "ingest"},
+    "app.tasks.decloud_uncrtaints.*": {"queue": "decloud"},
     "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": "ingest"},
     "app.tasks.backfill.*": {"queue": "ingest"},
     "app.tasks.agri_alerts.*": {"queue": "ingest"},

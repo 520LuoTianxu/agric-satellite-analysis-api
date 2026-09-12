@@ -32,11 +32,16 @@ from rasterio.warp import Resampling, reproject
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 from shapely.geometry import mapping
-from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
 from app.core.index_cogs import write_index_cogs_enabled
+from app.core.job_progress_redis import (
+    flush_to_job,
+    incr_done,
+    mark_scene_progress,
+    set_total,
+)
 from app.core.agri_classify import parse_s1_relative_orbit
 from app.core.s1_stac import (
     S1_STAC_COLLECTION,
@@ -465,20 +470,27 @@ def _upsert_agri_s1(
     return json_url
 
 
-def _maybe_s1_progress(session, job, step: str, details: dict | None = None, *, complete: bool = False) -> None:
-    """Job progress is optional so missing Job rows cannot abort OSS+MQ."""
-    if job is None:
-        return
+def _maybe_s1_progress(
+    job_id: str,
+    step: str,
+    *,
+    scene: int | None = None,
+    total_scenes: int | None = None,
+    scene_id: str | None = None,
+) -> None:
+    """Redis hot-path progress; never touches Postgres from scene workers."""
     try:
-        if complete:
-            complete_step(session, job, step, details)
-        else:
-            update_job_progress(session, job, step, details)
+        mark_scene_progress(
+            job_id,
+            step,
+            scene=scene,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
+        )
     except Exception as e:
         logger.warning(
             "s1_job_progress_failed",
             step=step,
-            complete=complete,
             error=str(e),
         )
 
@@ -509,30 +521,19 @@ def _process_one_s1_scene(
     were written. Empty samples / missing agri meta / Job-only races do not
     count as processed.
     """
-    from app.models.tables import Job, RasterLayer
+    from app.models.tables import RasterLayer
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     session = get_db_session()
     scene_id = scene.get("id")
     published = False
     try:
-        job = session.get(Job, uuid.UUID(job_id))
-        if job is None:
-            logger.warning(
-                "s1_job_missing_progress_only",
-                job_id=job_id,
-                scene_id=scene_id,
-            )
-
         _maybe_s1_progress(
-            session,
-            job,
+            job_id,
             "download_bands",
-            {
-                "scene": idx + 1,
-                "total_scenes": total_scenes,
-                "scene_id": scene_id,
-            },
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
@@ -564,13 +565,13 @@ def _process_one_s1_scene(
                 error=err,
                 **extra,
             )
+            incr_done(job_id, failed=True)
             return False
         vv = pol["vv"]
         vh = pol["vh"]
         vv[~field_mask] = np.nan
         vh[~field_mask] = np.nan
         download_ms = int((time.perf_counter() - t0) * 1000)
-        _maybe_s1_progress(session, job, "download_bands", complete=True)
 
         is_agri = agri_meta is not None
         write_cogs = write_index_cogs_enabled(is_agri=is_agri)
@@ -581,7 +582,13 @@ def _process_one_s1_scene(
 
         write_cog_ms = 0
         if write_cogs:
-            _maybe_s1_progress(session, job, "write_cog")
+            _maybe_s1_progress(
+                job_id,
+                "write_cog",
+                scene=idx + 1,
+                total_scenes=total_scenes,
+                scene_id=scene_id,
+            )
             t0 = time.perf_counter()
             vv_uri = _write_index_cog(
                 vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
@@ -590,7 +597,6 @@ def _process_one_s1_scene(
                 vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
             )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
-            _maybe_s1_progress(session, job, "write_cog", complete=True)
             logger.info(
                 "cog_uploaded",
                 object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
@@ -693,6 +699,7 @@ def _process_one_s1_scene(
                     json_url=json_url,
                 )
             write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
+        incr_done(job_id, failed=False)
         logger.info(
             "scene_timing",
             sensor="S1",
@@ -715,6 +722,7 @@ def _process_one_s1_scene(
             error=str(e),
             stac_api=s1_stac_api_url(),
         )
+        incr_done(job_id, failed=True)
         try:
             session.rollback()
         except Exception:
@@ -740,8 +748,13 @@ def _process_s1_scenes_parallel(
     agri_meta: dict | None,
     field_geom_geojson: dict,
     mq_task_id: str | None = None,
+    on_chunk=None,
 ) -> int:
-    """Process S1 scenes concurrently. Returns the processed count."""
+    """Process S1 scenes concurrently. Returns the processed count.
+
+    ``on_chunk(completed_n, processed)`` is invoked every ``workers`` completions
+    so the parent can flush Redis progress into Postgres.
+    """
     total = len(scenes)
     if total == 0:
         return 0
@@ -756,6 +769,8 @@ def _process_s1_scenes_parallel(
     )
 
     processed = 0
+    completed_n = 0
+    flush_every = max(1, workers)
     t_process = time.perf_counter()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -787,9 +802,15 @@ def _process_s1_scenes_parallel(
                 ok = fut.result()
             except Exception as e:
                 logger.error("s1_scene_failed", scene_id=scene.get("id"), error=str(e))
+                completed_n += 1
+                if on_chunk and completed_n % flush_every == 0:
+                    on_chunk(completed_n, processed)
                 continue
+            completed_n += 1
             if ok:
                 processed += 1
+            if on_chunk and completed_n % flush_every == 0:
+                on_chunk(completed_n, processed)
 
     logger.info(
         "scene_parallel_done",
@@ -798,6 +819,7 @@ def _process_s1_scenes_parallel(
         layers_created=processed,
         total_scenes=total,
         workers=workers,
+        wall_ms=int((time.perf_counter() - t_process) * 1000),
     )
     return processed
 
@@ -925,13 +947,24 @@ def process_s1_backfill(self, job_id: str) -> dict:
         )
 
         workers = min(scene_max_workers(), len(scenes))
+        set_total(job_id, len(scenes), workers=workers)
         update_job_progress(
             session,
             job,
             "process_scenes",
             {"total_scenes": len(scenes), "workers": workers},
         )
+        flush_to_job(
+            session,
+            job,
+            extra={"total_scenes": len(scenes), "workers": workers},
+            current_step="process_scenes",
+        )
         field_id = job.field_id
+
+        def _chunk_flush(_completed_n: int, _processed: int) -> None:
+            flush_to_job(session, job, current_step="process_scenes")
+
         processed = _process_s1_scenes_parallel(
             job_id=job_id,
             scenes=scenes,
@@ -947,6 +980,7 @@ def process_s1_backfill(self, job_id: str) -> dict:
             agri_meta=agri_meta,
             field_geom_geojson=field_geom_geojson,
             mq_task_id=mq_task_id,
+            on_chunk=_chunk_flush,
         )
 
         session.expire(job)
@@ -965,15 +999,20 @@ def process_s1_backfill(self, job_id: str) -> dict:
         )
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
-        progress = job.progress_json or {}
-        progress["current_step"] = "complete"
-        progress["layers_created"] = processed
-        progress["scenes_published"] = processed
-        progress["total_scenes"] = len(scenes)
-        progress["scene_workers"] = workers
-        job.progress_json = progress
-        flag_modified(job, "progress_json")
-        session.commit()
+        flush_to_job(
+            session,
+            job,
+            extra={
+                "current_step": "complete",
+                "layers_created": processed,
+                "scenes_published": processed,
+                "total_scenes": len(scenes),
+                "scene_workers": workers,
+                "workers": workers,
+            },
+            current_step="complete",
+            complete_process_scenes=True,
+        )
         return {
             "job_id": job_id,
             "status": "completed",
@@ -996,7 +1035,15 @@ def process_s1_backfill(self, job_id: str) -> dict:
                 job.status = "failed"
                 job.error = str(e)[:500]
                 job.finished_at = datetime.now(timezone.utc)
-                session.commit()
+                try:
+                    flush_to_job(
+                        session,
+                        job,
+                        extra={"error": str(e)[:500]},
+                        current_step="failed",
+                    )
+                except Exception:
+                    session.commit()
         except Exception:
             session.rollback()
         raise

@@ -26,7 +26,7 @@ UNCRTAINTS_CHECKPOINT_NAME=diagonal_1
 DECLOUD_BACKEND=uncrtaints
 DECLOUD_MODE=batch
 DECLOUD_CLOUD_MIN_PCT=30
-DECLOUD_STAC_CLOUD_MAX_PCT=90
+DECLOUD_STAC_CLOUD_MAX_PCT=100
 DECLOUD_INPUT_T=3
 DECLOUD_USE_SAR=1
 ```
@@ -45,7 +45,7 @@ cloud-removed product too early.
 
 **New (batch, default):**
 
-1. Search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 90; still weekly-best
+1. Search STAC up to `DECLOUD_STAC_CLOUD_MAX_PCT` (default 100; still weekly-best
    cloud) for the job date range.
 2. Download **parcel windows only** (never a full Sentinel scene). When decloud
    is on, the optical job also pulls the extra L2A bands UnCRtainTS needs and
@@ -95,9 +95,11 @@ After reconstruct, a heuristic scores the parcel window:
 Only **`good`** may enter official drought, land-assessment
 RS inputs, overview drought/weak-growth, and share optical drought series.
 
-`fair` and `bad` are **always stored** (OSS + MQ upsert) whenever a
+`fair` and `bad` are **always stored** (OSS + MQ upsert → `agri.parcel_scene_products`) whenever a
 reconstruction produced a usable array, even if lonlat sampling found few
-or weak pixels. Existing cloud>30% drought filters also skip them
+or weak pixels. Column averages (`ndvi_avg`, …) and `pixel_data.decloud_metrics`
+(rgb / reconstr NDVI / neighbor NDVI / gap) are kept for audit; only
+`decloud_quality=good` feeds drought / land metrics. Existing cloud>30% drought filters also skip them
 (`cloud_cover_over_30` stays true; `decloud_quality` is not `good`).
 Tooltips mark them as de-cloud that may be unreliable.
 

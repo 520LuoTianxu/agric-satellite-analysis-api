@@ -200,13 +200,25 @@ export function parcelCloudIsLegacyWindowFill(scene: {
     );
 }
 
-export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
-    if (!scene) return null;
+export type SceneCloudSource = "parcel" | "stac";
+
+export type SceneCloudDisplay = {
+    pct: number | null;
+    source: SceneCloudSource | null;
+};
+
+/** Parcel SCL cloud when trusted/present; else STAC scene cloud. */
+export function sceneCloudDisplay(
+    scene: OpticalSceneLike | null | undefined,
+): SceneCloudDisplay {
+    if (!scene) return { pct: null, source: null };
     if (parcelCloudIsUntrustedClear(scene)) {
-        return finiteNum(scene.cloud_cover);
+        const stac = finiteNum(scene.cloud_cover);
+        return { pct: stac, source: stac != null ? "stac" : null };
     }
     if (parcelCloudIsLegacyWindowFill(scene)) {
-        return finiteNum(scene.cloud_cover);
+        const stac = finiteNum(scene.cloud_cover);
+        return { pct: stac, source: stac != null ? "stac" : null };
     }
     const parcel = finiteNum(scene.parcel_cloud_cover_pct);
     const stac = finiteNum(scene.cloud_cover);
@@ -216,10 +228,15 @@ export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): numbe
         stac >= SUSPICIOUS_STAC_MIN &&
         stac - parcel >= SUSPICIOUS_STAC_OVER_PARCEL_GAP
     ) {
-        return stac;
+        return { pct: stac, source: "stac" };
     }
-    if (parcel != null) return parcel;
-    return stac;
+    if (parcel != null) return { pct: parcel, source: "parcel" };
+    if (stac != null) return { pct: stac, source: "stac" };
+    return { pct: null, source: null };
+}
+
+export function sceneCloudPct(scene: OpticalSceneLike | null | undefined): number | null {
+    return sceneCloudDisplay(scene).pct;
 }
 
 export function isOfficialOpticalScene(scene: {

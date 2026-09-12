@@ -96,7 +96,7 @@ async def get_soil_summary(
     response_model=SoilRefreshResponse,
     status_code=202,
 )
-@limiter.limit("1/minute")
+@limiter.limit("5/minute")
 async def refresh_soil(
     request: Request,
     field_id: uuid.UUID,

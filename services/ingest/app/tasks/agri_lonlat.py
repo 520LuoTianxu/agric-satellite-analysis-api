@@ -37,6 +37,12 @@ from app.core.agri_classify import (
 from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
+from app.core.job_progress_redis import (
+    flush_to_job,
+    incr_done,
+    mark_scene_progress,
+    set_total,
+)
 from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
@@ -47,6 +53,7 @@ from app.tasks.pipeline import (
     get_db_session,
     read_band_windowed,
     read_bands_windowed_parallel,
+    read_rgb_windowed,
     search_scenes_for_defs,
     update_job_progress,
     write_cog,
@@ -186,6 +193,9 @@ def publish_optical_lonlat_to_oss_mq(
         "generated_at_shanghai": row["generated_at_shanghai"],
         "pixel_data_url": row["pixel_data_url"],
         "json_oss_key": key,
+        "rgb_url": row.get("rgb_url"),
+        "large_rgb_url": row.get("large_rgb_url"),
+        "rgb_oss_key": row.get("rgb_oss_key"),
         "source": row.get("_source") or (pixel_obj or {}).get("source") or "stac_direct",
         "decloud_quality": row.get("_decloud_quality")
         or (pixel_obj or {}).get("decloud_quality"),
@@ -294,6 +304,9 @@ def emit_optical_lonlat(
     parcel_cloud_source: str | None = None,
     scl: np.ndarray | None = None,
     mq_task_id: str | None = None,
+    rgb_url: str | None = None,
+    large_rgb_url: str | None = None,
+    rgb_oss_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Sample lonlat_v1, upload OSS JSON, publish one MQ (PG write on producer)."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
@@ -384,6 +397,9 @@ def emit_optical_lonlat(
             "%Y-%m-%d %H:%M:%S%z"
         ),
         "pixel_data_url": f"stac-direct://field/{field_id_str}/{date_str}",
+        "rgb_url": rgb_url,
+        "large_rgb_url": large_rgb_url,
+        "rgb_oss_key": rgb_oss_key,
         "ndvi_avg": ndvi_avg,
         "ndvi_min": ndvi_min,
         "ndvi_max": ndvi_max,
@@ -452,29 +468,23 @@ def _process_one_optical_scene(
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
-    from app.models.tables import Job
-
-    session = get_db_session()
+    """Process one S2 scene. Progress is Redis-only (no per-step Postgres)."""
+    scene_id = scene.get("id")
     try:
-        job = session.get(Job, uuid.UUID(job_id))
-        if job is None:
-            logger.error("job_not_found_in_agri_optical_worker", job_id=job_id)
-            return None
-
-        update_job_progress(
-            session,
-            job,
+        mark_scene_progress(
+            job_id,
             "download_bands",
-            {
-                "scene": idx + 1,
-                "total_scenes": total_scenes,
-                "scene_id": scene["id"],
-            },
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
         hrefs = dict(scene.get("band_hrefs") or {})
         scl_href = hrefs.pop("SCL", None)
+        # Keep visual href for true-color preview only — never feed it into
+        # spectral index formulas (NDVI/EVI/…).
+        visual_href = hrefs.pop("visual", None)
         bands = read_bands_windowed_parallel(
             hrefs,
             bounds,
@@ -490,6 +500,91 @@ def _process_one_optical_scene(
                 target_shape,
                 target_transform,
                 resampling=Resampling.nearest,
+            )
+        # Padded landscape window for large_rgb (field_rgb stays on parcel grid).
+        scene_visual = None
+        scene_bands = None
+        scene_field_mask = None
+        try:
+            from app.core.true_color_preview import compute_scene_preview_grid
+            from rasterio.features import geometry_mask
+            from shapely.geometry import shape as shapely_shape
+
+            # Use unbuffered field extent (bounds already include ~0.001° parcel pad).
+            field_extent = (
+                bounds[0] + 0.001,
+                bounds[1] + 0.001,
+                bounds[2] - 0.001,
+                bounds[3] - 0.001,
+            )
+            scene_transform, scene_shape, scene_bounds = compute_scene_preview_grid(
+                field_extent
+            )
+            try:
+                geom = shapely_shape(field_geom_geojson)
+                scene_field_mask = geometry_mask(
+                    [geom],
+                    out_shape=scene_shape,
+                    transform=scene_transform,
+                    invert=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — outline soft-fail
+                logger.warning(
+                    "scene_field_mask_failed",
+                    scene_id=scene_id,
+                    error=str(exc),
+                )
+                scene_field_mask = None
+            if visual_href:
+                try:
+                    scene_visual = read_rgb_windowed(
+                        visual_href,
+                        scene_bounds,
+                        scene_shape,
+                        scene_transform,
+                    )
+                except Exception as exc:  # noqa: BLE001 — preview soft-fail
+                    logger.warning(
+                        "scene_visual_download_failed",
+                        scene_id=scene_id,
+                        error=str(exc),
+                    )
+            if scene_visual is None:
+                # Fallback: B04/B03/B02 over the padded window.
+                rgb_hrefs = {
+                    k: hrefs[k]
+                    for k in ("B04", "B03", "B02")
+                    if k in hrefs
+                }
+                # hrefs already popped visual/SCL; spectral bands remain.
+                # Re-read from original scene hrefs if needed.
+                if len(rgb_hrefs) < 3:
+                    orig = dict(scene.get("band_hrefs") or {})
+                    rgb_hrefs = {
+                        k: orig[k]
+                        for k in ("B04", "B03", "B02")
+                        if k in orig
+                    }
+                if len(rgb_hrefs) == 3:
+                    try:
+                        scene_bands = read_bands_windowed_parallel(
+                            rgb_hrefs,
+                            scene_bounds,
+                            scene_shape,
+                            scene_transform,
+                            scene_workers=1,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "scene_bands_download_failed",
+                            scene_id=scene_id,
+                            error=str(exc),
+                        )
+        except Exception as exc:  # noqa: BLE001 — preview must not fail ingest
+            logger.warning(
+                "scene_preview_grid_failed",
+                scene_id=scene_id,
+                error=str(exc),
             )
         from app.core.decloud import decloud_enabled
 
@@ -521,9 +616,14 @@ def _process_one_optical_scene(
                     error=str(exc),
                 )
         download_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(session, job, "download_bands")
+        mark_scene_progress(
+            job_id,
+            "compute_indices",
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
+        )
 
-        update_job_progress(session, job, "compute_indices")
         t0 = time.perf_counter()
         index_arrays: dict[str, np.ndarray] = {}
         for index_def in index_defs:
@@ -534,11 +634,16 @@ def _process_one_optical_scene(
             pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
             index_arrays[pix_key] = arr
         compute_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(session, job, "compute_indices")
 
         write_cog_ms = 0
         if write_cogs:
-            update_job_progress(session, job, "write_cog")
+            mark_scene_progress(
+                job_id,
+                "write_cog",
+                scene=idx + 1,
+                total_scenes=total_scenes,
+                scene_id=scene_id,
+            )
             t0 = time.perf_counter()
             for index_def in index_defs:
                 pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
@@ -552,12 +657,35 @@ def _process_one_optical_scene(
                     index_def.key,
                 )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
-            complete_step(session, job, "write_cog")
 
-        t0 = time.perf_counter()
+        # Progress must not sit inside write_lonlat_ms timing.
         parcel_from_scl = parcel_cloud_from_scl_window(scl, field_mask)
         parcel_source = PARCEL_CLOUD_SOURCE_SCL if parcel_from_scl is not None else None
-        update_job_progress(session, job, "write_lonlat")
+        scene_date = scene.get("date")
+        date_str_rgb = (
+            scene_date.isoformat()
+            if hasattr(scene_date, "isoformat")
+            else str(scene_date)[:10]
+        )
+        from app.core.true_color_preview import upload_field_rgb_preview
+
+        rgb_meta = upload_field_rgb_preview(
+            land_id=str(agri_meta["land_id"]),
+            date_str=date_str_rgb,
+            bands=bands,
+            field_mask=field_mask,
+            scene_bands=scene_bands,
+            scene_visual=scene_visual,
+            scene_field_mask=scene_field_mask,
+        )
+        mark_scene_progress(
+            job_id,
+            "write_lonlat",
+            scene=idx + 1,
+            total_scenes=total_scenes,
+            scene_id=scene_id,
+        )
+        t0 = time.perf_counter()
         result = emit_optical_lonlat(
             meta=agri_meta,
             geom4326=field_geom_geojson,
@@ -569,14 +697,12 @@ def _process_one_optical_scene(
             parcel_cloud_source=parcel_source,
             scl=scl,
             mq_task_id=mq_task_id,
+            rgb_url=rgb_meta.get("rgb_url"),
+            large_rgb_url=rgb_meta.get("large_rgb_url"),
+            rgb_oss_key=rgb_meta.get("rgb_oss_key"),
         )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
-        complete_step(
-            session,
-            job,
-            "write_lonlat",
-            {"pixels": (result or {}).get("pixels"), "date": str(scene["date"])},
-        )
+        incr_done(job_id, failed=False)
         logger.info(
             "scene_timing",
             sensor="S2",
@@ -598,13 +724,8 @@ def _process_one_optical_scene(
             scene_id=scene.get("id"),
             error=str(e),
         )
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        incr_done(job_id, failed=True)
         return None
-    finally:
-        session.close()
 
 
 @celery_app.task(
@@ -666,7 +787,12 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
         from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
 
         extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
-        extra_assets: dict[str, tuple[str, ...]] = {"SCL": SCL_STAC_ASSETS}
+        # SCL for parcel cloud; B02/B03/B04 for indices + true-color fallback.
+        # Optional visual/true_color asset for natural large RGB previews.
+        extra_assets: dict[str, tuple[str, ...]] = {
+            "SCL": SCL_STAC_ASSETS,
+            "visual": ("visual", "true_color", "TCI"),
+        }
         if decloud_enabled():
             from app.core.decloud import decloud_s2_extra_assets
 
@@ -776,16 +902,25 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             workers=workers,
             band_gdal_cap=band_max_workers(),
         )
+        set_total(job_id, len(scenes), workers=workers)
         update_job_progress(
             session,
             job,
             "process_scenes",
             {"total_scenes": len(scenes), "workers": workers},
         )
+        flush_to_job(
+            session,
+            job,
+            extra={"total_scenes": len(scenes), "workers": workers},
+            current_step="process_scenes",
+        )
 
         upserted = 0
         raw_results: list[dict[str, Any]] = []
         t_process = time.perf_counter()
+        flush_every = max(1, workers)
+        completed_n = 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -819,10 +954,16 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                         scene_id=scene.get("id"),
                         error=str(e),
                     )
+                    completed_n += 1
+                    if completed_n % flush_every == 0:
+                        flush_to_job(session, job, current_step="process_scenes")
                     continue
+                completed_n += 1
                 if result is not None:
                     upserted += 1
                     raw_results.append(result)
+                if completed_n % flush_every == 0:
+                    flush_to_job(session, job, current_step="process_scenes")
 
         logger.info(
             "scene_parallel_done",
@@ -845,6 +986,12 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
             "process_scenes",
             {"scenes_upserted": upserted, "workers": workers},
         )
+        flush_to_job(
+            session,
+            job,
+            extra={"scenes_upserted": upserted, "workers": workers},
+            complete_process_scenes=True,
+        )
 
         decloud_schedule: dict[str, Any] | None = None
         if decloud_enabled() and raw_results:
@@ -863,22 +1010,27 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
 
         job.status = "completed"
         job.finished_at = datetime.now(timezone.utc)
-        progress = job.progress_json or {}
-        progress["current_step"] = "complete"
-        progress["scenes_upserted"] = upserted
-        progress["total_scenes"] = len(scenes)
-        progress["skipped_existing"] = skipped_existing
-        progress["write_cogs"] = write_cogs
+        final_extra: dict[str, Any] = {
+            "current_step": "complete",
+            "scenes_upserted": upserted,
+            "total_scenes": len(scenes),
+            "skipped_existing": skipped_existing,
+            "write_cogs": write_cogs,
+        }
         if decloud_schedule:
-            progress["decloud"] = {
+            final_extra["decloud"] = {
                 "mode": decloud_schedule.get("mode"),
                 "batch": decloud_schedule.get("batch"),
                 "per_scene": decloud_schedule.get("per_scene"),
                 "hold_decloud_dates": decloud_schedule.get("hold_decloud_dates"),
             }
-        job.progress_json = progress
-        flag_modified(job, "progress_json")
-        session.commit()
+        flush_to_job(
+            session,
+            job,
+            extra=final_extra,
+            current_step="complete",
+            complete_process_scenes=True,
+        )
 
         logger.info(
             "agri_optical_job_completed",
@@ -901,7 +1053,15 @@ def process_agri_optical_lonlat(self, job_id: str) -> dict:
                 job.status = "failed"
                 job.error = str(e)
                 job.finished_at = datetime.now(timezone.utc)
-                session.commit()
+                try:
+                    flush_to_job(
+                        session,
+                        job,
+                        extra={"error": str(e)[:500]},
+                        current_step="failed",
+                    )
+                except Exception:
+                    session.commit()
         except Exception:
             pass
         retry_num = self.request.retries

@@ -318,7 +318,7 @@ def search_scenes_for_defs(
         collections=[STAC_COLLECTION],
         intersects=field_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=90 still includes 90.0% scenes
+        # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 still includes 100.0% scenes
         query={"eo:cloud_cover": {"lte": cloud_cap}},
         max_items=item_cap,
     )
@@ -437,6 +437,40 @@ def read_bands_windowed_parallel(
         return read_band_windowed(href, bounds, target_shape, target_transform)
 
     return run_parallel_band_jobs(band_hrefs, _one, scene_workers=scene_workers)
+
+
+def read_rgb_windowed(
+    href: str,
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    *,
+    resampling: Resampling = Resampling.bilinear,
+) -> np.ndarray | None:
+    """Read a 3-band visual/true_color COG windowed to the target grid.
+
+    Returns HxWx3 float32 (or None if the asset has fewer than 3 bands).
+    Element84 ``visual`` is typically uint8 RGB; values are preserved.
+    """
+    with rasterio.Env():
+        with rasterio.open(href) as src:
+            if src.count < 3:
+                return None
+            src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
+            window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
+            data = src.read([1, 2, 3], window=window, boundless=True, fill_value=0)
+            dst = np.zeros((3, *target_shape), dtype=np.float32)
+            for i in range(3):
+                reproject(
+                    source=data[i].astype(np.float32),
+                    destination=dst[i],
+                    src_transform=rasterio.windows.transform(window, src.transform),
+                    src_crs=src.crs,
+                    dst_transform=target_transform,
+                    dst_crs="EPSG:4326",
+                    resampling=resampling,
+                )
+            return np.transpose(dst, (1, 2, 0))
 
 
 # ── COG writing ──────────────────────────────────────────────────────

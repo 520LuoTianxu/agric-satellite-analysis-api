@@ -27,6 +27,7 @@ from app.core.decloud import (
     decloud_mode,
     decloud_oss_sensor,
     decloud_pixel_payload,
+    decloud_quality_metrics,
     decloud_s2_extra_assets,
     decloud_scene_id,
     decloud_stac_cloud_max_pct,
@@ -62,10 +63,10 @@ class DecloudFlagTests(unittest.TestCase):
             os.environ.pop("DECLOUD_CLOUD_MIN_PCT", None)
             self.assertEqual(decloud_cloud_min_pct(), 30.0)
 
-    def test_stac_max_default_is_90(self) -> None:
+    def test_stac_max_default_is_100(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DECLOUD_STAC_CLOUD_MAX_PCT", None)
-            self.assertEqual(decloud_stac_cloud_max_pct(), 90.0)
+            self.assertEqual(decloud_stac_cloud_max_pct(), 100.0)
 
     def test_backend_dummy(self) -> None:
         with patch.dict(os.environ, {"DECLOUD_BACKEND": "dummy"}):
@@ -128,9 +129,11 @@ class TriggerTests(unittest.TestCase):
             )
         )
 
-    def test_stac_85_triggers_95_does_not(self) -> None:
+    def test_stac_85_and_95_and_100_trigger_over_100_does_not(self) -> None:
         self.assertTrue(should_trigger_decloud(cloud_cover=85.0))
-        self.assertFalse(should_trigger_decloud(cloud_cover=95.0))
+        self.assertTrue(should_trigger_decloud(cloud_cover=95.0))
+        self.assertTrue(should_trigger_decloud(cloud_cover=100.0))
+        self.assertFalse(should_trigger_decloud(cloud_cover=100.1))
 
 
 class QualityScoreTests(unittest.TestCase):
@@ -530,6 +533,32 @@ class PersistProductTests(unittest.TestCase):
         self.assertEqual(payload["decloud_reasons"], ["ndvi_far_below_neighbors"])
         self.assertEqual(payload["source"], DECLOUD_SOURCE)
         self.assertEqual(payload["pixels"][0]["NDVI"], 0.1)
+
+    def test_pixel_payload_stores_quality_metrics_for_audit(self) -> None:
+        metrics = decloud_quality_metrics(
+            DecloudQualityInputs(
+                rgb_mean=0.12,
+                rgb_mean_raw=0.40,
+                rgb_std=0.05,
+                rgb_std_raw=0.08,
+                ndvi_mean=0.0,
+                neighbor_ndvi_mean=0.79,
+            )
+        )
+        self.assertEqual(metrics["ndvi_mean"], 0.0)
+        self.assertEqual(metrics["neighbor_ndvi_mean"], 0.79)
+        self.assertEqual(metrics["ndvi_gap"], 0.79)
+        payload = decloud_pixel_payload(
+            quality="bad",
+            score=0.6,
+            reasons=["ndvi_far_below_neighbors"],
+            raw_scene_id="stac_bridge_2024-07-01_S2",
+            pixels=[{"lon": 1.0, "lat": 2.0, "NDVI": 0.0, "clear": 0}],
+            metrics=metrics,
+        )
+        self.assertEqual(payload["decloud_metrics"]["ndvi_gap"], 0.79)
+        # fair/bad still carry pixel values for non-drought use
+        self.assertEqual(payload["pixels"][0]["NDVI"], 0.0)
 
     def test_fallback_pixels_from_zonal_means(self) -> None:
         pixels = fallback_lonlat_pixels(
