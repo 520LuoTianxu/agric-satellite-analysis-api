@@ -9,7 +9,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <ConfirmDialogProvider>
             <div className="flex h-screen overflow-hidden">
                 <Sidebar />
-                <main className="flex-1 overflow-y-auto bg-surface-2 pt-16 lg:pt-0 transition-[margin] duration-300 ease-in-out">
+                <main className="min-w-0 flex-1 overflow-y-auto bg-surface-2 pt-16 lg:pt-0 transition-[margin] duration-300 ease-in-out">
                     {children}
                 </main>
             </div>

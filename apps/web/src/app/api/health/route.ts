@@ -3,6 +3,9 @@ import { logger as rootLogger } from "@/lib/logger";
 
 const logger = rootLogger.child({ component: "health" });
 
+// 健康状态必须在请求时探测，避免构建阶段访问后端并缓存失效结果。
+export const dynamic = "force-dynamic";
+
 /**
  * GET /api/health
  *

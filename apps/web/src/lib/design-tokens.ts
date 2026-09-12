@@ -15,11 +15,6 @@ export function tokenColor(varName: string, alpha?: number): string {
     return alpha != null ? `hsl(${value} / ${alpha})` : `hsl(${value})`;
 }
 
-/**
- * Every surface that floats over map imagery uses this scrim: surface-3
- * at 95%, a hairline border and shadow-panel. Legible over both dark
- * canopy and bright bare soil, and identical for the toolbar, the
- * controls, the legend, the provenance bar and the analysis panel.
- */
+/** 地图浮层统一使用轻边框和柔和阴影，保证深浅影像上的文字可读性。 */
 export const MAP_CHROME =
-    "bg-surface-3/95 backdrop-blur border border-border shadow-panel";
+    "bg-background/95 backdrop-blur-md border border-border/60 shadow-[0_8px_32px_-12px_rgba(15,23,42,0.28)]";

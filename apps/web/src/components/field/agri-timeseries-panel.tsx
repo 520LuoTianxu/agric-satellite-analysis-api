@@ -1342,8 +1342,8 @@ export default function AgriTimeseriesPanel({
     const chartIndexType: IndexType = CHART_INDEX_TYPE[series] ?? "NDVI";
 
     return (
-        <Card className="border-primary/20 bg-primary-subtle/30">
-            <CardHeader className="pb-3 pt-3.5 px-3.5">
+        <Card className="overflow-hidden border-border/60 bg-card shadow-sm">
+            <CardHeader className="border-b border-border/50 bg-muted/20 p-4">
                 <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 space-y-1">
                         <CardTitle className="flex flex-wrap items-center gap-1.5 text-sm font-semibold tracking-tight">
@@ -1389,7 +1389,7 @@ export default function AgriTimeseriesPanel({
                     </div>
                 </div>
             </CardHeader>
-            <CardContent className="px-3.5 pb-3.5 pt-0 space-y-3">
+            <CardContent className="p-4 space-y-4">
                 <Dialog open={refreshDateOpen} onOpenChange={setRefreshDateOpen}>
                     <DialogContent className="sm:max-w-lg">
                         <DialogHeader>
@@ -1555,7 +1555,7 @@ export default function AgriTimeseriesPanel({
                 )}
                 {!loading && total > 0 && (
                     <>
-                        <div className="flex flex-nowrap gap-1.5 items-center overflow-x-auto">
+                        <div className="flex flex-wrap gap-1.5 items-center rounded-xl bg-muted/40 p-2">
                             {primaryKeys.map((key) => {
                                 const meta = SERIES_META[key];
                                 return (
@@ -1655,73 +1655,37 @@ export default function AgriTimeseriesPanel({
                                     : ""}
                             </p>
                         )}
-                        {(series === "ndvi" || series === "evi" || series === "drought") && (
-                            <>
-                                <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1.5">
-                                    <div className="flex flex-wrap items-center gap-1.5">
-                                        <span className="text-[11px] font-medium text-foreground">当日长势等级</span>
-                                        <Badge variant="secondary" className="text-[10px]">
-                                            {cropOption?.season_label_zh || cropOption?.name_zh || "作物生育季"}
-                                        </Badge>
-                                        {selectedBare && (
-                                            <Badge variant="destructive" className="text-[10px]">
-                                                疑似未种植/裸地（旺季 NDVI 低于 {UNCROPPED_NDVI}）
-                                            </Badge>
-                                        )}
-                                    </div>
-                                    <p className="text-[10px] text-muted-foreground leading-snug">
-                                        分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}；圆环中心为地块面积（亩）。
-                                    </p>
-                                    <NdviGradeSharesChart
-                                        variant="donut"
-                                        selectedShare={selectedDayShare}
-                                        areaMu={areaMu}
-                                        selectedDate={selectedDate}
-                                        height={200}
-                                    />
-                                </div>
-                                <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2 space-y-1">
-                                    <span className="text-[11px] font-medium text-foreground">多日长势占比趋势</span>
-                                    <NdviGradeSharesChart
-                                        variant="stacked"
-                                        historyByDate={dayGradeByDate}
-                                        meanByDate={sceneMeanByDate}
-                                        height={250}
-                                    />
-                                </div>
-                            </>
-                        )}
-                        <div className="flex flex-wrap items-center gap-2">
-                            <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                className="h-7 text-xs"
-                                disabled={!landId || harvestLoading}
-                                onClick={() => void runHarvestDetect()}
-                            >
-                                {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
-                                {t("harvestDetect")}
-                            </Button>
-                            <span className="text-[10px] text-muted-foreground">{t("harvestDetectHint")}</span>
-                            {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
-                                <Badge variant="default" className="text-[10px]">
-                                    {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
-                                </Badge>
-                            ) : harvestResult ? (
-                                <Badge variant="secondary" className="text-[10px]">
-                                    {harvestResult.status}
-                                </Badge>
-                            ) : null}
-                        </div>
-                        <div className="rounded-md border border-border/60 bg-background/70 px-2.5 py-2">
+                        <div className="rounded-xl border border-border/60 bg-background p-3">
+                            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/35 p-3">
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 shrink-0 text-xs"
+                                    disabled={!landId || harvestLoading}
+                                    onClick={() => void runHarvestDetect()}
+                                >
+                                    {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                                    {t("harvestDetect")}
+                                </Button>
+                                <span className="order-last w-full text-xs leading-relaxed text-muted-foreground">{t("harvestDetectHint")}</span>
+                                {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
+                                    <Badge variant="secondary" className="ml-auto text-xs tabular-nums">
+                                        {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
+                                    </Badge>
+                                ) : harvestResult ? (
+                                    <Badge variant="secondary" className="ml-auto text-xs">
+                                        {harvestResult.status}
+                                    </Badge>
+                                ) : null}
+                            </div>
                             {stats.length > 0 ? (
                                 <NdviChart
                                     stats={stats}
                                     decloudAltStats={decloudAltStats}
                                     selectedDate={selectedDate}
                                     onDateSelect={(d) => selectDateExplicit(d)}
-                                    height={220}
+                                    height={280}
                                     indexType={chartIndexType}
                                     seasonMonths={
                                         series === "ndvi" ||
@@ -1748,7 +1712,43 @@ export default function AgriTimeseriesPanel({
                                 <p className="text-xs text-muted-foreground py-2">{t("noMeanPoints")}</p>
                             )}
                         </div>
-                        <div className="space-y-2 rounded-md border border-border/50 bg-background/40 px-2.5 py-2">
+                        {(series === "ndvi" || series === "evi" || series === "drought") && (
+                            <>
+                                <div className="rounded-xl border border-border/60 bg-background p-3 space-y-3">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="text-[11px] font-medium text-foreground">当日长势等级</span>
+                                        <Badge variant="secondary" className="text-[10px]">
+                                            {cropOption?.season_label_zh || cropOption?.name_zh || "作物生育季"}
+                                        </Badge>
+                                        {selectedBare && (
+                                            <Badge variant="destructive" className="text-[10px]">
+                                                疑似未种植/裸地（旺季 NDVI 低于 {UNCROPPED_NDVI}）
+                                            </Badge>
+                                        )}
+                                    </div>
+                                    <p className="text-[10px] text-muted-foreground leading-snug">
+                                        分档按像元 NDVI：{NDVI_DAY_GRADE_RULE_ZH}；圆环中心为地块面积（亩）。
+                                    </p>
+                                    <NdviGradeSharesChart
+                                        variant="donut"
+                                        selectedShare={selectedDayShare}
+                                        areaMu={areaMu}
+                                        selectedDate={selectedDate}
+                                        height={200}
+                                    />
+                                </div>
+                                <div className="rounded-xl border border-border/60 bg-background p-3 space-y-3">
+                                    <span className="text-[11px] font-medium text-foreground">多日长势占比趋势</span>
+                                    <NdviGradeSharesChart
+                                        variant="stacked"
+                                        historyByDate={dayGradeByDate}
+                                        meanByDate={sceneMeanByDate}
+                                        height={250}
+                                    />
+                                </div>
+                            </>
+                        )}
+                        <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-3">
                             <p className="text-[11px] text-muted-foreground leading-relaxed">
                                 {selectedDate
                                     ? t("heatmapDate", { date: selectedDate, mode: AGRI_MODE_LABELS[series] })
@@ -1775,7 +1775,7 @@ export default function AgriTimeseriesPanel({
                             </p>
                             {selectedDate && (
                                 <div className="space-y-2">
-                                    <div className="flex flex-wrap gap-1.5 items-center">
+                                    <div className="flex max-h-36 flex-wrap gap-2 items-center overflow-y-auto">
                                         {chipDates.map((date) => {
                                             const active = selectedDate === date;
                                             const chipCloud = active ? cloudCoverPct : cloudPctByDate[date];
@@ -1791,7 +1791,7 @@ export default function AgriTimeseriesPanel({
                                                     size="sm"
                                                     variant={active ? "default" : "outline"}
                                                     className={cn(
-                                                        "h-6 text-[10px] px-1.5 tabular-nums shrink-0 gap-1",
+                                                        "h-8 rounded-lg text-xs px-2 tabular-nums shrink-0 gap-1.5",
                                                         active && cloudCoverOver30 && "ring-1 ring-warning/50",
                                                     )}
                                                     onClick={() => selectDateExplicit(date)}

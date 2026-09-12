@@ -193,7 +193,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
         } finally {
             if (gen === loadGenRef.current) setLoading(false);
         }
-    }, [fieldId, activeIndex, isAgriField]);
+    }, [fieldId, activeIndex, isAgriField, onDataLoaded]);
 
     useEffect(() => {
         loadData();

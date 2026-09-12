@@ -861,6 +861,7 @@
     "styleDark": "Dark"
   },
   "ndviChart": {
+    "threshold": "Threshold",
     "cloud": "Cloud: {percent}%",
     "cloudNA": "Cloud: N/A",
     "decloudClear": "De-cloud: clear raw",
@@ -999,6 +1000,7 @@
     "scoreOutOf": "{score} / 100"
   },
   "overviewPage": {
+    "fitRegion": "Fit region",
     "title": "China overview",
     "subtitle": "Drought / flood / weak growth · country→province→city→county",
     "breadcrumbCountry": "China",

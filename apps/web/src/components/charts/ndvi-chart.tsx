@@ -9,6 +9,7 @@ import {
     TooltipComponent,
     LegendComponent,
     MarkLineComponent,
+    MarkPointComponent,
     MarkAreaComponent,
     DataZoomComponent,
 } from "echarts/components";
@@ -39,6 +40,7 @@ echarts.use([
     TooltipComponent,
     LegendComponent,
     MarkLineComponent,
+    MarkPointComponent,
     MarkAreaComponent,
     DataZoomComponent,
     CanvasRenderer,
@@ -108,7 +110,7 @@ export default function NdviChart({
 }: NdviChartProps) {
     const t = useTranslations("ndviChart");
     const config = INDEX_CONFIG[indexType];
-    const seriesName = `Mean ${config.label}`;
+    const seriesName = config.label;
     const isSar = indexType === "VV" || indexType === "VH";
     const dataVals = stats
         .map((s) => s.mean)
@@ -186,7 +188,7 @@ export default function NdviChart({
                     opacity: 0.9,
                 },
                 symbol: "diamond",
-                symbolSize: s.date === selectedDate ? 10 : 7,
+                symbolSize: s.date === selectedDate ? 9 : 5,
                 cloudCover: s.cloud_cover ?? null,
                 decloudQuality: s.decloud_quality ?? null,
                 decloudReasons: s.decloud_reasons ?? [],
@@ -212,7 +214,7 @@ export default function NdviChart({
         const pad2 = (n: number) => String(n).padStart(2, "0");
         const markAreaData: any[] = [];
         if (stageBands?.length && years.length) {
-            const bandColors = ["rgba(216,243,220,0.35)", "rgba(149,213,178,0.28)", "rgba(82,183,136,0.22)", "rgba(244,162,97,0.18)"];
+            const bandColors = ["rgba(216,243,220,0.35)", "rgba(22,163,74,0.09)", "rgba(82,183,136,0.22)", "rgba(244,162,97,0.18)"];
             years.forEach((y) => {
                 stageBands.forEach((b, i) => {
                     const sd = b.startDay ?? 1;
@@ -235,7 +237,7 @@ export default function NdviChart({
                     {
                         name: years.length <= 2 ? "生育期" : undefined,
                         xAxis: `${y}-${pad2(sm)}-01`,
-                        itemStyle: { color: "rgba(216,243,220,0.32)" },
+                        itemStyle: { color: "rgba(22,163,74,0.06)" },
                     },
                     { xAxis: `${y}-${pad2(em)}-28` },
                 ]);
@@ -246,7 +248,7 @@ export default function NdviChart({
                         {
                             name: years.length <= 2 ? "旺长期" : undefined,
                             xAxis: `${y}-${pad2(ps)}-01`,
-                            itemStyle: { color: "rgba(149,213,178,0.28)" },
+                            itemStyle: { color: "rgba(22,163,74,0.09)" },
                         },
                         { xAxis: `${y}-${pad2(pe)}-28` },
                     ]);
@@ -254,7 +256,7 @@ export default function NdviChart({
             });
         }
         const markAreaOption = markAreaData.length
-            ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: "#3f6212" }, data: markAreaData }
+            ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: tokenColor("--muted-foreground") }, data: markAreaData }
             : undefined;
 
         const valueByDate = new Map(stats.map((s) => [s.date, s.mean]));
@@ -293,10 +295,13 @@ export default function NdviChart({
             ...(hasWeather ? ["Precip (mm)", "ET₀ (mm)"] : []),
         ];
         return {
-            grid: { top: showLegend ? 36 : 18, right: hasWeather ? 50 : 10, bottom: 40, left: 40 },
+            grid: { top: showLegend ? 42 : 22, right: hasWeather ? 46 : 20, bottom: 64, left: 42 },
             legend: showLegend
                 ? {
                     data: legendData,
+                    type: "scroll",
+                    left: 8,
+                    right: 8,
                     top: 0,
                     ...legendStyle(),
                 }
@@ -359,7 +364,8 @@ export default function NdviChart({
             },
             xAxis: {
                 type: "time" as const,
-                axisLabel: axisLabel(),
+                axisLabel: { ...axisLabel(), hideOverlap: true },
+                splitNumber: 4,
                 axisTick: { alignWithLabel: true },
             },
             yAxis: hasWeather
@@ -386,6 +392,18 @@ export default function NdviChart({
                         return ((viewStart - tMin) / span) * 100;
                     })(),
                     end: 100,
+                    zoomOnMouseWheel: false,
+                    moveOnMouseWheel: false,
+                },
+                {
+                    type: "slider" as const,
+                    bottom: 8,
+                    height: 18,
+                    borderColor: "transparent",
+                    fillerColor: "rgba(22,163,74,0.12)",
+                    dataBackground: { lineStyle: { color: indexLineColor(indexType), opacity: 0.4 }, areaStyle: { color: "rgba(22,163,74,0.06)" } },
+                    showDetail: false,
+                    brushSelect: false,
                 },
             ],
             series: [
@@ -418,12 +436,16 @@ export default function NdviChart({
                     name: seriesName,
                     type: "line",
                     data: ndviData,
-                    smooth: true,
-                    lineStyle: { color: indexLineColor(indexType), width: 2 },
+                    // 遥感观测使用真实折线，避免平滑插值制造不存在的峰谷。
+                    smooth: false,
+                    connectNulls: false,
+                    itemStyle: { color: indexLineColor(indexType) },
+                    lineStyle: { color: indexLineColor(indexType), width: 1.8 },
                     showSymbol: true,
                     markLine: {
                         silent: true,
-                        data: [thresholdMarkLine(config.threshold, "Threshold")],
+                        symbol: ["none", "none"],
+                        data: [thresholdMarkLine(config.threshold, t("threshold"), "insideEndTop")],
                     },
                     markArea: markAreaOption,
                     markPoint: markPointOption,
@@ -435,6 +457,8 @@ export default function NdviChart({
                             type: "scatter",
                             data: altData,
                             z: 5,
+                            symbol: "diamond",
+                            itemStyle: { color: tokenColor("--warning") },
                             tooltip: { trigger: "item" as const },
                         },
                     ]
@@ -510,11 +534,11 @@ export default function NdviChart({
                 lazyUpdate
             />
             {!isSar ? (
-                <div className="px-1 space-y-1">
-                    <p className="text-[10px] font-medium text-muted-foreground">
+                <details className="rounded-lg bg-muted/35 px-3 py-2 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer text-xs font-medium">
                         {t("pointLegendTitle")}
-                    </p>
-                    <ul className="grid gap-1 text-[10px] text-muted-foreground leading-snug sm:grid-cols-2">
+                    </summary>
+                    <ul className="mt-2 grid gap-2 text-xs text-muted-foreground leading-relaxed">
                         <li className="flex items-start gap-1.5">
                             <span
                                 className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
@@ -548,7 +572,7 @@ export default function NdviChart({
                             <span>{t("pointLegendSelected")}</span>
                         </li>
                     </ul>
-                </div>
+                </details>
             ) : null}
         </div>
     );

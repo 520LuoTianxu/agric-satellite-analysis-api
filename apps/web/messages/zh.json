@@ -861,6 +861,7 @@
     "styleDark": "深色"
   },
   "ndviChart": {
+    "threshold": "参考阈值",
     "cloud": "云量: {percent}%",
     "cloudNA": "云量: 无",
     "decloudClear": "去云: 晴空原始",
@@ -999,6 +1000,7 @@
     "scoreOutOf": "{score} / 100"
   },
   "overviewPage": {
+    "fitRegion": "适配视野",
     "title": "全国态势",
     "subtitle": "干旱 / 洪涝 / 弱长势 · 全国→省→市→县",
     "breadcrumbCountry": "全国",
