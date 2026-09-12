@@ -889,7 +889,8 @@
     "pointLegendSelected": "红色圆点：当前选中日期",
     "empty": "暂无 {index} 数据",
     "showObservations": "观测点与去云对照",
-    "showEvents": "风险标记"
+    "showEvents": "风险标记",
+    "onlyRealistic": "仅显示有效观测"
   },
   "agriPanel": {
     "title": "遥感监测",

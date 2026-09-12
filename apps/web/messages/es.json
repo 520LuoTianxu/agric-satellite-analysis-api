@@ -889,7 +889,8 @@
     "pointLegendSelected": "Punto rojo: fecha seleccionada",
     "empty": "Sin datos de {index}",
     "showObservations": "Observaciones y alternativas sin nubes",
-    "showEvents": "Marcadores de riesgo"
+    "showEvents": "Marcadores de riesgo",
+    "onlyRealistic": "Solo observaciones válidas"
   },
   "agriPanel": {
     "title": "Monitoreo satelital",

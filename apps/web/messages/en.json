@@ -889,7 +889,8 @@
     "pointLegendSelected": "Red dot: selected date",
     "empty": "No {index} data yet",
     "showObservations": "Observations & cloud-free alternatives",
-    "showEvents": "Risk markers"
+    "showEvents": "Risk markers",
+    "onlyRealistic": "Only valid observations"
   },
   "agriPanel": {
     "title": "Satellite monitoring",
