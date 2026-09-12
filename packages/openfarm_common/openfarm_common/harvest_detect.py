@@ -32,6 +32,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+_CONF_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
 @dataclass(frozen=True)
 class HarvestThresholds:
     grow_min: float = 0.35
@@ -39,6 +42,7 @@ class HarvestThresholds:
     lookback_k: int = 3
     confirm_m: int = 1
     min_clear_points: int = 4
+    peak_drop_frac: float = 0.35
 
     @classmethod
     def from_env(cls) -> "HarvestThresholds":
@@ -48,6 +52,7 @@ class HarvestThresholds:
             lookback_k=max(1, _env_int("HARVEST_LOOKBACK_K", 3)),
             confirm_m=max(0, _env_int("HARVEST_CONFIRM_M", 1)),
             min_clear_points=max(2, _env_int("HARVEST_MIN_CLEAR_POINTS", 4)),
+            peak_drop_frac=_env_float("HARVEST_PEAK_DROP_FRAC", 0.35),
         )
 
 
@@ -144,6 +149,129 @@ def filter_official_ndvi_points(
     return out
 
 
+def _followup_confidence(
+    points: list[dict[str, Any]],
+    index: int,
+    *,
+    drop: float,
+    drop_frac: float,
+    grow_min: float,
+    confirm_m: int,
+) -> str | None:
+    """Return confidence for a drop candidate, or None to skip (follow-up rebound)."""
+    following = points[index + 1 : index + 1 + confirm_m] if confirm_m else []
+    if confirm_m > 0 and len(following) >= confirm_m:
+        if any(p["_ndvi"] >= grow_min for p in following):
+            return None
+        return "high" if drop >= drop_frac + 0.1 else "medium"
+    if confirm_m > 0 and len(following) == 0:
+        return "low"  # window end, drop only
+    # partial follow-up
+    if following and any(p["_ndvi"] >= grow_min for p in following):
+        return None
+    return "medium" if following else "low"
+
+
+def _step_drop_candidates(
+    points: list[dict[str, Any]], thr: HarvestThresholds
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for i, pt in enumerate(points):
+        if i < thr.lookback_k:
+            continue
+        lookback = points[i - thr.lookback_k : i]
+        baseline = median([p["_ndvi"] for p in lookback])
+        if baseline <= 0:
+            continue
+        drop = (baseline - pt["_ndvi"]) / baseline
+        if drop < thr.drop_frac:
+            continue
+        confidence = _followup_confidence(
+            points,
+            i,
+            drop=drop,
+            drop_frac=thr.drop_frac,
+            grow_min=thr.grow_min,
+            confirm_m=thr.confirm_m,
+        )
+        if confidence is None:
+            continue
+        following = points[i + 1 : i + 1 + thr.confirm_m] if thr.confirm_m else []
+        candidates.append(
+            {
+                "method": "step_drop",
+                "harvest_date": pt["_date"].isoformat(),
+                "scene_id": pt.get("scene_id"),
+                "ndvi": pt["_ndvi"],
+                "baseline_ndvi": baseline,
+                "drop_frac": round(drop, 4),
+                "confidence": confidence,
+                "lookback_dates": [p["_date"].isoformat() for p in lookback],
+                "followup_dates": [p["_date"].isoformat() for p in following],
+            }
+        )
+    return candidates
+
+
+def _season_peak_index(points: list[dict[str, Any]], grow_min: float) -> int:
+    """Index of max NDVI among clear points that reached grow_min (else global max)."""
+    grow_idxs = [i for i, p in enumerate(points) if p["_ndvi"] >= grow_min]
+    pool = grow_idxs if grow_idxs else list(range(len(points)))
+    return max(pool, key=lambda i: (points[i]["_ndvi"], -i))
+
+
+def _peak_drop_candidates(
+    points: list[dict[str, Any]], thr: HarvestThresholds
+) -> list[dict[str, Any]]:
+    """Cumulative drop from season peak; does not require ndvi < grow_min."""
+    if not points:
+        return []
+    peak_i = _season_peak_index(points, thr.grow_min)
+    peak_pt = points[peak_i]
+    peak_ndvi = peak_pt["_ndvi"]
+    if peak_ndvi <= 0:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for i in range(peak_i + 1, len(points)):
+        pt = points[i]
+        drop = (peak_ndvi - pt["_ndvi"]) / peak_ndvi
+        if drop < thr.peak_drop_frac:
+            continue
+
+        following = points[i + 1 : i + 1 + thr.confirm_m] if thr.confirm_m else []
+        if pt["_ndvi"] < thr.grow_min:
+            # Same confirm stay-low branch as step path → high/medium; else medium
+            confirmed = None
+            if thr.confirm_m > 0 and len(following) >= thr.confirm_m:
+                if not any(p["_ndvi"] >= thr.grow_min for p in following):
+                    confirmed = (
+                        "high" if drop >= thr.peak_drop_frac + 0.1 else "medium"
+                    )
+            if confirmed is not None:
+                confidence = confirmed
+            else:
+                confidence = "medium"
+        else:
+            # Still >= grow_min (gradual harvest mid-decline)
+            confidence = "low"
+
+        candidates.append(
+            {
+                "method": "peak_drop",
+                "harvest_date": pt["_date"].isoformat(),
+                "scene_id": pt.get("scene_id"),
+                "ndvi": pt["_ndvi"],
+                "peak_date": peak_pt["_date"].isoformat(),
+                "peak_ndvi": peak_ndvi,
+                "peak_drop_frac": round(drop, 4),
+                "confidence": confidence,
+                "followup_dates": [p["_date"].isoformat() for p in following],
+            }
+        )
+    return candidates
+
+
 def detect_harvest(
     official_ndvi_points: list[dict[str, Any]],
     window: dict[str, Any] | None = None,
@@ -164,6 +292,7 @@ def detect_harvest(
             "lookback_k": thr.lookback_k,
             "confirm_m": thr.confirm_m,
             "min_clear_points": thr.min_clear_points,
+            "peak_drop_frac": thr.peak_drop_frac,
         },
         "clear_point_count": len(points),
         "note": "observation_only_no_interpolation",
@@ -191,44 +320,9 @@ def detect_harvest(
             window=win_meta,
         )
 
-    candidates: list[dict[str, Any]] = []
-    for i, pt in enumerate(points):
-        if i < thr.lookback_k:
-            continue
-        lookback = points[i - thr.lookback_k : i]
-        baseline = median([p["_ndvi"] for p in lookback])
-        if baseline <= 0:
-            continue
-        drop = (baseline - pt["_ndvi"]) / baseline
-        if drop < thr.drop_frac:
-            continue
-        # Post-harvest sustain: following clear points stay below grow_min
-        following = points[i + 1 : i + 1 + thr.confirm_m] if thr.confirm_m else []
-        if thr.confirm_m > 0 and len(following) >= thr.confirm_m:
-            if any(p["_ndvi"] >= thr.grow_min for p in following):
-                continue
-            confidence = "high" if drop >= thr.drop_frac + 0.1 else "medium"
-        elif thr.confirm_m > 0 and len(following) == 0:
-            confidence = "low"  # window end, drop only
-        else:
-            # partial follow-up
-            if following and any(p["_ndvi"] >= thr.grow_min for p in following):
-                continue
-            confidence = "medium" if following else "low"
-
-        candidates.append(
-            {
-                "harvest_date": pt["_date"].isoformat(),
-                "scene_id": pt.get("scene_id"),
-                "ndvi": pt["_ndvi"],
-                "baseline_ndvi": baseline,
-                "drop_frac": round(drop, 4),
-                "confidence": confidence,
-                "lookback_dates": [p["_date"].isoformat() for p in lookback],
-                "followup_dates": [p["_date"].isoformat() for p in following],
-            }
-        )
-
+    candidates = _step_drop_candidates(points, thr) + _peak_drop_candidates(
+        points, thr
+    )
     if not candidates:
         return HarvestDetectResult(
             status="uncertain",
@@ -237,7 +331,13 @@ def detect_harvest(
             window=win_meta,
         )
 
-    # Earliest satisfying candidate is primary
+    # Earliest date; on ties prefer higher confidence (high > medium > low)
+    candidates.sort(
+        key=lambda c: (
+            c["harvest_date"],
+            _CONF_RANK.get(str(c.get("confidence")), 9),
+        )
+    )
     primary = candidates[0]
     return HarvestDetectResult(
         status="detected",
