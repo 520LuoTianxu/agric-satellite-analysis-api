@@ -381,8 +381,9 @@ export default function NdviChart({
                 ]
                 : valueAxis({ min: yMin, max: yMax }),
             dataZoom: (() => {
-                // Default window: last 24 months ending at tMax; full range when span ≤ 24 months.
+                // Default window: last 24 months ending at tMax (end=100% = latest).
                 // Keep inside + slider in sync so the slider thumb matches the visible window.
+                // No LTTB — full series stays in option data so recent dates (e.g. 2026) render.
                 let start = 0;
                 let end = 100;
                 if (stats.length >= 2) {
@@ -398,6 +399,7 @@ export default function NdviChart({
                             const viewStart = tMax - MONTHS_24_MS;
                             start = ((viewStart - tMin) / span) * 100;
                         }
+                        // selectedDate near max is always inside: end stays 100%.
                     }
                 }
                 if (zoomRef.current?.key === viewKey) {

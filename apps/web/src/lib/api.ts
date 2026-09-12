@@ -1219,6 +1219,8 @@ export const agriApi = {
             to?: string;
             limit?: number;
             offset?: number;
+            /** asc (default) oldest-first; desc newest-first (timeseries should reverse client-side). */
+            order?: "asc" | "desc";
             /** If 1, prefer DB lonlat_v1 pixels (pixels_lonlat); grid pixel_data is fallback. */
             includePixels?: 0 | 1;
         } = {},
@@ -1228,6 +1230,7 @@ export const agriApi = {
         if (opts.from) params.set("from", opts.from);
         if (opts.to) params.set("to", opts.to);
         if (opts.includePixels != null) params.set("include_pixels", String(opts.includePixels));
+        if (opts.order) params.set("order", opts.order);
         params.set("limit", String(opts.limit ?? 200));
         params.set("offset", String(opts.offset ?? 0));
         return apiFetch<Paginated<AgriSceneProduct>>(
