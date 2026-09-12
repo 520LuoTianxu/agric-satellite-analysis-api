@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install shared task dependencies
-        run: pip install -e packages/openfarm_common numpy pillow
+        run: pip install -e packages/openfarm_common numpy pillow httpx reportlab matplotlib
       - name: Unit tests
         run: PYTHONPATH=services/ingest python -m unittest discover -s services/ingest/tests -v
 

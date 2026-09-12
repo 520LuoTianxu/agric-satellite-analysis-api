@@ -28,6 +28,7 @@ dependencies = [
     "rosetta-soil>=0.3.0",
     "reportlab>=4.0.0",
     "matplotlib>=3.8.0",
+    "pypdf>=4.0.0",
 ]
 
 [tool.setuptools.packages.find]
