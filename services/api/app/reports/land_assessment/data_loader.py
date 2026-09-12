@@ -786,7 +786,7 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
             "location": field.get("location") or field.get("name") or "—",
             "boundary": field.get("boundary")
             or "测绘 WGS 坐标（档案地块，不是手画框）",
-            "crop_label": "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）",
+            "crop_label": "玉米（默认6–9月生育期；可用自定义窗覆盖）",
             "crop_key": "maize",
             "land_id": None,
             "boundary_source": "survey",

@@ -355,7 +355,7 @@ def render_pdf(
 
     one_liner = ov.get("one_liner") or ""
     thinking_plain = (
-        f"这块地大约 {area_mu} 亩，位于 {field.get('location') or '—'}，种的是夏玉米。"
+        f"这块地大约 {area_mu} 亩，位于 {field.get('location') or '—'}，种的是{field.get('crop_label') or field.get('crop_type') or '作物'}。"
         f"我们不看全年平均绿度（全年平均会被冬天拉低，不公平），"
         f"只看玉米真正生长的夏天：7–8 月平均绿度大约 {rs.get('peak_ndvi_mean')}；"
         f"冬天大约 {rs.get('offseason_ndvi_mean')}。"
@@ -494,7 +494,7 @@ def render_pdf(
         ["位置", field.get("location") or "—"],
         [
             "作物",
-            field.get("crop_label") or "夏玉米（按 6–9 月生育期、7–8 月旺长期来看）",
+            field.get("crop_label") or "作物（按绑定作物生育期评估）",
         ],
         ["边界", field.get("boundary") or "—"],
         ["数据时段", risk.get("period") or "—"],
@@ -962,7 +962,7 @@ def render_pdf(
     story.append(
         p(
             "卫星：Sentinel-2 绿度等指数（OpenFarm / agri 回填）。天气：Open-Meteo。土壤：SoilGrids。"
-            "长势口径：夏玉米 6–9 月，旺长 7–8 月。生成工具：OpenFarm 选地体检。",
+            "长势口径：按地块作物生育期（可用自定义 growing_seasons 覆盖）。生成工具：OpenFarm 选地体检。",
             "small",
         )
     )
