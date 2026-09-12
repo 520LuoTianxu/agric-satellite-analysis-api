@@ -2,6 +2,7 @@
 
 Final window shape:
   {start_date, end_date, crops: [1..2 keys], label?}
+Max 3 windows per year (rotation rounds); max 2 crops per window.
 
 Accepts legacy months[] / start_month-end_month / crop (singular).
 """
@@ -14,6 +15,7 @@ from typing import Any
 
 MAX_CROPS_PER_WINDOW = 2
 MAX_DISTINCT_CROPS = 2
+MAX_WINDOWS = 3  # rotation rounds per year
 
 
 def _parse_iso_date(value: Any) -> date | None:
@@ -160,8 +162,13 @@ def validate_growing_seasons_crops(
     *,
     max_per_window: int = MAX_CROPS_PER_WINDOW,
     max_distinct: int = MAX_DISTINCT_CROPS,
+    max_windows: int = MAX_WINDOWS,
 ) -> None:
-    """Raise ValueError if crop limits exceeded."""
+    """Raise ValueError if window/crop limits exceeded."""
+    if len(windows) > max_windows:
+        raise ValueError(
+            f"growing_seasons has {len(windows)} windows; max {max_windows} per year (rotation rounds)"
+        )
     distinct: set[str] = set()
     for i, w in enumerate(windows):
         crops = list(w.get("crops") or [])
