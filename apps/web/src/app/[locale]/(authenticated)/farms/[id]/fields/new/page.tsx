@@ -121,7 +121,7 @@ export default function NewFieldPage() {
             </div>
 
             {/* Floating field details panel - top right */}
-            <div className="absolute top-4 right-4 z-10 w-80">
+            <div className="absolute bottom-4 left-4 right-4 z-10 max-h-[55%] overflow-y-auto sm:bottom-auto sm:left-auto sm:top-4 sm:max-h-[calc(100%-2rem)] sm:w-[360px]">
                 <div className={cn("overflow-hidden rounded-xl", MAP_CHROME)}>
                     {/* Panel header - always visible, acts as toggle */}
                     <button
@@ -140,7 +140,7 @@ export default function NewFieldPage() {
                     {/* Collapsible body */}
                     {panelOpen && (
                         <div className="border-t border-border px-4 pb-4">
-                            <form onSubmit={handleSubmit} className="space-y-3 pt-3">
+                            <form onSubmit={handleSubmit} className="space-y-4 pt-4">
                                 <div className="space-y-1.5">
                                     <Label htmlFor="field-name" className="text-xs">
                                         {t("fieldName")} <span className="text-destructive">*</span>

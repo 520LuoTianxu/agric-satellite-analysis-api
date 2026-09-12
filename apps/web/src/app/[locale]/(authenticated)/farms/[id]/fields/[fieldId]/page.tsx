@@ -212,7 +212,7 @@ function computeGeomBounds(geom: GeoJSON.Geometry): [number, number, number, num
 }
 
 const PANEL_WIDTH_STORAGE_KEY = "openfarm.fieldPanelWidthPx";
-const PANEL_WIDTH_DEFAULT_PX = 352; // 22rem
+const PANEL_WIDTH_DEFAULT_PX = 400; // 为图表和双列信息保留阅读宽度
 const PANEL_WIDTH_MIN_PX = 288; // 18rem
 const PANEL_WIDTH_MAX_PX = 640; // 40rem
 
@@ -619,25 +619,36 @@ export default function FieldDetailPage() {
         }
     }, [applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
+    // 地块应位于可见地图中，右侧分析面板占用的区域不参与居中计算。
+    const fitFieldInView = useCallback((map: maplibregl.Map) => {
+        if (!field?.geom) return;
+        const bounds = new maplibregl.LngLatBounds();
+        getAllCoords(field.geom).forEach(([lng, lat]) => bounds.extend([lng, lat]));
+        if (bounds.isEmpty()) return;
+        const width = map.getContainer().clientWidth;
+        const height = map.getContainer().clientHeight;
+        const mobile = window.matchMedia("(max-width: 639px)").matches;
+        map.fitBounds(bounds, {
+            padding: {
+                top: 80,
+                bottom: sidebarOpen && mobile ? Math.round(height * 0.52) + 28 : 48,
+                left: 56,
+                right: sidebarOpen && !mobile ? Math.min(panelWidthPx + 48, Math.round(width * 0.65)) : 40,
+            },
+            maxZoom: 17,
+            duration: 0,
+        });
+    }, [field, sidebarOpen, panelWidthPx]);
+
     // Callback from BaseMap when ready
     const handleMapReady = useCallback(
         (map: maplibregl.Map) => {
             setMapInstance(map);
             setupMapLayers(map);
 
-            // Fit to field bounds
-            if (field?.geom) {
-                try {
-                    const bounds = new maplibregl.LngLatBounds();
-                    const coords = getAllCoords(field.geom);
-                    coords.forEach(([lng, lat]) => bounds.extend([lng, lat]));
-                    if (!bounds.isEmpty()) {
-                        map.fitBounds(bounds, { padding: 60, maxZoom: 17 });
-                    }
-                } catch { }
-            }
+            fitFieldInView(map);
         },
-        [field, setupMapLayers],
+        [setupMapLayers, fitFieldInView],
     );
 
     // When field arrives after the map is already ready, draw/fit the boundary
@@ -646,17 +657,15 @@ export default function FieldDetailPage() {
         if (!mapInstance || !field?.geom) return;
         if (!mapInstance.isStyleLoaded()) return;
         setupMapLayers(mapInstance);
-        try {
-            const bounds = new maplibregl.LngLatBounds();
-            const coords = getAllCoords(field.geom);
-            coords.forEach(([lng, lat]) => bounds.extend([lng, lat]));
-            if (!bounds.isEmpty()) {
-                mapInstance.fitBounds(bounds, { padding: 60, maxZoom: 17 });
-            }
-        } catch {
-            /* ignore fit errors on incomplete geom */
-        }
-    }, [field, mapInstance, setupMapLayers]);
+        fitFieldInView(mapInstance);
+        // 观察实际地图容器，导航侧栏切换与窗口缩放均能保持地块可见。
+        const observer = new ResizeObserver(() => {
+            mapInstance.resize();
+            fitFieldInView(mapInstance);
+        });
+        observer.observe(mapInstance.getContainer());
+        return () => observer.disconnect();
+    }, [field, mapInstance, setupMapLayers, fitFieldInView]);
 
     // Location search
     const handleLocationSelect = useCallback(
@@ -937,8 +946,8 @@ export default function FieldDetailPage() {
             <button
                 type="button"
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className={cn("absolute top-4 z-20 rounded-lg p-2 transition-all hover:bg-surface-3", MAP_CHROME)}
-                style={{ right: sidebarOpen ? "calc(var(--panel-w) + 2rem)" : "1rem" }}
+                className={cn("absolute top-4 right-4 sm:right-[var(--toggle-right)] z-20 rounded-xl p-2.5 transition-all hover:bg-surface-3", MAP_CHROME)}
+                style={{ "--toggle-right": sidebarOpen ? "calc(var(--panel-w) + 2rem)" : "1rem" } as React.CSSProperties}
                 title={sidebarOpen ? "Hide panel (⌘.)" : "Show panel (⌘.)"}
             >
                 {sidebarOpen ? (
@@ -951,7 +960,7 @@ export default function FieldDetailPage() {
             {/* Floating tabbed sidebar - right */}
             <div
                 className={cn(
-                    "absolute top-4 right-4 bottom-4 z-10 w-[var(--panel-w)]",
+                    "absolute right-4 bottom-4 z-10 h-[52%] w-[calc(100%-2rem)] sm:top-4 sm:h-auto sm:w-[var(--panel-w)] max-w-[calc(100%-2rem)]",
                     !isResizingPanel && "transition-transform duration-300 ease-in-out",
                     sidebarOpen ? "translate-x-0" : "translate-x-[calc(100%+1rem)]",
                 )}
@@ -964,7 +973,7 @@ export default function FieldDetailPage() {
                     title="Drag to resize · double-click resets to default"
                     onMouseDown={handlePanelResizeStart}
                     onDoubleClick={handlePanelResizeReset}
-                    className="group/resize absolute left-0 top-0 bottom-0 z-20 flex w-3 -translate-x-1/2 cursor-col-resize touch-none items-center justify-center"
+                    className="group/resize absolute left-0 top-0 bottom-0 z-20 hidden sm:flex w-3 -translate-x-1/2 cursor-col-resize touch-none items-center justify-center"
                 >
                     <div
                         className={cn(
@@ -979,7 +988,7 @@ export default function FieldDetailPage() {
                         {/* Eight tabs do not fit 22rem on one line. The
                             reference wraps rather than scrolls, so no tab
                             is hidden behind an invisible scroll affordance. */}
-                        <TabsList variant="underline" className="shrink-0 flex-wrap gap-x-4 px-4">
+                        <TabsList variant="underline" className="shrink-0 flex-wrap gap-x-3 gap-y-1 bg-background/95 px-4 py-2">
                             <TabsTrigger
                                 value="info"
                                 variant="underline"
@@ -1043,7 +1052,7 @@ export default function FieldDetailPage() {
                             </TabsTrigger>
                         </TabsList>
 
-                        <div className="flex-1 overflow-y-auto">
+                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
                             {editing ? (
                                 <div className="p-4">
                                     <h3 className="text-sm font-semibold mb-3">{t("editField")}</h3>
@@ -1111,7 +1120,7 @@ export default function FieldDetailPage() {
                                 <>
                                     <TabsContent value="info" className="mt-0 p-4 space-y-3">
                                         {/* Field header card */}
-                                        <div className="rounded-lg border bg-card shadow-sm p-3">
+                                        <div className="rounded-xl border border-border/60 bg-card p-4">
                                             <h2 className="text-base font-bold">{field.name}</h2>
                                             <p className="text-xs text-muted-foreground mt-0.5">
                                                 {field.area_ha != null ? formatAreaMu(field.area_ha) : ""}
@@ -1121,8 +1130,8 @@ export default function FieldDetailPage() {
                                         </div>
 
                                         {/* Field details card */}
-                                        <div className="rounded-lg border bg-card shadow-sm p-3">
-                                            <dl className="space-y-2.5">
+                                        <div className="rounded-xl border border-border/60 bg-card p-4">
+                                            <dl className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
                                                 <InfoRow label={t("name")} value={field.name} />
                                                 <InfoRow
                                                     label={t("area")}
@@ -1253,9 +1262,9 @@ export default function FieldDetailPage() {
 
 function InfoRow({ label, value }: { label: string; value: string }) {
     return (
-        <div>
+        <div className="min-w-0 rounded-lg bg-muted/35 px-3 py-2.5">
             <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-            <dd className="mt-0.5 text-sm">{value}</dd>
+            <dd className="mt-1 break-words text-sm font-medium leading-relaxed">{value}</dd>
         </div>
     );
 }

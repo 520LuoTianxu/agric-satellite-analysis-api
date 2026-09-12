@@ -2,9 +2,10 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
+import { area, pointOnFeature, polygon } from "@turf/turf";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useLocale, useTranslations } from "next-intl";
-import { ChevronRight, Download, Loader2 } from "lucide-react";
+import { ChevronRight, Download, Loader2, Maximize2 } from "lucide-react";
 import {
     agriApi,
     cropsApi,
@@ -53,7 +54,7 @@ function geoJsonUrl(level: OverviewLevel, adcode: string | null): string {
     // Aliyun DataV: https://geo.datav.aliyun.com/areas_v3/bound/{adcode}_full.json
     // country→100000 (provinces), province/city adcode→cities/counties. Served via local cache/proxy.
     const code = level === "country" || !adcode ? "100000" : adcode;
-    if (code === "100000") return "/geo/100000_full.json";
+    // 统一经缓存代理加载，全国边界未预置时也可从上游获取。
     return `/api/geo/${code}`;
 }
 
@@ -183,6 +184,7 @@ export default function OverviewPage() {
 
     const mapContainerRef = useRef<HTMLDivElement>(null);
     const mapRef = useRef<maplibregl.Map | null>(null);
+    const regionBoundsRef = useRef<maplibregl.LngLatBounds | null>(null);
     const statsRef = useRef<OverviewStats | null>(null);
     const metricRef = useRef<MapMetric>(metric);
     const onFeatureClickRef = useRef<(child: OverviewChild) => void>(() => {});
@@ -344,10 +346,11 @@ export default function OverviewPage() {
             style: blankStyle,
             center: CHINA_CENTER,
             zoom: 3.4,
-            maxBounds: [
-                [CHINA_BOUNDS[0][0] - 5, CHINA_BOUNDS[0][1] - 5],
-                [CHINA_BOUNDS[1][0] + 5, CHINA_BOUNDS[1][1] + 5],
-            ],
+            // 边界约束会抬高最小缩放级别，宽屏下仍裁切全国；允许留白并禁用世界副本。
+            minZoom: 0,
+            renderWorldCopies: false,
+            bounds: CHINA_BOUNDS,
+            fitBoundsOptions: { padding: 32 },
             attributionControl: {
                 compact: true,
                 customAttribution:
@@ -360,6 +363,10 @@ export default function OverviewPage() {
         const resize = () => {
             try {
                 map.resize();
+                // 侧栏和窗口改变可用尺寸后，仍完整展示当前行政区。
+                if (regionBoundsRef.current) {
+                    map.fitBounds(regionBoundsRef.current, { padding: 32, duration: 0, maxZoom: 9 });
+                }
             } catch {
                 /* ignore */
             }
@@ -512,6 +519,28 @@ export default function OverviewPage() {
                 });
 
                 const fc: GeoJSON.FeatureCollection = { type: "FeatureCollection", features };
+                // 多面行政区会为各岛屿重复排字；独立点源保证每个行政区仅一个名称。
+                const seen = new Set<string>();
+                const labels: GeoJSON.Feature<GeoJSON.Point>[] = [];
+                for (const f of features) {
+                    const props = f.properties;
+                    const key = String(props.adcode ?? props.name);
+                    if (!props.name || seen.has(key)) continue;
+                    const anchor = props.centroid ?? props.center;
+                    let coordinates: number[];
+                    if (Array.isArray(anchor) && anchor.length >= 2 && anchor.slice(0, 2).every(Number.isFinite)) {
+                        coordinates = anchor.slice(0, 2);
+                    } else if (f.geometry?.type === "Polygon" || f.geometry?.type === "MultiPolygon") {
+                        // 缺少行政中心时选最大面，避免名称落在离岸小岛上。
+                        const parts = f.geometry.type === "Polygon" ? [f.geometry.coordinates] : f.geometry.coordinates;
+                        const mainland = parts.map((part: number[][][]) => polygon(part)).sort((a: GeoJSON.Feature<GeoJSON.Polygon>, b: GeoJSON.Feature<GeoJSON.Polygon>) => area(b) - area(a))[0];
+                        if (!mainland) continue;
+                        coordinates = pointOnFeature(mainland).geometry.coordinates;
+                    } else continue;
+                    seen.add(key);
+                    labels.push({ type: "Feature", properties: { name: props.name }, geometry: { type: "Point", coordinates } });
+                }
+                const labelData: GeoJSON.FeatureCollection<GeoJSON.Point> = { type: "FeatureCollection", features: labels };
                 const mProp = metricProp(metricRef.current);
                 const high = metricHighColor(metricRef.current);
 
@@ -522,6 +551,11 @@ export default function OverviewPage() {
                         m.resize();
                     } catch {
                         /* ignore */
+                    }
+                    if (m.getSource("overview-labels")) {
+                        (m.getSource("overview-labels") as maplibregl.GeoJSONSource).setData(labelData);
+                    } else {
+                        m.addSource("overview-labels", { type: "geojson", data: labelData });
                     }
                     if (m.getSource("overview")) {
                         (m.getSource("overview") as maplibregl.GeoJSONSource).setData(fc);
@@ -554,7 +588,7 @@ export default function OverviewPage() {
                             m.addLayer({
                                 id: "overview-label",
                                 type: "symbol",
-                                source: "overview",
+                                source: "overview-labels",
                                 layout: {
                                     "text-field": ["get", "name"],
                                     "text-size": 11,
@@ -589,7 +623,8 @@ export default function OverviewPage() {
                             }
                         }
                         if (!bounds.isEmpty()) {
-                            m.fitBounds(bounds, { padding: 40, duration: 600, maxZoom: 9 });
+                            regionBoundsRef.current = bounds;
+                            m.fitBounds(bounds, { padding: 32, duration: 0, maxZoom: 9 });
                         }
                     } catch {
                         /* ignore */
@@ -639,7 +674,7 @@ export default function OverviewPage() {
     const legendColor = metricHighColor(metric);
 
     return (
-        <div className="flex h-[calc(100vh-0px)] min-h-0 flex-1 flex-col gap-1.5 p-2 lg:p-3">
+        <div className="flex h-[calc(100dvh-4rem)] min-h-0 min-w-0 flex-1 flex-col gap-3 p-3 lg:h-dvh lg:p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <h1 className="text-base font-semibold tracking-tight lg:text-lg">{t("title")}</h1>
             </div>
@@ -742,9 +777,9 @@ export default function OverviewPage() {
                 })}
             </nav>
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_200px]">
+            <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(260px,1fr)_minmax(0,180px)] gap-3 lg:grid-cols-[minmax(0,1fr)_240px] lg:grid-rows-1">
                 {/* Map */}
-                <div className="flex min-h-0 flex-col gap-1.5 overflow-hidden">
+                <div className="flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden">
                     {/* Metric toggle */}
                     <div className="flex flex-wrap items-center gap-1">
                         <div className="flex flex-wrap gap-0.5">
@@ -754,7 +789,7 @@ export default function OverviewPage() {
                                     type="button"
                                     size="sm"
                                     variant={metric === b.key ? "default" : "outline"}
-                                    className="h-6 px-2 text-[11px]"
+                                    className="h-8 rounded-lg px-3 text-xs"
                                     onClick={() => setMetric(b.key)}
                                 >
                                     {b.label}
@@ -762,6 +797,20 @@ export default function OverviewPage() {
                             ))}
                         </div>
                         <div className="ml-auto flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 gap-1.5 px-2 text-xs"
+                                title={t("fitRegion")}
+                                onClick={() => {
+                                    const bounds = regionBoundsRef.current;
+                                    if (bounds) mapRef.current?.fitBounds(bounds, { padding: 32, duration: 300, maxZoom: 9 });
+                                }}
+                            >
+                                <Maximize2 className="h-3.5 w-3.5" />
+                                {t("fitRegion")}
+                            </Button>
                             <span
                                 className="inline-block h-1.5 w-14 rounded-sm"
                                 style={{
@@ -773,7 +822,7 @@ export default function OverviewPage() {
                                 type="button"
                                 size="sm"
                                 variant="outline"
-                                className="h-6 px-1.5 text-[11px]"
+                                className="h-8 px-2 text-xs"
                                 disabled={exporting || loading}
                                 onClick={() => void runExport("stats")}
                             >
@@ -783,7 +832,7 @@ export default function OverviewPage() {
                                 type="button"
                                 size="sm"
                                 variant="outline"
-                                className="h-6 px-1.5 text-[11px]"
+                                className="h-8 px-2 text-xs"
                                 disabled={exporting || loading}
                                 onClick={() => void runExport("weak")}
                             >

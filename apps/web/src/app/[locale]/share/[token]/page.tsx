@@ -635,7 +635,7 @@ function FieldMap({
         });
 
         mapRef.current = map;
-    }, [geom, token, hasLayer, preferAgriHeatmap, applyAgriHeatmap, applyTileOverlay]);
+    }, [geom, hasLayer, preferAgriHeatmap, applyAgriHeatmap, applyTileOverlay]);
 
     // Swap overlay when activeIndex changes
     useEffect(() => {

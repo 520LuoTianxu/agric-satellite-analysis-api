@@ -859,6 +859,7 @@
     "styleDark": "Oscuro"
   },
   "ndviChart": {
+    "threshold": "Umbral",
     "cloud": "Nubes: {percent}%",
     "cloudNA": "Nubes: N/D",
     "decloudClear": "Sin nubes: escena original despejada",
@@ -980,6 +981,7 @@
     "scoreOutOf": "{score} / 100"
   },
   "overviewPage": {
+    "fitRegion": "Ajustar región",
     "title": "Panorama China",
     "subtitle": "Sequía / inundación / crecimiento débil",
     "breadcrumbCountry": "China",

@@ -77,7 +77,7 @@ export default function LocationSearch({ onSelect, className = "" }: LocationSea
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [locale]);
 
     const handleInputChange = (value: string) => {
         setQuery(value);
