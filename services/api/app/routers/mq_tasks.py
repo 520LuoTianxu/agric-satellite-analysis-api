@@ -23,6 +23,7 @@ ALLOWED_MQ_TYPES = frozenset(
         "soil_fetch",
         "field_bootstrap",
         "assessment_report",
+        "season_growth_report",
     }
 )
 

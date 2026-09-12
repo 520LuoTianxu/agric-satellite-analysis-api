@@ -609,6 +609,94 @@ def _apply_assessment_job_progress(
         session.close()
 
 
+
+
+def _apply_season_growth_job_progress(
+    payload: dict[str, Any],
+    *,
+    status: str = "success",
+) -> bool:
+    """Update public.jobs from season_growth_report ResultMessage when job_id present."""
+    job_id = payload.get("job_id")
+    if not job_id:
+        return False
+    ok = status == "success"
+    if not ok:
+        session = SyncSession()
+        try:
+            err = payload.get("error") or "season_growth_report failed"
+            row = session.execute(
+                text(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        error = :error,
+                        finished_at = COALESCE(finished_at, now()),
+                        started_at = COALESCE(started_at, now())
+                    WHERE id = CAST(:job_id AS uuid)
+                    RETURNING id::text
+                    """
+                ),
+                {"job_id": str(job_id), "error": str(err)[:2000]},
+            ).first()
+            session.commit()
+            return bool(row)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+    progress = {
+        "stage": "done",
+        "percent": 100,
+        "object_key": payload.get("object_key"),
+        "public_url": payload.get("public_url"),
+        "filename": payload.get("filename"),
+        "one_liner": payload.get("one_liner"),
+        "llm_configured": payload.get("llm_configured"),
+        "scenes": payload.get("scenes"),
+        "ndvi_mean": payload.get("ndvi_mean"),
+        "ndvi_peak": payload.get("ndvi_peak"),
+        "harvest": payload.get("harvest"),
+        "window": payload.get("window"),
+        "content_type": payload.get("content_type") or "application/pdf",
+    }
+    session = SyncSession()
+    try:
+        row = session.execute(
+            text(
+                """
+                UPDATE jobs
+                SET status = 'succeeded',
+                    progress_json = CAST(:progress AS jsonb),
+                    error = NULL,
+                    finished_at = COALESCE(finished_at, now()),
+                    started_at = COALESCE(started_at, now())
+                WHERE id = CAST(:job_id AS uuid)
+                RETURNING id::text
+                """
+            ),
+            {
+                "job_id": str(job_id),
+                "progress": json.dumps(progress, ensure_ascii=False, default=str),
+            },
+        ).first()
+        session.commit()
+        if row:
+            logger.info(
+                "season_growth_job_updated job_id=%s object_key=%s",
+                job_id,
+                payload.get("object_key"),
+            )
+            return True
+        logger.warning("season_growth_job_missing_on_writer job_id=%s", job_id)
+        return False
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 def _apply_domain_from_payload(
     payload: dict[str, Any] | None,
     *,
@@ -644,6 +732,17 @@ def _apply_domain_from_payload(
             "grade": payload.get("grade"),
             "filename": payload.get("filename"),
         }
+    elif kind == "season_growth_report":
+        job_updated = _apply_season_growth_job_progress(payload, status=status)
+        stats["season_growth_report"] = {
+            "recorded": True,
+            "job_id": payload.get("job_id"),
+            "job_updated": job_updated,
+            "object_key": payload.get("object_key"),
+            "public_url": payload.get("public_url"),
+            "filename": payload.get("filename"),
+            "one_liner": payload.get("one_liner"),
+        }
     return stats
 
 
@@ -662,7 +761,7 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
             continue
         url_l = str(url).lower().split("?", 1)[0]
         # Assessment PDFs (and other binaries) are link-only; do not GET as JSON.
-        if label in ("assessment_pdf",) or url_l.endswith(".pdf"):
+        if label in ("assessment_pdf", "season_growth_pdf") or url_l.endswith(".pdf"):
             downloaded[label] = {
                 "link_only": True,
                 "url": url,
@@ -712,7 +811,7 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
         inline_payload = msg.payload
         if (
             isinstance(inline_payload, dict)
-            and inline_payload.get("kind") == "assessment_report"
+            and inline_payload.get("kind") in ("assessment_report", "season_growth_report")
             and msg.status != "success"
             and msg.error
             and not inline_payload.get("error")
@@ -721,7 +820,7 @@ def handle_result_message(payload: dict[str, Any], meta: dict[str, Any]) -> None
         # Prefer extras.job_id when payload omitted it (cross-host failure path).
         if (
             isinstance(inline_payload, dict)
-            and inline_payload.get("kind") == "assessment_report"
+            and inline_payload.get("kind") in ("assessment_report", "season_growth_report")
             and not inline_payload.get("job_id")
             and isinstance(msg.extras, dict)
             and msg.extras.get("job_id")

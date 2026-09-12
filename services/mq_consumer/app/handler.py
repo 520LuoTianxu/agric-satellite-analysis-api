@@ -21,6 +21,7 @@ SUPPORTED_TYPES = {
     "soil_fetch",
     "field_bootstrap",
     "assessment_report",
+    "season_growth_report",
 }
 
 
@@ -333,6 +334,38 @@ def _dispatch_assessment_report(
         "field_id": field_id,
     }
 
+
+
+def _dispatch_season_growth_report(
+    task: TaskMessage,
+    field_id: str,
+) -> dict[str, Any]:
+    """Dispatch season-growth PDF Celery task; result published by ingest."""
+    extras = dict(task.extras or {})
+    if not field_id:
+        raise ValueError("season_growth_report requires field_id")
+    job_id = extras.get("job_id")
+    kwargs: dict[str, Any] = {
+        "mq_task_id": task.task_id,
+        "field_id": str(field_id),
+    }
+    if job_id:
+        kwargs["job_id"] = str(job_id)
+    for key in ("start_date", "end_date", "crops", "label", "material_keys"):
+        if extras.get(key) is not None:
+            kwargs[key] = extras[key]
+    async_result = celery_client.send_task(
+        "app.tasks.season_growth_report.generate_season_growth_report",
+        kwargs=kwargs,
+        queue="ingest",
+    )
+    return {
+        "dispatched": ["app.tasks.season_growth_report.generate_season_growth_report"],
+        "celery_ids": [async_result.id],
+        "job_id": str(job_id) if job_id else None,
+        "field_id": field_id,
+    }
+
 def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
     """Process one TaskMessage. Permanent failures publish failed result (no raise)."""
     try:
@@ -386,6 +419,19 @@ def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
         elif task.type == "assessment_report":
             try:
                 info = _dispatch_assessment_report(task, field_id)
+            except ValueError as exc:
+                publish_task_result(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=str(exc),
+                    field_id=field_id,
+                    land_id=land_id,
+                    upload_summary_if_empty=False,
+                )
+                return
+        elif task.type == "season_growth_report":
+            try:
+                info = _dispatch_season_growth_report(task, field_id)
             except ValueError as exc:
                 publish_task_result(
                     task_id=task.task_id,
