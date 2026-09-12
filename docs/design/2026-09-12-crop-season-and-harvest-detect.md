@@ -39,30 +39,30 @@
 
 #### A.1 作物目录
 
-- 新增（或等价建模）：
-  - `corn_spring`：默认约 **4–8 月**（华北春玉米起点，可配置）
-  - `corn_summer`：默认约 **6–9 月**（现有夏玉米）
-- 保留 `corn` 作别名 → 默认映射 `corn_summer`（兼容旧地块），并在 UI 引导改选春/夏。
-- 其它作物仍用现有 `CROP_SEASONS`；自定义窗可覆盖任何作物默认。
+- **不**新增 `corn_spring` / `corn_summer` 作物键；作物选择器仍是普通作物（corn / wheat / rice …）。
+- 春玉米 vs 夏玉米 = 同一 `corn` 上的不同**日期窗**（或列表里两行），不是两个 catalog key。
+- 别名 `春玉米` / `夏玉米` 仍归一到 `corn`；其它作物仍用现有 `CROP_SEASONS`；自定义窗可覆盖任何作物默认。
 
 #### A.2 窗口模型
 
 ```text
 GrowingSeasonWindow:
-  start_date: "YYYY-MM-DD"   # 播种/生育开始（用户大致选择）
+  start_date: "YYYY-MM-DD"   # 播种/生育开始
   end_date:   "YYYY-MM-DD"   # 种植/生育结束
-  label?: string             # 可选：春玉米2025 / 夏玉米2025
+  crops: string[]            # 本窗 1–2 个作物键（单作长度1；间作长度2，如米豆）
+  label?: string             # 可选：春玉米2025 / 米豆间作2025
 ```
 
-兼容：若只传 `start_month`/`end_month`/`months[]`，后端归一成当年或任务年份的日期窗（与现有 decloud 窗解析共存一个归一函数）。
+- 列表可多窗（轮作）；**每窗最多 2 个作物**，全列表最多 **2 种不同作物**。
+- 兼容：旧字段 `crop: "corn"` → `crops: ["corn"]`；若只传 `start_month`/`end_month`/`months[]`，后端归一成日期窗。
 
 #### A.3 拉数 / 刷新 UX
 
-1. 选择或确认地块作物（春玉米 / 夏玉米 / 其它）。
-2. 默认填入该作物预设窗；用户可改「播种日起～结束日」。
-3. 支持多窗（轮作）；每一窗独立进入 `growing_seasons[]`。
-4. 提交 backfill / refresh 时 **必带** `crop_key`（或地块已绑定作物）+ 归一后的 `growing_seasons`。
-5. 文案：「未选手动窗则用作物默认生育期」——且默认已按春/夏区分。
+1. 维护**生育窗列表**：每行 = 日期范围 + 本窗作物多选（最多 2）+ 可选标签。
+2. 可加预设行（如春玉米窗 4–8、夏玉米窗 6–9）——作物键仍是 `corn`，只改日期。
+3. 间作：同一窗 `crops` 选两个（如 rice + soybean）。
+4. 提交 backfill / refresh 时带归一后的 `growing_seasons`（含 `crops[]` + 日期）。
+5. 文案：「未选手动窗则用地块作物默认生育期」。
 
 #### A.4 管道消费
 
@@ -149,7 +149,7 @@ UI: crop + windows
 
 ## Success criteria
 
-- [ ] 春玉米地块刷新不再默认 6–9；可选春玉米预设或自定义播种～结束。
+- [ ] 可用自定义/预设日期窗覆盖玉米默认 6–9（春玉米窗等）；不引入 corn_spring 键。
 - [ ] 夏玉米行为与现网兼容（默认 6–9）。
 - [ ] 收获检出只返回真实 scene 日期或 `uncertain`，无插值日。
 - [ ] UI 可区分「检出收获表现」与普通 NDVI 点，并可打开真彩核对。

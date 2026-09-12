@@ -11,7 +11,7 @@ import logging
 from datetime import date
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
     AgriStatsOut,
     AgriTableCount,
+    HarvestDetectOut,
     LandParcelOut,
     LandScenesSummaryOut,
     ProjectAreaLandOut,
@@ -684,6 +685,140 @@ async def land_scenes_summary(
         )
 
     return LandScenesSummaryOut(land_id=land_id, total=total, sensors=sensors)
+
+
+
+
+@router.get(
+    "/lands/{land_id}/harvest-detect",
+    response_model=HarvestDetectOut,
+)
+@router.post(
+    "/lands/{land_id}/harvest-detect",
+    response_model=HarvestDetectOut,
+)
+async def harvest_detect_for_land(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
+    crops: str | None = Query(
+        None, description="Comma-separated crop keys (metadata; max 2)"
+    ),
+    label: str | None = Query(None),
+    body: dict[str, Any] | None = Body(None),
+):
+    """Observation-only harvest day from official NDVI (soft-fail → uncertain)."""
+    try:
+        await _agri_ready(db)
+        exists = (
+            await db.execute(
+                text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+                {"land_id": land_id},
+            )
+        ).scalar()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Land parcel not found")
+
+        raw_window: dict[str, Any] = {}
+        if isinstance(body, dict):
+            raw_window.update(body.get("window") or body)
+        if start_date:
+            raw_window.setdefault("start_date", start_date.isoformat())
+        if end_date:
+            raw_window.setdefault("end_date", end_date.isoformat())
+        if crops:
+            raw_window.setdefault(
+                "crops", [c.strip() for c in crops.split(",") if c.strip()]
+            )
+        if label:
+            raw_window.setdefault("label", label)
+
+        from app.core.growing_seasons import normalize_growing_seasons
+
+        windows = normalize_growing_seasons(
+            [raw_window] if raw_window else [],
+            validate_crop_limits=bool(raw_window.get("crops") or raw_window.get("crop")),
+        )
+        window = windows[0] if windows else {
+            k: raw_window[k]
+            for k in ("start_date", "end_date", "crops", "label")
+            if raw_window.get(k) is not None
+        }
+
+        params: dict[str, Any] = {"land_id": land_id}
+        where = ["land_id = :land_id", "sensor = 'S2'", "ndvi_avg IS NOT NULL"]
+        if window.get("start_date"):
+            where.append("date >= :date_from")
+            params["date_from"] = window["start_date"]
+        if window.get("end_date"):
+            where.append("date <= :date_to")
+            params["date_to"] = window["end_date"]
+        wh = " AND ".join(where)
+        rows = (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT {_SCENE_COLS}
+                    FROM agri.parcel_scene_products
+                    WHERE {wh}
+                    ORDER BY date ASC, scene_id ASC
+                    LIMIT 500
+                    """
+                ),
+                params,
+            )
+        ).fetchall()
+
+        from app.core.agri_classify import is_official_optical_product
+        from app.core.harvest_detect import detect_harvest
+
+        points: list[dict[str, Any]] = []
+        for r in rows:
+            d = _row_to_dict(r)
+            official = is_official_optical_product(
+                source=d.get("source"),
+                scene_id=d.get("scene_id"),
+                decloud_quality=d.get("decloud_quality"),
+                parcel_cloud_cover_pct=d.get("parcel_cloud_cover_pct"),
+                cloud_cover=d.get("cloud_cover"),
+                cloud_cover_over_30=d.get("cloud_cover_over_30"),
+                parcel_cloud_source=d.get("parcel_cloud_source"),
+            )
+            points.append(
+                {
+                    "date": str(d.get("date"))[:10],
+                    "ndvi_avg": d.get("ndvi_avg"),
+                    "scene_id": d.get("scene_id"),
+                    "official": official,
+                    "decloud_quality": d.get("decloud_quality"),
+                    "source": d.get("source"),
+                }
+            )
+
+        result = detect_harvest(points, window=window)
+        return HarvestDetectOut(
+            land_id=land_id,
+            status=result.status,
+            harvest_date=result.harvest_date,
+            confidence=result.confidence,
+            scene_id=result.scene_id,
+            evidence=result.evidence or {},
+            alternates=result.alternates or [],
+            window=result.window or window,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("harvest_detect_failed land_id=%s", land_id)
+        return HarvestDetectOut(
+            land_id=land_id,
+            status="uncertain",
+            confidence="low",
+            evidence={"reason": "soft_fail", "error": str(exc)[:200]},
+            window={},
+        )
 
 
 # China overview (全国态势) — country/province/city/county stats

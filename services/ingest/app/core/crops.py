@@ -158,8 +158,8 @@ CROP_SEASONS: dict[str, CropSeason] = {
     "corn": CropSeason(
         frozenset({6, 7, 8, 9}),
         frozenset({7, 8}),
-        "夏玉米季（6–9月，峰值7–8月）",
-        "活力按夏玉米生长季，不用全年 NDVI 平均。",
+        "玉米季（默认6–9月，峰值7–8月；可用自定义生育窗覆盖）",
+        "活力按玉米默认生长季，不用全年 NDVI 平均；任务 growing_seasons 优先。",
     ),
     "rice": CropSeason(
         frozenset({6, 7, 8, 9}),

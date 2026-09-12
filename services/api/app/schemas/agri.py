@@ -358,3 +358,16 @@ class OverviewWeakParcelOut(BaseModel):
 class OverviewWeakParcelsOut(BaseModel):
     total: int
     items: list[OverviewWeakParcelOut]
+
+
+class HarvestDetectOut(BaseModel):
+    """Observation-only harvest detection for one growing window."""
+
+    land_id: str
+    status: str  # detected | uncertain | no_growth
+    harvest_date: date | None = None
+    confidence: str | None = None
+    scene_id: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    alternates: list[dict[str, Any]] = Field(default_factory=list)
+    window: dict[str, Any] = Field(default_factory=dict)
