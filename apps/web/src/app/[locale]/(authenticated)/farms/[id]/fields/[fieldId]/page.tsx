@@ -985,10 +985,8 @@ export default function FieldDetailPage() {
                 </div>
                 <div className={cn("flex h-full flex-col overflow-hidden rounded-xl", MAP_CHROME)}>
                     <Tabs defaultValue="info" value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
-                        {/* Eight tabs do not fit 22rem on one line. The
-                            reference wraps rather than scrolls, so no tab
-                            is hidden behind an invisible scroll affordance. */}
-                        <TabsList variant="underline" className="shrink-0 flex-wrap gap-x-3 gap-y-1 bg-background/95 px-4 py-2">
+                        {/* 四列固定排布，避免窄侧栏出现单个页签孤立换行。 */}
+                        <TabsList variant="underline" className="grid shrink-0 grid-cols-4 gap-x-2 gap-y-1 bg-background/95 px-3 py-2">
                             <TabsTrigger
                                 value="info"
                                 variant="underline"
@@ -1131,7 +1129,7 @@ export default function FieldDetailPage() {
 
                                         {/* Field details card */}
                                         <div className="rounded-xl border border-border/60 bg-card p-4">
-                                            <dl className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
+                                            <dl className="grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-3">
                                                 <InfoRow label={t("name")} value={field.name} />
                                                 <InfoRow
                                                     label={t("area")}

@@ -1656,29 +1656,29 @@ export default function AgriTimeseriesPanel({
                             </p>
                         )}
                         <div className="rounded-xl border border-border/60 bg-background p-3">
-                        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/35 p-3">
-                            <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                className="h-8 shrink-0 text-xs"
-                                disabled={!landId || harvestLoading}
-                                onClick={() => void runHarvestDetect()}
-                            >
-                                {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
-                                {t("harvestDetect")}
-                            </Button>
-                            <span className="order-last w-full text-xs leading-relaxed text-muted-foreground">{t("harvestDetectHint")}</span>
-                            {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
-                                <Badge variant="secondary" className="ml-auto text-xs tabular-nums">
-                                    {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
-                                </Badge>
-                            ) : harvestResult ? (
-                                <Badge variant="secondary" className="ml-auto text-xs">
-                                    {harvestResult.status}
-                                </Badge>
-                            ) : null}
-                        </div>
+                            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted/35 p-3">
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-8 shrink-0 text-xs"
+                                    disabled={!landId || harvestLoading}
+                                    onClick={() => void runHarvestDetect()}
+                                >
+                                    {harvestLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                                    {t("harvestDetect")}
+                                </Button>
+                                <span className="order-last w-full text-xs leading-relaxed text-muted-foreground">{t("harvestDetectHint")}</span>
+                                {harvestResult?.status === "detected" && harvestResult.harvest_date ? (
+                                    <Badge variant="secondary" className="ml-auto text-xs tabular-nums">
+                                        {harvestResult.harvest_date} · {harvestResult.confidence || "—"}
+                                    </Badge>
+                                ) : harvestResult ? (
+                                    <Badge variant="secondary" className="ml-auto text-xs">
+                                        {harvestResult.status}
+                                    </Badge>
+                                ) : null}
+                            </div>
                             {stats.length > 0 ? (
                                 <NdviChart
                                     stats={stats}

@@ -214,7 +214,7 @@ export default function NdviChart({
         const pad2 = (n: number) => String(n).padStart(2, "0");
         const markAreaData: any[] = [];
         if (stageBands?.length && years.length) {
-            const bandColors = ["rgba(216,243,220,0.35)", "rgba(149,213,178,0.28)", "rgba(82,183,136,0.22)", "rgba(244,162,97,0.18)"];
+            const bandColors = ["rgba(216,243,220,0.35)", "rgba(22,163,74,0.09)", "rgba(82,183,136,0.22)", "rgba(244,162,97,0.18)"];
             years.forEach((y) => {
                 stageBands.forEach((b, i) => {
                     const sd = b.startDay ?? 1;
@@ -237,7 +237,7 @@ export default function NdviChart({
                     {
                         name: years.length <= 2 ? "生育期" : undefined,
                         xAxis: `${y}-${pad2(sm)}-01`,
-                        itemStyle: { color: "rgba(216,243,220,0.32)" },
+                        itemStyle: { color: "rgba(22,163,74,0.06)" },
                     },
                     { xAxis: `${y}-${pad2(em)}-28` },
                 ]);
@@ -248,7 +248,7 @@ export default function NdviChart({
                         {
                             name: years.length <= 2 ? "旺长期" : undefined,
                             xAxis: `${y}-${pad2(ps)}-01`,
-                            itemStyle: { color: "rgba(149,213,178,0.28)" },
+                            itemStyle: { color: "rgba(22,163,74,0.09)" },
                         },
                         { xAxis: `${y}-${pad2(pe)}-28` },
                     ]);
@@ -256,7 +256,7 @@ export default function NdviChart({
             });
         }
         const markAreaOption = markAreaData.length
-            ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: "#3f6212" }, data: markAreaData }
+            ? { silent: true, label: { show: true, position: "insideTop", fontSize: 10, color: tokenColor("--muted-foreground") }, data: markAreaData }
             : undefined;
 
         const valueByDate = new Map(stats.map((s) => [s.date, s.mean]));
@@ -400,6 +400,8 @@ export default function NdviChart({
                     bottom: 8,
                     height: 18,
                     borderColor: "transparent",
+                    fillerColor: "rgba(22,163,74,0.12)",
+                    dataBackground: { lineStyle: { color: indexLineColor(indexType), opacity: 0.4 }, areaStyle: { color: "rgba(22,163,74,0.06)" } },
                     showDetail: false,
                     brushSelect: false,
                 },
