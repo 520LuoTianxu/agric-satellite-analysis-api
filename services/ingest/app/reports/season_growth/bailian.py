@@ -13,7 +13,7 @@ import httpx
 DEFAULT_BASE_URL = (
     "https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 )
-DEFAULT_MODEL = "qwen3.8-flash"
+DEFAULT_MODEL = "qwen3.7-flash"
 
 SYSTEM_PROMPT = """你是农业遥感分析助手。你只能基于用户提供的 JSON 事实与材料文本撰写中文解读。
 硬性规则：

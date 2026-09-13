@@ -119,7 +119,7 @@ services:
       OPENFARM_SCRATCH_DIR: /data/scratch
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
-      BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7flash}
+      BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
     volumes:
       - scratch:/data/scratch
     depends_on:
@@ -190,7 +190,7 @@ services:
       OPENFARM_SCRATCH_DIR: /data/scratch
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
-      BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7flash}
+      BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
     volumes:
       - scratch:/data/scratch
     depends_on:
