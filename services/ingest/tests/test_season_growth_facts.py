@@ -91,10 +91,10 @@ class SeasonGrowthFactsTests(unittest.TestCase):
             "harvest": {},
             "scenes": {},
         }
-        compact = facts_for_llm(facts, max_series=40)
+        compact = facts_for_llm(facts, max_series=24)
         self.assertTrue(compact["ndvi"]["series_truncated"])
-        self.assertLessEqual(len(compact["ndvi"]["series"]), 40)
-        self.assertLessEqual(len(compact["drought"]["days"]), 20)
+        self.assertLessEqual(len(compact["ndvi"]["series"]), 24)
+        self.assertLessEqual(len(compact["drought"]["days"]), 10)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ import httpx
 DEFAULT_BASE_URL = (
     "https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 )
-DEFAULT_MODEL = "qwen3.7flash"
+DEFAULT_MODEL = "qwen3.8-flash"
 
 SYSTEM_PROMPT = """你是农业遥感分析助手。你只能基于用户提供的 JSON 事实与材料文本撰写中文解读。
 硬性规则：
@@ -109,7 +109,7 @@ def generate_season_narrative(
     facts: dict[str, Any],
     material_text: str = "",
     *,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """Call Bailian chat/completions; return normalized AI sections.
@@ -122,7 +122,7 @@ def generate_season_narrative(
 
     user_payload = {
         "facts": facts,
-        "materials_excerpt": (material_text or "")[:8000],
+        "materials_excerpt": (material_text or "")[:4000],
     }
     body = {
         "model": cfg["model"],
@@ -137,7 +137,6 @@ def generate_season_narrative(
             },
         ],
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
     }
     url = f"{cfg['base_url']}/chat/completions"
     headers = {
@@ -161,6 +160,11 @@ def generate_season_narrative(
             out["raw_excerpt"] = str(content)[:500]
         return out
     except Exception as exc:
+        detail = str(exc)[:500]
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            detail = f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+        elif isinstance(exc, httpx.TimeoutException):
+            detail = f"timeout after {timeout}s: {type(exc).__name__}"
         note = f"大模型调用失败：{type(exc).__name__}。报告仍包含程序计算事实。"
         return {
             "one_liner": "遥感事实已生成（AI 调用失败）",
@@ -169,7 +173,7 @@ def generate_season_narrative(
             "interpretation": note,
             "recommendations": None,
             "llm_configured": True,
-            "error": str(exc)[:500],
+            "error": detail,
         }
     finally:
         if own_client:

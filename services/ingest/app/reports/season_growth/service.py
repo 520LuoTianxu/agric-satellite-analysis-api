@@ -62,7 +62,7 @@ def generate_season_growth_pdf(
     )
     material_text, materials_meta = download_material_keys(material_keys)
     llm_facts = facts_for_llm(facts)
-    ai = generate_season_narrative(llm_facts, material_text)
+    ai = generate_season_narrative(llm_facts, material_text, timeout=120.0)
 
     field_name = (facts.get("field") or {}).get("field_name")
     filename = season_growth_pdf_filename(field_name, label=label)

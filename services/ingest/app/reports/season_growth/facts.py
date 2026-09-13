@@ -94,8 +94,9 @@ def load_agri_s2_rows(
             text(
                 f"""
             SELECT date, scene_id, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
-                   parcel_cloud_cover_pct, cloud_cover, decloud_quality,
-                   source, product_id
+                   parcel_cloud_cover_pct, cloud_cover,
+                   pixel_data->>'source' AS source,
+                   pixel_data->>'decloud_quality' AS decloud_quality
             FROM agri.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
               AND date >= :start_date AND date <= :end_date
@@ -156,7 +157,7 @@ def load_agri_s1_rows(
         session.execute(
             text(
                 """
-            SELECT date, scene_id, vv_avg, vh_avg, product_id,
+            SELECT date, scene_id, vv_avg, vh_avg,
                    NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
             FROM agri.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S1'
@@ -566,17 +567,28 @@ def build_season_facts(
     return facts
 
 
-def facts_for_llm(facts: dict[str, Any], *, max_series: int = 40) -> dict[str, Any]:
-    """Compact facts for Bailian prompt (truncate long series)."""
+def facts_for_llm(
+    facts: dict[str, Any],
+    *,
+    max_series: int = 24,
+    max_drought_days: int = 10,
+) -> dict[str, Any]:
+    """Compact facts for Bailian prompt (truncate long series / day lists)."""
     ndvi = dict(facts.get("ndvi") or {})
     ndmi = dict(facts.get("ndmi") or {})
+    # Keep scalars; drop bulky nested raw rows if present.
+    for key in ("mean", "peak", "latest", "min", "max"):
+        if key in (facts.get("ndvi") or {}):
+            ndvi[key] = (facts.get("ndvi") or {}).get(key)
     series = list(ndvi.get("series") or [])
     if len(series) > max_series:
         step = max(1, len(series) // max_series)
         series = series[::step][:max_series]
         ndvi["series"] = series
         ndvi["series_truncated"] = True
+        ndvi["series_original_n"] = len(list((facts.get("ndvi") or {}).get("series") or []))
     else:
+        ndvi["series"] = series
         ndvi["series_truncated"] = False
     ndmi_series = list(ndmi.get("series") or [])
     if len(ndmi_series) > max_series:
@@ -584,9 +596,45 @@ def facts_for_llm(facts: dict[str, Any], *, max_series: int = 40) -> dict[str, A
         ndmi["series"] = ndmi_series[::step][:max_series]
         ndmi["series_truncated"] = True
     else:
+        ndmi["series"] = ndmi_series
         ndmi["series_truncated"] = False
-    drought = dict(facts.get("drought") or {})
-    drought["days"] = list(drought.get("days") or [])[:20]
+    drought_in = dict(facts.get("drought") or {})
+    drought = {
+        "drought_scene_count": drought_in.get("drought_scene_count"),
+        "counts": drought_in.get("counts") or {},
+        "days": list(drought_in.get("days") or [])[:max_drought_days],
+        "days_truncated": len(list(drought_in.get("days") or [])) > max_drought_days,
+    }
+    flood_in = dict(facts.get("flood") or {})
+    flood = {
+        "status": flood_in.get("status"),
+        "scene_count": flood_in.get("scene_count"),
+        "vv_median": flood_in.get("vv_median"),
+        "flood_scene_count": flood_in.get("flood_scene_count"),
+        "counts": flood_in.get("counts") or {},
+        "note": flood_in.get("note"),
+    }
+    harvest = facts.get("harvest")
+    if isinstance(harvest, dict):
+        harvest = {
+            k: harvest.get(k)
+            for k in ("status", "harvest_date", "confidence", "scene_id", "method")
+            if k in harvest or k in ("status", "harvest_date", "confidence")
+        }
+    prior = facts.get("prior_year")
+    if isinstance(prior, dict):
+        # Drop nested series from prior-year block if any.
+        prior = {
+            k: prior.get(k)
+            for k in (
+                "year",
+                "ndvi_mean",
+                "ndvi_peak",
+                "drought_scene_count",
+                "scenes",
+            )
+            if k in prior
+        }
     return {
         "field": facts.get("field"),
         "window": facts.get("window"),
@@ -596,7 +644,7 @@ def facts_for_llm(facts: dict[str, Any], *, max_series: int = 40) -> dict[str, A
         "ndvi": ndvi,
         "ndmi": ndmi,
         "drought": drought,
-        "flood": facts.get("flood"),
-        "harvest": facts.get("harvest"),
-        "prior_year": facts.get("prior_year"),
+        "flood": flood,
+        "harvest": harvest,
+        "prior_year": prior,
     }

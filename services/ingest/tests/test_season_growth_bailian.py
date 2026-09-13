@@ -46,7 +46,7 @@ class BailianClientTests(unittest.TestCase):
             {
                 "BAILIAN_API_KEY": "test-key",
                 "BAILIAN_BASE_URL": "https://example.test/v1",
-                "BAILIAN_MODEL": "qwen3.7flash",
+                "BAILIAN_MODEL": "qwen3.8-flash",
             },
             clear=False,
         ):
