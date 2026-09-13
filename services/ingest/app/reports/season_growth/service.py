@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.reports.season_growth.bailian import generate_season_narrative
-from app.reports.season_growth.charts import render_ndvi_ndmi_chart
+from app.reports.season_growth.charts import render_season_charts
 from app.reports.season_growth.facts import build_season_facts, facts_for_llm
 from app.reports.season_growth.materials import download_material_keys
 from app.reports.season_growth.pdf_render import render_season_growth_pdf
@@ -69,21 +69,18 @@ def generate_season_growth_pdf(
 
     with tempfile.TemporaryDirectory(prefix="season_growth_") as tmp:
         tmp_dir = Path(tmp)
-        chart_path = render_ndvi_ndmi_chart(facts, tmp_dir / "ndvi_ndmi.png")
-        dest = Path(out_path) if out_path else tmp_dir / filename
+        chart_paths = render_season_charts(facts, tmp_dir)
         if out_path:
             dest = Path(out_path)
         else:
-            # Persist outside temp: caller may upload; write beside tmp then copy
             dest = Path(tempfile.gettempdir()) / f"season_growth_{uuid.uuid4().hex}.pdf"
         render_season_growth_pdf(
             facts=facts,
             ai=ai,
-            chart_path=chart_path,
+            chart_paths=chart_paths,
             materials_meta=materials_meta,
             out_path=dest,
         )
-        # If we used internal temp chart only, PDF already embeds it; dest is final
         final_path = dest
 
     summary = {

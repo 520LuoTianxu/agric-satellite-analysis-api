@@ -271,16 +271,21 @@ def _drought_summary(
     )
     counts: Counter[str] = Counter()
     days: list[dict[str, str]] = []
+    scene_classes: list[dict[str, str]] = []
     for d, cls in classified:
-        counts[str(cls)] += 1
+        c = str(cls)
+        counts[c] += 1
+        scene_classes.append({"date": d, "class": c})
         if is_drought_day_class(cls):
-            days.append({"date": d, "class": str(cls)})
+            days.append({"date": d, "class": c})
     return {
         "counts": dict(counts),
         "drought_scene_count": sum(
             counts.get(k, 0) for k in ("mild", "moderate", "severe")
         ),
         "days": days[:40],
+        "scene_classes": scene_classes,
+        "classified": scene_classes,
     }
 
 
@@ -291,6 +296,7 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "scene_count": 0,
             "vv_median": None,
             "counts": {},
+            "scenes": [],
             "note": "窗口内无 Sentinel-1 数据，无法做洪涝判定",
         }
     observations: list[SarObs] = []
@@ -310,11 +316,24 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
         )
     classified = classify_flood_series(observations)
     counts: Counter[str] = Counter()
-    for _, cls in classified:
+    scenes: list[dict[str, Any]] = []
+    for i, (d, cls) in enumerate(classified):
         if cls is None:
             counts["unknown"] += 1
+            c: str | None = None
         else:
-            counts[str(cls)] += 1
+            c = str(cls)
+            counts[c] += 1
+        row = s1_rows[i] if i < len(s1_rows) else {}
+        scenes.append(
+            {
+                "date": d,
+                "vv": row.get("vv_avg"),
+                "vh": row.get("vh_avg"),
+                "relative_orbit": row.get("relative_orbit"),
+                "class": c,
+            }
+        )
     vvs_sorted = sorted(vvs)
     vv_median = None
     if vvs_sorted:
@@ -330,6 +349,7 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "vv_median": vv_median,
         "counts": dict(counts),
         "flood_scene_count": flood_n,
+        "scenes": scenes,
         "note": None,
     }
 
@@ -374,6 +394,153 @@ def _prior_year_comparison(
         "ndvi_peak": _peak(ndvi),
         "point_count": len(ndvi),
     }
+
+
+
+DROUGHT_CLASS_CN = {
+    "severe": "重度",
+    "moderate": "中度",
+    "mild": "轻度",
+    "normal": "正常",
+    "unreliable": "不可靠",
+    "out_of_season": "季外",
+}
+
+FLOOD_CLASS_CN = {
+    "flood_severe": "洪涝(重)",
+    "flood_moderate": "洪涝",
+    "watch": "关注",
+    "dry": "正常",
+}
+
+
+def drought_class_cn(cls: str | None) -> str:
+    if cls is None:
+        return "缺测/未定"
+    return DROUGHT_CLASS_CN.get(str(cls), str(cls))
+
+
+def flood_class_cn(cls: str | None) -> str:
+    if cls is None:
+        return "缺测/未定"
+    return FLOOD_CLASS_CN.get(str(cls), str(cls))
+
+
+def _methodology() -> dict[str, Any]:
+    """Short Chinese summary of drought / flood rules (mirrors agri_classify)."""
+    return {
+        "drought": (
+            "Sentinel-2 光学干旱：仅官方可用景（晴空或 good 去云）且落在生育期月份参与判定；"
+            "以 NDDI=(NDVI-NDMI)/(NDVI+NDMI) 为主，结合同月 NDDI 分位及 NDMI/NDVI 相对同月中位数的下降；"
+            "轻度/中度/重度对应 NDDI 阈值与绿度跌幅；季外标「季外」，非官方标「不可靠」。"
+        ),
+        "flood": (
+            "Sentinel-1 洪涝：按相对轨道建 VV 基线；"
+            "洪涝需同时满足 VV≤−17.0 dB、相对基线下降≥3 dB，且 VH 或 VV−VH 辅助条件；"
+            "VV≤−15.0 dB 的近阈值情形标「关注」；仅 VV−VH 不会单独判洪涝。"
+        ),
+        "sensors": "Sentinel-2（光学 NDVI/NDMI/EVI/MNDWI）与 Sentinel-1（SAR VV/VH）。",
+    }
+
+
+def _build_s2_appendix(
+    s2_rows: list[dict[str, Any]], drought: dict[str, Any]
+) -> list[dict[str, Any]]:
+    class_by_date: dict[str, str] = {}
+    for sc in drought.get("scene_classes") or drought.get("classified") or []:
+        d = sc.get("date")
+        if d and d not in class_by_date:
+            class_by_date[str(d)] = str(sc.get("class") or "")
+    out: list[dict[str, Any]] = []
+    for r in s2_rows:
+        d = str(r.get("date") or "")
+        cls = class_by_date.get(d)
+        out.append(
+            {
+                "date": d,
+                "cloud_pct": r.get("cloud_pct"),
+                "quality": r.get("decloud_quality") or ("official" if r.get("official") else "raw"),
+                "drought_class": cls,
+                "drought_class_cn": drought_class_cn(cls),
+                "ndvi": r.get("ndvi_avg"),
+                "ndmi": r.get("ndmi_avg"),
+                "evi": r.get("evi_avg"),
+                "mndwi": r.get("mndwi_avg"),
+            }
+        )
+    return out
+
+
+def _build_s1_appendix(flood: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for sc in flood.get("scenes") or []:
+        cls = sc.get("class")
+        out.append(
+            {
+                "date": sc.get("date"),
+                "relative_orbit": sc.get("relative_orbit"),
+                "vv": sc.get("vv"),
+                "vh": sc.get("vh"),
+                "flood_class": cls,
+                "flood_class_cn": flood_class_cn(cls),
+            }
+        )
+    return out
+
+
+def _build_timeline(
+    *,
+    start: date,
+    end: date,
+    s2_rows: list[dict[str, Any]],
+    s1_rows: list[dict[str, Any]],
+    drought: dict[str, Any],
+    flood: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Month rows in window: program scene / drought / flood counts only."""
+    months: list[tuple[int, int]] = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        months.append((y, m))
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+
+    drought_days = {
+        str(d.get("date")): str(d.get("class"))
+        for d in (drought.get("days") or [])
+    }
+    flood_scenes = list(flood.get("scenes") or [])
+
+    rows: list[dict[str, Any]] = []
+    for yy, mm in months:
+        prefix = f"{yy:04d}-{mm:02d}"
+        s2_n = sum(1 for r in s2_rows if str(r.get("date", "")).startswith(prefix))
+        s1_n = sum(1 for r in s1_rows if str(r.get("date", "")).startswith(prefix))
+        drought_n = sum(1 for d in drought_days if d.startswith(prefix))
+        flood_n = sum(
+            1
+            for sc in flood_scenes
+            if str(sc.get("date", "")).startswith(prefix)
+            and sc.get("class") in ("flood_moderate", "flood_severe")
+        )
+        watch_n = sum(
+            1
+            for sc in flood_scenes
+            if str(sc.get("date", "")).startswith(prefix) and sc.get("class") == "watch"
+        )
+        rows.append(
+            {
+                "month": prefix,
+                "s2_count": s2_n,
+                "s1_count": s1_n,
+                "drought_days": drought_n,
+                "flood_count": flood_n,
+                "watch_count": watch_n,
+            }
+        )
+    return rows
 
 
 def build_season_facts(
@@ -506,6 +673,7 @@ def build_season_facts(
             "scene_count": 0,
             "vv_median": None,
             "counts": {},
+            "scenes": [],
             "note": "经典地块无 S1 洪涝判定",
         }
         prior = _prior_year_comparison(
@@ -531,6 +699,42 @@ def build_season_facts(
             if harvest.evidence and k in harvest.evidence
         },
     }
+
+    s2_appendix = _build_s2_appendix(s2 if s2 else [], drought)
+    # Classic path: rebuild appendix from pseudo-like ndvi if no agri s2
+    if not s2 and ndvi_ts:
+        s2_appendix = []
+        class_by_date: dict[str, str] = {}
+        for sc in drought.get("scene_classes") or []:
+            d = sc.get("date")
+            if d and d not in class_by_date:
+                class_by_date[str(d)] = str(sc.get("class") or "")
+        ndmi_by = {p["date"]: p.get("value") for p in ndmi_ts}
+        for p in ndvi_ts:
+            d = p["date"]
+            cls = class_by_date.get(d)
+            s2_appendix.append(
+                {
+                    "date": d,
+                    "cloud_pct": 0.0,
+                    "quality": "classic",
+                    "drought_class": cls,
+                    "drought_class_cn": drought_class_cn(cls),
+                    "ndvi": p.get("value"),
+                    "ndmi": ndmi_by.get(d),
+                    "evi": None,
+                    "mndwi": None,
+                }
+            )
+    s1_appendix = _build_s1_appendix(flood)
+    timeline = _build_timeline(
+        start=start,
+        end=end,
+        s2_rows=s2 if s2 else [{"date": p["date"]} for p in ndvi_ts],
+        s1_rows=s1,
+        drought=drought,
+        flood=flood,
+    )
 
     facts: dict[str, Any] = {
         "field": field_meta,
@@ -563,6 +767,10 @@ def build_season_facts(
         "flood": flood,
         "harvest": harvest_dict,
         "prior_year": prior,
+        "methodology": _methodology(),
+        "timeline": timeline,
+        "s2_appendix": s2_appendix,
+        "s1_appendix": s1_appendix,
     }
     return facts
 
@@ -572,6 +780,8 @@ def facts_for_llm(
     *,
     max_series: int = 24,
     max_drought_days: int = 10,
+    max_s2_appendix: int = 30,
+    max_s1_appendix: int = 20,
 ) -> dict[str, Any]:
     """Compact facts for Bailian prompt (truncate long series / day lists)."""
     ndvi = dict(facts.get("ndvi") or {})
@@ -606,6 +816,14 @@ def facts_for_llm(
         "days_truncated": len(list(drought_in.get("days") or [])) > max_drought_days,
     }
     flood_in = dict(facts.get("flood") or {})
+    flood_scenes = list(flood_in.get("scenes") or [])
+    # Prefer key flood/watch days; else truncate
+    key_flood = [
+        s
+        for s in flood_scenes
+        if s.get("class") in ("flood_severe", "flood_moderate", "watch")
+    ]
+    flood_scenes_out = (key_flood or flood_scenes)[:max_s1_appendix]
     flood = {
         "status": flood_in.get("status"),
         "scene_count": flood_in.get("scene_count"),
@@ -613,6 +831,8 @@ def facts_for_llm(
         "flood_scene_count": flood_in.get("flood_scene_count"),
         "counts": flood_in.get("counts") or {},
         "note": flood_in.get("note"),
+        "scenes": flood_scenes_out,
+        "scenes_truncated": len(flood_scenes) > len(flood_scenes_out),
     }
     harvest = facts.get("harvest")
     if isinstance(harvest, dict):
@@ -628,13 +848,29 @@ def facts_for_llm(
             k: prior.get(k)
             for k in (
                 "year",
+                "start_date",
+                "end_date",
                 "ndvi_mean",
                 "ndvi_peak",
                 "drought_scene_count",
+                "point_count",
                 "scenes",
             )
             if k in prior
         }
+    s2_app = list(facts.get("s2_appendix") or [])
+    # Prefer drought days in truncated appendix
+    drought_dates = {d.get("date") for d in (drought_in.get("days") or [])}
+    if len(s2_app) > max_s2_appendix:
+        preferred = [r for r in s2_app if r.get("date") in drought_dates]
+        rest = [r for r in s2_app if r.get("date") not in drought_dates]
+        s2_app_out = (preferred + rest)[:max_s2_appendix]
+        s2_trunc = True
+    else:
+        s2_app_out = s2_app
+        s2_trunc = False
+    s1_app = list(facts.get("s1_appendix") or [])
+    s1_app_out = s1_app[:max_s1_appendix]
     return {
         "field": facts.get("field"),
         "window": facts.get("window"),
@@ -647,4 +883,10 @@ def facts_for_llm(
         "flood": flood,
         "harvest": harvest,
         "prior_year": prior,
+        "methodology": facts.get("methodology"),
+        "timeline": facts.get("timeline") or [],
+        "s2_appendix": s2_app_out,
+        "s2_appendix_truncated": s2_trunc,
+        "s1_appendix": s1_app_out,
+        "s1_appendix_truncated": len(s1_app) > max_s1_appendix,
     }
