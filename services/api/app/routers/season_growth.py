@@ -214,6 +214,7 @@ async def create_season_growth_report(
 
     return job
 
+
 @router.post(
     "/fields/{field_id}/season-growth-report/materials",
     response_model=MaterialUploadOut,
