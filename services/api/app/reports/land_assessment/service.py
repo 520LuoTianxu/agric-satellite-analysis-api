@@ -132,6 +132,8 @@ def generate_assessment_pdf(
     Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
     Returns dict with out_path, scorecard summary, flood_evidence, object payload.
     """
+    # Soft-fail policy: empty weather / soil / RS series still produce a PDF
+    # with available evidence; only a missing field is hard-fail.
     if data_dir is not None:
         bundle = load_bundle_from_dir(Path(data_dir))
     else:

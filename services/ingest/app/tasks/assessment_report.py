@@ -95,6 +95,9 @@ def generate_assessment_report(
     field_id: str | None = None,
     crop_type: str | None = None,
     crop_name_zh: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    years: int | None = None,
 ) -> dict:
     """Generate land assessment PDF for a field.
 
@@ -259,6 +262,23 @@ def generate_assessment_report(
             progress["crop_type"] = crop_type
         if crop_name_zh:
             progress["crop_name_zh"] = crop_name_zh
+        if date_from:
+            progress["date_from"] = date_from
+        if date_to:
+            progress["date_to"] = date_to
+        if years is not None:
+            progress["years"] = years
+
+        # Soft note when series are sparse — PDF still generated with available data
+        notes: list[str] = []
+        n_rows = int(result.get("n_index_rows") or 0)
+        if n_rows < 8:
+            notes.append(
+                "遥感指数样本偏少；若已排队拉取，稍后重生成可获得更完整长势评分"
+            )
+        if notes:
+            progress["data_notes"] = notes
+            progress["data_partial"] = True
 
         if job:
             _update_job(session, job, "succeeded", progress=progress)

@@ -108,7 +108,9 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const [generating, setGenerating] = useState(false);
     const [downloading, setDownloading] = useState(false);
     const [boundCrop, setBoundCrop] = useState(() => (isUsableCrop(cropType) ? String(cropType).trim() : ""));
-    const [pickCrop, setPickCrop] = useState("");
+    const [pickCrop, setPickCrop] = useState(() => (isUsableCrop(cropType) ? String(cropType).trim() : ""));
+    const [years, setYears] = useState<number>(3);
+    const [dateFrom, setDateFrom] = useState<string>("");
     const [scorecard, setScorecard] = useState<AssessmentScorecard | null>(null);
     const [scorecardState, setScorecardState] = useState<ScorecardState>("loading");
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -135,7 +137,9 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
 
 
     useEffect(() => {
-        setBoundCrop(isUsableCrop(cropType) ? String(cropType).trim() : "");
+        const next = isUsableCrop(cropType) ? String(cropType).trim() : "";
+        setBoundCrop(next);
+        if (next) setPickCrop(next);
     }, [cropType]);
 
     const refreshMeta = useCallback(async () => {
@@ -306,10 +310,19 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const runGenerate = async (cropKey?: string) => {
         setGenerating(true);
         try {
-            const job = await assessmentApi.generate(
-                fieldId,
-                cropKey ? { crop_type: cropKey } : undefined,
-            );
+            const body: {
+                crop_type?: string;
+                date_from?: string;
+                years?: number;
+                pull_data: boolean;
+            } = { pull_data: true };
+            if (cropKey) body.crop_type = cropKey;
+            if (dateFrom.trim()) {
+                body.date_from = dateFrom.trim();
+            } else {
+                body.years = years;
+            }
+            const job = await assessmentApi.generate(fieldId, body);
             if (cropKey) {
                 setBoundCrop(cropKey);
                 onCropBound?.(cropKey);
@@ -326,7 +339,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 toast.error(job.error || t("generateFailed"));
                 return;
             }
-            toast.message(t("generateStarted"));
+            toast.message(t("pullAndGenerateStarted"));
             startPoll(job.id);
         } catch (e: any) {
             setGenerating(false);
@@ -339,16 +352,16 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     };
 
     const handleGenerate = async () => {
-        // Treat unusable/invalid bound crop as unbound and force the gate.
-        if (!isUsableCrop(boundCrop)) {
-            if (!isUsableCrop(pickCrop)) {
-                toast.error(t("cropRequired"));
-                return;
-            }
-            await runGenerate(pickCrop.trim());
+        const cropKey = isUsableCrop(pickCrop)
+            ? pickCrop.trim()
+            : isUsableCrop(boundCrop)
+              ? boundCrop.trim()
+              : "";
+        if (!cropKey) {
+            toast.error(t("cropRequired"));
             return;
         }
-        await runGenerate();
+        await runGenerate(cropKey);
     };
 
     const handleBindOnly = async () => {
@@ -411,36 +424,85 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 </div>
             ) : (
                 <>
-                    {needsCrop && (
-                        <div className="rounded-lg border border-warning/40 bg-warning-subtle p-3 space-y-2">
+                    <div
+                        className={`rounded-lg border p-3 space-y-3 ${
+                            needsCrop
+                                ? "border-warning/40 bg-warning-subtle"
+                                : "border-border bg-card"
+                        }`}
+                    >
+                        {needsCrop ? (
                             <p className="text-xs text-warning leading-relaxed">
                                 {t("cropGateHint")}
                             </p>
+                        ) : (
+                            <p className="text-[11px] text-muted-foreground">
+                                {t("boundCrop")}:{" "}
+                                <span className="font-medium text-foreground">{boundCrop}</span>
+                                {" · "}
+                                {t("cropReselectHint")}
+                            </p>
+                        )}
+                        <div className="space-y-1">
+                            <span className="text-xs text-muted-foreground">{t("selectCrop")}</span>
                             <CropSelect
                                 value={pickCrop}
                                 onChange={setPickCrop}
                                 placeholder={t("selectCrop")}
                                 required
                             />
+                        </div>
+                        <div className="space-y-1.5">
+                            <span className="text-xs text-muted-foreground">{t("historyWindow")}</span>
+                            <div className="flex flex-wrap gap-1.5">
+                                {[1, 2, 3, 5].map((y) => (
+                                    <Button
+                                        key={y}
+                                        type="button"
+                                        size="sm"
+                                        variant={
+                                            !dateFrom && years === y ? "default" : "outline"
+                                        }
+                                        className="h-7 px-2.5 text-xs"
+                                        onClick={() => {
+                                            setYears(y);
+                                            setDateFrom("");
+                                        }}
+                                    >
+                                        {t("yearsPreset", { years: y })}
+                                    </Button>
+                                ))}
+                            </div>
+                            <label className="text-xs space-y-1 block">
+                                <span className="text-muted-foreground">{t("dateFromOptional")}</span>
+                                <input
+                                    type="date"
+                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                    value={dateFrom}
+                                    max={new Date().toISOString().slice(0, 10)}
+                                    onChange={(e) => setDateFrom(e.target.value)}
+                                />
+                            </label>
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                {dateFrom
+                                    ? t("windowHintDateFrom", { dateFrom })
+                                    : t("windowHintYears", { years })}
+                            </p>
+                        </div>
+                        {needsCrop && (
                             <div className="flex flex-wrap gap-2">
                                 <Button size="sm" variant="outline" onClick={handleBindOnly}>
                                     {t("bindCrop")}
                                 </Button>
                             </div>
-                        </div>
-                    )}
-
-                    {!needsCrop && (
-                        <p className="text-[11px] text-muted-foreground">
-                            {t("boundCrop")}: <span className="font-medium text-foreground">{boundCrop}</span>
-                        </p>
-                    )}
+                        )}
+                    </div>
 
                     <div className="flex flex-wrap gap-2">
                         <Button
                             size="sm"
                             onClick={handleGenerate}
-                            disabled={inFlight || (needsCrop && !pickCrop)}
+                            disabled={inFlight || (!isUsableCrop(pickCrop) && !isUsableCrop(boundCrop))}
                         >
                             {inFlight ? (
                                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
@@ -451,7 +513,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                                 ? t("generating")
                                 : needsCrop
                                   ? t("bindAndGenerate")
-                                  : t("generate")}
+                                  : t("pullAndGenerate")}
                         </Button>
                         <Button
                             size="sm"

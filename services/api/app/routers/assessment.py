@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -20,17 +20,50 @@ from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import Field, Job
 from app.reports.land_assessment.scorecard_view import scorecard_public_view
+from app.reports.land_assessment.window import resolve_assessment_window
 from app.schemas.monitoring import JobOut
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, Field as PydanticField, field_validator, model_validator
 
 
 class AssessmentGenerateRequest(BaseModel):
-    """Optional crop bind when legacy fields lack crop_type."""
+    """Crop bind + optional historical window + one-click data pull."""
 
     crop_type: str | None = PydanticField(
         default=None,
-        description="Catalog key from GET /v1/crops; binds to field if missing",
+        description="Catalog key from GET /v1/crops; binds to field if provided/missing",
     )
+    date_from: str | None = PydanticField(
+        default=None,
+        description="YYYY-MM-DD start of historical window; date_to is always today",
+    )
+    years: int | None = PydanticField(
+        default=None,
+        ge=1,
+        le=20,
+        description="If date_from omitted, start = today − years (default 3)",
+    )
+    pull_data: bool = PydanticField(
+        default=True,
+        description="Queue weather + RS indices + soil bootstrap before PDF",
+    )
+
+    @field_validator("date_from", mode="before")
+    @classmethod
+    def _empty_date_from(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    @model_validator(mode="after")
+    def _validate_date_from_iso(self) -> "AssessmentGenerateRequest":
+        if self.date_from:
+            try:
+                date.fromisoformat(self.date_from[:10])
+            except ValueError as e:
+                raise ValueError("date_from must be YYYY-MM-DD") from e
+            self.date_from = self.date_from[:10]
+        return self
 
 
 class AssessmentDimensionOut(BaseModel):
@@ -85,20 +118,29 @@ async def create_assessment_report(
     db: Annotated[AsyncSession, Depends(get_db)],
     body: AssessmentGenerateRequest | None = None,
 ):
-    """Enqueue a 选地体检（白话版）PDF generation job."""
+    """Enqueue data pulls (optional) + 选地体检（白话版）PDF generation.
+
+    Never refuses generation merely because weather / soil / RS are incomplete;
+    missing series are scored with available data inside the PDF worker.
+    """
     field = await _get_field(field_id, ctx.org_id, db)
 
     from app.core.crops import crop_name_zh, normalize_crop_key, require_crop_key
 
+    req = body or AssessmentGenerateRequest()
     crop_key = normalize_crop_key(field.crop_type)
-    requested = (body.crop_type if body else None) or None
-    if not crop_key and requested:
+    requested = req.crop_type or None
+    crop_changed = False
+    if requested:
         try:
-            crop_key = require_crop_key(requested)
+            new_key = require_crop_key(requested)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
-        field.crop_type = crop_key
-        await db.flush()
+        if crop_key != new_key:
+            field.crop_type = new_key
+            crop_changed = True
+            await db.flush()
+        crop_key = new_key
     if not crop_key:
         raise HTTPException(
             status_code=400,
@@ -108,6 +150,16 @@ async def create_assessment_report(
                 "crops_path": "/v1/crops",
             },
         )
+
+    try:
+        date_from, date_to, weather_days, years_used = resolve_assessment_window(
+            date_from=req.date_from,
+            years=req.years,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    pull_data = bool(req.pull_data)
 
     # Reuse in-flight job if one is pending/running
     existing = (
@@ -124,6 +176,9 @@ async def create_assessment_report(
         )
     ).scalar_one_or_none()
     if existing:
+        # Persist crop bind even when PDF job is already in flight
+        if crop_changed:
+            await db.commit()
         return existing
 
     job = Job(
@@ -134,6 +189,11 @@ async def create_assessment_report(
             "kind": "land_assessment_plain",
             "crop_type": crop_key,
             "crop_name_zh": crop_name_zh(crop_key),
+            "date_from": date_from,
+            "date_to": date_to,
+            "years": years_used,
+            "pull_data": pull_data,
+            "weather_days": weather_days,
         },
     )
     db.add(job)
@@ -144,6 +204,30 @@ async def create_assessment_report(
     try:
         from app.mq_publish import publish_api_task
 
+        if pull_data:
+            bootstrap_extras: dict[str, Any] = {
+                "date_from": date_from,
+                "date_to": date_to,
+                "days": weather_days,
+                "weather_days": weather_days,
+                "years": years_used,
+                "source": "assessment_one_click",
+            }
+            bootstrap_task_id = publish_api_task(
+                type="field_bootstrap",
+                field_id=str(field_id),
+                extras=bootstrap_extras,
+            )
+            logger.info(
+                "assessment_bootstrap_dispatched",
+                job_id=str(job.id),
+                field_id=str(field_id),
+                mq_task_id=bootstrap_task_id,
+                date_from=date_from,
+                date_to=date_to,
+                weather_days=weather_days,
+            )
+
         mq_task_id = publish_api_task(
             type="assessment_report",
             field_id=str(field_id),
@@ -151,6 +235,10 @@ async def create_assessment_report(
                 "job_id": str(job.id),
                 "crop_type": crop_key,
                 "crop_name_zh": crop_name_zh(crop_key),
+                "date_from": date_from,
+                "date_to": date_to,
+                "years": years_used,
+                "pull_data": pull_data,
             },
         )
         logger.info(
@@ -158,6 +246,9 @@ async def create_assessment_report(
             job_id=str(job.id),
             field_id=str(field_id),
             mq_task_id=mq_task_id,
+            date_from=date_from,
+            date_to=date_to,
+            pull_data=pull_data,
         )
     except Exception as e:
         logger.error(

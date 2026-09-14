@@ -241,6 +241,10 @@ def _dispatch_field_bootstrap(
     Publishes a single lightweight ResultMessage after Celery enqueue
     (accepted/dispatched). Standalone weather_backfill / soil_fetch /
     satellite_analysis carry full end-of-task results via mq_task_id hooks.
+
+    Optional extras:
+      - date_from / date_to → backfill_indices_for_field
+      - days / weather_days → backfill_weather_for_field (or derived from date_from)
     """
     extras = dict(task.extras or {})
     skip_indices = bool(extras.get("skip_indices") or False)
@@ -248,10 +252,31 @@ def _dispatch_field_bootstrap(
     dispatched: list[str] = []
     celery_ids: list[str] = []
 
+    weather_kwargs: dict[str, Any] = {}
+    days = extras.get("days")
+    if days is None:
+        days = extras.get("weather_days")
+    if days is None and extras.get("date_from"):
+        try:
+            from datetime import date as _date
+
+            start = _date.fromisoformat(str(extras["date_from"])[:10])
+            end_raw = extras.get("date_to")
+            end = (
+                _date.fromisoformat(str(end_raw)[:10])
+                if end_raw
+                else _date.today()
+            )
+            days = max(1, (end - start).days)
+        except ValueError:
+            days = None
+    if days is not None:
+        weather_kwargs["days"] = int(days)
+
     w = celery_client.send_task(
         "app.tasks.weather.backfill_weather_for_field",
         args=[field_id],
-        kwargs={},
+        kwargs=weather_kwargs,
         queue="ingest",
     )
     dispatched.append("app.tasks.weather.backfill_weather_for_field")
@@ -270,6 +295,10 @@ def _dispatch_field_bootstrap(
         bk: dict[str, Any] = {}
         if sentinel_job_id:
             bk["sentinel_job_id"] = str(sentinel_job_id)
+        if extras.get("date_from"):
+            bk["date_from"] = str(extras["date_from"])[:10]
+        if extras.get("date_to"):
+            bk["date_to"] = str(extras["date_to"])[:10]
         b = celery_client.send_task(
             "app.tasks.backfill.backfill_indices_for_field",
             args=[field_id],
@@ -288,6 +317,9 @@ def _dispatch_field_bootstrap(
             "phase": "bootstrap_dispatched",
             "dispatched": dispatched,
             "skip_indices": skip_indices,
+            "date_from": extras.get("date_from"),
+            "date_to": extras.get("date_to"),
+            "days": weather_kwargs.get("days"),
         },
         upload_summary_if_empty=True,
     )
@@ -295,6 +327,9 @@ def _dispatch_field_bootstrap(
         "dispatched": dispatched,
         "celery_ids": celery_ids,
         "skip_indices": skip_indices,
+        "date_from": extras.get("date_from"),
+        "date_to": extras.get("date_to"),
+        "days": weather_kwargs.get("days"),
     }
 
 
@@ -319,7 +354,7 @@ def _dispatch_assessment_report(
     }
     if job_id:
         kwargs["job_id"] = str(job_id)
-    for key in ("crop_type", "crop_name_zh"):
+    for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
     async_result = celery_client.send_task(

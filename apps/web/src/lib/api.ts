@@ -666,8 +666,15 @@ export interface AssessmentScorecard {
     generated_at: string | null;
 }
 
+export interface AssessmentGenerateBody {
+    crop_type?: string;
+    date_from?: string;
+    years?: number;
+    pull_data?: boolean;
+}
+
 export const assessmentApi = {
-    generate: (fieldId: string, body?: { crop_type?: string }) =>
+    generate: (fieldId: string, body?: AssessmentGenerateBody) =>
         apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
             method: "POST",
             body: JSON.stringify(body || {}),

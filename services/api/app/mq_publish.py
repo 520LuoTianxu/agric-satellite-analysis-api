@@ -103,12 +103,40 @@ def _fallback_celery(
                 except Exception:
                     pass
     elif type == "field_bootstrap":
-        send_task("app.tasks.weather.backfill_weather_for_field", args=[fid])
+        wkwargs: dict[str, Any] = {}
+        days = extras.get("days")
+        if days is None:
+            days = extras.get("weather_days")
+        if days is None and extras.get("date_from"):
+            try:
+                from datetime import date as _date
+
+                start = _date.fromisoformat(str(extras["date_from"])[:10])
+                end_raw = extras.get("date_to")
+                end = (
+                    _date.fromisoformat(str(end_raw)[:10])
+                    if end_raw
+                    else _date.today()
+                )
+                days = max(1, (end - start).days)
+            except ValueError:
+                days = None
+        if days is not None:
+            wkwargs["days"] = int(days)
+        send_task(
+            "app.tasks.weather.backfill_weather_for_field",
+            args=[fid],
+            kwargs=wkwargs,
+        )
         send_task("app.tasks.soil.fetch_soil_for_field", args=[fid])
         if not extras.get("skip_indices"):
             kwargs = {}
             if extras.get("sentinel_job_id"):
                 kwargs["sentinel_job_id"] = str(extras["sentinel_job_id"])
+            if extras.get("date_from"):
+                kwargs["date_from"] = str(extras["date_from"])[:10]
+            if extras.get("date_to"):
+                kwargs["date_to"] = str(extras["date_to"])[:10]
             send_task(
                 "app.tasks.backfill.backfill_indices_for_field",
                 args=[fid],
