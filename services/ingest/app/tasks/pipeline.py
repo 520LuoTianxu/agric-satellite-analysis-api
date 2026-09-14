@@ -157,9 +157,12 @@ def existing_layer_dates(
     return {d for d in rows if d is not None}
 
 
+
 def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
     """Dates already present in agri.parcel_scene_products for land_id + sensor."""
     from sqlalchemy import text as sa_text
+
+    from app.core.date_coerce import dates_from_sql_rows
 
     rows = session.execute(
         sa_text(
@@ -174,17 +177,7 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
         ),
         {"land_id": str(land_id), "sensor": sensor},
     ).fetchall()
-    out: set[date] = set()
-    for d in rows:
-        if d is None:
-            continue
-        if isinstance(d, date):
-            out.add(d)
-        elif hasattr(d, "date"):
-            out.add(d.date())
-        else:
-            out.add(date.fromisoformat(str(d)[:10]))
-    return out
+    return dates_from_sql_rows(rows)
 
 
 def collect_existing_scene_dates(
