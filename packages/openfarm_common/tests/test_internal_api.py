@@ -137,5 +137,42 @@ class HttpWritesTests(unittest.TestCase):
         self.assertTrue(out["ok"])
 
 
+class AssessmentBundleClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env = patch.dict(
+            os.environ,
+            {"API_BASE_URL": "http://api.test", "INTERNAL_API_TOKEN": "tok"},
+            clear=False,
+        )
+        self.env.start()
+
+    def tearDown(self) -> None:
+        self.env.stop()
+
+    def test_assessment_bundle(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertIn("/assessment-bundle", request.url.path)
+            return httpx.Response(
+                200, json={"field": {"id": "f1"}, "indices": [], "soil": {}}
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.assessment_bundle("f1", client=client)
+        self.assertEqual(out["field"]["id"], "f1")
+
+    def test_ingest_pg_reads_follows_writes(self) -> None:
+        with patch.dict(
+            os.environ, {"INGEST_PG_WRITES": "0", "INGEST_PG_READS": ""}, clear=False
+        ):
+            self.assertFalse(ia.ingest_pg_reads_allowed())
+        with patch.dict(
+            os.environ,
+            {"INGEST_PG_WRITES": "0", "INGEST_PG_READS": "1"},
+            clear=False,
+        ):
+            self.assertTrue(ia.ingest_pg_reads_allowed())
+
+
 if __name__ == "__main__":
     unittest.main()

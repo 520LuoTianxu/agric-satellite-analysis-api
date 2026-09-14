@@ -73,10 +73,109 @@ HOURLY_VARIABLE_MAP = {
 }
 
 
+
 def _get_db_session():
     from app.core.database_sync import SyncSession
 
     return SyncSession()
+
+
+def _http_only_weather() -> bool:
+    """True when download must not use SyncSession (reads or writes)."""
+    try:
+        from openfarm_common.internal_api import (
+            http_writes_enabled,
+            ingest_pg_reads_allowed,
+            ingest_pg_writes_enabled,
+            internal_api_enabled,
+        )
+
+        if not internal_api_enabled():
+            return False
+        if not ingest_pg_writes_enabled() or not ingest_pg_reads_allowed():
+            return True
+        # Prefer HTTP geom even when PG still allowed — caller decides.
+        return False
+    except ImportError:
+        return False
+
+
+def _resolve_field_lat_lon(field_id: str, session=None) -> tuple[float, float] | None:
+    """Centroid (lat, lon) via internal geom API, else SyncSession Field.geom."""
+    try:
+        from openfarm_common.internal_api import field_geom, internal_api_enabled
+
+        if internal_api_enabled():
+            g = field_geom(field_id)
+            lat, lon = g.get("centroid_lat"), g.get("centroid_lon")
+            if lat is not None and lon is not None:
+                return float(lat), float(lon)
+    except Exception as exc:
+        logger.warning(
+            "weather_field_geom_http_failed",
+            field_id=field_id,
+            error=str(exc),
+        )
+        try:
+            from openfarm_common.internal_api import ingest_pg_reads_allowed
+
+            if not ingest_pg_reads_allowed():
+                return None
+        except ImportError:
+            pass
+
+    if session is None:
+        return None
+    from app.models.tables import Field
+
+    field = session.get(Field, uuid.UUID(field_id))
+    if not field or field.deleted_at is not None:
+        return None
+    geom_shape = to_shape(field.geom)
+    centroid = geom_shape.centroid
+    return float(centroid.y), float(centroid.x)
+
+
+def _rows_to_weather_payload(field_id: str, records: list[dict]) -> dict:
+    """Serialize in-memory weather records for results/apply."""
+    rows = []
+    for r in records:
+        rows.append(
+            {
+                "field_id": field_id,
+                "date": r["date"].isoformat()
+                if hasattr(r["date"], "isoformat")
+                else str(r["date"])[:10],
+                "latitude": float(r["latitude"]) if r.get("latitude") is not None else None,
+                "longitude": float(r["longitude"])
+                if r.get("longitude") is not None
+                else None,
+                "temperature_2m_min": r.get("temperature_2m_min"),
+                "temperature_2m_max": r.get("temperature_2m_max"),
+                "temperature_2m_mean": r.get("temperature_2m_mean"),
+                "precipitation_sum": r.get("precipitation_sum"),
+                "et0_fao_mm": r.get("et0_fao_mm"),
+                "soil_temperature_0cm": r.get("soil_temperature_0cm"),
+                "soil_temperature_6cm": r.get("soil_temperature_6cm"),
+                "soil_temperature_18cm": r.get("soil_temperature_18cm"),
+                "soil_temperature_54cm": r.get("soil_temperature_54cm"),
+                "soil_moisture_0_1cm": r.get("soil_moisture_0_1cm"),
+                "soil_moisture_1_3cm": r.get("soil_moisture_1_3cm"),
+                "soil_moisture_3_9cm": r.get("soil_moisture_3_9cm"),
+                "soil_moisture_9_27cm": r.get("soil_moisture_9_27cm"),
+                "soil_moisture_27_81cm": r.get("soil_moisture_27_81cm"),
+                "vapor_pressure_deficit": r.get("vapor_pressure_deficit"),
+                "shortwave_radiation_sum": r.get("shortwave_radiation_sum"),
+                "wind_speed_10m_max": r.get("wind_speed_10m_max"),
+                "cloud_cover_mean": r.get("cloud_cover_mean"),
+                "gdd_daily": r.get("gdd_daily"),
+                "gdd_cumulative": r.get("gdd_cumulative"),
+                "heat_stress_flag": r.get("heat_stress_flag"),
+                "source": r.get("source") or "open-meteo",
+                "model_used": r.get("model_used"),
+            }
+        )
+    return {"kind": "weather_daily", "field_id": field_id, "rows": rows}
 
 
 def _calculate_gdd(
@@ -174,23 +273,16 @@ def fetch_weather_for_field(
     Returns:
         dict with field_id, rows_upserted, status.
     """
-    from app.models.tables import Field, WeatherDaily
+    from app.models.tables import WeatherDaily
 
-    session = _get_db_session()
+    http_only = _http_only_weather()
+    session = None if http_only else _get_db_session()
     try:
-        field = session.get(Field, uuid.UUID(field_id))
-        if not field:
+        coords = _resolve_field_lat_lon(field_id, session=session)
+        if coords is None:
             logger.warning("weather_field_not_found", field_id=field_id)
             return {"field_id": field_id, "rows_upserted": 0, "status": "skipped"}
-
-        if field.deleted_at is not None:
-            logger.info("weather_field_deleted", field_id=field_id)
-            return {"field_id": field_id, "rows_upserted": 0, "status": "skipped"}
-
-        # Compute centroid from field geometry
-        geom_shape = to_shape(field.geom)
-        centroid = geom_shape.centroid
-        lat, lon = centroid.y, centroid.x
+        lat, lon = coords
 
         today = date.today()
         if backfill_days > 0:
@@ -220,20 +312,23 @@ def fetch_weather_for_field(
             logger.warning("weather_no_daily_data", field_id=field_id)
             return {"field_id": field_id, "rows_upserted": 0, "status": "no_data"}
 
-        # Get last known cumulative GDD for this field
-        last_gdd_row = session.execute(
-            select(WeatherDaily.gdd_cumulative, WeatherDaily.date)
-            .where(
-                WeatherDaily.field_id == uuid.UUID(field_id),
-                WeatherDaily.gdd_cumulative.isnot(None))
-            .order_by(WeatherDaily.date.desc())
-            .limit(1)
-        ).first()
-        cumulative_gdd = float(last_gdd_row[0]) if last_gdd_row else 0.0
+        # Get last known cumulative GDD for this field (skip when HTTP-only)
+        cumulative_gdd = 0.0
+        if session is not None:
+            last_gdd_row = session.execute(
+                select(WeatherDaily.gdd_cumulative, WeatherDaily.date)
+                .where(
+                    WeatherDaily.field_id == uuid.UUID(field_id),
+                    WeatherDaily.gdd_cumulative.isnot(None))
+                .order_by(WeatherDaily.date.desc())
+                .limit(1)
+            ).first()
+            cumulative_gdd = float(last_gdd_row[0]) if last_gdd_row else 0.0
 
         gdd_base = settings.weather_gdd_base_temp
         heat_threshold = settings.weather_heat_stress_threshold
         rows_upserted = 0
+        pending_records: list[dict] = []
 
         for i, date_str in enumerate(daily["time"]):
             row_date = date.fromisoformat(date_str)
@@ -276,27 +371,57 @@ def fetch_weather_for_field(
             else:
                 record["heat_stress_flag"] = None
 
-            # Upsert via INSERT ... ON CONFLICT DO UPDATE
-            stmt = pg_insert(WeatherDaily).values(**record)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_weather_field_date",
-                set_={k: v for k, v in record.items() if k not in ("field_id", "date")})
-            session.execute(stmt)
             rows_upserted += 1
+            pending_records.append(record)
 
-        session.commit()
+            if session is not None:
+                # Upsert via INSERT ... ON CONFLICT DO UPDATE
+                stmt = pg_insert(WeatherDaily).values(**record)
+                stmt = stmt.on_conflict_do_update(
+                    constraint="uq_weather_field_date",
+                    set_={
+                        k: v
+                        for k, v in record.items()
+                        if k not in ("field_id", "date")
+                    },
+                )
+                session.execute(stmt)
 
-        # Compute water balance and drought index via SQL update
-        _update_water_balance(session, field_id)
+        if session is not None:
+            session.commit()
+            _update_water_balance(session, field_id)
+        else:
+            # HTTP-only: push rows to API (water balance computed server-side)
+            try:
+                from openfarm_common.internal_api import apply_results, http_writes_enabled
+
+                if http_writes_enabled() and pending_records:
+                    apply_results(
+                        _rows_to_weather_payload(field_id, pending_records)
+                    )
+            except Exception as e:
+                logger.warning(
+                    "weather_http_apply_inline_failed",
+                    field_id=field_id,
+                    error=str(e),
+                )
+                return {
+                    "field_id": field_id,
+                    "rows_upserted": 0,
+                    "status": "failed",
+                    "error": str(e),
+                }
 
         logger.info(
             "weather_fetch_complete",
             field_id=field_id,
-            rows_upserted=rows_upserted)
+            rows_upserted=rows_upserted,
+            http_only=http_only)
         return {
             "field_id": field_id,
             "rows_upserted": rows_upserted,
             "status": "success",
+            "pending_records": pending_records if http_only else None,
         }
 
     except httpx.HTTPStatusError as e:
@@ -305,7 +430,8 @@ def fetch_weather_for_field(
             field_id=field_id,
             status=e.response.status_code,
             detail=str(e))
-        session.rollback()
+        if session is not None:
+            session.rollback()
         raise self.retry(exc=e, countdown=60 * (2**self.request.retries))
 
     except Exception as e:
@@ -314,7 +440,8 @@ def fetch_weather_for_field(
             field_id=field_id,
             error=str(e),
             exc_info=True)
-        session.rollback()
+        if session is not None:
+            session.rollback()
         return {
             "field_id": field_id,
             "rows_upserted": 0,
@@ -322,7 +449,8 @@ def fetch_weather_for_field(
             "error": str(e),
         }
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _update_water_balance(session, field_id: str) -> None:
@@ -508,14 +636,34 @@ def backfill_weather_for_field(
                     status = "failed"
                 payload = None
                 if status == "success":
-                    payload = _weather_result_payload(field_id, days=backfill)
+                    pending = (
+                        result.get("pending_records")
+                        if isinstance(result, dict)
+                        else None
+                    )
+                    if pending:
+                        payload = _rows_to_weather_payload(field_id, pending)
+                    else:
+                        try:
+                            payload = _weather_result_payload(
+                                field_id, days=backfill
+                            )
+                        except Exception:
+                            payload = None
                     try:
                         from openfarm_common.internal_api import (
                             apply_results,
                             http_writes_enabled,
+                            ingest_pg_writes_enabled,
                         )
 
-                        if http_writes_enabled() and payload:
+                        # Inline apply already done in http_only fetch; re-apply
+                        # only when PG path produced rows and HTTP dual-write on.
+                        if (
+                            http_writes_enabled()
+                            and payload
+                            and ingest_pg_writes_enabled()
+                        ):
                             apply_results(payload)
                     except Exception as e:
                         logger.warning(

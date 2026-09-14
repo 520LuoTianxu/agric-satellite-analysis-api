@@ -150,9 +150,20 @@ def generate_assessment_pdf(
     if data_dir is not None:
         bundle = load_bundle_from_dir(Path(data_dir))
     else:
-        if session is None or field_id is None:
-            raise ValueError("session and field_id required when data_dir is omitted")
+        if field_id is None:
+            raise ValueError("field_id required when data_dir is omitted")
         fid = uuid.UUID(str(field_id))
+        try:
+            from openfarm_common.internal_api import internal_api_enabled
+
+            http_ok = internal_api_enabled()
+        except ImportError:
+            http_ok = False
+        if session is None and not http_ok:
+            raise ValueError(
+                "session and field_id required when data_dir is omitted "
+                "and internal HTTP is not configured"
+            )
         bundle = load_field_bundle(session, fid)
 
     field = bundle["field"]

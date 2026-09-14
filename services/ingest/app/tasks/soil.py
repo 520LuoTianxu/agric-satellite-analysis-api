@@ -119,6 +119,55 @@ def _get_db_session():
     return SyncSession()
 
 
+def _soil_http_only() -> bool:
+    try:
+        from openfarm_common.internal_api import (
+            ingest_pg_reads_allowed,
+            ingest_pg_writes_enabled,
+            internal_api_enabled,
+        )
+
+        if not internal_api_enabled():
+            return False
+        return (not ingest_pg_writes_enabled()) or (not ingest_pg_reads_allowed())
+    except ImportError:
+        return False
+
+
+def _resolve_field_lat_lon_soil(
+    field_id: str, session=None
+) -> tuple[float, float] | None:
+    """Return (lat, lon) via internal geom API or SyncSession Field.geom."""
+    try:
+        from openfarm_common.internal_api import field_geom, internal_api_enabled
+
+        if internal_api_enabled():
+            g = field_geom(field_id)
+            lat, lon = g.get("centroid_lat"), g.get("centroid_lon")
+            if lat is not None and lon is not None:
+                return float(lat), float(lon)
+    except Exception as exc:
+        logger.warning(
+            "soil_field_geom_http_failed", field_id=field_id, error=str(exc)
+        )
+        try:
+            from openfarm_common.internal_api import ingest_pg_reads_allowed
+
+            if not ingest_pg_reads_allowed():
+                return None
+        except ImportError:
+            pass
+
+    if session is None:
+        return None
+    field = session.get(Field, uuid.UUID(field_id))
+    if not field or field.deleted_at is not None:
+        return None
+    geom = to_shape(field.geom)
+    c = geom.centroid
+    return float(c.y), float(c.x)
+
+
 # ── WCS Client ───────────────────────────────────────────────────────
 
 
@@ -1093,7 +1142,8 @@ def fetch_soil_for_field(
     When ``mq_task_id`` is set (CloudAMQP soil_fetch), publish ResultMessage
     on terminal success/failure paths.
     """
-    session = _get_db_session()
+    http_only_early = _soil_http_only()
+    session = None if http_only_early else _get_db_session()
     job: Job | None = None
 
     def _publish_soil_mq(
@@ -1124,16 +1174,32 @@ def fetch_soil_for_field(
                 error=str(e))
 
     try:
+        http_only = http_only_early
         # Load optional job for progress tracking
-        if job_id:
+        if job_id and not http_only:
             job = session.get(Job, uuid.UUID(job_id))
             if job:
                 job.status = "running"
                 job.started_at = datetime.now(timezone.utc)
                 session.commit()
+        elif job_id and http_only:
+            try:
+                from app.core.job_http import update_job_record
 
-        field = session.get(Field, uuid.UUID(field_id))
-        if not field:
+                update_job_record(
+                    None,
+                    None,
+                    "running",
+                    progress={"stage": "source_detection"},
+                    job_id=job_id,
+                )
+            except Exception:
+                pass
+
+        coords = _resolve_field_lat_lon_soil(
+            field_id, session=None if http_only else session
+        )
+        if coords is None:
             logger.error("soil_field_not_found", field_id=field_id)
             if job:
                 job.status = "failed"
@@ -1142,23 +1208,12 @@ def fetch_soil_for_field(
                 session.commit()
             _publish_soil_mq("failed", error="Field not found")
             return {"status": "error", "message": "Field not found"}
-
-        if field.deleted_at is not None:
-            logger.info("soil_field_deleted", field_id=field_id)
-            if job:
-                job.status = "failed"
-                job.error = "Field deleted"
-                job.finished_at = datetime.now(timezone.utc)
-                session.commit()
-            _publish_soil_mq("failed", error="Field deleted")
-            return {"status": "skipped", "message": "Field deleted"}
+        lat, lon = coords
+        field = None if http_only else session.get(Field, uuid.UUID(field_id))
 
         # Step 1: Determine source
-        _update_soil_job(session, job, "source_detection")
-
-        geom = to_shape(field.geom)
-        centroid = geom.centroid
-        lat, lon = centroid.y, centroid.x
+        if not http_only:
+            _update_soil_job(session, job, "source_detection")
 
         logger.info(
             "soil_fetch_start",
@@ -1215,7 +1270,74 @@ def fetch_soil_for_field(
 
         summary_data = _compute_field_summary(layer_dicts)
 
-        # Step 4b: Persist to DB
+        # Step 4b: Persist to DB (or HTTP results/apply when download has no PG)
+        soil_payload = {
+            "kind": "soil_profile",
+            "field_id": field_id,
+            "profile": {
+                "source": source,
+                "source_resolution_m": resolution,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "metadata_json": {
+                    "centroid_lat": lat,
+                    "centroid_lon": lon,
+                    "properties_fetched": len(converted),
+                },
+            },
+            "layers": layer_dicts,
+            "summary": summary_data,
+            "data_quality_score": quality,
+        }
+        if http_only:
+            try:
+                from openfarm_common.internal_api import apply_results, http_writes_enabled
+
+                if http_writes_enabled():
+                    apply_results(soil_payload)
+            except Exception as e:
+                logger.warning(
+                    "soil_http_apply_failed", field_id=field_id, error=str(e)
+                )
+                _publish_soil_mq("failed", error=str(e)[:500])
+                return {"status": "error", "message": str(e)}
+            if job_id:
+                try:
+                    from app.core.job_http import update_job_record
+
+                    update_job_record(
+                        None,
+                        None,
+                        "succeeded",
+                        progress={"stage": "complete", "percent": 100},
+                        job_id=job_id,
+                    )
+                except Exception:
+                    pass
+            _publish_soil_mq(
+                "success",
+                extras={
+                    "source_name": source,
+                    "layers": len(layer_dicts),
+                    "quality_score": quality,
+                },
+                payload=soil_payload,
+            )
+            logger.info(
+                "soil_fetch_complete",
+                field_id=field_id,
+                source=source,
+                layers=len(layer_dicts),
+                quality_score=quality,
+                http_only=True,
+            )
+            return {
+                "status": "success",
+                "field_id": field_id,
+                "source": source,
+                "layers": len(layer_dicts),
+                "quality_score": quality,
+            }
+
         _update_soil_job(session, job, "save_results")
         # Delete old profile + layers + summary for this field (upsert pattern)
         old_profiles = (
@@ -1238,7 +1360,7 @@ def fetch_soil_for_field(
         # Create new profile
         profile = SoilProfile(
 
-            field_id=field.id,
+            field_id=uuid.UUID(field_id),
             source=source,
             source_resolution_m=resolution,
             fetched_at=datetime.now(timezone.utc),
@@ -1285,7 +1407,7 @@ def fetch_soil_for_field(
 
         # Create field summary
         summary = SoilFieldSummary(
-            field_id=field.id,
+            field_id=uuid.UUID(field_id),
             profile_id=profile.id,
             dominant_texture=summary_data.get("dominant_texture"),
             avg_ph=summary_data.get("avg_ph"),
@@ -1328,7 +1450,7 @@ def fetch_soil_for_field(
             today = datetime.now(timezone.utc).date()
             for candidate in alert_candidates:
                 alert = Alert(
-                    field_id=field.id,
+                    field_id=uuid.UUID(field_id),
 
                     date=today,
                     severity=candidate.severity,
@@ -1400,10 +1522,11 @@ def fetch_soil_for_field(
         }
 
     except Exception as exc:
-        session.rollback()
+        if session is not None:
+            session.rollback()
         logger.exception("soil_fetch_error", field_id=field_id)
         _publish_soil_mq("failed", error=str(exc)[:500])
-        if job_id:
+        if job_id and session is not None:
             try:
                 job = session.get(Job, uuid.UUID(job_id))
                 if job and job.status != "completed":
@@ -1413,6 +1536,16 @@ def fetch_soil_for_field(
                     session.commit()
             except Exception:
                 pass
+        elif job_id:
+            try:
+                from app.core.job_http import update_job_record
+
+                update_job_record(
+                    None, None, "failed", error=str(exc)[:500], job_id=job_id
+                )
+            except Exception:
+                pass
         raise self.retry(exc=exc, countdown=60)
     finally:
-        session.close()
+        if session is not None:
+            session.close()

@@ -15,7 +15,8 @@
 #   WORKER_ID=download-1
 #   WORK_CLAIM_INTERVAL_SEC=4
 #   WORK_QUEUE_MODE=claim   # optional; leave legacy until cutover (do not force)
-# ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2).
+# ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2)
+# and assessment/season-growth bundles + weather/soil geom (D4.1).
 #
 # Secrets stay in .env / docker-compose.dev.yml — never hard-code credentials here.
 

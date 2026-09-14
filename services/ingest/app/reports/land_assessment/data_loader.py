@@ -762,8 +762,45 @@ def load_site_admission(
     return out
 
 
-def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
-    """Load everything needed to score + render a field assessment."""
+def load_field_bundle(
+    session: Session | None,
+    field_id: uuid.UUID,
+    *,
+    allow_http: bool = True,
+) -> dict[str, Any]:
+    """Load everything needed to score + render a field assessment.
+
+    When ``API_BASE_URL`` + ``INTERNAL_API_TOKEN`` are set (download host), prefer
+    ``GET /v1/internal/fields/{id}/assessment-bundle``. SyncSession is used only
+    when HTTP is unavailable or ``INGEST_PG_READS`` / ``INGEST_PG_WRITES`` still
+    allow local PG reads.
+    """
+    if allow_http:
+        try:
+            from openfarm_common.internal_api import (
+                assessment_bundle,
+                ingest_pg_reads_allowed,
+                internal_api_enabled,
+            )
+        except ImportError:
+            assessment_bundle = None  # type: ignore
+            internal_api_enabled = lambda: False  # noqa: E731
+            ingest_pg_reads_allowed = lambda: True  # noqa: E731
+
+        if assessment_bundle is not None and internal_api_enabled():
+            try:
+                return assessment_bundle(str(field_id))
+            except Exception:
+                if not ingest_pg_reads_allowed():
+                    raise
+                # Fall through to SyncSession when PG reads still allowed.
+
+    if session is None:
+        raise ValueError(
+            "session required for load_field_bundle when internal HTTP is "
+            "disabled or failed and PG reads are not allowed"
+        )
+
     field = session.get(Field, field_id)
     if not field or field.deleted_at is not None:
         raise ValueError(f"Field not found: {field_id}")
@@ -827,6 +864,8 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         "suitability": suit,
         "site_admission": site_admission,
     }
+
+
 
 
 def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:

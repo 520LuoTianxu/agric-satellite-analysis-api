@@ -1649,7 +1649,7 @@ def build_spatial_block(
 
 
 def build_season_facts(
-    session: "Session",
+    session: "Session | None",
     field_id: uuid.UUID | str,
     *,
     start_date: str,
@@ -1657,14 +1657,14 @@ def build_season_facts(
     crops: list[str] | None = None,
     label: str | None = None,
 ) -> dict[str, Any]:
-    """Compute compact JSON facts for PDF + LLM (no invented metrics)."""
+    """Compute compact JSON facts for PDF + LLM (no invented metrics).
+
+    Prefers ``GET /v1/internal/fields/{id}/season-growth-inputs`` when the
+    download host has ``API_BASE_URL`` + token (no SyncSession required).
+    """
     from app.models.tables import Field
 
     fid = uuid.UUID(str(field_id))
-    field = session.get(Field, fid)
-    if not field or getattr(field, "deleted_at", None) is not None:
-        raise ValueError("Field not found")
-
     start = _parse_date(start_date)
     end = _parse_date(end_date)
     if not start or not end:
@@ -1672,7 +1672,57 @@ def build_season_facts(
     if end < start:
         raise ValueError("end_date must be >= start_date")
 
-    land_id = parse_agri_land_id(getattr(field, "tags_json", None))
+    http_inputs: dict[str, Any] | None = None
+    try:
+        from openfarm_common.internal_api import (
+            ingest_pg_reads_allowed,
+            internal_api_enabled,
+            season_growth_inputs,
+        )
+
+        if internal_api_enabled():
+            try:
+                http_inputs = season_growth_inputs(
+                    str(fid),
+                    date_from=start.isoformat(),
+                    date_to=end.isoformat(),
+                )
+            except Exception:
+                if not ingest_pg_reads_allowed():
+                    raise
+                http_inputs = None
+    except ImportError:
+        pass
+
+    prior_s2_http: list[dict[str, Any]] = []
+    if http_inputs is not None:
+        field_meta = dict(http_inputs.get("field") or {})
+        land_id = field_meta.get("land_id") or http_inputs.get("land_id")
+        s2 = list(http_inputs.get("s2_rows") or [])
+        s1 = list(http_inputs.get("s1_rows") or [])
+        classic_preloaded = list(http_inputs.get("classic_indices") or [])
+        prior_s2_http = list(http_inputs.get("prior_s2_rows") or [])
+    else:
+        if session is None:
+            raise ValueError(
+                "session required for build_season_facts when internal HTTP "
+                "is disabled or failed"
+            )
+        field = session.get(Field, fid)
+        if not field or getattr(field, "deleted_at", None) is not None:
+            raise ValueError("Field not found")
+        land_id = parse_agri_land_id(getattr(field, "tags_json", None))
+        field_meta = {
+            "field_id": str(fid),
+            "field_name": getattr(field, "name", None) or "地块",
+            "land_id": land_id,
+            "crop_type": getattr(field, "crop_type", None),
+            "area_ha": float(field.area_ha) if getattr(field, "area_ha", None) else None,
+        }
+        s2 = load_agri_s2_rows(session, land_id, start, end) if land_id else []
+        s1 = load_agri_s1_rows(session, land_id, start, end) if land_id else []
+        classic_preloaded = []
+
     window = {
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
@@ -1683,17 +1733,7 @@ def build_season_facts(
         range(start.month, end.month + 1) if start.year == end.year else [start.month]
     )
 
-    field_meta = {
-        "field_id": str(fid),
-        "field_name": getattr(field, "name", None) or "地块",
-        "land_id": land_id,
-        "crop_type": getattr(field, "crop_type", None),
-        "area_ha": float(field.area_ha) if getattr(field, "area_ha", None) else None,
-    }
-
     if land_id:
-        s2 = load_agri_s2_rows(session, land_id, start, end)
-        s1 = load_agri_s1_rows(session, land_id, start, end)
         if not s2 and not s1:
             raise ValueError(
                 f"窗口内无 agri 遥感数据 (land_id={land_id}, {start}~{end})"
@@ -1724,17 +1764,45 @@ def build_season_facts(
         harvest = detect_harvest(harvest_pts, window=window)
         drought = _drought_summary(s2, season_months)
         flood = _flood_summary(s1)
-        prior = _prior_year_comparison(
-            session,
-            land_id=land_id,
-            field_id=fid,
-            start=start,
-            end=end,
-            is_agri=True,
-        )
+        if prior_s2_http:
+            prior_ndvi = [
+                {"date": r["date"], "value": r["ndvi_avg"]}
+                for r in prior_s2_http
+                if r.get("ndvi_avg") is not None
+            ]
+            prior = {
+                "year": start.year - 1,
+                "start_date": (http_inputs or {})
+                .get("prior_window", {})
+                .get("start_date"),
+                "end_date": (http_inputs or {})
+                .get("prior_window", {})
+                .get("end_date"),
+                "ndvi_mean": round(_series_mean(prior_ndvi), 4)
+                if _series_mean(prior_ndvi) is not None
+                else None,
+                "ndvi_peak": _peak(prior_ndvi),
+                "point_count": len(prior_ndvi),
+                "scenes": {"s2_count": len(prior_s2_http)},
+            }
+        elif session is not None:
+            prior = _prior_year_comparison(
+                session,
+                land_id=land_id,
+                field_id=fid,
+                start=start,
+                end=end,
+                is_agri=True,
+            )
+        else:
+            prior = {}
         data_source = "agri.parcel_scene_products"
     else:
-        indices = load_classic_indices(session, fid, start, end)
+        indices = (
+            classic_preloaded
+            if classic_preloaded
+            else load_classic_indices(session, fid, start, end)
+        )
         ndvi_ts, ndmi_ts = _indices_to_ndvi_ndmi(indices, start, end)
         if len(ndvi_ts) < 2:
             raise ValueError(
@@ -1781,14 +1849,17 @@ def build_season_facts(
             "scenes": [],
             "note": "经典地块无 S1 洪涝判定",
         }
-        prior = _prior_year_comparison(
-            session,
-            land_id=None,
-            field_id=fid,
-            start=start,
-            end=end,
-            is_agri=False,
-        )
+        if session is not None:
+            prior = _prior_year_comparison(
+                session,
+                land_id=None,
+                field_id=fid,
+                start=start,
+                end=end,
+                is_agri=False,
+            )
+        else:
+            prior = {}
         data_source = "field_stats"
 
     peak = _peak(ndvi_ts)
@@ -1970,7 +2041,7 @@ def build_season_facts(
         "program_conclusions": conclusions,
         "disclaimer": FOOTER_DISCLAIMER,
         "spatial": build_spatial_block(
-            session if land_id else None,
+            session if (land_id and session is not None) else None,
             land_id=land_id,
             s2_rows=s2 if s2 else [],
             ndvi_peak=peak,

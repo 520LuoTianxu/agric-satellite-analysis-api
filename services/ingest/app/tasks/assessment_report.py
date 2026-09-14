@@ -72,8 +72,46 @@ def _publish_mq_result(
         )
 
 
+
+def _maybe_sync_session():
+    """Open SyncSession only when PG reads are still allowed on this host."""
+    try:
+        from openfarm_common.internal_api import (
+            ingest_pg_reads_allowed,
+            internal_api_enabled,
+        )
+
+        if internal_api_enabled() and not ingest_pg_reads_allowed():
+            return None
+    except ImportError:
+        pass
+    return SyncSession()
+
+
+def _data_readiness_http(
+    field_id: uuid.UUID,
+    date_from: str | None,
+    date_to: str | None,
+) -> dict | None:
+    try:
+        from openfarm_common.internal_api import data_readiness, internal_api_enabled
+
+        if not internal_api_enabled():
+            return None
+        return data_readiness(
+            str(field_id), date_from=date_from, date_to=date_to
+        )
+    except Exception as exc:
+        logger.warning(
+            "assessment_data_readiness_http_failed",
+            field_id=str(field_id),
+            error=str(exc),
+        )
+        return None
+
+
 def _resolve_job(session, job_id: str | None) -> Job | None:
-    if not job_id:
+    if not job_id or session is None:
         return None
     try:
         return session.get(Job, uuid.UUID(str(job_id)))
@@ -256,10 +294,45 @@ def bootstrap_pulls_ready(
     look ready in the first seconds.
     """
     celery_ready, pending_ids = _celery_ids_ready(wait_celery_ids)
-    weather_rows = _weather_row_count(session, field_id, date_from, date_to)
-    soil_ok = _soil_ready(session, field_id)
-    active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
-    coverage = _agri_rs_coverage_ok(session, field_id, date_from, date_to)
+    readiness = _data_readiness_http(field_id, date_from, date_to)
+    if readiness is not None:
+        weather_rows = int(readiness.get("weather_rows") or 0)
+        soil_ok = bool(readiness.get("soil_ok"))
+        # Active RS jobs still need local Job table or celery ids — skip PG count.
+        active_rs = 0
+        if session is not None:
+            try:
+                active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+            except Exception:
+                active_rs = 0
+        span = readiness.get("span_days")
+        s2_min = max(6, min(48, int(span) // 30)) if span else None
+        s1_min = max(3, min(24, int(span) // 60)) if span else None
+        s2_dates = int(readiness.get("s2_dates") or 0)
+        s1_dates = int(readiness.get("s1_dates") or 0)
+        coverage = {
+            "ok": bool(
+                s2_min is not None
+                and s1_min is not None
+                and s2_dates >= s2_min
+                and s1_dates >= s1_min
+            ),
+            "land_id": readiness.get("land_id"),
+            "s2_dates": s2_dates,
+            "s1_dates": s1_dates,
+            "span_days": span,
+            "s2_min": s2_min,
+            "s1_min": s1_min,
+        }
+    else:
+        if session is None:
+            raise RuntimeError(
+                "bootstrap_pulls_ready needs SyncSession or internal data-readiness"
+            )
+        weather_rows = _weather_row_count(session, field_id, date_from, date_to)
+        soil_ok = _soil_ready(session, field_id)
+        active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+        coverage = _agri_rs_coverage_ok(session, field_id, date_from, date_to)
 
     weather_ok = weather_rows >= weather_min_rows
     # After top-level weather/soil/indices orchestration finishes, wait until
@@ -339,7 +412,7 @@ def generate_assessment_report(
     soil + agri RS wave before building the PDF so we do not race a soil-only
     report. After max retries, proceed with whatever data is available.
     """
-    session = SyncSession()
+    session = _maybe_sync_session()
     field_id_str: str | None = str(field_id) if field_id else None
     job_id_str: str | None = str(job_id) if job_id else None
     job: Job | None = None
@@ -730,4 +803,5 @@ def generate_assessment_report(
                 pass
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()

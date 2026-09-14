@@ -8,6 +8,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.core.database_sync import SyncSession
+
+
+def _maybe_sync_session():
+    try:
+        from openfarm_common.internal_api import (
+            ingest_pg_reads_allowed,
+            internal_api_enabled,
+        )
+        if internal_api_enabled() and not ingest_pg_reads_allowed():
+            return None
+    except ImportError:
+        pass
+    return SyncSession()
+
 from app.core.logging import logger
 from app.models.tables import Job
 from app.reports.season_growth.service import generate_season_growth_pdf
@@ -72,7 +86,7 @@ def _publish_mq_result(
 
 
 def _resolve_job(session, job_id: str | None) -> Job | None:
-    if not job_id:
+    if not job_id or session is None:
         return None
     try:
         return session.get(Job, uuid.UUID(str(job_id)))
@@ -106,7 +120,7 @@ def generate_season_growth_report(
     soil + agri RS wave before building the PDF so we do not race an empty
     S1/S2 window. After max retries, proceed with whatever data is available.
     """
-    session = SyncSession()
+    session = _maybe_sync_session()
     field_id_str: str | None = str(field_id) if field_id else None
     job_id_str: str | None = str(job_id) if job_id else None
     job: Job | None = None
@@ -461,4 +475,5 @@ def generate_season_growth_report(
                 pass
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()

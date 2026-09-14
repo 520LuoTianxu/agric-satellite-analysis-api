@@ -294,12 +294,18 @@ CloudAMQP 为可选兼容。开发按 **D0 → D4** 推进。
 - 双发防护：`should_run_claim_agent()` 仅 `claim`；`dual` 下载机只跑 MQ。
 - mq_consumer：`WORK_QUEUE_MODE=claim` 时仅 claim agent。
 
-**D4.1 延期（不阻塞本 PR）**
+**D4.1（本阶段）** — assessment / season-growth / 关键 ingest 读：
+
+- `GET /v1/internal/fields/{id}/assessment-bundle`
+- `GET /v1/internal/fields/{id}/season-growth-inputs`
+- `GET /v1/internal/fields/{id}/data-readiness`
+- ingest `load_field_bundle` / season `build_season_facts` 优先 Internal HTTP；`INGEST_PG_READS` 跟随 `INGEST_PG_WRITES`（可显式覆盖）
+- weather/soil：centroid 走 `fields/{id}/geom`；`INGEST_PG_WRITES=0` 时结果 `results/apply`
+
+**仍延期**
 
 - raster_layers / field_stats 大批量写入的 internal HTTP。
 - backfill `pg_advisory_*` 锁。
-- 报告 `data_loader` 重读改全 HTTP。
-- ingest 侧全面禁本地 weather/soil/scene upsert（靠 `INGEST_PG_WRITES=0` + 验证后切）。
 
 **切流顺序（摘要；细节见手册）**
 

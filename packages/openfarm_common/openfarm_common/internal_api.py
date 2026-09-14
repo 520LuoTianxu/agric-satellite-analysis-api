@@ -24,11 +24,14 @@ __all__ = [
     "agri_scenes_summary",
     "api_base_url",
     "apply_results",
+    "assessment_bundle",
     "complete_work",
+    "data_readiness",
     "fail_work",
     "field_geom",
     "get_job",
     "http_writes_enabled",
+    "ingest_pg_reads_allowed",
     "ingest_pg_writes_enabled",
     "internal_api_enabled",
     "internal_api_token",
@@ -36,6 +39,7 @@ __all__ = [
     "patch_job",
     "progress_work",
     "resolve_field",
+    "season_growth_inputs",
 ]
 
 
@@ -81,6 +85,18 @@ def ingest_pg_writes_enabled() -> bool:
     if _falsey(raw):
         return False
     return True
+
+
+def ingest_pg_reads_allowed() -> bool:
+    """Whether download workers may use SyncSession for reads.
+
+    Defaults to the same as ``INGEST_PG_WRITES``. Override with ``INGEST_PG_READS``
+    (``1`` keep PG reads while writes are HTTP-only; ``0`` forbid PG reads).
+    """
+    raw = _env("INGEST_PG_READS", "")
+    if raw:
+        return not _falsey(raw)
+    return ingest_pg_writes_enabled()
 
 
 def http_writes_enabled() -> bool:
@@ -406,3 +422,93 @@ def progress_work(
     with internal_client() as c:
         return _do(c)
 
+
+def assessment_bundle(
+    field_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """GET /v1/internal/fields/{id}/assessment-bundle — full load_field_bundle JSON."""
+    params: dict[str, str] = {}
+    if date_from:
+        params["date_from"] = str(date_from)[:10]
+    if date_to:
+        params["date_to"] = str(date_to)[:10]
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.get(
+            f"/v1/internal/fields/{field_id}/assessment-bundle",
+            params=params or None,
+        )
+        _raise_for_status(r, context="fields/assessment-bundle")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("assessment-bundle returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def season_growth_inputs(
+    field_id: str,
+    *,
+    date_from: str,
+    date_to: str,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """GET /v1/internal/fields/{id}/season-growth-inputs — field + S2/S1/indices rows."""
+    params = {"date_from": str(date_from)[:10], "date_to": str(date_to)[:10]}
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.get(
+            f"/v1/internal/fields/{field_id}/season-growth-inputs",
+            params=params,
+        )
+        _raise_for_status(r, context="fields/season-growth-inputs")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("season-growth-inputs returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def data_readiness(
+    field_id: str,
+    *,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """GET /v1/internal/fields/{id}/data-readiness — weather/soil/RS coverage counts."""
+    params: dict[str, str] = {}
+    if date_from:
+        params["date_from"] = str(date_from)[:10]
+    if date_to:
+        params["date_to"] = str(date_to)[:10]
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.get(
+            f"/v1/internal/fields/{field_id}/data-readiness",
+            params=params or None,
+        )
+        _raise_for_status(r, context="fields/data-readiness")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("data-readiness returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)

@@ -321,6 +321,52 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
             session.execute(text(UPSERT_WEATHER_SQL), params)
             n += 1
         session.commit()
+        # Rolling water balance / drought index (same as ingest worker SQL)
+        field_ids = {
+            str(r.get("field_id") or payload.get("field_id"))
+            for r in rows
+            if isinstance(r, dict) and (r.get("field_id") or payload.get("field_id"))
+        }
+        for fid in field_ids:
+            try:
+                session.execute(
+                    text(
+                        """
+                        UPDATE weather_daily w
+                        SET water_balance_30d_mm = sub.wb,
+                            drought_index = CASE
+                                WHEN sub.stddev_wb > 0
+                                THEN sub.wb / sub.stddev_wb
+                                ELSE 0
+                            END,
+                            updated_at = NOW()
+                        FROM (
+                            SELECT
+                                id,
+                                SUM(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
+                                    OVER (
+                                        PARTITION BY field_id
+                                        ORDER BY date
+                                        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                                    ) AS wb,
+                                STDDEV(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
+                                    OVER (
+                                        PARTITION BY field_id
+                                        ORDER BY date
+                                        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                                    ) AS stddev_wb
+                            FROM weather_daily
+                            WHERE field_id = CAST(:field_id AS uuid)
+                              AND date >= CURRENT_DATE - INTERVAL '90 days'
+                        ) sub
+                        WHERE w.id = sub.id
+                        """
+                    ),
+                    {"field_id": fid},
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
     except Exception:
         session.rollback()
         raise

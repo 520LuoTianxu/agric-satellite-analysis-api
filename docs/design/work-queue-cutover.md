@@ -159,20 +159,19 @@ for Celery only.
 
 ---
 
-## 7. D4.1 deferred — remaining download PG / heavy loaders
+## 7. D4.1 — assessment / season-growth / critical ingest reads (no download PG)
 
-These **do not** block D4 merge. Track explicitly; rewrite behind internal HTTP later.
+| Endpoint / path | Purpose |
+|-----------------|---------|
+| `GET /v1/internal/fields/{id}/assessment-bundle` | Full `load_field_bundle` JSON for scoring/PDF |
+| `GET /v1/internal/fields/{id}/season-growth-inputs` | Field + S2/S1/indices rows for `build_season_facts` |
+| `GET /v1/internal/fields/{id}/data-readiness` | Weather/soil/RS counts for bootstrap wait |
+| ingest `data_loader` / season `facts` | Prefer HTTP when `API_BASE_URL`+token; PG only if `INGEST_PG_READS` allows |
+| weather / soil tasks | Field centroid via `fields/{id}/geom`; HTTP-only upsert via `results/apply` when `INGEST_PG_WRITES=0` |
 
-| Area | Why deferred | Interim |
-|------|----------------|---------|
-| `raster_layers` / `field_stats` writes | High-volume scene/index upserts; needs batched apply API | Keep SyncSession until D4.1 |
-| `pg_advisory_*` locks in backfill | Coordination still on shared PG | Keep until no download PG |
-| Report `data_loader` heavy reads | Large joins for PDF facts/charts | Prefer internal read APIs incrementally; OK on PG until cutover of DB URLs |
-| Full soil/weather/scene **local** upsert cutover | HTTP `results/apply` exists; ingest still defaults to PG writes | Flip via `INGEST_PG_WRITES=0` after verification |
-| Per-chunk optical/S1 as distinct work_items | Chunks are Celery children today | Optional later; parent `satellite_analysis` / bootstrap is enough |
+**Still deferred (heavy):** high-volume `raster_layers` / `field_stats` scene upserts; `pg_advisory_*` backfill locks; per-chunk optical work_items.
 
-Acceptance for “download without `DATABASE_URL`” requires D4.1 (or equivalent) for the
-rows above — **out of scope for D4 scaffolding PR**.
+After D4.1 verify assessment PDF for a known field with download `DATABASE_URL` pointing at a closed `:5432` (or unset) while `API_BASE_URL` works.
 
 ---
 

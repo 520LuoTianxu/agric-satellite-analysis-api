@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid as _uuid
 from typing import Annotated, Any
 
@@ -207,3 +208,444 @@ async def field_geom(
         centroid_lat=row["centroid_lat"],
         geojson=row["geojson"] if include_geojson else None,
     )
+
+
+# ── D4.1: assessment / season-growth / readiness bundles ─────────────
+
+
+class DataReadinessOut(BaseModel):
+    field_id: str
+    land_id: str | None = None
+    weather_rows: int = 0
+    soil_ok: bool = False
+    s2_dates: int = 0
+    s1_dates: int = 0
+    span_days: int | None = None
+
+
+def _sync_load_assessment_bundle(field_id: str) -> dict[str, Any]:
+    """Run ingest-equivalent load_field_bundle on API SyncSession (no HTTP recurse)."""
+    from app.core.database_sync import SyncSession
+    from app.reports.land_assessment.data_loader import load_field_bundle
+
+    fid = _parse_field_uuid(field_id)
+    session = SyncSession()
+    try:
+        return load_field_bundle(session, fid, allow_http=False)
+    finally:
+        session.close()
+
+
+def _tag_land_id(tags: Any) -> str | None:
+    return _land_id_from_tags(tags)
+
+
+@router.get("/{field_id}/assessment-bundle")
+async def assessment_bundle(
+    field_id: str,
+    _: InternalAuth,
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """JSON sufficient for compute_assessment / PDF (same shape as load_field_bundle).
+
+    ``date_from`` / ``date_to`` are accepted for forward compatibility; the current
+    loader uses crop-season lookback rather than an explicit window.
+    """
+    del date_from, date_to  # reserved
+    try:
+        bundle = await asyncio.to_thread(_sync_load_assessment_bundle, field_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"assessment-bundle failed: {e}"
+        ) from e
+    return bundle
+
+
+@router.get("/{field_id}/data-readiness", response_model=DataReadinessOut)
+async def data_readiness(
+    field_id: str,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    """Weather row count + soil profile + agri S2/S1 coverage for bootstrap wait."""
+    fid = _parse_field_uuid(field_id)
+    field_row = (
+        await db.execute(
+            select(FieldModel).where(
+                FieldModel.id == fid,
+                FieldModel.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not field_row:
+        raise HTTPException(status_code=404, detail="field not found")
+    land_id = _tag_land_id(field_row.tags_json)
+
+    weather_params: dict[str, Any] = {"fid": str(fid)}
+    weather_sql = (
+        "SELECT count(*)::int AS n FROM weather_daily WHERE field_id = CAST(:fid AS uuid)"
+    )
+    if date_from:
+        weather_sql += " AND date >= CAST(:d0 AS date)"
+        weather_params["d0"] = date_from[:10]
+    if date_to:
+        weather_sql += " AND date <= CAST(:d1 AS date)"
+        weather_params["d1"] = date_to[:10]
+    weather_rows = int(
+        (await db.execute(text(weather_sql), weather_params)).scalar() or 0
+    )
+
+    soil_ok = bool(
+        (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM soil_profiles WHERE field_id = CAST(:fid AS uuid) LIMIT 1"
+                ),
+                {"fid": str(fid)},
+            )
+        ).scalar()
+    )
+
+    s2_dates = 0
+    s1_dates = 0
+    span_days = None
+    if land_id and date_from and date_to:
+        try:
+            from datetime import date as _date
+
+            d0 = _date.fromisoformat(date_from[:10])
+            d1 = _date.fromisoformat(date_to[:10])
+            if d1 >= d0:
+                span_days = (d1 - d0).days + 1
+                cov = (
+                    await db.execute(
+                        text(
+                            """
+                            SELECT
+                              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
+                              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
+                            FROM agri.parcel_scene_products
+                            WHERE land_id = :land_id
+                              AND date >= CAST(:d0 AS date)
+                              AND date <= CAST(:d1 AS date)
+                              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
+                              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+                            """
+                        ),
+                        {
+                            "land_id": land_id,
+                            "d0": date_from[:10],
+                            "d1": date_to[:10],
+                        },
+                    )
+                ).mappings().first()
+                s2_dates = int((cov or {}).get("s2_dates") or 0)
+                s1_dates = int((cov or {}).get("s1_dates") or 0)
+        except ValueError:
+            pass
+
+    return DataReadinessOut(
+        field_id=str(fid),
+        land_id=land_id,
+        weather_rows=weather_rows,
+        soil_ok=soil_ok,
+        s2_dates=s2_dates,
+        s1_dates=s1_dates,
+        span_days=span_days,
+    )
+
+
+def _sync_load_season_growth_inputs(
+    field_id: str, date_from: str, date_to: str
+) -> dict[str, Any]:
+    """Field meta + agri S2/S1 rows + classic indices for season-growth facts."""
+    from datetime import date as _date
+
+    from sqlalchemy import text as sa_text
+
+    from app.core.agri_classify import (
+        CLOUD_MAX_PCT,
+        cloud_pct,
+        is_official_optical_product,
+        parse_s1_relative_orbit,
+    )
+    from app.core.agri_tags import parse_agri_land_id
+    from app.core.database_sync import SyncSession
+    from app.models.tables import Field as FieldTbl
+    from app.models.tables import FieldStat, RasterLayer
+
+    start = _date.fromisoformat(date_from[:10])
+    end = _date.fromisoformat(date_to[:10])
+    if end < start:
+        raise ValueError("date_to must be >= date_from")
+
+    fid = _parse_field_uuid(field_id)
+    session = SyncSession()
+    try:
+        field = session.get(FieldTbl, fid)
+        if not field or field.deleted_at is not None:
+            raise ValueError(f"Field not found: {field_id}")
+        land_id = parse_agri_land_id(field.tags_json)
+        field_meta = {
+            "field_id": str(fid),
+            "field_name": field.name or "地块",
+            "land_id": land_id,
+            "crop_type": field.crop_type,
+            "area_ha": float(field.area_ha) if field.area_ha is not None else None,
+            "tags": field.tags_json if isinstance(field.tags_json, list) else [],
+        }
+
+        def _num(v: Any) -> float | None:
+            if v is None:
+                return None
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            if f != f or f in (float("inf"), float("-inf")):
+                return None
+            return f
+
+        def _iso(d: Any) -> str:
+            if hasattr(d, "isoformat"):
+                return d.isoformat()[:10]
+            return str(d)[:10]
+
+        s2_rows: list[dict[str, Any]] = []
+        s1_rows: list[dict[str, Any]] = []
+        classic_indices: list[dict[str, Any]] = []
+
+        if land_id:
+            rows = (
+                session.execute(
+                    sa_text(
+                        """
+                        SELECT date, scene_id, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
+                               parcel_cloud_cover_pct, cloud_cover,
+                               pixel_data->>'source' AS source,
+                               pixel_data->>'decloud_quality' AS decloud_quality,
+                               rgb_url, large_rgb_url, rgb_oss_key,
+                               pixel_data->>'format' AS pixel_format,
+                               CASE
+                                 WHEN jsonb_typeof(pixel_data->'pixels') = 'array'
+                                 THEN jsonb_array_length(pixel_data->'pixels')
+                                 ELSE 0
+                               END AS pixel_n
+                        FROM agri.parcel_scene_products
+                        WHERE land_id = :land_id AND sensor = 'S2'
+                          AND date >= :start_date AND date <= :end_date
+                        ORDER BY date
+                        """
+                    ),
+                    {
+                        "land_id": land_id,
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                    },
+                )
+                .mappings()
+                .all()
+            )
+            for r in rows:
+                cloud = cloud_pct(r["parcel_cloud_cover_pct"], r["cloud_cover"])
+                official = is_official_optical_product(
+                    source=r.get("source"),
+                    scene_id=r.get("scene_id"),
+                    parcel_cloud_cover_pct=r["parcel_cloud_cover_pct"],
+                    cloud_cover=r["cloud_cover"],
+                    decloud_quality=r.get("decloud_quality"),
+                    cloud_max_pct=CLOUD_MAX_PCT,
+                )
+                s2_rows.append(
+                    {
+                        "date": _iso(r["date"]),
+                        "scene_id": r.get("scene_id"),
+                        "ndvi_avg": _num(r["ndvi_avg"]),
+                        "evi_avg": _num(r["evi_avg"]),
+                        "ndmi_avg": _num(r["ndmi_avg"]),
+                        "mndwi_avg": _num(r["mndwi_avg"]),
+                        "parcel_cloud_cover_pct": _num(r["parcel_cloud_cover_pct"]),
+                        "cloud_cover": _num(r["cloud_cover"]),
+                        "cloud_pct": cloud,
+                        "decloud_quality": r.get("decloud_quality"),
+                        "source": r.get("source"),
+                        "official": bool(official),
+                        "clear": cloud is not None and cloud <= CLOUD_MAX_PCT,
+                        "rgb_url": r.get("rgb_url") or None,
+                        "large_rgb_url": r.get("large_rgb_url") or None,
+                        "rgb_oss_key": r.get("rgb_oss_key") or None,
+                        "pixel_format": r.get("pixel_format"),
+                        "pixel_n": int(r["pixel_n"] or 0)
+                        if r.get("pixel_n") is not None
+                        else 0,
+                    }
+                )
+
+            s1_raw = (
+                session.execute(
+                    sa_text(
+                        """
+                        SELECT date, scene_id, vv_avg, vh_avg,
+                               pixel_data->>'relative_orbit' AS relative_orbit,
+                               rgb_url, large_rgb_url, rgb_oss_key
+                        FROM agri.parcel_scene_products
+                        WHERE land_id = :land_id AND sensor = 'S1'
+                          AND date >= :start_date AND date <= :end_date
+                        ORDER BY date
+                        """
+                    ),
+                    {
+                        "land_id": land_id,
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                    },
+                )
+                .mappings()
+                .all()
+            )
+            for r in s1_raw:
+                orbit = r.get("relative_orbit")
+                if orbit is None and r.get("scene_id"):
+                    orbit = parse_s1_relative_orbit(r.get("scene_id"))
+                s1_rows.append(
+                    {
+                        "date": _iso(r["date"]),
+                        "scene_id": r.get("scene_id"),
+                        "vv_avg": _num(r["vv_avg"]),
+                        "vh_avg": _num(r["vh_avg"]),
+                        "relative_orbit": orbit,
+                        "rgb_url": r.get("rgb_url") or None,
+                        "large_rgb_url": r.get("large_rgb_url") or None,
+                        "rgb_oss_key": r.get("rgb_oss_key") or None,
+                    }
+                )
+        else:
+            from sqlalchemy import select as sa_select
+
+            rows = session.execute(
+                sa_select(
+                    FieldStat.date,
+                    RasterLayer.layer_type,
+                    FieldStat.mean,
+                    FieldStat.median,
+                    FieldStat.quality_score,
+                )
+                .join(RasterLayer, RasterLayer.id == FieldStat.layer_id)
+                .where(
+                    FieldStat.field_id == fid,
+                    FieldStat.date >= start,
+                    FieldStat.date <= end,
+                )
+                .order_by(FieldStat.date)
+            ).all()
+            for r in rows:
+                classic_indices.append(
+                    {
+                        "date": _iso(r.date),
+                        "layer_type": r.layer_type,
+                        "mean": _num(r.mean),
+                        "median": _num(r.median),
+                        "quality_score": _num(r.quality_score) or 0.5,
+                    }
+                )
+
+        # Prior-year window (same DOY span, previous year) for YoY — optional.
+        prior_s2: list[dict[str, Any]] = []
+        try:
+            prior_start = start.replace(year=start.year - 1)
+        except ValueError:
+            prior_start = start.replace(year=start.year - 1, day=28)
+        try:
+            prior_end = end.replace(year=end.year - 1)
+        except ValueError:
+            prior_end = end.replace(year=end.year - 1, day=28)
+        if land_id:
+            rows = (
+                session.execute(
+                    sa_text(
+                        """
+                        SELECT date, scene_id, ndvi_avg, ndmi_avg,
+                               parcel_cloud_cover_pct, cloud_cover,
+                               pixel_data->>'source' AS source,
+                               pixel_data->>'decloud_quality' AS decloud_quality
+                        FROM agri.parcel_scene_products
+                        WHERE land_id = :land_id AND sensor = 'S2'
+                          AND date >= :start_date AND date <= :end_date
+                        ORDER BY date
+                        """
+                    ),
+                    {
+                        "land_id": land_id,
+                        "start_date": prior_start.isoformat(),
+                        "end_date": prior_end.isoformat(),
+                    },
+                )
+                .mappings()
+                .all()
+            )
+            for r in rows:
+                cloud = cloud_pct(r["parcel_cloud_cover_pct"], r["cloud_cover"])
+                official = is_official_optical_product(
+                    source=r.get("source"),
+                    scene_id=r.get("scene_id"),
+                    parcel_cloud_cover_pct=r["parcel_cloud_cover_pct"],
+                    cloud_cover=r["cloud_cover"],
+                    decloud_quality=r.get("decloud_quality"),
+                    cloud_max_pct=CLOUD_MAX_PCT,
+                )
+                prior_s2.append(
+                    {
+                        "date": _iso(r["date"]),
+                        "scene_id": r.get("scene_id"),
+                        "ndvi_avg": _num(r["ndvi_avg"]),
+                        "ndmi_avg": _num(r["ndmi_avg"]),
+                        "cloud_pct": cloud,
+                        "official": bool(official),
+                        "clear": cloud is not None and cloud <= CLOUD_MAX_PCT,
+                    }
+                )
+
+        return {
+            "field": field_meta,
+            "land_id": land_id,
+            "date_from": start.isoformat(),
+            "date_to": end.isoformat(),
+            "s2_rows": s2_rows,
+            "s1_rows": s1_rows,
+            "classic_indices": classic_indices,
+            "prior_s2_rows": prior_s2,
+            "prior_window": {
+                "start_date": prior_start.isoformat(),
+                "end_date": prior_end.isoformat(),
+            },
+        }
+    finally:
+        session.close()
+
+
+@router.get("/{field_id}/season-growth-inputs")
+async def season_growth_inputs(
+    field_id: str,
+    _: InternalAuth,
+    date_from: str = Query(..., min_length=8, max_length=32),
+    date_to: str = Query(..., min_length=8, max_length=32),
+):
+    """Raw rows for season-growth ``build_season_facts`` without download PG."""
+    try:
+        payload = await asyncio.to_thread(
+            _sync_load_season_growth_inputs, field_id, date_from, date_to
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"season-growth-inputs failed: {e}"
+        ) from e
+    return payload
