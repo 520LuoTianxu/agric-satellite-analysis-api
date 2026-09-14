@@ -362,7 +362,7 @@ def generate_assessment_pdf(
         soil=bundle["soil"],
         weather_summary=bundle["weather_summary"],
         chart_paths=chart_paths,
-        title_suffix="OpenFarm",
+        title_suffix="乡合农服",
         flood_evidence=flood_evidence,
         analysis=analysis,
         ai=ai,

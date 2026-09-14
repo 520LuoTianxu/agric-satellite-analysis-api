@@ -441,5 +441,80 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertIn("根系层有效持水量", facts["soil"]["rootzone_awc_label"])
 
 
+class QuestionnaireAnalysisTests(unittest.TestCase):
+    def facts(self, survey=None):
+        return ai_analysis.facts_for_llm(
+            field={},
+            scorecard={},
+            rs={},
+            risk={},
+            soil={},
+            weather_summary={},
+            site_admission=survey,
+        )
+
+    def test_complete_questionnaire_reaches_all_parallel_requests(self):
+        survey = {
+            "source": "现场问卷",
+            "fetched_at": "2026-09-14",
+            "item_answers": {"drainage": "blocked", "note": "排水出口受阻"},
+            "red_line_answers": {"ownership": False},
+            "dimensions": [
+                {
+                    "name": "水利",
+                    "items": [
+                        {
+                            "id": "drainage",
+                            "option_key": "blocked",
+                            "option_label": "排水出口受阻",
+                        }
+                    ],
+                }
+            ],
+        }
+        facts = self.facts(survey)
+        seen = []
+
+        def respond(*, system, user, **kwargs):
+            received = json.loads(user.split("程序事实 JSON：\n", 1)[1])
+            received_survey = received["site_admission"]
+            self.assertEqual(received_survey["item_answers"], survey["item_answers"])
+            self.assertFalse(received_survey["红线排查"]["ownership"])
+            self.assertEqual(
+                received_survey["维度得分"][0]["items"][0]["option_label"],
+                "排水出口受阻",
+            )
+            self.assertEqual(received_survey["source"], "现场问卷")
+            self.assertEqual(received_survey["fetched_at"], "2026-09-14")
+            key = user.split("分节=", 1)[1].split("。", 1)[0]
+            seen.append(key)
+            if key == "overall":
+                return {
+                    key: {
+                        "evaluation": "现场问卷反映排水出口受阻，需与土壤排水等级交叉核实。"
+                    }
+                }, None
+            if key == "business":
+                return {
+                    key: {"available": False},
+                    "evidence_gaps": ["现场排水情况待核验"],
+                }, None
+            return {key: {}}, None
+
+        with (
+            patch.dict(os.environ, {"BAILIAN_API_KEY": "test-key"}),
+            patch.object(ai_analysis, "_bailian_chat", side_effect=respond),
+        ):
+            out = ai_analysis.generate_land_assessment_narrative(facts, parallel=True)
+        self.assertEqual(set(seen), {spec[0] for spec in ai_analysis.SECTION_SPECS})
+        self.assertIn("现场问卷", out["overall"]["evaluation"])
+        self.assertEqual(out["evidence_gaps"], ["现场排水情况待核验"])
+
+    def test_absent_questionnaire_stays_optional_for_every_section(self):
+        facts = self.facts()
+        for key, _, _ in ai_analysis.SECTION_SPECS:
+            self.assertIsNone(ai_analysis._section_facts(facts, key)["site_admission"])
+
+
 if __name__ == "__main__":
     unittest.main()

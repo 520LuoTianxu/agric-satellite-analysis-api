@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Reportlab PDF renderer for 选地体检（≤10 页，facts + AI）。"""
+"""完整选地报告：保留全部分析章节，以分页、导航与统一样式提升阅读体验。"""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+from reportlab.platypus.tableofcontents import TableOfContents
 
 from app.reports.land_assessment.paths import FONT_PATH
 from app.reports.land_assessment.soil_labels import (
@@ -94,11 +97,12 @@ def _styles() -> dict[str, ParagraphStyle]:
         "h1": ParagraphStyle(
             "h1",
             fontName="CNB",
-            fontSize=13,
-            leading=20,
+            fontSize=15,
+            leading=23,
             textColor=HexColor("#143d2b"),
             spaceBefore=4,
-            spaceAfter=4,
+            spaceAfter=6,
+            keepWithNext=True,
         ),
         "h2": ParagraphStyle(
             "h2",
@@ -107,18 +111,23 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=16,
             textColor=HexColor("#1f4d38"),
             spaceBefore=4,
-            spaceAfter=2,
+            spaceAfter=4,
+            keepWithNext=True,
         ),
         "body": ParagraphStyle(
             "body",
             fontName="CN",
-            fontSize=9.5,
-            leading=14.5,
+            fontSize=10,
+            leading=15.5,
             alignment=TA_JUSTIFY,
-            textColor=HexColor("#222"),
+            textColor=HexColor("#222222"),
         ),
         "small": ParagraphStyle(
-            "small", fontName="CN", fontSize=8, leading=12, textColor=HexColor("#666")
+            "small",
+            fontName="CN",
+            fontSize=8.5,
+            leading=13,
+            textColor=HexColor("#666666"),
         ),
         "center": ParagraphStyle(
             "center",
@@ -126,7 +135,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=10,
             leading=14,
             alignment=TA_CENTER,
-            textColor=HexColor("#333"),
+            textColor=HexColor("#333333"),
         ),
         "badge": ParagraphStyle(
             "badge",
@@ -139,38 +148,42 @@ def _styles() -> dict[str, ParagraphStyle]:
         "bullet": ParagraphStyle(
             "bullet",
             fontName="CN",
-            fontSize=9,
-            leading=13.5,
-            textColor=HexColor("#222"),
+            fontSize=9.5,
+            leading=14.5,
+            textColor=HexColor("#222222"),
             leftIndent=6,
         ),
         "ai_note": ParagraphStyle(
             "ai_note",
             fontName="CN",
-            fontSize=9,
-            leading=13.5,
+            fontSize=9.5,
+            leading=14.5,
             textColor=HexColor("#7a3a00"),
             backColor=HexColor("#fff7e0"),
         ),
         "tbl_h": ParagraphStyle(
-            "tbl_h", fontName="CNB", fontSize=8.5, leading=11, textColor=white
+            "tbl_h", fontName="CNB", fontSize=9, leading=13, textColor=white
         ),
         "tbl_c": ParagraphStyle(
-            "tbl_c", fontName="CN", fontSize=8, leading=11.5, textColor=HexColor("#222")
+            "tbl_c",
+            fontName="CN",
+            fontSize=9,
+            leading=13,
+            textColor=HexColor("#222222"),
         ),
         "tbl_b": ParagraphStyle(
             "tbl_b",
             fontName="CNB",
-            fontSize=8,
-            leading=11.5,
-            textColor=HexColor("#222"),
+            fontSize=9.5,
+            leading=14,
+            textColor=HexColor("#222222"),
         ),
         "toc": ParagraphStyle(
             "toc",
             fontName="CN",
             fontSize=10,
             leading=16,
-            textColor=HexColor("#222"),
+            textColor=HexColor("#222222"),
             leftIndent=4,
         ),
         "card_label": ParagraphStyle(
@@ -183,15 +196,15 @@ def _styles() -> dict[str, ParagraphStyle]:
         "card_value": ParagraphStyle(
             "card_value",
             fontName="CN",
-            fontSize=9,
-            leading=13,
-            textColor=HexColor("#222"),
+            fontSize=9.5,
+            leading=14,
+            textColor=HexColor("#222222"),
         ),
     }
 
 
 class ScoreBadge(Flowable):
-    def __init__(self, score, light, grade, width=170 * mm, height=32 * mm):
+    def __init__(self, score, light, grade, width=168 * mm, height=32 * mm):
         Flowable.__init__(self)
         self.score = score
         self.light = light
@@ -227,7 +240,7 @@ class ScoreBadge(Flowable):
             self.width / 2 + 4 * mm, self.height / 2 + 1 * mm, f"{self.score}"
         )
         c.setFont("CN", 10)
-        c.setFillColor(HexColor("#444"))
+        c.setFillColor(HexColor("#444444"))
         c.drawCentredString(
             self.width / 2 + 4 * mm,
             6 * mm,
@@ -236,7 +249,7 @@ class ScoreBadge(Flowable):
 
 
 def _esc(text: Any) -> str:
-    s = str(text or "")
+    s = "" if text is None else str(text)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -267,6 +280,30 @@ def _ai_failed(ai: dict[str, Any] | None) -> bool:
     return False
 
 
+class AssessmentDocTemplate(SimpleDocTemplate):
+    """通过多轮排版回填真实目录页码，避免篇幅变化后目录失准。"""
+
+    def afterFlowable(self, flowable):
+        title = getattr(flowable, "chapter_title", None)
+        if title:
+            key = "chapter-" + str(
+                next(
+                    (i for i, row in enumerate(TOC_ENTRIES) if row[0] == title),
+                    len(TOC_ENTRIES),
+                )
+            )
+            self.canv.bookmarkPage(key)
+            self.canv.addOutlineEntry(title, key, level=0)
+            blurb = next(
+                (row[1] for row in TOC_ENTRIES if row[0] == title),
+                "逐题答案、红线排查与来源",
+            )
+            label = (
+                f"{_esc(title)}<br/><font size='9' color='#66746c'>{_esc(blurb)}</font>"
+            )
+            self.notify("TOCEntry", (0, label, self.page, key))
+
+
 def render_pdf(
     out_path: Path | str,
     field: dict[str, Any],
@@ -276,13 +313,13 @@ def render_pdf(
     soil: dict[str, Any],
     weather_summary: dict[str, Any],
     chart_paths: dict[str, Path] | None = None,
-    title_suffix: str = "OpenFarm",
+    title_suffix: str = "乡合农服",
     flood_evidence: dict[str, Any] | None = None,
     analysis: dict[str, Any] | None = None,
     ai: dict[str, Any] | None = None,
     site_admission: dict[str, Any] | None = None,
 ) -> Path:
-    """Render ≤10-page land-assessment PDF from program facts + AI JSON."""
+    """完整渲染选地报告，按章节自然分页，不通过删减正文限制页数。"""
     _register_fonts()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,13 +343,15 @@ def render_pdf(
 
     def section_title(ordinal_title: str):
         """Major chapter heading with Chinese ordinal, e.g. 二、地块基础画像."""
-        return Paragraph(_esc(ordinal_title), styles["h1"])
+        heading = Paragraph(_esc(ordinal_title), styles["h1"])
+        heading.chapter_title = ordinal_title
+        return heading
 
     def sub_title(text: str, level: str = "1"):
         """Subhead: 1. / （一） style."""
         return Paragraph(f"<b>{_esc(text)}</b>", styles["h2"])
 
-    def kv_card(title: str, rows: list[tuple[str, str]], width=165 * mm):
+    def kv_card(title: str, rows: list[tuple[str, str]], width=168 * mm):
         """Structured key/value card with green header."""
         safe_rows = rows or [("—", "—")]
         t = Table(
@@ -328,6 +367,9 @@ def render_pdf(
                 for k, v in safe_rows
             ],
             colWidths=[38 * mm, width - 38 * mm],
+            repeatRows=1,
+            splitInRow=1,
+            hAlign="LEFT",
         )
         t.setStyle(
             TableStyle(
@@ -341,15 +383,24 @@ def render_pdf(
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("LEFTPADDING", (0, 0), (-1, -1), 5),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ]
             )
         )
-        return KeepTogether([t, Spacer(1, 2 * mm)])
+        # 普通事件卡片整体换页；极长卡片仍可由内部表格拆分，避免丢失详细依据。
+        return KeepTogether([t, Spacer(1, 3 * mm)])
 
     def make_table(data, col_widths, header_bg="#1f4d38"):
-        t = Table(data, colWidths=col_widths, repeatRows=1)
+        # 统一内容宽度；跨页重复表头并允许超长单元格拆分，不裁掉正文。
+        total = sum(col_widths)
+        t = Table(
+            data,
+            colWidths=[w / total * 168 * mm for w in col_widths],
+            repeatRows=1,
+            splitInRow=1,
+            hAlign="LEFT",
+        )
         t.setStyle(
             TableStyle(
                 [
@@ -357,8 +408,8 @@ def render_pdf(
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("LEFTPADDING", (0, 0), (-1, -1), 4),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                     ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cfd8cf")),
                     ("ROWBACKGROUNDS", (0, 1), (-1, -1), [HexColor("#f7fbf7"), white]),
                 ]
@@ -385,7 +436,7 @@ def render_pdf(
             elems.append(p(f"<font color='#7a3a00'>{_esc(empty)}</font>", "small"))
             return elems
         for it in cleaned:
-            elems.append(p(f"• {_esc(it)}", "bullet"))
+            elems.append(p(f"· {_esc(it)}", "bullet"))
         return elems
 
     def ai_block(title: str, body: str):
@@ -397,7 +448,10 @@ def render_pdf(
                 [Paragraph(f"<b>{_esc(title)}</b>", styles["h2"])],
                 [Paragraph(_esc(text), styles["body"])],
             ],
-            colWidths=[165 * mm],
+            colWidths=[168 * mm],
+            repeatRows=1,
+            splitInRow=1,
+            hAlign="LEFT",
         )
         box.setStyle(
             TableStyle(
@@ -406,18 +460,26 @@ def render_pdf(
                     ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#e8c48a")),
                     ("LEFTPADDING", (0, 0), (-1, -1), 6),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ]
             )
         )
-        return KeepTogether([box, Spacer(1, 2 * mm)])
+        box.spaceAfter = 3 * mm
+        return box
 
     def img(name, w=165 * mm, ratio=0.34, caption=None):
         path = chart_paths.get(name)
         elems = []
         if path and Path(path).exists():
-            elems.append(Image(str(path), width=w, height=w * ratio))
+            # 按原图宽高比缩放，ratio 仅限制占用高度，避免图形被压扁。
+            from reportlab.lib.utils import ImageReader
+
+            iw, ih = ImageReader(str(path)).getSize()
+            scale = min(w / iw, w * ratio / ih)
+            picture = Image(str(path), width=iw * scale, height=ih * scale)
+            picture.keepWithNext = bool(caption)
+            elems.append(picture)
             if caption:
                 elems.append(Paragraph(_esc(caption), styles["small"]))
             elems.append(Spacer(1, 1.5 * mm))
@@ -431,7 +493,9 @@ def render_pdf(
         c.setFont("CN", 8)
         c.setFillColor(HexColor("#788878"))
         c.drawString(16 * mm, 7 * mm, f"选地体检 · 程序事实+AI解读 · {title_suffix}")
-        c.drawRightString(A4[0] - 16 * mm, 7 * mm, f"{doc.page}")
+        c.drawRightString(A4[0] - 16 * mm, 7 * mm, f"第 {doc.page} 页")
+        if doc.page > 1:
+            c.drawString(16 * mm, A4[1] - 10 * mm, "选地分析报告")
         c.restoreState()
 
     overall_ai = ai.get("overall") or {}
@@ -449,7 +513,9 @@ def render_pdf(
 
     # ── 1. AI选地综合评价（封面）──
     story.append(Spacer(1, 3 * mm))
-    story.append(p("一、AI选地综合评价", "cover_title"))
+    cover_heading = p("一、AI选地综合评价", "cover_title")
+    cover_heading.chapter_title = "一、AI选地综合评价"
+    story.append(cover_heading)
     story.append(p("程序计算评分 · AI 仅解读 · 需田间确认", "cover_sub"))
     story.append(Spacer(1, 2 * mm))
     story.append(hr())
@@ -463,7 +529,7 @@ def render_pdf(
         ["报告时间", now_str],
     ]
     meta_data = [[cell(a, "tbl_b"), cell(b, "tbl_c")] for a, b in meta]
-    mt = Table(meta_data, colWidths=[28 * mm, 140 * mm])
+    mt = Table(meta_data, colWidths=[28 * mm, 140 * mm], hAlign="LEFT")
     mt.setStyle(
         TableStyle(
             [
@@ -474,8 +540,8 @@ def render_pdf(
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
         )
     )
@@ -488,6 +554,10 @@ def render_pdf(
     story.append(p(f"<b>程序一句话：</b>{_esc(ov.get('one_liner') or '')}", "body"))
     story.append(Spacer(1, 2 * mm))
     story.append(ai_block("AI 总体评价", _ai_text(overall_ai.get("evaluation"))))
+    # 综合结论与详细建议分层呈现，避免封面末段溢出形成只有几行的续页。
+    story.append(PageBreak())
+    story.append(p("一、AI选地综合评价（续）", "h1"))
+    story.append(hr())
     story.append(sub_title("1. 优势"))
     story += bullets(overall_ai.get("strengths") or [])
     story.append(sub_title("2. 主要风险"))
@@ -513,15 +583,23 @@ def render_pdf(
         )
     )
     story.append(Spacer(1, 2 * mm))
-    toc_rows = [
-        [
-            cell("章节", "tbl_h"),
-            cell("内容提要", "tbl_h"),
-        ]
+    # 目录由实际分页回填，章节标题、提要和页码均可点击跳转。
+    contents = TableOfContents()
+    contents.levelStyles = [
+        ParagraphStyle(
+            "contents",
+            fontName="CN",
+            fontSize=11,
+            leading=18,
+            textColor=HexColor("#173d2a"),
+            spaceBefore=12,
+            spaceAfter=6,
+            leftIndent=0,
+            firstLineIndent=0,
+        )
     ]
-    for title, blurb in TOC_ENTRIES:
-        toc_rows.append([cell(title, "tbl_b"), cell(blurb, "tbl_c")])
-    story.append(make_table(toc_rows, [55 * mm, 110 * mm]))
+    contents.dotsMinLevel = 0
+    story.append(contents)
     story.append(Spacer(1, 3 * mm))
     story.append(
         p(
@@ -679,6 +757,10 @@ def render_pdf(
             ]
         )
     story.append(kv_card("气候基线（程序）", climate_rows))
+    # 基础数据与文字解读分别起页，给完整的区域、适配及限制分析留足空间。
+    story.append(PageBreak())
+    story.append(p("二、地块基础画像（续）", "h1"))
+    story.append(hr())
     story.append(
         ai_block(
             "（一）区域农业特征",
@@ -730,6 +812,9 @@ def render_pdf(
         p("虚线：绿阈 70 / 黄阈 55。表仅作图例，解读见下方 AI 小节。", "small")
     )
     story.append(Spacer(1, 1.5 * mm))
+    story.append(PageBreak())
+    story.append(p("三、综合评分解释（续）", "h1"))
+    story.append(hr())
     story.append(sub_title("1. 偏高维度"))
     story += bullets(score_ai.get("high_dims") or [])
     story.append(sub_title("2. 偏低维度"))
@@ -837,7 +922,7 @@ def render_pdf(
                 ]
                 story.append(kv_card(head, rows))
             else:
-                story.append(p(f"• {_esc(card)}", "bullet"))
+                story.append(p(f"· {_esc(card)}", "bullet"))
     elif events:
         story.append(
             p(
@@ -859,7 +944,7 @@ def render_pdf(
                 cell("生育阶段", "tbl_h"),
             ]
         ]
-        for ev in events[:8]:
+        for ev in events:
             if not isinstance(ev, dict):
                 continue
             eid = ev.get("id") or "—"
@@ -898,9 +983,9 @@ def render_pdf(
                 line = f"{item.get('rank', '')}. {_esc(item.get('cause') or '')}"
                 if item.get("evidence"):
                     line += f"（依据：{_esc(item.get('evidence'))}）"
-                story.append(p(f"• {line}", "bullet"))
+                story.append(p(f"· {line}", "bullet"))
             else:
-                story.append(p(f"• {_esc(item)}", "bullet"))
+                story.append(p(f"· {_esc(item)}", "bullet"))
     else:
         story.append(p(f"<font color='#7a3a00'>{AI_FAIL}</font>", "small"))
 
@@ -1156,8 +1241,8 @@ def render_pdf(
     story.append(ai_block("依据说明", _ai_text(yield_ai.get("rationale"))))
     story.append(p("严禁虚构亩产数字。本页不含任何编造的产量数值。", "small"))
 
-    # ── 10. 经营分析（与产量潜力同页，控制总页数 ≤10）──
-    story.append(Spacer(1, 3 * mm))
+    # ── 10. 经营分析：篇幅较短时紧接产量章节，不用空白页凑页数 ──
+    story.append(Spacer(1, 5 * mm))
     story.append(section_title("十、经营分析"))
     story.append(hr())
     available = bool(biz_ai.get("available"))
@@ -1180,7 +1265,7 @@ def render_pdf(
     story.append(sub_title("2. 数据来源与置信"))
     story.append(
         p(
-            "卫星：Sentinel-2 指数（OpenFarm / agri）。天气：Open-Meteo。"
+            "卫星：Sentinel-2 指数（乡合农服 / agri）。天气：Open-Meteo。"
             "土壤：SoilGrids。评分与图表由程序计算；AI 仅做农学解读。"
             f" 置信：{_esc((scorecard.get('confidence') or {}).get('plain') or '—')}",
             "small",
@@ -1194,15 +1279,66 @@ def render_pdf(
             )
         )
 
-    doc = SimpleDocTemplate(
+    if site_admission:
+        # 问卷摘要保留在画像章节；逐题证据另页完整列出，方便追溯AI引用依据。
+        story.append(PageBreak())
+        story.append(section_title("附录、现场问卷明细"))
+        story.append(hr())
+        story.append(
+            p(
+                "以下为现场问卷填报资料，作为各章节AI分析的输入；与遥感、气象、土壤数据存在差异时，应结合来源与采集时间核查。",
+                "body",
+            )
+        )
+        provenance = [
+            ("来源", site_admission.get("source") or "未注明"),
+            ("获取时间", site_admission.get("fetched_at") or "未注明"),
+        ]
+        story.append(kv_card("问卷来源", provenance))
+        items = {
+            str(item.get("id")): item
+            for dimension in site_admission.get("dimensions") or []
+            if isinstance(dimension, dict)
+            for item in dimension.get("items") or []
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        answers = dict(site_admission.get("item_answers") or {})
+        for key, item in items.items():
+            if key not in answers:
+                answers[key] = item.get("option_label") or item.get("option_key")
+        survey_rows = [[cell("题目", "tbl_h"), cell("现场回答", "tbl_h")]]
+        for key, value in answers.items():
+            item = items.get(str(key)) or {}
+            label = item.get("name") or key
+            # 只有原始选项与该题评分选项一致时才使用中文选项名，避免覆盖矛盾回答。
+            if item.get("option_label") and value == item.get("option_key"):
+                value = item["option_label"]
+            if isinstance(value, (dict, list, bool)):
+                value = json.dumps(value, ensure_ascii=False)
+            survey_rows.append(
+                [cell(label), cell(value if value is not None else "未回答")]
+            )
+        if len(survey_rows) > 1:
+            story.append(make_table(survey_rows, [55 * mm, 110 * mm]))
+        else:
+            story.append(p("暂无逐题答案，已提供的问卷摘要见地块基础画像。", "small"))
+        red_lines = site_admission.get("red_line_answers") or {}
+        if red_lines:
+            story.append(sub_title("红线排查（原始回答）"))
+            rows = [[cell("排查项", "tbl_h"), cell("填报内容", "tbl_h")]]
+            for key, value in red_lines.items():
+                rows.append([cell(key), cell(json.dumps(value, ensure_ascii=False))])
+            story.append(make_table(rows, [55 * mm, 110 * mm]))
+
+    doc = AssessmentDocTemplate(
         str(out_path),
         pagesize=A4,
-        leftMargin=16 * mm,
-        rightMargin=16 * mm,
-        topMargin=12 * mm,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=17 * mm,
         bottomMargin=18 * mm,
         title=f"{field.get('name') or '地块'}选地体检",
-        author="OpenFarm",
+        author="乡合农服",
     )
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    doc.multiBuild(story, onFirstPage=footer, onLaterPages=footer)
     return out_path
