@@ -1058,7 +1058,14 @@
     "noScorecardHint": "Generate a land report first. The chart uses that report's real scores, not sample numbers.",
     "legacyNoScorecard": "This report was saved without dimension scores",
     "legacyNoScorecardHint": "Generate a new land report to fill the hexagon.",
-    "scoreOutOf": "{score} / 100"
+    "scoreOutOf": "{score} / 100",
+    "cdfinancePanelTitle": "cdfinance credentials (shared by assessment & season growth)",
+    "cdfinancePanelHint": "Optionally paste a temporary Bearer token and groupId before generate to refresh site-admission questionnaire and NPK. Leave empty to use cached DB data.",
+    "cdfinanceGroupId": "groupId (site questionnaire)",
+    "cdfinanceGroupPlaceholder": "e.g. 3232; leave blank to resolve from agri tags",
+    "cdfinanceToken": "Bearer Token (temporary; not stored in server config)",
+    "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
+    "siteAdmissionMissingHint": "No cached site-admission questionnaire. Fill Token + groupId if you want it pulled into this report."
   },
   "overviewPage": {
     "fitRegion": "Fit region",
@@ -1150,6 +1157,7 @@
     "empty": "No season growth report yet — pick a window and generate.",
     "generatedAt": "Generated at: {time}",
     "noteFacts": "Facts (scene counts, NDVI/NDMI, drought/flood, harvest) are computed from products — never invented by the LLM.",
-    "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts."
+    "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts.",
+    "cdfinanceReuseHint": "Uses the cdfinance Token / groupId above (if filled) to refresh questionnaire and NPK before generate."
   }
 }

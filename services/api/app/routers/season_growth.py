@@ -8,7 +8,16 @@ from datetime import date, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel, Field as PydanticField, field_validator
 from sqlalchemy import select
@@ -21,6 +30,11 @@ from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import Field, Job
 from app.schemas.monitoring import JobOut
+from app.services.cdfinance_report_prefetch import (
+    normalize_optional_group_id,
+    prefetch_cdfinance_for_report,
+    resolve_request_token,
+)
 
 
 class SeasonGrowthGenerateRequest(BaseModel):
@@ -32,6 +46,18 @@ class SeasonGrowthGenerateRequest(BaseModel):
     pull_data: bool = PydanticField(
         default=True,
         description="Queue weather + agri RS indices + soil bootstrap before PDF",
+    )
+    cdfinance_token: str | None = PydanticField(
+        default=None,
+        description="Temporary cdfinance H5 Bearer for site-admission / NPK prefetch",
+    )
+    token: str | None = PydanticField(
+        default=None,
+        description="Alias of cdfinance_token",
+    )
+    group_id: str | int | None = PydanticField(
+        default=None,
+        description="cdfinance groupId for groupSiteAdmission questionnaire",
     )
 
     @field_validator("start_date", "end_date")
@@ -81,6 +107,7 @@ async def create_season_growth_report(
     body: SeasonGrowthGenerateRequest,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    authorization: Annotated[str | None, Header()] = None,
 ):
     """Enqueue data pulls (optional) + 生育期长势 PDF generation.
 
@@ -88,7 +115,7 @@ async def create_season_growth_report(
     missing series are handled inside the PDF worker. When pull_data=true,
     field_bootstrap fans out pulls first and season_growth follows (no race).
     """
-    await _get_field(field_id, ctx.org_id, db)
+    field = await _get_field(field_id, ctx.org_id, db)
 
     start = date.fromisoformat(body.start_date)
     end = date.fromisoformat(body.end_date)
@@ -97,6 +124,23 @@ async def create_season_growth_report(
 
     pull_data = bool(body.pull_data)
     weather_days = max(1, (end - start).days)
+
+    cdfinance_token = resolve_request_token(
+        cdfinance_token=body.cdfinance_token,
+        token=body.token,
+        authorization=authorization,
+    )
+    group_id = normalize_optional_group_id(body.group_id)
+    cdfinance_prefetch: dict[str, Any] | None = None
+    if cdfinance_token:
+        cdfinance_prefetch = await prefetch_cdfinance_for_report(
+            db,
+            field,
+            token=cdfinance_token,
+            group_id=group_id,
+            force=True,
+        )
+        await db.flush()
 
     # Reuse in-flight pending/running job for same field (like assessment)
     existing = (
@@ -127,6 +171,8 @@ async def create_season_growth_report(
         ),
         "pull_data": pull_data,
         "weather_days": weather_days,
+        "cdfinance_prefetch": cdfinance_prefetch,
+        "group_id": group_id,
     }
     job = Job(
         field_id=field_id,
@@ -162,6 +208,10 @@ async def create_season_growth_report(
                     "crops": list(body.crops or []),
                     "label": body.label,
                     "material_keys": list(body.material_keys or []),
+                    "cdfinance_prefetched": bool(
+                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+                    ),
+                    "group_id": group_id,
                 },
             }
             bootstrap_task_id = publish_api_task(
@@ -192,6 +242,10 @@ async def create_season_growth_report(
                     "label": body.label,
                     "material_keys": list(body.material_keys or []),
                     "pull_data": False,
+                    "cdfinance_prefetched": bool(
+                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+                    ),
+                    "group_id": group_id,
                 },
             )
             logger.info(

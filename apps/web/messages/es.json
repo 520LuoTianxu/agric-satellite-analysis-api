@@ -1058,7 +1058,14 @@
     "noScorecardHint": "Genere primero un informe. El gráfico usa esas puntuaciones reales, no cifras de ejemplo.",
     "legacyNoScorecard": "Este informe se guardó sin puntuaciones por dimensión",
     "legacyNoScorecardHint": "Genere un informe nuevo para ver el hexágono.",
-    "scoreOutOf": "{score} / 100"
+    "scoreOutOf": "{score} / 100",
+    "cdfinancePanelTitle": "Credenciales cdfinance (evaluación y crecimiento)",
+    "cdfinancePanelHint": "Opcionalmente pegue Bearer Token y groupId antes de generar para actualizar el cuestionario y NPK. Vacío = datos en caché.",
+    "cdfinanceGroupId": "groupId (cuestionario)",
+    "cdfinanceGroupPlaceholder": "p. ej. 3232; vacío = resolver desde agri",
+    "cdfinanceToken": "Bearer Token (temporal; no se guarda en el servidor)",
+    "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
+    "siteAdmissionMissingHint": "Sin cuestionario en caché. Complete Token + groupId si desea incluirlo."
   },
   "overviewPage": {
     "fitRegion": "Ajustar región",
@@ -1150,6 +1157,7 @@
     "empty": "No season growth report yet — pick a window and generate.",
     "generatedAt": "Generated at: {time}",
     "noteFacts": "Facts (scene counts, NDVI/NDMI, drought/flood, harvest) are computed from products — never invented by the LLM.",
-    "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts."
+    "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts.",
+    "cdfinanceReuseHint": "Usa el Token / groupId de arriba (si está relleno) para actualizar cuestionario y NPK antes de generar."
   }
 }

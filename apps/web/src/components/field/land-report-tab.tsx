@@ -6,6 +6,7 @@ import {
     fieldsApi,
     jobsApi,
     seasonGrowthApi,
+    soilApi,
     ApiError,
     type AssessmentDimensionKey,
     type AssessmentScorecard,
@@ -140,6 +141,9 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const sgPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const sgFileRef = useRef<HTMLInputElement>(null);
 
+    // Shared cdfinance credentials for assessment + season-growth generate
+    const [cdfinanceToken, setCdfinanceToken] = useState("");
+    const [cdfinanceGroupId, setCdfinanceGroupId] = useState("");
 
     useEffect(() => {
         const next = isUsableCrop(cropType) ? String(cropType).trim() : "";
@@ -239,6 +243,16 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 setSgUploading(false);
             }
             const crops = sgCrop.trim() ? [sgCrop.trim()] : [];
+            const cdfinanceBody: {
+                cdfinance_token?: string;
+                group_id?: string;
+            } = {};
+            if (cdfinanceToken.trim()) {
+                cdfinanceBody.cdfinance_token = cdfinanceToken.trim();
+            }
+            if (cdfinanceGroupId.trim()) {
+                cdfinanceBody.group_id = cdfinanceGroupId.trim();
+            }
             const job = await seasonGrowthApi.generate(fieldId, {
                 start_date: sgStart,
                 end_date: sgEnd,
@@ -246,6 +260,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 label: sgLabel.trim() || undefined,
                 material_keys,
                 pull_data: true,
+                ...cdfinanceBody,
             });
             setSgLatest(job);
             if (job.status === "succeeded") {
@@ -321,12 +336,28 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 date_from?: string;
                 years?: number;
                 pull_data: boolean;
+                cdfinance_token?: string;
+                group_id?: string;
             } = { pull_data: true };
             if (cropKey) body.crop_type = cropKey;
             if (dateFrom.trim()) {
                 body.date_from = dateFrom.trim();
             } else {
                 body.years = years;
+            }
+            if (cdfinanceToken.trim()) {
+                body.cdfinance_token = cdfinanceToken.trim();
+            }
+            if (cdfinanceGroupId.trim()) {
+                body.group_id = cdfinanceGroupId.trim();
+            }
+            // Soft prompt when no token and no cached site admission
+            if (!body.cdfinance_token) {
+                try {
+                    await soilApi.getSiteAdmission(fieldId);
+                } catch {
+                    toast.message(t("siteAdmissionMissingHint"));
+                }
             }
             const job = await assessmentApi.generate(fieldId, body);
             if (cropKey) {
@@ -500,6 +531,34 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                                 </Button>
                             </div>
                         )}
+                    </div>
+
+                    <div className="rounded-lg border border-border bg-card p-3 space-y-2">
+                        <p className="text-xs font-medium">{t("cdfinancePanelTitle")}</p>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                            {t("cdfinancePanelHint")}
+                        </p>
+                        <label className="text-xs space-y-1 block">
+                            <span className="text-muted-foreground">{t("cdfinanceGroupId")}</span>
+                            <Input
+                                className="h-9"
+                                value={cdfinanceGroupId}
+                                placeholder={t("cdfinanceGroupPlaceholder")}
+                                onChange={(e) => setCdfinanceGroupId(e.target.value)}
+                                autoComplete="off"
+                            />
+                        </label>
+                        <label className="text-xs space-y-1 block">
+                            <span className="text-muted-foreground">{t("cdfinanceToken")}</span>
+                            <Input
+                                className="h-9 font-mono text-[11px]"
+                                type="password"
+                                value={cdfinanceToken}
+                                placeholder={t("cdfinanceTokenPlaceholder")}
+                                onChange={(e) => setCdfinanceToken(e.target.value)}
+                                autoComplete="off"
+                            />
+                        </label>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
@@ -771,6 +830,10 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                                 </ul>
                             )}
                         </div>
+
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                            {ts("cdfinanceReuseHint")}
+                        </p>
 
                         <div className="flex flex-wrap gap-2">
                             <Button

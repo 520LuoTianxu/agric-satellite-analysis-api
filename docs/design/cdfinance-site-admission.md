@@ -28,7 +28,22 @@
 
 - `GET /v1/fields/{id}/site-admission`
 - `POST /v1/fields/{id}/site-admission` — Bearer 同 NPK；`force=true` 刷新
+- Assessment / season-growth generate bodies: optional `cdfinance_token` + `group_id` (soft prefetch before MQ)
 
 ## 评估
 
 `load_site_admission` → `facts_for_llm.site_admission`；PDF「地块基础画像」卡片 + 管理建议要点。软缺失 OK。
+
+## Report generate (选地体检 / 生育期长势)
+
+`POST .../assessment-report` and `POST .../season-growth-report` accept optional:
+
+- `cdfinance_token` (alias `token`) — temporary H5 Bearer
+- `group_id` — questionnaire groupId
+
+When token is present, API host **soft-prefetches** (never blocks PDF):
+
+1. site admission upsert → `group_site_admission` (needs resolvable groupId)
+2. NPK upsert → `soil_nutrient_npk`
+
+Bearer is **not** stored in job params / MQ. PDF workers keep reading from DB.
