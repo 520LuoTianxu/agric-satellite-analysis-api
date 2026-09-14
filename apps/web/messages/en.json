@@ -1093,6 +1093,8 @@
     "labelPlaceholder": "e.g. 2026 summer corn",
     "materials": "Materials (optional: pdf/txt/images)",
     "filesSelected": "{count} file(s) selected",
+    "chooseFiles": "Choose files",
+    "clearFiles": "Clear",
     "generate": "Generate growth report",
     "generating": "Generating…",
     "uploading": "Uploading materials…",

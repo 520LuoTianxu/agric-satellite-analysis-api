@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Maximize2 } from "lucide-react";
 import type { AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS } from "@/lib/agri-heatmap";
@@ -38,6 +38,131 @@ function PreviewImg({
             className={cn("h-full w-full object-contain", className)}
             onError={onFailed}
         />
+    );
+}
+
+function ZoomableScene({
+    src,
+    alt,
+    overlaySrc,
+    active,
+}: {
+    src: string;
+    alt: string;
+    overlaySrc?: string | null;
+    active: boolean;
+}) {
+    const viewportRef = useRef<HTMLDivElement>(null);
+    const transformRef = useRef({ scale: 1, x: 0, y: 0 });
+    const dragRef = useRef<{ x: number; y: number } | null>(null);
+    const [, setTick] = useState(0);
+
+    const apply = useCallback((next: { scale: number; x: number; y: number }) => {
+        transformRef.current = next;
+        setTick((n) => n + 1);
+    }, []);
+
+    const reset = useCallback(() => apply({ scale: 1, x: 0, y: 0 }), [apply]);
+
+    useEffect(() => {
+        if (!active) reset();
+    }, [active, reset]);
+
+    useEffect(() => {
+        const el = viewportRef.current;
+        if (!el || !active) return;
+        const onWheel = (e: WheelEvent) => {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const rect = el.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const { scale, x, y } = transformRef.current;
+            const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+            const nextScale = Math.min(8, Math.max(1, scale * factor));
+            if (Math.abs(nextScale - scale) < 0.0001) return;
+            if (nextScale <= 1.001) {
+                apply({ scale: 1, x: 0, y: 0 });
+                return;
+            }
+            const worldX = (mx - x) / scale;
+            const worldY = (my - y) / scale;
+            apply({
+                scale: nextScale,
+                x: mx - worldX * nextScale,
+                y: my - worldY * nextScale,
+            });
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, [active, apply]);
+
+    const { scale, x, y } = transformRef.current;
+
+    return (
+        <div
+            ref={viewportRef}
+            className={cn(
+                "relative min-h-0 flex-1 overflow-hidden rounded-md bg-muted/40 touch-none",
+                scale > 1 ? "cursor-grab" : "cursor-zoom-in",
+            )}
+            onDoubleClick={reset}
+            onPointerDown={(e) => {
+                if (transformRef.current.scale <= 1) return;
+                if (e.button !== 0) return;
+                dragRef.current = { x: e.clientX, y: e.clientY };
+                e.currentTarget.setPointerCapture(e.pointerId);
+                e.currentTarget.style.cursor = "grabbing";
+            }}
+            onPointerMove={(e) => {
+                const start = dragRef.current;
+                if (!start) return;
+                const dx = e.clientX - start.x;
+                const dy = e.clientY - start.y;
+                start.x = e.clientX;
+                start.y = e.clientY;
+                const t = transformRef.current;
+                apply({ scale: t.scale, x: t.x + dx, y: t.y + dy });
+            }}
+            onPointerUp={(e) => {
+                dragRef.current = null;
+                e.currentTarget.style.cursor =
+                    transformRef.current.scale > 1 ? "grab" : "zoom-in";
+            }}
+            onPointerCancel={() => {
+                dragRef.current = null;
+            }}
+        >
+            <div
+                className="relative flex h-full w-full items-center justify-center"
+                style={{
+                    transform: `translate(${x}px, ${y}px) scale(${scale})`,
+                    transformOrigin: "0 0",
+                }}
+            >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                    src={src}
+                    alt={alt}
+                    draggable={false}
+                    className="max-h-full max-w-full select-none object-contain"
+                />
+                {overlaySrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                        src={overlaySrc}
+                        alt={`${alt}叠加`}
+                        draggable={false}
+                        className="pointer-events-none absolute inset-0 m-auto max-h-full max-w-full select-none object-contain opacity-55"
+                    />
+                ) : null}
+            </div>
+            <p className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-background/85 px-2 py-0.5 text-[10px] text-muted-foreground shadow-sm">
+                Ctrl / ⌘ + 滚轮缩放
+                {scale > 1 ? " · 拖动平移 · 双击重置" : ""}
+            </p>
+        </div>
     );
 }
 
@@ -105,26 +230,11 @@ function PreviewFrame({
             <p className="mt-0.5 text-[9px] leading-none text-muted-foreground">{caption}</p>
 
             <Dialog open={open} onOpenChange={setOpen}>
-                <DialogContent className="max-w-[min(92vw,56rem)] p-3 sm:p-4">
+                <DialogContent className="flex h-[min(85vh,56rem)] w-[min(90vw,80rem)] max-w-[90vw] flex-col gap-3 overflow-hidden p-3 sm:p-4">
                     <DialogHeader className="space-y-1 pr-8">
                         <DialogTitle className="text-sm font-medium">{caption}</DialogTitle>
                     </DialogHeader>
-                    <div className="relative max-h-[min(78vh,40rem)] overflow-auto rounded-md bg-muted/40">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                            src={src}
-                            alt={alt}
-                            className="mx-auto max-h-[min(78vh,40rem)] w-auto max-w-full object-contain"
-                        />
-                        {overlaySrc ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                                src={overlaySrc}
-                                alt={`${alt}叠加`}
-                                className="pointer-events-none absolute inset-0 mx-auto max-h-[min(78vh,40rem)] w-auto max-w-full object-contain opacity-55"
-                            />
-                        ) : null}
-                    </div>
+                    <ZoomableScene src={src} alt={alt} overlaySrc={overlaySrc} active={open} />
                 </DialogContent>
             </Dialog>
         </div>
@@ -292,7 +402,6 @@ export default function AgriHeatmapLegend({ heatmap, compact = false }: AgriHeat
                 </>
             )}
 
-            {/* Always expanded when URLs exist — no collapse toggle */}
             {hasPreview && (
                 <OssPreviewStack
                     parcelRgbUrl={parcelRgbUrl}

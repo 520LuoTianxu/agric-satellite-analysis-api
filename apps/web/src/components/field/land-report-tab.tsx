@@ -15,6 +15,8 @@ import CropSelect from "@/components/field/crop-select";
 import LandScorecardRadar from "@/components/charts/land-scorecard-radar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { DatePicker } from "@/components/ui/date-picker";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
     CheckCircle2,
@@ -22,9 +24,11 @@ import {
     FileText,
     Hexagon,
     Loader2,
+    Paperclip,
     RefreshCw,
     AlertTriangle,
     Sprout,
+    X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -134,6 +138,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const [sgFiles, setSgFiles] = useState<File[]>([]);
     const [sgUploading, setSgUploading] = useState(false);
     const sgPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const sgFileRef = useRef<HTMLInputElement>(null);
 
 
     useEffect(() => {
@@ -475,12 +480,10 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                             </div>
                             <label className="text-xs space-y-1 block">
                                 <span className="text-muted-foreground">{t("dateFromOptional")}</span>
-                                <input
-                                    type="date"
-                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                <DatePicker
                                     value={dateFrom}
                                     max={new Date().toISOString().slice(0, 10)}
-                                    onChange={(e) => setDateFrom(e.target.value)}
+                                    onChange={setDateFrom}
                                 />
                             </label>
                             <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -691,21 +694,11 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <label className="text-xs space-y-1">
                                 <span className="text-muted-foreground">{ts("startDate")}</span>
-                                <input
-                                    type="date"
-                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                                    value={sgStart}
-                                    onChange={(e) => setSgStart(e.target.value)}
-                                />
+                                <DatePicker value={sgStart} onChange={setSgStart} />
                             </label>
                             <label className="text-xs space-y-1">
                                 <span className="text-muted-foreground">{ts("endDate")}</span>
-                                <input
-                                    type="date"
-                                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
-                                    value={sgEnd}
-                                    onChange={(e) => setSgEnd(e.target.value)}
-                                />
+                                <DatePicker value={sgEnd} onChange={setSgEnd} />
                             </label>
                         </div>
                         <div className="space-y-1">
@@ -718,30 +711,65 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                         </div>
                         <label className="text-xs space-y-1 block">
                             <span className="text-muted-foreground">{ts("labelOptional")}</span>
-                            <input
-                                type="text"
-                                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                            <Input
+                                className="h-9"
                                 value={sgLabel}
                                 placeholder={ts("labelPlaceholder")}
                                 onChange={(e) => setSgLabel(e.target.value)}
                             />
                         </label>
-                        <label className="text-xs space-y-1 block">
+                        <div className="text-xs space-y-1.5">
                             <span className="text-muted-foreground">{ts("materials")}</span>
                             <input
+                                ref={sgFileRef}
                                 type="file"
                                 multiple
-                                className="block w-full text-xs"
+                                className="hidden"
                                 onChange={(e) =>
                                     setSgFiles(Array.from(e.target.files || []))
                                 }
                             />
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-9"
+                                    onClick={() => sgFileRef.current?.click()}
+                                >
+                                    <Paperclip className="mr-1.5 h-4 w-4" />
+                                    {ts("chooseFiles")}
+                                </Button>
+                                {sgFiles.length > 0 && (
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-9 px-2 text-muted-foreground"
+                                        onClick={() => {
+                                            setSgFiles([]);
+                                            if (sgFileRef.current) sgFileRef.current.value = "";
+                                        }}
+                                    >
+                                        <X className="mr-1 h-3.5 w-3.5" />
+                                        {ts("clearFiles")}
+                                    </Button>
+                                )}
+                            </div>
                             {sgFiles.length > 0 && (
-                                <p className="text-[11px] text-muted-foreground">
-                                    {ts("filesSelected", { count: sgFiles.length })}
-                                </p>
+                                <ul className="space-y-0.5 text-[11px] text-muted-foreground">
+                                    <li>{ts("filesSelected", { count: sgFiles.length })}</li>
+                                    {sgFiles.slice(0, 4).map((f) => (
+                                        <li key={f.name} className="truncate">
+                                            {f.name}
+                                        </li>
+                                    ))}
+                                    {sgFiles.length > 4 && (
+                                        <li>…</li>
+                                    )}
+                                </ul>
                             )}
-                        </label>
+                        </div>
 
                         <div className="flex flex-wrap gap-2">
                             <Button

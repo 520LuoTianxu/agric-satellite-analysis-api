@@ -1093,6 +1093,8 @@
     "labelPlaceholder": "例如：2026夏玉米",
     "materials": "附加材料（可选，pdf/txt/图片）",
     "filesSelected": "已选 {count} 个文件",
+    "chooseFiles": "选择文件",
+    "clearFiles": "清除",
     "generate": "生成长势报告",
     "generating": "正在生成…",
     "uploading": "上传材料中…",
