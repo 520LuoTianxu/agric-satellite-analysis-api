@@ -107,6 +107,29 @@ def _load_agri_meta(session, field) -> dict[str, Any]:
     land_id = parse_agri_land_id(getattr(field, "tags_json", None))
     if not land_id:
         raise RuntimeError("field is not agri-tagged (need agri:<land_id>)")
+
+    try:
+        from openfarm_common.internal_api import agri_land_meta, internal_api_enabled
+    except ImportError:
+        internal_api_enabled = lambda: False  # noqa: E731
+        agri_land_meta = None  # type: ignore
+
+    if agri_land_meta is not None and internal_api_enabled():
+        try:
+            meta = agri_land_meta(str(land_id))
+            return {
+                "land_id": meta.get("land_id") or land_id,
+                "tile_id": meta.get("tile_id"),
+                "land_name": meta.get("land_name") or field.name,
+                "field_id": str(field.id),
+            }
+        except Exception as e:
+            logger.warning(
+                "agri_land_meta_http_failed falling_back_db",
+                land_id=land_id,
+                error=str(e),
+            )
+
     row = (
         session.execute(
             text(
@@ -138,6 +161,31 @@ def _dsn() -> str:
 
 
 def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) -> int:
+    try:
+        from openfarm_common.internal_api import (
+            agri_scenes_summary,
+            internal_api_enabled,
+        )
+    except ImportError:
+        internal_api_enabled = lambda: False  # noqa: E731
+        agri_scenes_summary = None  # type: ignore
+
+    if agri_scenes_summary is not None and internal_api_enabled():
+        try:
+            summary = agri_scenes_summary(str(land_id))
+            if sensor:
+                for s in summary.get("sensors") or []:
+                    if str(s.get("sensor")) == str(sensor):
+                        return int(s.get("count") or 0)
+                return 0
+            return int(summary.get("total") or 0)
+        except Exception as e:
+            logger.warning(
+                "agri_scenes_summary_http_failed falling_back_db",
+                land_id=str(land_id),
+                error=str(e),
+            )
+
     if sensor:
         n = session.execute(
             text(

@@ -226,7 +226,7 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 |------|------|----------|
 | **D0** | 文档/配置约定；下载机 Redis 改本机；停误起 PostGIS | 无通往 API `:6379` 的连接 |
 | **D1** | 迁移 `work_items`；实现 claim/heartbeat/progress/complete/fail；API 入队接线（先 1–2 类任务，如 assessment / season_growth） | 多 worker 不重复领；无公网出站可跑通 |
-| **D2** | Internal resolve + jobs/只读；mq_consumer/ingest 去直连读 PG | 下载机无 `DATABASE_URL` 读 |
+| **D2** | Internal resolve + jobs get/patch + agri scene dates；mq_consumer/ingest 热读改 HTTP（`API_BASE_URL` 未设则 DB 回退） | 配置 HTTP 后下载机热读不经 PG；写路径仍 DB（D3） |
 | **D3** | complete 落库覆盖景/天气/土壤等写路径；删除下载机写 PG | 下载机无 PG TCP |
 | **D4** | 其余任务类型切流；可选下线 MQ | 全链路无 MQ 可运行 |
 

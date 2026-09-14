@@ -25,12 +25,12 @@ SUPPORTED_TYPES = {
 }
 
 
-def _resolve_field_and_land(
+def _resolve_field_and_land_db(
     field_id: str | None,
     parcel_id: str | None,
     land_id: str | None,
 ) -> tuple[str | None, str | None]:
-    """Map field_id / parcel_id(land_id) using agri: tags on public.fields."""
+    """Legacy SyncSession resolve (when API_BASE_URL unset)."""
     lid = land_id or parcel_id
     fid = field_id
     session = SyncSession()
@@ -67,6 +67,45 @@ def _resolve_field_and_land(
     finally:
         session.close()
     return fid, lid
+
+
+def _resolve_field_and_land_http(
+    field_id: str | None,
+    parcel_id: str | None,
+    land_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve via GET /v1/internal/fields/resolve."""
+    from openfarm_common.internal_api import resolve_field
+
+    data = resolve_field(field_id=field_id, land_id=land_id, parcel_id=parcel_id)
+    return data.get("field_id"), data.get("land_id")
+
+
+def _resolve_field_and_land(
+    field_id: str | None,
+    parcel_id: str | None,
+    land_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Map field_id / parcel_id(land_id); prefer internal HTTP when configured."""
+    lid = land_id or parcel_id
+    fid = field_id
+    if fid and lid:
+        return fid, lid
+
+    try:
+        from openfarm_common.internal_api import internal_api_enabled
+    except ImportError:
+        internal_api_enabled = lambda: False  # noqa: E731
+
+    if internal_api_enabled():
+        try:
+            return _resolve_field_and_land_http(field_id, parcel_id, land_id)
+        except Exception as exc:
+            logger.warning(
+                "field_resolve_http_failed falling_back_db err=%s",
+                exc,
+            )
+    return _resolve_field_and_land_db(field_id, parcel_id, land_id)
 
 
 def _dispatch_satellite_analysis(
