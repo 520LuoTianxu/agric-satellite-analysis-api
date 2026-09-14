@@ -358,6 +358,37 @@ def _dispatch_field_bootstrap(
         dispatched.append("app.tasks.assessment_report.generate_assessment_report")
         celery_ids.append(a.id)
 
+    # Optional one-click season growth: same bootstrap → wait pattern as assessment.
+    followup_sg = extras.get("followup_season_growth")
+    if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
+        sg_kwargs: dict[str, Any] = {
+            "job_id": str(followup_sg["job_id"]),
+            "field_id": str(field_id),
+            "pull_data": True,
+            "wait_celery_ids": list(celery_ids),
+        }
+        for key in ("start_date", "end_date", "crops", "label", "material_keys"):
+            if followup_sg.get(key) is not None:
+                sg_kwargs[key] = followup_sg[key]
+            elif extras.get(key) is not None and key not in sg_kwargs:
+                sg_kwargs[key] = extras[key]
+        # Map bootstrap date window aliases if followup omitted start/end.
+        if sg_kwargs.get("start_date") is None and extras.get("date_from"):
+            sg_kwargs["start_date"] = str(extras["date_from"])[:10]
+        if sg_kwargs.get("end_date") is None and extras.get("date_to"):
+            sg_kwargs["end_date"] = str(extras["date_to"])[:10]
+        if followup_sg.get("mq_task_id"):
+            sg_kwargs["mq_task_id"] = str(followup_sg["mq_task_id"])
+        sg = celery_client.send_task(
+            "app.tasks.season_growth_report.generate_season_growth_report",
+            kwargs=sg_kwargs,
+            queue="ingest",
+        )
+        dispatched.append(
+            "app.tasks.season_growth_report.generate_season_growth_report"
+        )
+        celery_ids.append(sg.id)
+
     publish_task_result(
         task_id=task.task_id,
         status="success",
@@ -375,6 +406,9 @@ def _dispatch_field_bootstrap(
             else bool(extras.get("allow_agri")),
             "followup_assessment": bool(
                 isinstance(followup, dict) and followup.get("job_id")
+            ),
+            "followup_season_growth": bool(
+                isinstance(followup_sg, dict) and followup_sg.get("job_id")
             ),
         },
         upload_summary_if_empty=True,
@@ -450,6 +484,10 @@ def _dispatch_season_growth_report(
     for key in ("start_date", "end_date", "crops", "label", "material_keys"):
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
+    if extras.get("pull_data") is not None:
+        kwargs["pull_data"] = bool(extras.get("pull_data"))
+    if extras.get("wait_celery_ids"):
+        kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
     async_result = celery_client.send_task(
         "app.tasks.season_growth_report.generate_season_growth_report",
         kwargs=kwargs,

@@ -166,6 +166,32 @@ def _fallback_celery(
                     kwargs=ak,
                     queue="ingest",
                 )
+            followup_sg = extras.get("followup_season_growth")
+            if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
+                sk: dict[str, Any] = {
+                    "job_id": str(followup_sg["job_id"]),
+                    "field_id": fid,
+                    "pull_data": True,
+                }
+                for key in (
+                    "start_date",
+                    "end_date",
+                    "crops",
+                    "label",
+                    "material_keys",
+                    "mq_task_id",
+                ):
+                    if followup_sg.get(key) is not None:
+                        sk[key] = followup_sg[key]
+                if sk.get("start_date") is None and extras.get("date_from"):
+                    sk["start_date"] = str(extras["date_from"])[:10]
+                if sk.get("end_date") is None and extras.get("date_to"):
+                    sk["end_date"] = str(extras["date_to"])[:10]
+                send_task(
+                    "app.tasks.season_growth_report.generate_season_growth_report",
+                    kwargs=sk,
+                    queue="ingest",
+                )
     elif type == "agri_bridge":
         send_task(
             "app.tasks.agri_bridge.bridge_field_stac_to_agri",
@@ -199,6 +225,10 @@ def _fallback_celery(
         for key in ("start_date", "end_date", "crops", "label", "material_keys"):
             if extras.get(key) is not None:
                 kwargs[key] = extras[key]
+        if extras.get("pull_data") is not None:
+            kwargs["pull_data"] = bool(extras.get("pull_data"))
+        if extras.get("wait_celery_ids"):
+            kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
         send_task(
             "app.tasks.season_growth_report.generate_season_growth_report",
             kwargs=kwargs,

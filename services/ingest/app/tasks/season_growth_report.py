@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -13,6 +13,7 @@ from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.models.tables import Job
 from app.reports.season_growth.service import generate_season_growth_pdf
+from app.tasks.assessment_report import bootstrap_pulls_ready
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.worker import celery_app
 
@@ -84,7 +85,7 @@ def _resolve_job(session, job_id: str | None) -> Job | None:
 @celery_app.task(
     name="app.tasks.season_growth_report.generate_season_growth_report",
     bind=True,
-    max_retries=1,
+    max_retries=90,
     default_retry_delay=30,
 )
 def generate_season_growth_report(
@@ -97,8 +98,15 @@ def generate_season_growth_report(
     crops: list | None = None,
     label: str | None = None,
     material_keys: list | None = None,
+    pull_data: bool = False,
+    wait_celery_ids: list | None = None,
 ) -> dict:
-    """Generate season-growth PDF for a field + growing-season window."""
+    """Generate season-growth PDF for a field + growing-season window.
+
+    When ``pull_data`` is true (one-click CTA), wait for bootstrap weather +
+    soil + agri RS wave before building the PDF so we do not race an empty
+    S1/S2 window. After max retries, proceed with whatever data is available.
+    """
     session = SyncSession()
     field_id_str: str | None = str(field_id) if field_id else None
     job_id_str: str | None = str(job_id) if job_id else None
@@ -120,6 +128,8 @@ def generate_season_growth_report(
         material_keys = (
             material_keys if material_keys is not None else params.get("material_keys")
         )
+        if not pull_data and params.get("pull_data") is not None:
+            pull_data = bool(params.get("pull_data"))
 
         if not field_id_str:
             if job:
@@ -135,6 +145,14 @@ def generate_season_growth_report(
                 },
             )
             return {"error": "field_id required"}
+
+        if job_id_str and not job:
+            logger.info(
+                "season_growth_job_absent_local",
+                job_id=job_id_str,
+                field_id=field_id_str,
+                mq_task_id=mq_task_id,
+            )
 
         if not start_date or not end_date:
             err = "start_date and end_date required"
@@ -152,12 +170,96 @@ def generate_season_growth_report(
             )
             return {"error": err}
 
+        if pull_data:
+            wave_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+            if job and job.created_at:
+                wave_cutoff = job.created_at - timedelta(minutes=2)
+            weather_min_rows = 7
+            try:
+                span = (
+                    datetime.fromisoformat(str(end_date)[:10]).date()
+                    - datetime.fromisoformat(str(start_date)[:10]).date()
+                ).days + 1
+                weather_min_rows = max(1, min(7, span))
+            except ValueError:
+                pass
+            started_at = None
+            if job and job.created_at:
+                started_at = job.created_at
+            elif job and job.started_at:
+                started_at = job.started_at
+            else:
+                started_at = datetime.now(timezone.utc)
+            status = bootstrap_pulls_ready(
+                session,
+                field_id=uuid.UUID(field_id_str),
+                date_from=str(start_date)[:10],
+                date_to=str(end_date)[:10],
+                wait_celery_ids=[str(x) for x in (wait_celery_ids or []) if x],
+                wave_cutoff=wave_cutoff,
+                weather_min_rows=weather_min_rows,
+                started_at=started_at,
+                min_wait_seconds=45,
+            )
+            if not status["ready"]:
+                retries = int(getattr(self.request, "retries", 0) or 0)
+                max_r = int(getattr(self, "max_retries", 90) or 90)
+                progress_wait = {
+                    "stage": "waiting_for_data",
+                    "percent": min(55, 10 + retries),
+                    "pull_data": True,
+                    "weather_rows": status["weather_rows"],
+                    "weather_ok": status["weather_ok"],
+                    "soil_ok": status["soil_ok"],
+                    "active_rs_jobs": status["active_rs_jobs"],
+                    "rs_ok": status["rs_ok"],
+                    "celery_ready": status["celery_ready"],
+                    "pending_celery": len(status["pending_celery_ids"]),
+                }
+                if job:
+                    _update_job(session, job, "running", progress=progress_wait)
+                if retries < max_r:
+                    logger.info(
+                        "season_growth_waiting_for_bootstrap",
+                        field_id=field_id_str,
+                        job_id=job_id_str,
+                        retry=retries,
+                        **{
+                            k: status[k]
+                            for k in (
+                                "weather_rows",
+                                "weather_ok",
+                                "soil_ok",
+                                "active_rs_jobs",
+                                "rs_ok",
+                                "celery_ready",
+                            )
+                        },
+                    )
+                    raise self.retry(countdown=30)
+                logger.warning(
+                    "season_growth_bootstrap_wait_timeout",
+                    field_id=field_id_str,
+                    job_id=job_id_str,
+                    **{
+                        k: status[k]
+                        for k in (
+                            "weather_rows",
+                            "weather_ok",
+                            "soil_ok",
+                            "active_rs_jobs",
+                            "rs_ok",
+                            "celery_ready",
+                        )
+                    },
+                )
+
         if job:
             _update_job(
                 session,
                 job,
                 "running",
-                progress={"stage": "facts", "percent": 15},
+                progress={"stage": "facts", "percent": 60 if pull_data else 15},
             )
 
         result = generate_season_growth_pdf(

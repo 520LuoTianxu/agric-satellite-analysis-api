@@ -245,6 +245,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 crops,
                 label: sgLabel.trim() || undefined,
                 material_keys,
+                pull_data: true,
             });
             setSgLatest(job);
             if (job.status === "succeeded") {
