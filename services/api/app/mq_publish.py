@@ -258,11 +258,66 @@ def publish_api_task(
     extras = dict(extras or {})
     tid = task_id or str(uuid.uuid4())
 
-    # WORK_QUEUE_MODE=claim skips CloudAMQP (work_items inserted by callers).
+    # D4: when dual|claim, insert work_items (idempotent). Claim mode skips MQ below.
     try:
-        from app.services.work_items import should_publish_mq
+        from app.services.work_items import (
+            CLAIMABLE_TYPES,
+            enqueue_work_item_sync,
+            should_enqueue_work_items,
+            should_publish_mq,
+            work_item_idempotency_key,
+        )
     except Exception:
         should_publish_mq = lambda: True  # noqa: E731
+        should_enqueue_work_items = lambda: False  # noqa: E731
+        CLAIMABLE_TYPES = frozenset()  # type: ignore
+        enqueue_work_item_sync = None  # type: ignore
+        work_item_idempotency_key = None  # type: ignore
+
+    if should_enqueue_work_items() and type in CLAIMABLE_TYPES and enqueue_work_item_sync:
+        try:
+            idem = work_item_idempotency_key(type, task_id=tid, extras=extras)
+            payload = {
+                "field_id": field_id,
+                "parcel_id": parcel_id,
+                "land_id": land_id,
+                "extras": extras,
+                "task_id": tid,
+            }
+            # Priority: reports high; bootstrap/pull next; data tasks default
+            priority = 0
+            if type in ("assessment_report", "season_growth_report"):
+                priority = 10
+            elif type == "field_bootstrap":
+                priority = 5
+            work_id = enqueue_work_item_sync(
+                type=type,
+                payload=payload,
+                priority=priority,
+                idempotency_key=idem,
+            )
+            if work_id:
+                logger.info(
+                    "work_item_enqueued_from_publish",
+                    work_id=work_id,
+                    task_id=tid,
+                    type=type,
+                    field_id=field_id,
+                )
+        except Exception as exc:
+            logger.error(
+                "work_item_enqueue_from_publish_failed",
+                task_id=tid,
+                type=type,
+                error=str(exc),
+            )
+            # Fail closed in claim mode (no MQ fallback for this publish).
+            if not should_publish_mq():
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"work_items enqueue failed: {exc}",
+                ) from exc
+
     if not should_publish_mq():
         logger.info(
             "mq_publish_skipped_claim_mode",

@@ -1,6 +1,7 @@
 # 下载机去直连 PG / Redis 方案（主方案：无 MQ + HTTP Claim）
 
-> 状态：**主方案已定为「无 MQ + Postgres work_items + HTTP claim」；进入开发**  
+> 状态：**主方案已定为「无 MQ + Postgres work_items + HTTP claim」；D0–D4 scaffolding 已合入（prod 默认仍 legacy）**
+> 切流手册：`docs/design/work-queue-cutover.md`  
 > 日期：2026-09-14（修订：无 MQ 升为主路径）  
 > 关联（降级为可选兼容）：`docs/design/cloudamqp-task-bus.md`  
 > 目标：下载机不直连 Postgres；不直连 API 机 Redis；多 API / 多下载集群；下载机可无公网 IP（仅出站）。
@@ -228,7 +229,7 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 | **D1** | 迁移 `work_items`；实现 claim/heartbeat/progress/complete/fail；API 入队接线（先 1–2 类任务，如 assessment / season_growth） | 多 worker 不重复领；无公网出站可跑通 |
 | **D2** | Internal resolve + jobs get/patch + agri scene dates；mq_consumer/ingest 热读改 HTTP（`API_BASE_URL` 未设则 DB 回退） | 配置 HTTP 后下载机热读不经 PG；写路径仍 DB（D3） |
 | **D3** | complete / `results/apply` 落库（复用 mq_result_writer 逻辑）；ingest 报告 job 可走 HTTP PATCH；`INGEST_PG_WRITES` 开关；**不**一键切断 prod PG | 代码+flag；cutover 见下文 |
-| **D4** | 其余任务类型切流；可选下线 MQ | 全链路无 MQ 可运行 |
+| **D4** | 切流手册；扩展 claim 类型（bootstrap/satellite/weather/soil）；双发防护；重 PG 路径 D4.1 延期清单 | scaffolding 合入；prod 默认不翻 claim / PG=0 |
 
 每阶段：回滚开关、冒烟（claim → 执行 → complete → UI 可见）。
 
@@ -281,15 +282,29 @@ CloudAMQP 为可选兼容。开发按 **D0 → D4** 推进。
 - ingest：`http_writes_enabled()` 时 assessment / season_growth 走 `PATCH /internal/jobs`；带 `work_item_id` 时任务结束再 `complete`（claim agent 只 progress=dispatched）。
 - 默认 **`INGEST_PG_WRITES=1`**、`WORK_QUEUE_MODE=legacy`：行为与切流前兼容。
 
-**仍直连 PG（D4）**
+## D4 scaffolding（安全切流，默认不翻 prod）
 
-- weather / soil / agri scene **ingest 本地 upsert**（HTTP apply 已具备，ingest 侧全面改投递与禁本地写待 D4）。
-- raster_layers / field_stats / advisory locks / 重报告 data_loader。
-- 其余任务类型 claim 切流；可选下线 MQ。
+**手册：** `docs/design/work-queue-cutover.md`（dual → claim → `INGEST_HTTP_WRITES=1` → `INGEST_PG_WRITES=0` → 可选 MQ teardown；含验证与回滚）。
 
-**建议切流顺序**
+**已落地（代码）**
 
-1. API 热更含 `result_apply` + internal results。
-2. 下载机设 `API_BASE_URL` + token（D2 已支持读）；可先 `INGEST_HTTP_WRITES=1` 双写验证 job 进度。
-3. 再 `INGEST_PG_WRITES=0`（报告路径）→ 验证 UI。
-4. `WORK_QUEUE_MODE=claim` 仅在 work_items 入队与 agent 稳定后开启。
+- Claimable types：`assessment_report` / `season_growth_report` / `field_bootstrap` / `satellite_analysis` / `agri_bridge` / `weather_backfill` / `soil_fetch`（光学/S1 chunk 仍为 Celery 子任务，挂在 satellite/bootstrap 下）。
+- `publish_api_task` 在 `dual|claim` 时同步入队 `work_items`（idempotent）；`claim` 跳过 MQ。
+- 一键 `pull_data`：只入队/发布 `field_bootstrap`(+followup)，避免 claim 下裸 PDF 抢跑。
+- 双发防护：`should_run_claim_agent()` 仅 `claim`；`dual` 下载机只跑 MQ。
+- mq_consumer：`WORK_QUEUE_MODE=claim` 时仅 claim agent。
+
+**D4.1 延期（不阻塞本 PR）**
+
+- raster_layers / field_stats 大批量写入的 internal HTTP。
+- backfill `pg_advisory_*` 锁。
+- 报告 `data_loader` 重读改全 HTTP。
+- ingest 侧全面禁本地 weather/soil/scene upsert（靠 `INGEST_PG_WRITES=0` + 验证后切）。
+
+**切流顺序（摘要；细节见手册）**
+
+1. API `WORK_QUEUE_MODE=dual`（下载仍 legacy）→ 确认 work_items 入队。
+2. 下载 `INGEST_HTTP_WRITES=1` canary。
+3. 停 MQ 或 API→`claim` 后，下载 `WORK_QUEUE_MODE=claim`（**禁止** dual API + claim download 同时消费同类型）。
+4. 验证后再 `INGEST_PG_WRITES=0`；可选下线 MQ。
+5. **禁止**在未跑手册验证前把 prod download 默认改成 claim 或 PG=0。

@@ -2,6 +2,7 @@
 # Primary control plane (D1+): HTTP claim → API (no MQ required).
 # See docs/design/download-host-no-direct-pg-redis.md
 #
+# Cutover runbook: docs/design/work-queue-cutover.md
 # Usage (legacy MQ still default until WORK_QUEUE_MODE=claim):
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 #     -f docker-compose.download-machine.yml --profile consumer \

@@ -1,4 +1,4 @@
-"""Entrypoint: MQ consume (legacy) and/or HTTP claim agent (WORK_QUEUE_MODE=claim)."""
+"""Entrypoint: MQ consume (legacy/dual) or HTTP claim agent (WORK_QUEUE_MODE=claim)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 import sys
 
 from app.work_agent import run_forever as run_claim_agent
-from app.work_agent import work_queue_mode
+from app.work_agent import should_run_claim_agent, work_queue_mode
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +23,7 @@ def _run_mq() -> None:
     from app.handler import handle_task_message
 
     if not settings.cloudamqp_url:
-        logger.error("CLOUDAMQP_URL is required for mq_consumer legacy mode")
+        logger.error("CLOUDAMQP_URL is required for mq_consumer legacy/dual mode")
         sys.exit(1)
     logger.info(
         "starting mq_consumer broker=%s download_queue=%s",
@@ -40,12 +40,15 @@ def _run_mq() -> None:
 def main() -> None:
     mode = work_queue_mode()
     logger.info("WORK_QUEUE_MODE=%s", mode)
-    if mode == "claim":
+    if should_run_claim_agent():
+        # Optional: mq_consumer as claim agent only when WORK_QUEUE_MODE=claim.
         run_claim_agent()
         return
-    # legacy (default) and dual: keep CloudAMQP consumer.
-    # dual on download would double-run if claim also polled — claim is API-side only
-    # until cutover; enable claim mode explicitly on download host when ready.
+    if mode == "dual":
+        # Harden: dual on API fills work_items + MQ; download must not also claim.
+        logger.info(
+            "dual mode: MQ consumer only (claim agent disabled to prevent double-dispatch)"
+        )
     _run_mq()
 
 

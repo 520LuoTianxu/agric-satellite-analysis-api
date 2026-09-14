@@ -163,3 +163,42 @@ class InternalAuthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimAgentGuardTests(unittest.TestCase):
+    def test_should_run_claim_agent_only_claim(self) -> None:
+        with patch.object(wi.settings, "work_queue_mode", "legacy"):
+            self.assertFalse(wi.should_run_claim_agent())
+        with patch.object(wi.settings, "work_queue_mode", "dual"):
+            self.assertFalse(wi.should_run_claim_agent())
+            self.assertTrue(wi.should_enqueue_work_items())
+            self.assertTrue(wi.should_publish_mq())
+        with patch.object(wi.settings, "work_queue_mode", "claim"):
+            self.assertTrue(wi.should_run_claim_agent())
+            self.assertFalse(wi.should_publish_mq())
+
+    def test_claimable_types_include_data_pulls(self) -> None:
+        for t in (
+            "field_bootstrap",
+            "satellite_analysis",
+            "agri_bridge",
+            "weather_backfill",
+            "soil_fetch",
+            "assessment_report",
+            "season_growth_report",
+        ):
+            self.assertIn(t, wi.CLAIMABLE_TYPES)
+        self.assertIn("field_bootstrap", wi.COMPLETE_ON_DISPATCH_TYPES)
+        self.assertNotIn("assessment_report", wi.COMPLETE_ON_DISPATCH_TYPES)
+
+    def test_idempotency_key_prefers_job_id(self) -> None:
+        key = wi.work_item_idempotency_key(
+            "assessment_report",
+            task_id="tid-1",
+            extras={"job_id": "job-9"},
+        )
+        self.assertEqual(key, "assessment_report:job-9")
+        key2 = wi.work_item_idempotency_key(
+            "weather_backfill", task_id="tid-2", extras={}
+        )
+        self.assertEqual(key2, "weather_backfill:tid-2")
