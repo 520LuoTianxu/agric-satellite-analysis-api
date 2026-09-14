@@ -46,6 +46,20 @@ DIM_TITLE = {
     "drought_safety": "抗旱安全",
 }
 
+# Major chapters (cover is 一；目录 is unnumbered thin page)
+TOC_ENTRIES = [
+    ("一、AI选地综合评价", "综合评分与总体解读"),
+    ("二、地块基础画像", "位置·土壤·气候与适配"),
+    ("三、综合评分解释", "六维雷达与高低维度解读"),
+    ("四、遥感长势", "绿度曲线、阶段与异常证据"),
+    ("五、空间异常", "需关注区域与时间连续性"),
+    ("六、土壤", "指标到田间影响"),
+    ("七、气候风险", "历史气候与涝旱证据"),
+    ("八、种植管理建议", "品种·播种·水肥·巡田"),
+    ("九、产量潜力", "相对等级（无亩产数字）"),
+    ("十、经营分析", "有模型才给金额"),
+]
+
 
 def _register_fonts() -> None:
     if "CN" not in pdfmetrics.getRegisteredFontNames():
@@ -143,6 +157,28 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontName="CNB",
             fontSize=8,
             leading=11.5,
+            textColor=HexColor("#222"),
+        ),
+        "toc": ParagraphStyle(
+            "toc",
+            fontName="CN",
+            fontSize=10,
+            leading=16,
+            textColor=HexColor("#222"),
+            leftIndent=4,
+        ),
+        "card_label": ParagraphStyle(
+            "card_label",
+            fontName="CNB",
+            fontSize=8.5,
+            leading=12,
+            textColor=HexColor("#1f4d38"),
+        ),
+        "card_value": ParagraphStyle(
+            "card_value",
+            fontName="CN",
+            fontSize=9,
+            leading=13,
             textColor=HexColor("#222"),
         ),
     }
@@ -260,6 +296,50 @@ def render_pdf(
     def cell(text, style="tbl_c"):
         return Paragraph(_esc(text), styles[style])
 
+    def section_title(ordinal_title: str):
+        """Major chapter heading with Chinese ordinal, e.g. 二、地块基础画像."""
+        return Paragraph(_esc(ordinal_title), styles["h1"])
+
+    def sub_title(text: str, level: str = "1"):
+        """Subhead: 1. / （一） style."""
+        return Paragraph(f"<b>{_esc(text)}</b>", styles["h2"])
+
+    def kv_card(title: str, rows: list[tuple[str, str]], width=165 * mm):
+        """Structured key/value card with green header."""
+        safe_rows = rows or [("—", "—")]
+        t = Table(
+            [[Paragraph(f"<b>{_esc(title)}</b>", styles["tbl_h"])]]
+            + [
+                [
+                    Paragraph(_esc(k), styles["card_label"]),
+                    Paragraph(
+                        _esc(v if v not in (None, "") else "—"),
+                        styles["card_value"],
+                    ),
+                ]
+                for k, v in safe_rows
+            ],
+            colWidths=[38 * mm, width - 38 * mm],
+        )
+        t.setStyle(
+            TableStyle(
+                [
+                    ("SPAN", (0, 0), (-1, 0)),
+                    ("BACKGROUND", (0, 0), (-1, 0), HexColor("#1f4d38")),
+                    ("BACKGROUND", (0, 1), (0, -1), HexColor("#eef6ee")),
+                    ("ROWBACKGROUNDS", (1, 1), (1, -1), [HexColor("#f7fbf7"), white]),
+                    ("BOX", (0, 0), (-1, -1), 0.6, HexColor("#cfe0cf")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.3, HexColor("#e2eee2")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        return KeepTogether([t, Spacer(1, 2 * mm)])
+
     def make_table(data, col_widths, header_bg="#1f4d38"):
         t = Table(data, colWidths=col_widths, repeatRows=1)
         t.setStyle(
@@ -359,9 +439,9 @@ def render_pdf(
 
     story: list = []
 
-    # ── 1. AI选地综合评价 ──
+    # ── 1. AI选地综合评价（封面）──
     story.append(Spacer(1, 3 * mm))
-    story.append(p("AI选地综合评价", "cover_title"))
+    story.append(p("一、AI选地综合评价", "cover_title"))
     story.append(p("程序计算评分 · AI 仅解读 · 需田间确认", "cover_sub"))
     story.append(Spacer(1, 2 * mm))
     story.append(hr())
@@ -400,11 +480,11 @@ def render_pdf(
     story.append(p(f"<b>程序一句话：</b>{_esc(ov.get('one_liner') or '')}", "body"))
     story.append(Spacer(1, 2 * mm))
     story.append(ai_block("AI 总体评价", _ai_text(overall_ai.get("evaluation"))))
-    story.append(p("<b>优势</b>", "h2"))
+    story.append(sub_title("1. 优势"))
     story += bullets(overall_ai.get("strengths") or [])
-    story.append(p("<b>主要风险</b>", "h2"))
+    story.append(sub_title("2. 主要风险"))
     story += bullets(overall_ai.get("main_risks") or [])
-    story.append(p("<b>核心建议（含依据）</b>", "h2"))
+    story.append(sub_title("3. 核心建议（含依据）"))
     story += bullets(overall_ai.get("core_advice") or [])
     story.append(
         p(
@@ -414,38 +494,128 @@ def render_pdf(
         )
     )
 
-    # ── 2. 地块基础画像 ──
+    # ── 目录（薄页）──
     story.append(PageBreak())
-    story.append(p("地块基础画像", "h1"))
+    story.append(p("目录", "h1"))
     story.append(hr())
     story.append(
         p(
-            f"位置 {_esc(field.get('location') or '—')}；面积约 {area_mu} 亩；"
-            f"作物 {_esc(crop_label)}。"
-            f"土壤质地 {_esc(soil.get('dominant_texture') or '—')}，"
-            f"pH {soil.get('avg_ph') if soil.get('avg_ph') is not None else '—'}，"
-            f"排水 {_esc(soil.get('drainage_class') or '—')}，"
-            f"根区持水 {soil.get('rootzone_awc_mm') if soil.get('rootzone_awc_mm') is not None else '—'} mm。",
-            "body",
+            "本报告为程序事实 + AI 解读；各章标题采用中文序数编号。页码见页脚。",
+            "small",
         )
     )
-    story.append(Spacer(1, 1.5 * mm))
+    story.append(Spacer(1, 2 * mm))
+    toc_rows = [
+        [
+            cell("章节", "tbl_h"),
+            cell("内容提要", "tbl_h"),
+        ]
+    ]
+    for title, blurb in TOC_ENTRIES:
+        toc_rows.append([cell(title, "tbl_b"), cell(blurb, "tbl_c")])
+    story.append(make_table(toc_rows, [55 * mm, 110 * mm]))
+    story.append(Spacer(1, 3 * mm))
+    story.append(
+        p(
+            "阅读建议：先看一、三了解总分与短板，再看四的异常证据表核对“发生了什么”。",
+            "small",
+        )
+    )
+
+    # ── 2. 地块基础画像 ──
+    story.append(PageBreak())
+    story.append(section_title("二、地块基础画像"))
+    story.append(hr())
+    season_months = sorted(
+        (scorecard.get("method") or {}).get("season_months") or [6, 7, 8, 9]
+    )
+    peak_months = sorted((scorecard.get("method") or {}).get("peak_months") or [7, 8])
+    season_txt = (
+        f"默认{season_months[0]}–{season_months[-1]}月"
+        f"；峰值{peak_months[0]}–{peak_months[-1]}月"
+    )
+    story.append(
+        kv_card(
+            "位置 / 面积 / 作物 / 生育季",
+            [
+                ("位置", field.get("location") or "—"),
+                ("面积", f"约 {area_mu} 亩（{area_ha} 公顷）"),
+                ("作物", crop_label),
+                ("生育季", season_txt),
+                ("数据时段", risk.get("period") or "—"),
+            ],
+        )
+    )
+    story.append(
+        kv_card(
+            "土壤关键指标（程序）",
+            [
+                ("质地", soil.get("dominant_texture") or "—"),
+                (
+                    "pH",
+                    (
+                        str(soil.get("avg_ph"))
+                        if soil.get("avg_ph") is not None
+                        else "—"
+                    ),
+                ),
+                ("排水", soil.get("drainage_class") or "—"),
+                (
+                    "根区持水",
+                    (
+                        f"{soil.get('rootzone_awc_mm')} mm"
+                        if soil.get("rootzone_awc_mm") is not None
+                        else "—"
+                    ),
+                ),
+                (
+                    "渍水风险",
+                    (
+                        str(soil.get("waterlogging_risk"))
+                        if soil.get("waterlogging_risk") is not None
+                        else "—"
+                    ),
+                ),
+            ],
+        )
+    )
     wh_plain = analysis.get("weather_history_plain") or ""
-    if wh_plain:
-        story.append(p(f"<b>气候本底（程序）：</b>{_esc(wh_plain)}", "body"))
+    climate_rows = [("气候本底摘要", wh_plain or "—")]
+    if weather_summary:
+        climate_rows.extend(
+            [
+                (
+                    "近月热胁迫",
+                    (
+                        f"{weather_summary.get('heat_stress_days')} 天"
+                        if weather_summary.get("heat_stress_days") is not None
+                        else "—"
+                    ),
+                ),
+                (
+                    "近月水分盈亏",
+                    (
+                        f"{weather_summary.get('water_deficit_mm')} mm"
+                        if weather_summary.get("water_deficit_mm") is not None
+                        else "—"
+                    ),
+                ),
+            ]
+        )
+    story.append(kv_card("气候基线（程序）", climate_rows))
     story.append(
         ai_block(
-            "区域农业特征",
+            "（一）区域农业特征",
             _ai_text(portrait_ai.get("regional_ag_traits")),
         )
     )
-    story.append(ai_block("作物适配", _ai_text(portrait_ai.get("crop_fit"))))
-    story.append(p("<b>限制因素</b>", "h2"))
+    story.append(ai_block("（二）作物适配", _ai_text(portrait_ai.get("crop_fit"))))
+    story.append(sub_title("（三）限制因素"))
     story += bullets(portrait_ai.get("limits") or [])
 
     # ── 3. 综合评分解释 ──
     story.append(PageBreak())
-    story.append(p("综合评分解释", "h1"))
+    story.append(section_title("三、综合评分解释"))
     story.append(hr())
     story.append(
         p(
@@ -454,39 +624,48 @@ def render_pdf(
         )
     )
     story.append(Spacer(1, 1.5 * mm))
-    rows = [
+    # Radar is primary; compact legend under chart (not a full dimension table)
+    radar_elems = img(
+        "score_radar.png", w=120 * mm, ratio=0.92, caption="六维综合评分雷达图（程序）"
+    )
+    if radar_elems:
+        story += radar_elems
+    else:
+        story.append(p("（雷达图暂缺：六维分数不完整时跳过）", "small"))
+    legend_rows = [
         [
             cell("维度", "tbl_h"),
             cell("分数", "tbl_h"),
             cell("灯", "tbl_h"),
-            cell("程序说明", "tbl_h"),
         ]
     ]
     for key in DIM_ORDER:
         d = dims.get(key) or {}
-        rows.append(
+        legend_rows.append(
             [
                 cell(DIM_TITLE.get(key, d.get("name") or key), "tbl_b"),
                 cell(str(d.get("score", "—")), "tbl_b"),
                 cell(LIGHT_WORD.get(d.get("light"), d.get("light") or "—"), "tbl_b"),
-                cell(d.get("plain") or "—", "tbl_c"),
             ]
         )
-    st = make_table(rows, [28 * mm, 16 * mm, 18 * mm, 103 * mm])
-    story.append(st)
-    story.append(Spacer(1, 2 * mm))
-    story.append(p("<b>偏高维度</b>", "h2"))
+    story.append(make_table(legend_rows, [50 * mm, 30 * mm, 30 * mm]))
+    story.append(Spacer(1, 1.5 * mm))
+    story.append(
+        p("虚线：绿阈 70 / 黄阈 55。表仅作图例，解读见下方 AI 小节。", "small")
+    )
+    story.append(Spacer(1, 1.5 * mm))
+    story.append(sub_title("1. 偏高维度"))
     story += bullets(score_ai.get("high_dims") or [])
-    story.append(p("<b>偏低维度</b>", "h2"))
+    story.append(sub_title("2. 偏低维度"))
     story += bullets(score_ai.get("low_dims") or [])
-    story.append(p("<b>最大驱动因素</b>", "h2"))
+    story.append(sub_title("3. 最大驱动因素"))
     story += bullets(score_ai.get("biggest_drivers") or [])
-    story.append(p("<b>如何改进</b>", "h2"))
+    story.append(sub_title("4. 如何改进"))
     story += bullets(score_ai.get("how_to_improve") or [])
 
     # ── 4. 遥感长势 ──
     story.append(PageBreak())
-    story.append(p("遥感长势", "h1"))
+    story.append(section_title("四、遥感长势"))
     story.append(hr())
     story.append(
         p(
@@ -548,9 +727,55 @@ def render_pdf(
             _ai_text(rs_ai.get("phenology_normality")),
         )
     )
-    story.append(p("<b>异常点</b>", "h2"))
-    story += bullets(rs_ai.get("anomalies") or [])
-    story.append(p("<b>可能原因（排序）</b>", "h2"))
+
+    # 异常点：程序事件证据表（WHAT），AI 列表作补充
+    story.append(sub_title("1. 异常点（程序证据）"))
+    events = analysis.get("risk_events_evidence") or risk.get("events") or []
+    if events:
+        erows = [
+            [
+                cell("事件", "tbl_h"),
+                cell("时段", "tbl_h"),
+                cell("表现", "tbl_h"),
+                cell("同期天气/水分", "tbl_h"),
+                cell("生育阶段", "tbl_h"),
+            ]
+        ]
+        for ev in events[:8]:
+            if not isinstance(ev, dict):
+                continue
+            eid = ev.get("id") or "—"
+            period = ev.get("period_full") or (
+                f"{ev.get('start', '')}～{ev.get('end', '')}"
+            )
+            perf = ev.get("performance") or ev.get("type") or "—"
+            wx = ev.get("weather_moisture") or "—"
+            stage = ev.get("stage") or "—"
+            erows.append(
+                [
+                    cell(str(eid), "tbl_b"),
+                    cell(str(period), "tbl_c"),
+                    cell(str(perf), "tbl_c"),
+                    cell(str(wx), "tbl_c"),
+                    cell(str(stage), "tbl_c"),
+                ]
+            )
+        story.append(make_table(erows, [14 * mm, 32 * mm, 52 * mm, 42 * mm, 25 * mm]))
+        story.append(
+            p(
+                "说明：表现中的 NDVI/EVI/NDWI 取自事件窗内已观测场景均值；"
+                "无月尺度天气时仅给水分指数或地块级摘要，不编造日降水。",
+                "small",
+            )
+        )
+    else:
+        story.append(p("程序未检出生育期长势/偏湿聚类事件。", "small"))
+    ai_anoms = rs_ai.get("anomalies") or []
+    if ai_anoms:
+        story.append(sub_title("1b. AI 补充异常描述"))
+        story += bullets(ai_anoms)
+
+    story.append(sub_title("2. 可能原因（排序）"))
     ranked = rs_ai.get("ranked_causes") or []
     if ranked:
         for item in ranked:
@@ -566,7 +791,7 @@ def render_pdf(
 
     # ── 5. 空间异常 ──
     story.append(PageBreak())
-    story.append(p("空间异常", "h1"))
+    story.append(section_title("五、空间异常"))
     story.append(hr())
     has_panel = bool(chart_paths.get("ndvi_stages_panel.png"))
     phenology_name = None
@@ -593,9 +818,9 @@ def render_pdf(
                 "small",
             )
         )
-    story.append(p("<b>需关注区域</b>", "h2"))
+    story.append(sub_title("1. 需关注区域"))
     story += bullets(spatial_ai.get("watch_zones") or [])
-    story.append(p("<b>原因</b>", "h2"))
+    story.append(sub_title("2. 原因"))
     story += bullets(spatial_ai.get("why") or [])
     story.append(
         ai_block(
@@ -609,7 +834,7 @@ def render_pdf(
 
     # ── 6. 土壤 ──
     story.append(PageBreak())
-    story.append(p("土壤", "h1"))
+    story.append(section_title("六、土壤"))
     story.append(hr())
     soil_plain = analysis.get("soil_analysis_plain") or ""
     if soil_plain:
@@ -661,7 +886,7 @@ def render_pdf(
 
     # ── 7. 气候风险 ──
     story.append(PageBreak())
-    story.append(p("气候风险", "h1"))
+    story.append(section_title("七、气候风险"))
     story.append(hr())
     if wh_plain:
         story.append(p(f"<b>历史气候（程序）：</b>{_esc(wh_plain)}", "body"))
@@ -686,7 +911,7 @@ def render_pdf(
         flood_evidence
         and int(flood_evidence.get("absolute_open_water_scenes") or 0) > 0
     ):
-        story.append(p("明水面涝证据（硬证据）", "h2"))
+        story.append(sub_title("1. 明水面涝证据（硬证据）"))
         n_all = flood_evidence.get("absolute_open_water_scenes")
         story.append(
             p(
@@ -702,9 +927,9 @@ def render_pdf(
                 ratio=0.40,
                 caption="明水面场景真彩",
             )
-    story.append(p("<b>风险存在（非已发生灾害）</b>", "h2"))
+    story.append(sub_title("2. 风险存在（非已发生灾害）"))
     story += bullets(climate_ai.get("risk_present") or [])
-    story.append(p("<b>灾害已发生（须有硬证据）</b>", "h2"))
+    story.append(sub_title("3. 灾害已发生（须有硬证据）"))
     disasters = climate_ai.get("disaster_occurred") or []
     if disasters:
         story += bullets(disasters)
@@ -715,7 +940,7 @@ def render_pdf(
 
     # ── 8. 种植管理建议 ──
     story.append(PageBreak())
-    story.append(p("种植管理建议", "h1"))
+    story.append(section_title("八、种植管理建议"))
     story.append(hr())
     story.append(
         ai_block(
@@ -723,11 +948,11 @@ def render_pdf(
             _ai_text(mgmt_ai.get("variety_direction")),
         )
     )
-    story.append(p("<b>播种与田间重点</b>", "h2"))
+    story.append(sub_title("1. 播种与田间重点"))
     story += bullets(mgmt_ai.get("planting_focus") or [])
-    story.append(p("<b>水肥关注</b>", "h2"))
+    story.append(sub_title("2. 水肥关注"))
     story += bullets(mgmt_ai.get("water_fertility_watch") or [])
-    story.append(p("<b>巡田建议</b>", "h2"))
+    story.append(sub_title("3. 巡田建议"))
     story += bullets(mgmt_ai.get("scouting") or [])
     story.append(
         p("说明：不发明精确播期/施肥量/灌溉量；请结合当地农技与田间实测。", "small")
@@ -735,7 +960,7 @@ def render_pdf(
 
     # ── 9. 产量潜力 ──
     story.append(PageBreak())
-    story.append(p("产量潜力", "h1"))
+    story.append(section_title("九、产量潜力"))
     story.append(hr())
     level = yield_ai.get("level")
     if level in ("高", "中", "低"):
@@ -753,7 +978,7 @@ def render_pdf(
 
     # ── 10. 经营分析（与产量潜力同页，控制总页数 ≤10）──
     story.append(Spacer(1, 3 * mm))
-    story.append(p("经营分析", "h1"))
+    story.append(section_title("十、经营分析"))
     story.append(hr())
     available = bool(biz_ai.get("available"))
     if not available:
@@ -769,10 +994,10 @@ def render_pdf(
         story.append(ai_block("经营解读", _ai_text(biz_ai.get("note"))))
     gaps = ai.get("evidence_gaps") or []
     if gaps:
-        story.append(p("<b>证据缺口</b>", "h2"))
+        story.append(sub_title("1. 证据缺口"))
         story += bullets(gaps, empty="—")
     story.append(Spacer(1, 3 * mm))
-    story.append(p("数据来源与置信", "h2"))
+    story.append(sub_title("2. 数据来源与置信"))
     story.append(
         p(
             "卫星：Sentinel-2 指数（OpenFarm / agri）。天气：Open-Meteo。"
