@@ -719,6 +719,7 @@ export interface SeasonGrowthGenerateBody {
     crops?: string[];
     label?: string;
     material_keys?: string[];
+    pull_data?: boolean;
 }
 
 export interface SeasonGrowthMaterialUpload {

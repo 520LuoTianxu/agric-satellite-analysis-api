@@ -29,6 +29,10 @@ class SeasonGrowthGenerateRequest(BaseModel):
     crops: list[str] = PydanticField(default_factory=list)
     label: str | None = None
     material_keys: list[str] = PydanticField(default_factory=list)
+    pull_data: bool = PydanticField(
+        default=True,
+        description="Queue weather + agri RS indices + soil bootstrap before PDF",
+    )
 
     @field_validator("start_date", "end_date")
     @classmethod
@@ -78,11 +82,21 @@ async def create_season_growth_report(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Enqueue a 生育期长势 PDF generation job."""
+    """Enqueue data pulls (optional) + 生育期长势 PDF generation.
+
+    Never refuses generation merely because weather / soil / RS are incomplete;
+    missing series are handled inside the PDF worker. When pull_data=true,
+    field_bootstrap fans out pulls first and season_growth follows (no race).
+    """
     await _get_field(field_id, ctx.org_id, db)
 
-    if date.fromisoformat(body.end_date) < date.fromisoformat(body.start_date):
+    start = date.fromisoformat(body.start_date)
+    end = date.fromisoformat(body.end_date)
+    if end < start:
         raise HTTPException(status_code=422, detail="end_date must be >= start_date")
+
+    pull_data = bool(body.pull_data)
+    weather_days = max(1, (end - start).days)
 
     # Reuse in-flight pending/running job for same field (like assessment)
     existing = (
@@ -111,6 +125,8 @@ async def create_season_growth_report(
         "window_key": _window_key(
             body.start_date, body.end_date, body.crops, body.label
         ),
+        "pull_data": pull_data,
+        "weather_days": weather_days,
     }
     job = Job(
         field_id=field_id,
@@ -125,24 +141,66 @@ async def create_season_growth_report(
     try:
         from app.mq_publish import publish_api_task
 
-        mq_task_id = publish_api_task(
-            type="season_growth_report",
-            field_id=str(field_id),
-            extras={
-                "job_id": str(job.id),
-                "start_date": body.start_date,
-                "end_date": body.end_date,
-                "crops": list(body.crops or []),
-                "label": body.label,
-                "material_keys": list(body.material_keys or []),
-            },
-        )
-        logger.info(
-            "season_growth_job_dispatched",
-            job_id=str(job.id),
-            field_id=str(field_id),
-            mq_task_id=mq_task_id,
-        )
+        if pull_data:
+            # Do NOT publish season_growth_report in parallel — that raced PDF ahead
+            # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out with
+            # allow_agri and enqueues season growth as followup after Celery ids.
+            season_mq_task_id = str(uuid.uuid4())
+            bootstrap_extras: dict[str, Any] = {
+                "date_from": body.start_date,
+                "date_to": body.end_date,
+                "days": weather_days,
+                "weather_days": weather_days,
+                "source": "season_growth_one_click",
+                "allow_agri": True,
+                "with_bridge": True,
+                "followup_season_growth": {
+                    "job_id": str(job.id),
+                    "mq_task_id": season_mq_task_id,
+                    "start_date": body.start_date,
+                    "end_date": body.end_date,
+                    "crops": list(body.crops or []),
+                    "label": body.label,
+                    "material_keys": list(body.material_keys or []),
+                },
+            }
+            bootstrap_task_id = publish_api_task(
+                type="field_bootstrap",
+                field_id=str(field_id),
+                extras=bootstrap_extras,
+            )
+            logger.info(
+                "season_growth_bootstrap_dispatched",
+                job_id=str(job.id),
+                field_id=str(field_id),
+                mq_task_id=bootstrap_task_id,
+                season_mq_task_id=season_mq_task_id,
+                start_date=body.start_date,
+                end_date=body.end_date,
+                weather_days=weather_days,
+                pull_data=True,
+            )
+        else:
+            mq_task_id = publish_api_task(
+                type="season_growth_report",
+                field_id=str(field_id),
+                extras={
+                    "job_id": str(job.id),
+                    "start_date": body.start_date,
+                    "end_date": body.end_date,
+                    "crops": list(body.crops or []),
+                    "label": body.label,
+                    "material_keys": list(body.material_keys or []),
+                    "pull_data": False,
+                },
+            )
+            logger.info(
+                "season_growth_job_dispatched",
+                job_id=str(job.id),
+                field_id=str(field_id),
+                mq_task_id=mq_task_id,
+                pull_data=False,
+            )
     except Exception as e:
         logger.error(
             "season_growth_job_dispatch_failed",
@@ -155,7 +213,6 @@ async def create_season_growth_report(
         await db.commit()
 
     return job
-
 
 @router.post(
     "/fields/{field_id}/season-growth-report/materials",

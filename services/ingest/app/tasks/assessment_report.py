@@ -115,7 +115,7 @@ def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -
             Job.field_id == field_id,
             Job.status.in_(("pending", "running")),
             Job.params_json["is_backfill"].as_boolean().is_(True),
-            Job.type.notin_(("backfill", "agri_bridge", "assessment_report")),
+            Job.type.notin_(("backfill", "agri_bridge", "assessment_report", "season_growth_report")),
             Job.created_at >= wave_cutoff,
         )
     ).scalar()

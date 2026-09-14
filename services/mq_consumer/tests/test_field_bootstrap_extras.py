@@ -159,6 +159,48 @@ class FieldBootstrapExtrasTests(unittest.TestCase):
             "app.tasks.assessment_report.generate_assessment_report", info["dispatched"]
         )
 
+    def test_followup_season_growth_enqueued_after_pulls(self) -> None:
+        sends: list[tuple] = []
+
+        def fake_send(name, args=None, kwargs=None, queue=None):
+            sends.append((name, args or [], kwargs or {}, queue))
+            return SimpleNamespace(id=f"celery-{len(sends)}")
+
+        with (
+            patch.object(handler_mod.celery_client, "send_task", side_effect=fake_send),
+            patch.object(handler_mod, "publish_task_result"),
+        ):
+            info = handler_mod._dispatch_field_bootstrap(
+                _Task(
+                    {
+                        "date_from": "2026-06-01",
+                        "date_to": "2026-09-30",
+                        "days": 121,
+                        "followup_season_growth": {
+                            "job_id": "job-sg-1",
+                            "mq_task_id": "mq-sg-1",
+                            "start_date": "2026-06-01",
+                            "end_date": "2026-09-30",
+                            "crops": ["corn"],
+                            "label": "S1",
+                        },
+                    }
+                ),
+                "field-1",
+                "15411",
+            )
+        sg = next(s for s in sends if "season_growth_report" in s[0])
+        self.assertTrue(sg[2].get("pull_data"))
+        self.assertEqual(sg[2].get("job_id"), "job-sg-1")
+        self.assertEqual(sg[2].get("start_date"), "2026-06-01")
+        self.assertEqual(sg[2].get("end_date"), "2026-09-30")
+        self.assertIn("wait_celery_ids", sg[2])
+        self.assertGreaterEqual(len(sg[2]["wait_celery_ids"]), 3)
+        self.assertIn(
+            "app.tasks.season_growth_report.generate_season_growth_report",
+            info["dispatched"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
