@@ -115,11 +115,94 @@ def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -
             Job.field_id == field_id,
             Job.status.in_(("pending", "running")),
             Job.params_json["is_backfill"].as_boolean().is_(True),
-            Job.type.notin_(("backfill", "agri_bridge", "assessment_report", "season_growth_report")),
+            Job.type.notin_(
+                ("backfill", "agri_bridge", "assessment_report", "season_growth_report")
+            ),
             Job.created_at >= wave_cutoff,
         )
     ).scalar()
     return int(rows or 0)
+
+
+def _parse_iso_date(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value[:10]).date()
+    except ValueError:
+        return None
+
+
+def _agri_rs_coverage_ok(
+    session,
+    field_id: uuid.UUID,
+    date_from: str | None,
+    date_to: str | None,
+) -> dict:
+    """True when agri.parcel_scene_products already cover the assessment window.
+
+    Used to avoid blocking PDF generation on staggered skip-noop backfill chunks
+    (90-day shards with 30s countdown) when S2/S1 lonlat rows already exist.
+    """
+    from sqlalchemy import text as sa_text
+
+    from app.core.agri_tags import parse_agri_land_id
+    from app.models.tables import Field
+
+    out = {
+        "ok": False,
+        "land_id": None,
+        "s2_dates": 0,
+        "s1_dates": 0,
+        "span_days": None,
+        "s2_min": None,
+        "s1_min": None,
+    }
+    start = _parse_iso_date(date_from)
+    end = _parse_iso_date(date_to)
+    if not start or not end or end < start:
+        return out
+
+    field = session.get(Field, field_id)
+    land_id = parse_agri_land_id(getattr(field, "tags_json", None) if field else None)
+    if not land_id:
+        return out
+    out["land_id"] = land_id
+
+    span_days = (end - start).days + 1
+    out["span_days"] = span_days
+    # Roughly ≥ monthly S2 and bi-monthly S1 across the window; clamp for short seasons.
+    s2_min = max(6, min(48, span_days // 30))
+    s1_min = max(3, min(24, span_days // 60))
+    out["s2_min"] = s2_min
+    out["s1_min"] = s1_min
+
+    row = (
+        session.execute(
+            sa_text(
+                """
+            SELECT
+              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
+              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
+            FROM agri.parcel_scene_products
+            WHERE land_id = :land_id
+              AND date >= :d0
+              AND date <= :d1
+              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
+              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+            """
+            ),
+            {"land_id": str(land_id), "d0": start, "d1": end},
+        )
+        .mappings()
+        .first()
+    )
+    s2_dates = int((row or {}).get("s2_dates") or 0)
+    s1_dates = int((row or {}).get("s1_dates") or 0)
+    out["s2_dates"] = s2_dates
+    out["s1_dates"] = s1_dates
+    out["ok"] = s2_dates >= s2_min and s1_dates >= s1_min
+    return out
 
 
 def _weather_row_count(
@@ -178,11 +261,14 @@ def bootstrap_pulls_ready(
     weather_rows = _weather_row_count(session, field_id, date_from, date_to)
     soil_ok = _soil_ready(session, field_id)
     active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+    coverage = _agri_rs_coverage_ok(session, field_id, date_from, date_to)
 
     weather_ok = weather_rows >= weather_min_rows
     # After top-level weather/soil/indices orchestration finishes, wait until
-    # child agri_optical / index jobs drain (or never started).
-    rs_ok = celery_ready and active_rs == 0
+    # child agri_optical / index jobs drain (or never started). If agri lonlat
+    # coverage for the window is already sufficient, do not block on staggered
+    # skip-noop backfill chunks still sitting in the ingest queue.
+    rs_ok = celery_ready and (active_rs == 0 or bool(coverage.get("ok")))
 
     elapsed_ok = True
     if started_at is not None and min_wait_seconds > 0:
@@ -208,6 +294,18 @@ def bootstrap_pulls_ready(
         "active_rs_jobs": active_rs,
         "rs_ok": rs_ok,
         "elapsed_ok": elapsed_ok,
+        "rs_coverage_ok": bool(coverage.get("ok")),
+        "rs_coverage": {
+            k: coverage.get(k)
+            for k in (
+                "land_id",
+                "s2_dates",
+                "s1_dates",
+                "s2_min",
+                "s1_min",
+                "span_days",
+            )
+        },
     }
 
 
@@ -329,6 +427,8 @@ def generate_assessment_report(
                     "soil_ok": status["soil_ok"],
                     "active_rs_jobs": status["active_rs_jobs"],
                     "rs_ok": status["rs_ok"],
+                    "rs_coverage_ok": status.get("rs_coverage_ok"),
+                    "rs_coverage": status.get("rs_coverage"),
                     "celery_ready": status["celery_ready"],
                     "pending_celery": len(status["pending_celery_ids"]),
                 }
