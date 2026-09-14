@@ -40,8 +40,23 @@ class LandAssessmentPdfSmoke(unittest.TestCase):
                 self.assertEqual(result["ai"]["yield_potential"]["level"], "中")
                 # scoring still produced a numeric score
                 self.assertIsInstance(result["score"], (int, float))
-                n_pages = len(PdfReader(result["out_path"]).pages)
-                self.assertLessEqual(n_pages, 10)
+                reader = PdfReader(result["out_path"])
+                n_pages = len(reader.pages)
+                self.assertLessEqual(n_pages, 11)  # ≤10 content + thin 目录
+                front = "".join((pg.extract_text() or "") for pg in reader.pages[:3])
+                self.assertIn("目录", front)
+                self.assertIn("二、地块基础画像", front)
+                self.assertTrue(
+                    (Path(result["charts_dir"]) / "score_radar.png").exists()
+                    or "score_radar.png" in (result.get("charts") or [])
+                )
+                all_text = "".join((pg.extract_text() or "") for pg in reader.pages)
+                self.assertIn("异常点", all_text)
+                self.assertIn("三、综合评分解释", all_text)
+                # Evidence columns / event ids when fixture has events
+                evs = (result.get("analysis") or {}).get("risk_events_evidence") or []
+                if evs:
+                    self.assertIn("E1", all_text)
 
 
 if __name__ == "__main__":

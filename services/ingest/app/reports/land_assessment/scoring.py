@@ -948,3 +948,161 @@ def compute_assessment(
             "peak_months": sorted(peak_months),
         },
     }
+
+
+def _phenology_stage_label(date_str: str) -> str:
+    """Map calendar date to coarse maize-season stage label (display only)."""
+    try:
+        m = int(date_str[5:7])
+        day = int(date_str[8:10])
+    except (TypeError, ValueError, IndexError):
+        return "—"
+    if m <= 6:
+        return "苗期"
+    if m == 7 and day < 20:
+        return "拔节—抽雄"
+    if m in (7, 8):
+        return "旺长"
+    if m == 9:
+        return "成熟回落"
+    return "季外"
+
+
+def enrich_risk_events(
+    events: list[dict[str, Any]] | None,
+    by_date: dict[str, dict[str, float]] | None,
+    *,
+    weather_summary: dict[str, Any] | None = None,
+    weather_history: dict[str, Any] | None = None,
+    ndvi_p30: float | None = None,
+    ndwi_p85: float | None = None,
+) -> list[dict[str, Any]]:
+    """Attach display-only evidence to program risk events (E1…).
+
+    Does **not** alter scoring. Uses only observed index means and optional
+    weather aggregates already present in the bundle — never invents numbers.
+    """
+    by_date = by_date or {}
+    out: list[dict[str, Any]] = []
+    months_wx: list[Any] = []
+    wh = weather_history or {}
+    for key in ("season_totals", "months", "monthly"):
+        raw = wh.get(key)
+        if isinstance(raw, list):
+            months_wx = raw
+            break
+
+    def _month_wx(ym: str) -> dict[str, Any] | None:
+        for row in months_wx:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("ym") or row.get("month") or "")
+            if label[:7] == ym[:7]:
+                return row
+        return None
+
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        row = dict(ev)
+        start = str(row.get("start") or "")[:10]
+        end = str(row.get("end") or start)[:10]
+        if not start:
+            out.append(row)
+            continue
+        try:
+            d0 = datetime.fromisoformat(start).date()
+            d1 = datetime.fromisoformat(end).date()
+        except ValueError:
+            out.append(row)
+            continue
+
+        ndvis: list[float] = []
+        evis: list[float] = []
+        ndwis: list[float] = []
+        scene_dates: list[str] = []
+        for d, layers in sorted(by_date.items()):
+            try:
+                dd = datetime.fromisoformat(d[:10]).date()
+            except ValueError:
+                continue
+            if dd < d0 or dd > d1:
+                continue
+            scene_dates.append(d[:10])
+            if layers.get("NDVI") is not None:
+                ndvis.append(float(layers["NDVI"]))
+            if layers.get("EVI") is not None:
+                evis.append(float(layers["EVI"]))
+            wet = layers.get("NDWI")
+            if wet is None:
+                wet = layers.get("MNDWI")
+            if wet is not None:
+                ndwis.append(float(wet))
+
+        mean_ndvi = round(float(np.mean(ndvis)), 3) if ndvis else None
+        mean_evi = round(float(np.mean(evis)), 3) if evis else None
+        mean_ndwi = round(float(np.mean(ndwis)), 3) if ndwis else None
+        min_ndvi = round(float(np.min(ndvis)), 3) if ndvis else None
+
+        typ = str(row.get("type") or "异常")
+        days = row.get("days")
+        bits = [typ]
+        if days is not None:
+            bits.append(f"持续{days}天")
+        if mean_ndvi is not None:
+            bit = f"均NDVI≈{mean_ndvi}"
+            if min_ndvi is not None and min_ndvi != mean_ndvi:
+                bit += f"（最低{min_ndvi}）"
+            if ndvi_p30 is not None:
+                bit += f"，对照生育期P30={round(float(ndvi_p30), 3)}"
+            bits.append(bit)
+        if mean_evi is not None:
+            bits.append(f"均EVI≈{mean_evi}")
+        if scene_dates:
+            bits.append(f"景数{len(scene_dates)}")
+        performance = "；".join(bits)
+
+        wx_bits: list[str] = []
+        if mean_ndwi is not None:
+            wet_note = f"同期均NDWI≈{mean_ndwi}"
+            if ndwi_p85 is not None and mean_ndwi > float(ndwi_p85):
+                wet_note += f"（高于生育期P85={round(float(ndwi_p85), 3)}，偏湿信号）"
+            wx_bits.append(wet_note)
+        ym = start[:7]
+        mx = _month_wx(ym)
+        if mx:
+            if mx.get("precip_mm") is not None:
+                wx_bits.append(f"{ym}降水≈{float(mx['precip_mm']):.0f} mm")
+            if mx.get("heat_days") is not None:
+                wx_bits.append(f"高温日{int(mx['heat_days'])}")
+            if mx.get("t_max_mean") is not None:
+                wx_bits.append(f"均最高温≈{float(mx['t_max_mean']):.1f}℃")
+        if not wx_bits and weather_summary:
+            heat = weather_summary.get("heat_stress_days")
+            deficit = weather_summary.get("water_deficit_mm")
+            if heat is not None:
+                wx_bits.append(f"近月热胁迫天{heat}（地块摘要，非事件窗精确值）")
+            if deficit is not None:
+                wx_bits.append(f"近月水分盈亏{deficit} mm（地块摘要）")
+        weather_text = "；".join(wx_bits) if wx_bits else "—"
+
+        mid = start if start == end else end
+        stage = _phenology_stage_label(mid)
+
+        row["mean_ndvi"] = mean_ndvi
+        row["mean_evi"] = mean_evi
+        row["mean_ndwi"] = mean_ndwi
+        row["min_ndvi"] = min_ndvi
+        row["n_scenes"] = len(scene_dates)
+        row["scene_dates"] = scene_dates
+        row["performance"] = performance
+        row["weather_moisture"] = weather_text
+        row["stage"] = stage
+        if start == end:
+            row["period_full"] = start
+        elif start[:4] == end[:4]:
+            row["period_full"] = f"{start}～{end[5:]}"
+        else:
+            row["period_full"] = f"{start}～{end}"
+        out.append(row)
+    return out

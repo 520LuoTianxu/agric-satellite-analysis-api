@@ -775,6 +775,90 @@ def render_weather_history_bars(
     return out_path
 
 
+def render_score_radar(
+    dimensions: list[dict[str, Any]] | dict[str, Any],
+    out_path: Path,
+    *,
+    title: str = "六维综合评分（程序）",
+) -> Path | None:
+    """Matplotlib hexagon/radar chart for the six assessment dimensions.
+
+    ``dimensions`` may be the scorecard ``dimensions`` list (with key/score)
+    or a mapping of key -> score. Order follows DIM keys used in the PDF.
+    """
+    order = (
+        ("crop", "作物匹配"),
+        ("soil", "土壤条件"),
+        ("vigor", "遥感长势"),
+        ("weather", "天气适宜"),
+        ("wet_safety", "抗渍/洪涝"),
+        ("drought_safety", "抗旱安全"),
+    )
+    by_key: dict[str, float] = {}
+    if isinstance(dimensions, dict):
+        for k, v in dimensions.items():
+            try:
+                by_key[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+    else:
+        for item in dimensions or []:
+            if not isinstance(item, dict) or not item.get("key"):
+                continue
+            try:
+                by_key[str(item["key"])] = float(item["score"])
+            except (TypeError, ValueError):
+                continue
+    scores = []
+    labels = []
+    for key, label in order:
+        if key not in by_key:
+            return None
+        scores.append(by_key[key])
+        labels.append(label)
+    if len(scores) != 6:
+        return None
+
+    _setup_font()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n = 6
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    scores_closed = scores + scores[:1]
+    angles_closed = angles + angles[:1]
+
+    fig, ax = plt.subplots(figsize=(5.6, 5.2), dpi=130, subplot_kw=dict(polar=True))
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_thetagrids(np.degrees(angles), labels, fontsize=10)
+    ax.set_ylim(0, 100)
+    ax.set_yticks([40, 55, 70, 85, 100])
+    ax.set_yticklabels(["40", "55", "70", "85", "100"], fontsize=7, color="#666")
+    ax.plot(angles_closed, scores_closed, color="#1f4d38", lw=2.0)
+    ax.fill(angles_closed, scores_closed, color="#52b788", alpha=0.28)
+    for ang, sc, lab in zip(angles, scores, labels):
+        ax.text(
+            ang,
+            min(100, sc + 8),
+            f"{sc:.0f}",
+            ha="center",
+            va="center",
+            fontsize=8,
+            color="#143d2b",
+            fontweight="bold",
+        )
+    # Reference rings for light thresholds
+    ax.plot(angles_closed, [70] * (n + 1), color="#1b7a3d", ls="--", lw=0.7, alpha=0.55)
+    ax.plot(angles_closed, [55] * (n + 1), color="#c48a00", ls="--", lw=0.7, alpha=0.45)
+    ax.set_title(title, fontsize=11, pad=14, color="#143d2b")
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def render_charts(
     by_date: dict[str, dict[str, float]],
     meta: dict[str, Any],

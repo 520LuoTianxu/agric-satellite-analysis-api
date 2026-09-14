@@ -16,6 +16,7 @@ from app.reports.land_assessment.charts import (
     pick_phenology_stages,
     pick_phenology_year,
     render_charts,
+    render_score_radar,
 )
 from app.reports.land_assessment.data_loader import (
     build_flood_evidence,
@@ -35,6 +36,7 @@ from app.reports.land_assessment.scoring import (
     build_narrative_bridge,
     compute_assessment,
     compute_phenology_stage_summary,
+    enrich_risk_events,
 )
 
 
@@ -238,6 +240,23 @@ def generate_assessment_pdf(
         uncropped_years=(computed.get("rs") or {}).get("possible_uncropped_years"),
     )
 
+    # Display-only event evidence (NDVI/weather/stage) — does not change scores
+    meta = computed.get("meta") or {}
+    enriched_events = enrich_risk_events(
+        (computed.get("risk") or {}).get("events") or [],
+        computed.get("by_date") or {},
+        weather_summary=bundle.get("weather_summary") or {},
+        weather_history=analysis.get("weather_history")
+        or bundle.get("weather_history")
+        or {},
+        ndvi_p30=meta.get("ndvi_p30"),
+        ndwi_p85=meta.get("ndwi_p85"),
+    )
+    analysis["risk_events_evidence"] = enriched_events
+    # Keep risk.events in sync for LLM facts + PDF
+    if isinstance(computed.get("risk"), dict):
+        computed["risk"]["events"] = enriched_events
+
     chart_paths = render_charts(
         computed["by_date"],
         computed["meta"],
@@ -249,6 +268,12 @@ def generate_assessment_pdf(
         write_individual_stage_maps=False,
         analysis=analysis,
     )
+    radar = render_score_radar(
+        (computed.get("scorecard") or {}).get("dimensions") or [],
+        charts_dir / "score_radar.png",
+    )
+    if radar:
+        chart_paths["score_radar.png"] = radar
 
     if out_path is None:
         out_path = tmp_root / assessment_pdf_filename(field.get("name"))
