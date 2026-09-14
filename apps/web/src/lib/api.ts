@@ -671,6 +671,12 @@ export interface AssessmentGenerateBody {
     date_from?: string;
     years?: number;
     pull_data?: boolean;
+    /** Temporary cdfinance H5 Bearer for site-admission / NPK prefetch */
+    cdfinance_token?: string;
+    /** Alias of cdfinance_token */
+    token?: string;
+    /** cdfinance groupId for groupSiteAdmission */
+    group_id?: string | number;
 }
 
 export const assessmentApi = {
@@ -720,6 +726,9 @@ export interface SeasonGrowthGenerateBody {
     label?: string;
     material_keys?: string[];
     pull_data?: boolean;
+    cdfinance_token?: string;
+    token?: string;
+    group_id?: string | number;
 }
 
 export interface SeasonGrowthMaterialUpload {

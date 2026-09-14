@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,12 @@ from app.models.tables import Field, Job
 from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.window import resolve_assessment_window
 from app.schemas.monitoring import JobOut
+from app.services.cdfinance_report_prefetch import (
+    field_has_site_admission,
+    normalize_optional_group_id,
+    prefetch_cdfinance_for_report,
+    resolve_request_token,
+)
 from pydantic import BaseModel, Field as PydanticField, field_validator, model_validator
 
 
@@ -45,6 +51,18 @@ class AssessmentGenerateRequest(BaseModel):
     pull_data: bool = PydanticField(
         default=True,
         description="Queue weather + RS indices + soil bootstrap before PDF",
+    )
+    cdfinance_token: str | None = PydanticField(
+        default=None,
+        description="Temporary cdfinance H5 Bearer for site-admission / NPK prefetch",
+    )
+    token: str | None = PydanticField(
+        default=None,
+        description="Alias of cdfinance_token",
+    )
+    group_id: str | int | None = PydanticField(
+        default=None,
+        description="cdfinance groupId for groupSiteAdmission questionnaire",
     )
 
     @field_validator("date_from", mode="before")
@@ -117,6 +135,7 @@ async def create_assessment_report(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     body: AssessmentGenerateRequest | None = None,
+    authorization: Annotated[str | None, Header()] = None,
 ):
     """Enqueue data pulls (optional) + 选地体检（白话版）PDF generation.
 
@@ -161,6 +180,31 @@ async def create_assessment_report(
 
     pull_data = bool(req.pull_data)
 
+    # Soft cdfinance prefetch (site admission + NPK) before enqueue — never blocks PDF.
+    cdfinance_token = resolve_request_token(
+        cdfinance_token=req.cdfinance_token,
+        token=req.token,
+        authorization=authorization,
+    )
+    group_id = normalize_optional_group_id(req.group_id)
+    cdfinance_prefetch: dict[str, Any] | None = None
+    if cdfinance_token:
+        cdfinance_prefetch = await prefetch_cdfinance_for_report(
+            db,
+            field,
+            token=cdfinance_token,
+            group_id=group_id,
+            force=True,
+        )
+        await db.flush()
+    elif not await field_has_site_admission(db, field_id):
+        # Soft hint only — UI may toast; generation still proceeds.
+        logger.info(
+            "assessment_site_admission_missing",
+            field_id=str(field_id),
+            hint="pass cdfinance_token + group_id to prefetch questionnaire",
+        )
+
     # Reuse in-flight job if one is pending/running
     existing = (
         await db.execute(
@@ -194,6 +238,9 @@ async def create_assessment_report(
             "years": years_used,
             "pull_data": pull_data,
             "weather_days": weather_days,
+            # Never store Bearer token; only soft status for debugging.
+            "cdfinance_prefetch": cdfinance_prefetch,
+            "group_id": group_id,
         },
     )
     db.add(job)
@@ -226,6 +273,10 @@ async def create_assessment_report(
                     "date_from": date_from,
                     "date_to": date_to,
                     "years": years_used,
+                    "cdfinance_prefetched": bool(
+                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+                    ),
+                    "group_id": group_id,
                 },
             }
             bootstrap_task_id = publish_api_task(
@@ -256,6 +307,10 @@ async def create_assessment_report(
                     "date_to": date_to,
                     "years": years_used,
                     "pull_data": False,
+                    "cdfinance_prefetched": bool(
+                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+                    ),
+                    "group_id": group_id,
                 },
             )
             logger.info(
