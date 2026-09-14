@@ -338,6 +338,7 @@ def generate_assessment_pdf(
         weather_summary=bundle["weather_summary"],
         analysis=analysis,
         flood_evidence=flood_evidence,
+        site_admission=bundle.get("site_admission"),
     )
     ai = generate_land_assessment_narrative(llm_facts, timeout=180.0, parallel=True)
 
@@ -354,6 +355,7 @@ def generate_assessment_pdf(
         flood_evidence=flood_evidence,
         analysis=analysis,
         ai=ai,
+        site_admission=bundle.get("site_admission"),
     )
 
     ov = computed["scorecard"]["overall"]

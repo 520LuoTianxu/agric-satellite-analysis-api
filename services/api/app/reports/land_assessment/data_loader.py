@@ -699,6 +699,69 @@ def load_suitability_sync(
     return out
 
 
+def load_site_admission(
+    session: Session, field_id: uuid.UUID, land_id: str | None = None
+) -> dict[str, Any] | None:
+    """Optional cdfinance site-admission questionnaire; soft-absent → None."""
+    try:
+        from app.models.tables import GroupSiteAdmission
+    except ImportError:
+        return None
+    from app.core.agri_tags import parse_cdfinance_group_id
+    from app.models.tables import Field as FieldModel
+
+    row = session.execute(
+        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+    ).scalar_one_or_none()
+    if row is None and land_id:
+        # Resolve group_id from agri parcels
+        from sqlalchemy import text as sa_text
+
+        gid = session.execute(
+            sa_text(
+                "SELECT group_id::text FROM agri.land_parcels WHERE land_id = :lid LIMIT 1"
+            ),
+            {"lid": land_id},
+        ).scalar()
+        if gid:
+            row = session.execute(
+                select(GroupSiteAdmission).where(
+                    GroupSiteAdmission.group_id == str(gid)
+                )
+            ).scalar_one_or_none()
+    if row is None:
+        field = session.get(FieldModel, field_id)
+        if field is not None:
+            tagged = parse_cdfinance_group_id(field.tags_json)
+            if tagged:
+                row = session.execute(
+                    select(GroupSiteAdmission).where(
+                        GroupSiteAdmission.group_id == tagged
+                    )
+                ).scalar_one_or_none()
+    if row is None:
+        return None
+    summary = row.summary_json if isinstance(row.summary_json, dict) else {}
+    out = {
+        "group_id": row.group_id,
+        "land_id": row.land_id,
+        "status": row.status,
+        "score": row.score,
+        "score_bank": row.score_bank,
+        "total_area_mu": row.total_area_mu,
+        "avg_yield": row.avg_yield,
+        "mu_profit": row.mu_profit,
+        "key_labels": summary.get("key_labels") or {},
+        "item_answers": summary.get("item_answers") or {},
+        "red_line_answers": summary.get("red_line_answers") or {},
+        "planned_crops": summary.get("planned_crops") or [],
+        "dimensions": summary.get("dimensions") or [],
+        "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
+        "source": row.source,
+    }
+    return out
+
+
 def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     """Load everything needed to score + render a field assessment."""
     field = session.get(Field, field_id)
@@ -730,6 +793,7 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     )
 
     suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
+    site_admission = load_site_admission(session, field_id, land_id=land_id)
 
     tags = field.tags_json or []
     boundary = (
@@ -761,6 +825,7 @@ def load_field_bundle(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         "weather_stress": wstress,
         "weather_history": weather_history,
         "suitability": suit,
+        "site_admission": site_admission,
     }
 
 
@@ -833,6 +898,11 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
         "weather_stress": wstress,
         "weather_history": whist,
         "suitability": suit,
+        "site_admission": (
+            json.loads((data_dir / "site_admission.json").read_text(encoding="utf-8"))
+            if (data_dir / "site_admission.json").exists()
+            else None
+        ),
     }
 
 

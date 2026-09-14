@@ -512,3 +512,50 @@ class SoilNutrientNpk(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+
+class GroupSiteAdmission(Base):
+    """cdfinance groupSiteAdmission questionnaire snapshot (pre-flow).
+
+    Keyed by vendor ``group_id``; optionally linked to an OpenFarm field /
+    agri ``land_id``. Soft-absent for assessment when no row.
+    """
+
+    __tablename__ = "group_site_admission"
+    __table_args__ = (
+        UniqueConstraint("group_id", name="uq_group_site_admission_group"),
+        Index("idx_group_site_admission_field_id", "field_id"),
+        Index("idx_group_site_admission_land_id", "land_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    )
+    field_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("fields.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, server_default="cdfinance_groupSiteAdmission"
+    )
+    status: Mapped[str | None] = mapped_column(String(32))
+    score: Mapped[float | None] = mapped_column(Float)
+    score_bank: Mapped[str | None] = mapped_column(String(80))
+    survey_id: Mapped[int | None] = mapped_column(BigInteger)
+    answer_id: Mapped[int | None] = mapped_column(BigInteger)
+    total_area_mu: Mapped[float | None] = mapped_column(Float)
+    avg_yield: Mapped[float | None] = mapped_column(Float)
+    mu_profit: Mapped[float | None] = mapped_column(Float)
+    summary_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    vendor_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

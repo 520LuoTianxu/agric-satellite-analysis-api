@@ -280,6 +280,7 @@ def render_pdf(
     flood_evidence: dict[str, Any] | None = None,
     analysis: dict[str, Any] | None = None,
     ai: dict[str, Any] | None = None,
+    site_admission: dict[str, Any] | None = None,
 ) -> Path:
     """Render ≤10-page land-assessment PDF from program facts + AI JSON."""
     _register_fonts()
@@ -288,6 +289,7 @@ def render_pdf(
     chart_paths = chart_paths or {}
     analysis = analysis or {}
     ai = ai or {}
+    site_admission = site_admission if isinstance(site_admission, dict) else None
 
     ov = scorecard["overall"]
     dims = {d["key"]: d for d in scorecard["dimensions"]}
@@ -559,11 +561,7 @@ def render_pdf(
         ),
         (
             "pH",
-            (
-                str(soil.get("avg_ph"))
-                if soil.get("avg_ph") is not None
-                else "—"
-            ),
+            (str(soil.get("avg_ph")) if soil.get("avg_ph") is not None else "—"),
         ),
         (
             "排水",
@@ -617,6 +615,46 @@ def render_pdf(
             ]
         )
     story.append(kv_card("土壤关键指标（程序）", _soil_rows))
+    if site_admission:
+        _sa = site_admission
+        _labels = (
+            _sa.get("key_labels") if isinstance(_sa.get("key_labels"), dict) else {}
+        )
+        _sa_rows: list[tuple[str, str]] = [
+            ("问卷分组", str(_sa.get("group_id") or "—")),
+            (
+                "现场评分",
+                (
+                    f"{_sa.get('score')}（{_sa.get('status') or '—'}）"
+                    if _sa.get("score") is not None
+                    else (_sa.get("status") or "—")
+                ),
+            ),
+            (
+                "评估面积",
+                (
+                    f"{_sa.get('total_area_mu')} 亩"
+                    if _sa.get("total_area_mu") is not None
+                    else "—"
+                ),
+            ),
+        ]
+        for k, label in (
+            ("soil_type", "土壤类型"),
+            ("land_nature", "土地性质"),
+            ("terrain", "地形地势"),
+            ("water_source", "水源"),
+            ("water_flow", "出水量"),
+            ("drainage", "排水"),
+            ("power", "电力"),
+            ("traffic", "交通"),
+        ):
+            if _labels.get(k):
+                _sa_rows.append((label, str(_labels[k])))
+        crops = _sa.get("planned_crops") or []
+        if crops:
+            _sa_rows.append(("拟种作物", "、".join(str(c) for c in crops)))
+        story.append(kv_card("现场准入问卷（中和农信）", _sa_rows))
     wh_plain = analysis.get("weather_history_plain") or ""
     climate_rows = [("气候本底摘要", wh_plain or "—")]
     if weather_summary:
@@ -1066,6 +1104,24 @@ def render_pdf(
     story.append(PageBreak())
     story.append(section_title("八、种植管理建议"))
     story.append(hr())
+    if site_admission:
+        _lbl = site_admission.get("key_labels") or {}
+        bits = []
+        if _lbl.get("drainage"):
+            bits.append(f"排水：{_lbl['drainage']}")
+        if _lbl.get("water_source"):
+            bits.append(f"水源：{_lbl['water_source']}")
+        if _lbl.get("soil_type"):
+            bits.append(f"土类：{_lbl['soil_type']}")
+        if bits:
+            story.append(
+                p(
+                    "现场问卷要点（程序）："
+                    + "；".join(bits)
+                    + "。以下管理建议应与之衔接。",
+                    "small",
+                )
+            )
     story.append(
         ai_block(
             "品种方向",

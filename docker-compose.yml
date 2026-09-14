@@ -120,6 +120,14 @@ services:
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
       BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
+
+      CDFINANCE_SOIL_BASE_URL: ${CDFINANCE_SOIL_BASE_URL:-https://joint-venture.cdfinance.com.cn/agric-api}
+      CDFINANCE_APP_KEY: ${CDFINANCE_APP_KEY:-83f94deg-k4d3-5gc4-0a6d-fd995a6f03g5}
+      CDFINANCE_CHANNEL_NET: ${CDFINANCE_CHANNEL_NET:-H5}
+      CDFINANCE_HR_BASE_ID: ${CDFINANCE_HR_BASE_ID:-38}
+      CDFINANCE_ORIGIN: ${CDFINANCE_ORIGIN:-https://joint-venture.cdfinance.com.cn}
+      CDFINANCE_REFERER: ${CDFINANCE_REFERER:-https://joint-venture.cdfinance.com.cn/}
+      CDFINANCE_SOIL_TIMEOUT_SECONDS: ${CDFINANCE_SOIL_TIMEOUT_SECONDS:-60}
     volumes:
       - scratch:/data/scratch
     depends_on:

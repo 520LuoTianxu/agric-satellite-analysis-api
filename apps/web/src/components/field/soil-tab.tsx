@@ -14,6 +14,7 @@ import type {
     SoilWeatherStressResponse,
     SamplingZonesResponse,
     SoilNpk,
+    SiteAdmission,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -126,7 +127,11 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
     const [npkToken, setNpkToken] = useState("");
     const [npkLoading, setNpkLoading] = useState(false);
     const [npkForce, setNpkForce] = useState(false);
-
+    const [siteAdmission, setSiteAdmission] = useState<SiteAdmission | null>(null);
+    const [siteGroupId, setSiteGroupId] = useState("");
+    const [siteToken, setSiteToken] = useState("");
+    const [siteLoading, setSiteLoading] = useState(false);
+    const [siteForce, setSiteForce] = useState(false);
 
     const handleFetchNpk = useCallback(async () => {
         const token = npkToken.trim();
@@ -149,6 +154,33 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
             setNpkLoading(false);
         }
     }, [fieldId, npkToken, npkForce, npk, t]);
+
+    const handleFetchSiteAdmission = useCallback(async () => {
+        const token = siteToken.trim();
+        if (!token) {
+            toast.error(t("siteAdmissionTokenRequired"));
+            return;
+        }
+        setSiteLoading(true);
+        try {
+            const res = await soilApi.fetchSiteAdmission(fieldId, {
+                token,
+                group_id: siteGroupId.trim() || undefined,
+                force: siteForce || !!siteAdmission,
+            });
+            setSiteAdmission(res.admission);
+            if (res.admission.group_id) {
+                setSiteGroupId(String(res.admission.group_id));
+            }
+            toast.success(res.message || t("siteAdmissionFetchOk"));
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : t("siteAdmissionFetchFail");
+            toast.error(msg);
+        } finally {
+            setSiteLoading(false);
+        }
+    }, [fieldId, siteToken, siteGroupId, siteForce, siteAdmission, t]);
+
 
     /* ── Sampling zone map markers (target / bullseye style) ── */
 
@@ -319,6 +351,14 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                 setNpk(cachedNpk);
             } catch {
                 setNpk(null);
+            }
+
+            try {
+                const cachedSite = await soilApi.getSiteAdmission(fieldId);
+                setSiteAdmission(cachedSite);
+                if (cachedSite.group_id) setSiteGroupId(String(cachedSite.group_id));
+            } catch {
+                setSiteAdmission(null);
             }
 
             // Load intelligence data (only if soil data exists)
@@ -870,6 +910,105 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                                     <><Loader2 className="h-3 w-3 animate-spin mr-1" />{t("npkFetching")}</>
                                 ) : (
                                     npk ? t("npkRefetch") : t("npkFetch")
+                                )}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+
+            {/* Site admission questionnaire (cdfinance) */}
+            <section className="space-y-2">
+                <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                    <MapPin className="h-4 w-4" />
+                    {t("siteAdmissionTitle")}
+                </h4>
+                <div className="rounded-lg border bg-card p-3 space-y-3">
+                    {siteAdmission ? (
+                        <div className="space-y-2">
+                            <div className="grid grid-cols-3 gap-2">
+                                <div className="rounded-md bg-surface-2 p-2 text-center">
+                                    <div className="text-[10px] text-muted-foreground">{t("siteAdmissionScore")}</div>
+                                    <div className="text-lg font-semibold tabular-nums">
+                                        {siteAdmission.score != null ? siteAdmission.score : "—"}
+                                    </div>
+                                    <div className="text-[10px] text-muted-foreground">{siteAdmission.status || "—"}</div>
+                                </div>
+                                <div className="rounded-md bg-surface-2 p-2 text-center">
+                                    <div className="text-[10px] text-muted-foreground">{t("siteAdmissionArea")}</div>
+                                    <div className="text-lg font-semibold tabular-nums">
+                                        {siteAdmission.total_area_mu != null ? siteAdmission.total_area_mu : "—"}
+                                    </div>
+                                    <div className="text-[10px] text-muted-foreground">mu</div>
+                                </div>
+                                <div className="rounded-md bg-surface-2 p-2 text-center">
+                                    <div className="text-[10px] text-muted-foreground">groupId</div>
+                                    <div className="text-sm font-semibold tabular-nums break-all">
+                                        {siteAdmission.group_id}
+                                    </div>
+                                </div>
+                            </div>
+                            {siteAdmission.planned_crops && siteAdmission.planned_crops.length > 0 && (
+                                <p className="text-[11px] text-muted-foreground">
+                                    {t("siteAdmissionCrops")}: {siteAdmission.planned_crops.join("、")}
+                                </p>
+                            )}
+                            {siteAdmission.key_labels && Object.keys(siteAdmission.key_labels).length > 0 && (
+                                <div>
+                                    <div className="text-[10px] text-muted-foreground mb-1">{t("siteAdmissionKeyAnswers")}</div>
+                                    <div className="flex flex-wrap gap-1">
+                                        {Object.entries(siteAdmission.key_labels).map(([k, v]) => (
+                                            <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-muted">
+                                                {String(v)}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <p className="text-[11px] text-muted-foreground">{t("siteAdmissionEmpty")}</p>
+                    )}
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] text-muted-foreground">{t("siteAdmissionGroupId")}</label>
+                        <input
+                            type="text"
+                            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                            placeholder={t("siteAdmissionGroupPlaceholder")}
+                            value={siteGroupId}
+                            onChange={(e) => setSiteGroupId(e.target.value)}
+                            autoComplete="off"
+                        />
+                        <label className="text-[10px] text-muted-foreground">{t("siteAdmissionTokenPrompt")}</label>
+                        <input
+                            type="password"
+                            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                            placeholder={t("siteAdmissionTokenPlaceholder")}
+                            value={siteToken}
+                            onChange={(e) => setSiteToken(e.target.value)}
+                            autoComplete="off"
+                        />
+                        <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={siteForce}
+                                    onChange={(e) => setSiteForce(e.target.checked)}
+                                />
+                                {t("siteAdmissionForce")}
+                            </label>
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                className="ml-auto h-7 text-xs"
+                                disabled={siteLoading}
+                                onClick={handleFetchSiteAdmission}
+                            >
+                                {siteLoading ? (
+                                    <><Loader2 className="h-3 w-3 animate-spin mr-1" />{t("siteAdmissionFetching")}</>
+                                ) : (
+                                    siteAdmission ? t("siteAdmissionRefetch") : t("siteAdmissionFetch")
                                 )}
                             </Button>
                         </div>

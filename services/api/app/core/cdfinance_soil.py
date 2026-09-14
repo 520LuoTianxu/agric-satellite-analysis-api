@@ -146,7 +146,9 @@ def normalize_vendor_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(sqi, dict):
         try:
             out["sqi_score"] = (
-                float(sqi["total_score"]) if sqi.get("total_score") is not None else None
+                float(sqi["total_score"])
+                if sqi.get("total_score") is not None
+                else None
             )
         except (TypeError, ValueError):
             out["sqi_score"] = None
@@ -237,7 +239,11 @@ async def analyze_soil_v2(
     if base_id:
         headers["hr-base-id"] = str(base_id)
 
-    to = timeout if timeout is not None else float(settings.cdfinance_soil_timeout_seconds)
+    to = (
+        timeout
+        if timeout is not None
+        else float(settings.cdfinance_soil_timeout_seconds)
+    )
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=to)
     try:
