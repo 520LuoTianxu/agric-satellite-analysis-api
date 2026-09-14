@@ -339,6 +339,28 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
     land_id = parse_agri_land_id(field.tags_json)
     if not land_id:
         return None
+
+    try:
+        from openfarm_common.internal_api import agri_land_meta, internal_api_enabled
+    except ImportError:
+        internal_api_enabled = lambda: False  # noqa: E731
+        agri_land_meta = None  # type: ignore
+
+    if agri_land_meta is not None and internal_api_enabled():
+        try:
+            meta = agri_land_meta(str(land_id))
+            return {
+                "land_id": meta.get("land_id") or land_id,
+                "tile_id": meta.get("tile_id"),
+                "land_name": meta.get("land_name") or field.name,
+            }
+        except Exception as e:
+            logger.warning(
+                "agri_land_meta_http_failed falling_back_db",
+                land_id=land_id,
+                error=str(e),
+            )
+
     row = (
         session.execute(
             text(

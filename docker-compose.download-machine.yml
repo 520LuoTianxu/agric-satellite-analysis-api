@@ -8,12 +8,13 @@
 #     up -d --build ingest storage beat tiler mq_consumer decloud
 #
 # REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
-# Claim mode env (set in .env when enabling):
+# Internal HTTP (D2 reads + optional D1 claim) — set in .env:
 #   API_BASE_URL=http://<api-lb>:8000
 #   INTERNAL_API_TOKEN=<same as API>
 #   WORKER_ID=download-1
 #   WORK_CLAIM_INTERVAL_SEC=4
-#   WORK_QUEUE_MODE=claim   # optional; default legacy keeps MQ consumer
+#   WORK_QUEUE_MODE=claim   # optional; leave legacy until cutover (do not force)
+# ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2).
 #
 # Secrets stay in .env / docker-compose.dev.yml — never hard-code credentials here.
 
@@ -34,6 +35,9 @@ services:
     depends_on: !reset []
     restart: unless-stopped
     environment:
+      # D2: prefer internal HTTP reads when set (writes still use DATABASE_URL until D3)
+      API_BASE_URL: ${API_BASE_URL:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       MPLCONFIGDIR: /tmp/matplotlib
       SYNC_DB_POOL_SIZE: "8"
       SYNC_DB_MAX_OVERFLOW: "8"

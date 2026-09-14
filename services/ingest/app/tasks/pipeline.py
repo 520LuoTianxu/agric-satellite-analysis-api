@@ -159,10 +159,37 @@ def existing_layer_dates(
 
 
 def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
-    """Dates already present in agri.parcel_scene_products for land_id + sensor."""
-    from sqlalchemy import text as sa_text
+    """Dates already present in agri.parcel_scene_products for land_id + sensor.
 
-    from app.core.date_coerce import dates_from_sql_rows
+    Prefers internal HTTP when ``API_BASE_URL`` + ``INTERNAL_API_TOKEN`` are set
+    (download-host D2); falls back to SyncSession otherwise.
+    """
+    from app.core.date_coerce import coerce_to_date, dates_from_sql_rows
+
+    try:
+        from openfarm_common.internal_api import agri_scene_dates, internal_api_enabled
+    except ImportError:
+        internal_api_enabled = lambda: False  # noqa: E731
+        agri_scene_dates = None  # type: ignore
+
+    if agri_scene_dates is not None and internal_api_enabled():
+        try:
+            iso_dates = agri_scene_dates(str(land_id), sensor=str(sensor))
+            out: set[date] = set()
+            for raw in iso_dates:
+                d = coerce_to_date(raw)
+                if d is not None:
+                    out.add(d)
+            return out
+        except Exception as e:
+            logger.warning(
+                "agri_scene_dates_http_failed falling_back_db",
+                land_id=str(land_id),
+                sensor=sensor,
+                error=str(e),
+            )
+
+    from sqlalchemy import text as sa_text
 
     rows = session.execute(
         sa_text(

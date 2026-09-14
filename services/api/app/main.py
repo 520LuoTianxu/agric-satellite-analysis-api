@@ -33,6 +33,8 @@ from app.routers import (
     mq_tasks,
     internal_work,
     internal_fields,
+    internal_jobs,
+    internal_agri,
 )
 
 
@@ -107,6 +109,8 @@ app.include_router(soil.router, prefix=PREFIX, tags=["soil"])
 app.include_router(mq_tasks.router, prefix=PREFIX, tags=["mq"])
 app.include_router(internal_work.router, prefix=PREFIX)
 app.include_router(internal_fields.router, prefix=PREFIX)
+app.include_router(internal_jobs.router, prefix=PREFIX)
+app.include_router(internal_agri.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────
