@@ -213,7 +213,6 @@ async def create_season_growth_report(
 
     try:
         from app.mq_publish import publish_api_task
-        from app.services.work_items import should_publish_mq
 
         season_extras: dict[str, Any] = {
             "job_id": str(job.id),
@@ -228,24 +227,27 @@ async def create_season_growth_report(
             ),
             "group_id": group_id,
         }
-        work_id = await _maybe_enqueue_season_growth_work(
-            db,
-            job_id=str(job.id),
-            field_id=str(field_id),
-            extras=season_extras,
-        )
-        if work_id:
-            logger.info(
-                "season_growth_work_item_enqueued",
+        # pull_data → field_bootstrap(+followup) only (same race fix as assessment).
+        if not pull_data:
+            work_id = await _maybe_enqueue_season_growth_work(
+                db,
                 job_id=str(job.id),
-                work_id=work_id,
-                pull_data=pull_data,
+                field_id=str(field_id),
+                extras=season_extras,
             )
+            if work_id:
+                logger.info(
+                    "season_growth_work_item_enqueued",
+                    job_id=str(job.id),
+                    work_id=work_id,
+                    pull_data=False,
+                )
 
-        if pull_data and should_publish_mq():
+        if pull_data:
             # Do NOT publish season_growth_report in parallel — that raced PDF ahead
             # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out with
             # allow_agri and enqueues season growth as followup after Celery ids.
+            # publish_api_task also inserts work_items when dual|claim (D4).
             season_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
                 "date_from": body.start_date,
@@ -285,7 +287,7 @@ async def create_season_growth_report(
                 weather_days=weather_days,
                 pull_data=True,
             )
-        elif should_publish_mq():
+        else:
             mq_task_id = publish_api_task(
                 type="season_growth_report",
                 field_id=str(field_id),

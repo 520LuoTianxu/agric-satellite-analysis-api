@@ -17,7 +17,23 @@ CLAIMABLE_TYPES = frozenset(
     {
         "assessment_report",
         "season_growth_report",
-        # Future: agri_optical, decloud, field_bootstrap, …
+        "field_bootstrap",
+        "satellite_analysis",  # agri optical + S1 chunk wave via backfill
+        "agri_bridge",
+        "weather_backfill",
+        "soil_fetch",
+    }
+)
+
+# Types where claim agent completes the lease after Celery dispatch (fan-out /
+# fire-and-forget). Report types stay leased until the Celery task POSTs complete.
+COMPLETE_ON_DISPATCH_TYPES = frozenset(
+    {
+        "field_bootstrap",
+        "satellite_analysis",
+        "agri_bridge",
+        "weather_backfill",
+        "soil_fetch",
     }
 )
 
@@ -35,6 +51,82 @@ def should_enqueue_work_items() -> bool:
 
 def should_publish_mq() -> bool:
     return work_queue_mode() in ("legacy", "dual")
+
+
+def should_run_claim_agent() -> bool:
+    """Download claim poller may run only in claim mode (never dual).
+
+    dual = API enqueues work_items AND publishes MQ; download must consume MQ
+    only, otherwise the same logical task is double-dispatched.
+    """
+    return work_queue_mode() == "claim"
+
+
+def work_item_idempotency_key(
+    type: str,
+    *,
+    task_id: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> str | None:
+    """Stable idempotency key for enqueue from publish / routers."""
+    extras = extras or {}
+    job_id = extras.get("job_id")
+    if type in ("assessment_report", "season_growth_report") and job_id:
+        return f"{type}:{job_id}"
+    if type == "soil_fetch" and job_id:
+        return f"{type}:{job_id}"
+    if task_id:
+        return f"{type}:{task_id}"
+    return None
+
+
+def enqueue_work_item_sync(
+    *,
+    type: str,
+    payload: dict[str, Any] | None = None,
+    priority: int = 0,
+    idempotency_key: str | None = None,
+) -> str | None:
+    """Sync insert for publish_api_task path (API has DATABASE_URL).
+
+    Returns work item id string, or None when type is not claimable.
+    """
+    if type not in CLAIMABLE_TYPES:
+        return None
+    payload = dict(payload or {})
+    from openfarm_common.database_sync import SyncSession
+    from app.models.tables import WorkItem
+
+    session = SyncSession()
+    try:
+        if idempotency_key:
+            existing = session.execute(
+                select(WorkItem).where(WorkItem.idempotency_key == idempotency_key)
+            ).scalar_one_or_none()
+            if existing:
+                return str(existing.id)
+        item = WorkItem(
+            type=type,
+            payload_json=payload,
+            status="pending",
+            priority=int(priority),
+            idempotency_key=idempotency_key,
+            attempts=0,
+        )
+        session.add(item)
+        session.commit()
+        logger.info(
+            "work_item_enqueued_sync",
+            work_id=str(item.id),
+            type=type,
+            idempotency_key=idempotency_key,
+        )
+        return str(item.id)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 async def reaper_expired_leases(db: AsyncSession) -> int:
@@ -281,14 +373,18 @@ async def fail_work_item(
 
 __all__ = [
     "CLAIMABLE_TYPES",
+    "COMPLETE_ON_DISPATCH_TYPES",
     "claim_work_items",
     "complete_work_item",
     "enqueue_work_item",
+    "enqueue_work_item_sync",
     "fail_work_item",
     "heartbeat_work_item",
     "progress_work_item",
     "reaper_expired_leases",
     "should_enqueue_work_items",
     "should_publish_mq",
+    "should_run_claim_agent",
+    "work_item_idempotency_key",
     "work_queue_mode",
 ]
