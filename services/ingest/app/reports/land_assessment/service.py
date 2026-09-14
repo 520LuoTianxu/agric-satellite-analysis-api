@@ -26,6 +26,10 @@ from app.reports.land_assessment.data_loader import (
     load_field_bundle,
     load_oss_media_for_dates,
 )
+from app.reports.land_assessment.ai_analysis import (
+    facts_for_llm,
+    generate_land_assessment_narrative,
+)
 from app.reports.land_assessment.pdf_render import render_pdf
 from app.reports.land_assessment.scoring import (
     build_narrative_bridge,
@@ -250,6 +254,18 @@ def generate_assessment_pdf(
         out_path = tmp_root / assessment_pdf_filename(field.get("name"))
     out_path = Path(out_path)
 
+    llm_facts = facts_for_llm(
+        field=field,
+        scorecard=computed["scorecard"],
+        rs=computed["rs"],
+        risk=computed["risk"],
+        soil=bundle["soil"],
+        weather_summary=bundle["weather_summary"],
+        analysis=analysis,
+        flood_evidence=flood_evidence,
+    )
+    ai = generate_land_assessment_narrative(llm_facts, timeout=120.0)
+
     render_pdf(
         out_path=out_path,
         field=field,
@@ -262,6 +278,7 @@ def generate_assessment_pdf(
         title_suffix="OpenFarm",
         flood_evidence=flood_evidence,
         analysis=analysis,
+        ai=ai,
     )
 
     ov = computed["scorecard"]["overall"]
@@ -320,6 +337,7 @@ def generate_assessment_pdf(
         "risk": computed["risk"],
         "flood_evidence": flood_evidence,
         "analysis": analysis,
+        "ai": ai,
         "charts_dir": str(charts_dir),
         "charts": chart_names,
     }

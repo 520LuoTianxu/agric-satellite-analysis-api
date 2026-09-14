@@ -15,11 +15,13 @@ DEFAULT_BASE_URL = (
 )
 DEFAULT_MODEL = "qwen3.7-flash"
 
+AI_FAIL = "AI 分析失败"
+
 SYSTEM_PROMPT = """你是资深农学与遥感分析助手，撰写面向农户与农技人员的中文「生育期长势分析报告」解读。
 只能基于用户提供的 JSON 事实撰写；不得编造数值、日期、景数、等级、百分比或田间事实。
 
 硬性规则：
-1. 程序拥有全部数字（NDVI/NDMI/EVI/MNDWI/VV/VH、日期、景数、等级、收获）。你只解读，不重算、不发明。
+1. 程序拥有全部数字（NDVI/NDMI/EVI/MNDWI/VV/VH、日期、景数、等级、收获）。你只解读，不重算、不发明、不改写程序分数。
 2. 不得编造天气、播种、品种、土壤、产量、墒情、成熟度；缺失则写「未提供，需进一步确认」。
 3. 语气必须谨慎：使用 提示/可能/疑似/需进一步确认。禁止虚假因果。
 4. 不能仅凭 NDVI 推断产量损失或写「生物量积累达标」「生物量达标」；应写冠层绿度。
@@ -29,10 +31,13 @@ SYSTEM_PROMPT = """你是资深农学与遥感分析助手，撰写面向农户�
 8. 严禁散文出现英文字段名/JSON 键（如 flood_scene_count、status=ok、detected、low）。
 9. 物候阶段为估计，不得写成实测播种日期。
 10. 禁止用语：排水良好、排水条件良好、无渍涝隐患、立即收割、干旱风险提示偏高、生物量达标、温光（无数据时）、降水偏少（无数据时）。
-11. 输出必须是合法 JSON，键恰好为：
+10b. 禁止产品升级/平台介绍/未来功能宣传；只写农学解读与田间建议。
+10c. 多因子推理：异常须结合阶段+天气/水分+土壤（若有）排序可能原因；禁止单指数下结论。
+11. 输出必须是合法 JSON，至少包含键：
     core_conclusion, synthesis, timeline_bullets, monthly_notes,
     conclusions, factors_strong, factors_mid, factors_weak,
     actions_now, actions_week, actions_next_season, evidence_gaps。
+    可增加额外键（extensible），但不得省略上述键，不得用其重算程序数字。
 12. 字段分工（禁止互相复读同一段）：
     - core_conclusion：60–90字，一句核心判断（谨慎，引用程序事实）。
     - synthesis：120–180字，综合回答：①当前冠层绿度？②是否提示干旱？③是否提示洪涝？④是否疑似成熟后期/收获准备？⑤与上年峰值日期差？⑥还缺哪些证据？
@@ -85,9 +90,9 @@ def bailian_settings() -> dict[str, str]:
     """Read Bailian config from process env only (secrets never hard-coded)."""
     return {
         "api_key": (os.environ.get("BAILIAN_API_KEY") or "").strip(),
-        "base_url": (
-            os.environ.get("BAILIAN_BASE_URL") or DEFAULT_BASE_URL
-        ).rstrip("/"),
+        "base_url": (os.environ.get("BAILIAN_BASE_URL") or DEFAULT_BASE_URL).rstrip(
+            "/"
+        ),
         "model": (os.environ.get("BAILIAN_MODEL") or DEFAULT_MODEL).strip()
         or DEFAULT_MODEL,
     }
@@ -154,7 +159,6 @@ def _clip(text: str | None, max_chars: int) -> str | None:
     return t[: max_chars - 1] + "…"
 
 
-
 def _program_next_season_from_facts(facts: dict[str, Any] | None) -> str:
     """Build agronomic next-season placeholder from program facts (soft-fail safe)."""
     try:
@@ -162,9 +166,13 @@ def _program_next_season_from_facts(facts: dict[str, Any] | None) -> str:
 
         facts = facts or {}
         return program_next_season_actions(
-            drought=facts.get("drought") if isinstance(facts.get("drought"), dict) else {},
+            drought=facts.get("drought")
+            if isinstance(facts.get("drought"), dict)
+            else {},
             flood=facts.get("flood") if isinstance(facts.get("flood"), dict) else {},
-            harvest=facts.get("harvest") if isinstance(facts.get("harvest"), dict) else None,
+            harvest=facts.get("harvest")
+            if isinstance(facts.get("harvest"), dict)
+            else None,
         )
     except Exception:
         return (
@@ -174,18 +182,23 @@ def _program_next_season_from_facts(facts: dict[str, Any] | None) -> str:
         )
 
 
-def _sanitize_next_season(
-    text: str | None, facts: dict[str, Any] | None
-) -> str | None:
+def _looks_like_remote_ops_local(t: str | None) -> bool:
+    """Minimal fallback when facts module cannot import."""
+    s = (t or "").strip()
+    if not s:
+        return False
+    keys = ("无人机", "多源卫星", "补测频次", "云量", "遥感作业", "卫星补测")
+    return any(k in s for k in keys)
+
+
+def _sanitize_next_season(text: str | None, facts: dict[str, Any] | None) -> str | None:
     """Drop remote-sensing-ops advice; fall back to program agronomy."""
     try:
         from app.reports.season_growth.facts import looks_like_remote_ops_advice
     except Exception:
+        looks_like_remote_ops_advice = _looks_like_remote_ops_local  # type: ignore
 
-        def looks_like_remote_ops_advice(t: str | None) -> bool:  # type: ignore
-            return False
-
-    raw = (str(text).strip() if text is not None else "")
+    raw = str(text).strip() if text is not None else ""
     if not raw or looks_like_remote_ops_advice(raw):
         return _program_next_season_from_facts(facts)
     # Also reject if any line is remote-ops (mixed cards).
@@ -193,6 +206,7 @@ def _sanitize_next_season(
         if looks_like_remote_ops_advice(ln):
             return _program_next_season_from_facts(facts)
     return raw
+
 
 def _empty_ai_fields() -> dict[str, Any]:
     return {
@@ -253,9 +267,7 @@ def _normalize_ai(obj: dict[str, Any] | None) -> dict[str, Any]:
     out["recommendations"] = out.get("actions_now")
     out["follow_up"] = list(out.get("evidence_gaps") or [])
     out["causes_ranked"] = list(out.get("factors_mid") or [])
-    out["timeline_notes"] = (
-        "\n".join(out.get("timeline_bullets") or []) or None
-    )
+    out["timeline_notes"] = "\n".join(out.get("timeline_bullets") or []) or None
     out["llm_configured"] = True
     out["error"] = None
     return out
@@ -266,7 +278,7 @@ def missing_llm_sections() -> dict[str, Any]:
     out = _empty_ai_fields()
     out.update(
         {
-            "core_conclusion": "遥感事实已生成（AI 解读未启用）",
+            "core_conclusion": f"遥感事实已生成（{AI_FAIL}：未配置）",
             "synthesis": note,
             "actions_now": "请配置 BAILIAN_API_KEY 后重新生成以获得 AI 解读与建议。",
             "actions_week": "未来7天结合田间墒情与植株状态安排农事，不宜仅凭遥感定夺。",
@@ -275,7 +287,7 @@ def missing_llm_sections() -> dict[str, Any]:
                 "并在拔节–抽雄、灌浆等关键阶段安排墒情检查；记录播种日期、品种与产量以便解读"
                 "（需结合当地确认）。"
             ),
-            "one_liner": "遥感事实已生成（AI 解读未启用）",
+            "one_liner": f"遥感事实已生成（{AI_FAIL}：未配置）",
             "summary": note,
             "interpretation": note,
             "recommendations": "请配置 BAILIAN_API_KEY 后重新生成以获得 AI 解读与建议。",
@@ -334,10 +346,9 @@ def generate_season_narrative(
         resp = http.post(url, headers=headers, json=body)
         resp.raise_for_status()
         data = resp.json()
-        content = (
-            ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
-            or ""
-        )
+        content = ((data.get("choices") or [{}])[0].get("message") or {}).get(
+            "content"
+        ) or ""
         parsed = _extract_json(content)
         out = _normalize_ai(parsed)
         out["actions_next_season"] = _sanitize_next_season(
@@ -353,14 +364,14 @@ def generate_season_narrative(
             detail = f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"
         elif isinstance(exc, httpx.TimeoutException):
             detail = f"timeout after {timeout}s: {type(exc).__name__}"
-        note = f"大模型调用失败：{type(exc).__name__}。报告仍包含程序计算事实。"
+        note = f"{AI_FAIL}：大模型调用失败（{type(exc).__name__}）。报告仍包含程序计算事实。"
         out = _empty_ai_fields()
         out.update(
             {
-                "core_conclusion": "遥感事实已生成（AI 调用失败）",
+                "core_conclusion": f"遥感事实已生成（{AI_FAIL}）",
                 "synthesis": note,
                 "actions_next_season": _program_next_season_from_facts(facts),
-                "one_liner": "遥感事实已生成（AI 调用失败）",
+                "one_liner": f"遥感事实已生成（{AI_FAIL}）",
                 "summary": note,
                 "interpretation": note,
                 "recommendations": None,

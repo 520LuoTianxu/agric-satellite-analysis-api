@@ -1,0 +1,11 @@
+{
+  "field_crop_suitability": {
+    "crop": "corn",
+    "score": 74,
+    "rating": "较适宜",
+    "limiting_factors": ["偏碱"]
+  },
+  "crops": [
+    {"crop": "corn", "score": 74, "rating": "较适宜", "limiting_factors": ["偏碱"]}
+  ]
+}
