@@ -123,6 +123,33 @@ async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -
     return field
 
 
+async def _maybe_enqueue_assessment_work(
+    db,
+    *,
+    job_id: str,
+    field_id: str,
+    extras: dict,
+) -> str | None:
+    """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
+    from app.services.work_items import enqueue_work_item, should_enqueue_work_items
+
+    if not should_enqueue_work_items():
+        return None
+    payload = {
+        "field_id": field_id,
+        "extras": dict(extras),
+    }
+    item = await enqueue_work_item(
+        db,
+        type="assessment_report",
+        payload=payload,
+        priority=10,
+        idempotency_key=f"assessment_report:{job_id}",
+    )
+    await db.commit()
+    return str(item.id)
+
+
 @router.post(
     "/fields/{field_id}/assessment-report",
     response_model=JobOut,
@@ -250,8 +277,36 @@ async def create_assessment_report(
 
     try:
         from app.mq_publish import publish_api_task
+        from app.services.work_items import should_publish_mq
 
-        if pull_data:
+        assessment_extras: dict[str, Any] = {
+            "job_id": str(job.id),
+            "crop_type": crop_key,
+            "crop_name_zh": crop_name_zh(crop_key),
+            "date_from": date_from,
+            "date_to": date_to,
+            "years": years_used,
+            "pull_data": pull_data,
+            "cdfinance_prefetched": bool(
+                cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+            ),
+            "group_id": group_id,
+        }
+        work_id = await _maybe_enqueue_assessment_work(
+            db,
+            job_id=str(job.id),
+            field_id=str(field_id),
+            extras=assessment_extras,
+        )
+        if work_id:
+            logger.info(
+                "assessment_work_item_enqueued",
+                job_id=str(job.id),
+                work_id=work_id,
+                pull_data=pull_data,
+            )
+
+        if pull_data and should_publish_mq():
             # Do NOT publish assessment_report in parallel — that raced PDF ahead of
             # weather/RS (soil-only reports). Bootstrap fans out pulls with allow_agri
             # and enqueues assessment as followup after Celery ids are known.
@@ -295,23 +350,11 @@ async def create_assessment_report(
                 weather_days=weather_days,
                 pull_data=True,
             )
-        else:
+        elif should_publish_mq():
             mq_task_id = publish_api_task(
                 type="assessment_report",
                 field_id=str(field_id),
-                extras={
-                    "job_id": str(job.id),
-                    "crop_type": crop_key,
-                    "crop_name_zh": crop_name_zh(crop_key),
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "years": years_used,
-                    "pull_data": False,
-                    "cdfinance_prefetched": bool(
-                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
-                    ),
-                    "group_id": group_id,
-                },
+                extras=assessment_extras,
             )
             logger.info(
                 "assessment_job_dispatched",

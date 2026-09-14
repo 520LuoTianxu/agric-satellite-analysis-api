@@ -31,6 +31,8 @@ from app.routers import (
     users,
     weather,
     mq_tasks,
+    internal_work,
+    internal_fields,
 )
 
 
@@ -103,6 +105,8 @@ app.include_router(storage.router, prefix=PREFIX, tags=["storage"])
 app.include_router(weather.router, prefix=PREFIX, tags=["weather"])
 app.include_router(soil.router, prefix=PREFIX, tags=["soil"])
 app.include_router(mq_tasks.router, prefix=PREFIX, tags=["mq"])
+app.include_router(internal_work.router, prefix=PREFIX)
+app.include_router(internal_fields.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────

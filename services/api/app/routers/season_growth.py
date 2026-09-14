@@ -95,6 +95,33 @@ def _window_key(
     return f"{start}|{end}|{crops_s}|{label or ''}"
 
 
+async def _maybe_enqueue_season_growth_work(
+    db,
+    *,
+    job_id: str,
+    field_id: str,
+    extras: dict,
+) -> str | None:
+    """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
+    from app.services.work_items import enqueue_work_item, should_enqueue_work_items
+
+    if not should_enqueue_work_items():
+        return None
+    payload = {
+        "field_id": field_id,
+        "extras": dict(extras),
+    }
+    item = await enqueue_work_item(
+        db,
+        type="season_growth_report",
+        payload=payload,
+        priority=10,
+        idempotency_key=f"season_growth_report:{job_id}",
+    )
+    await db.commit()
+    return str(item.id)
+
+
 @router.post(
     "/fields/{field_id}/season-growth-report",
     response_model=JobOut,
@@ -186,8 +213,36 @@ async def create_season_growth_report(
 
     try:
         from app.mq_publish import publish_api_task
+        from app.services.work_items import should_publish_mq
 
-        if pull_data:
+        season_extras: dict[str, Any] = {
+            "job_id": str(job.id),
+            "start_date": body.start_date,
+            "end_date": body.end_date,
+            "crops": list(body.crops or []),
+            "label": body.label,
+            "material_keys": list(body.material_keys or []),
+            "pull_data": pull_data,
+            "cdfinance_prefetched": bool(
+                cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
+            ),
+            "group_id": group_id,
+        }
+        work_id = await _maybe_enqueue_season_growth_work(
+            db,
+            job_id=str(job.id),
+            field_id=str(field_id),
+            extras=season_extras,
+        )
+        if work_id:
+            logger.info(
+                "season_growth_work_item_enqueued",
+                job_id=str(job.id),
+                work_id=work_id,
+                pull_data=pull_data,
+            )
+
+        if pull_data and should_publish_mq():
             # Do NOT publish season_growth_report in parallel — that raced PDF ahead
             # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out with
             # allow_agri and enqueues season growth as followup after Celery ids.
@@ -230,23 +285,11 @@ async def create_season_growth_report(
                 weather_days=weather_days,
                 pull_data=True,
             )
-        else:
+        elif should_publish_mq():
             mq_task_id = publish_api_task(
                 type="season_growth_report",
                 field_id=str(field_id),
-                extras={
-                    "job_id": str(job.id),
-                    "start_date": body.start_date,
-                    "end_date": body.end_date,
-                    "crops": list(body.crops or []),
-                    "label": body.label,
-                    "material_keys": list(body.material_keys or []),
-                    "pull_data": False,
-                    "cdfinance_prefetched": bool(
-                        cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
-                    ),
-                    "group_id": group_id,
-                },
+                extras=season_extras,
             )
             logger.info(
                 "season_growth_job_dispatched",
