@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,126 @@ def _ndvi_series(by_date: dict[str, dict[str, float]]) -> list[tuple[str, float]
             continue
         out.append((d, float(v)))
     return out
+
+
+def estimate_emergence(
+    by_date: dict[str, dict[str, float]],
+    year: int,
+    *,
+    window_start: tuple[int, int] = (5, 15),
+    window_end: tuple[int, int] = (7, 15),
+    min_rise: float = 0.06,
+    sustain_n: int = 2,
+) -> dict[str, Any]:
+    """Estimate maize emergence from first sustained NDVI climb in planting window.
+
+    Corn after wheat may emerge mid–late June; do **not** hardcode 06-01.
+    Returns dict with date/ndvi/method/note_zh. If evidence insufficient,
+    date is None and note_zh says 依据不足.
+    """
+    series = [(d, v) for d, v in _ndvi_series(by_date) if int(d[:4]) == year]
+    if not series:
+        return {
+            "date": None,
+            "ndvi": None,
+            "method": "insufficient",
+            "note_zh": "出苗期推算：依据不足（无当年绿度序列）",
+            "year": year,
+        }
+
+    lo = date(year, window_start[0], window_start[1])
+    hi = date(year, window_end[0], window_end[1])
+    # include a short pre-window baseline
+    pre = (
+        date(year, max(1, window_start[0] - 1), 1)
+        if window_start[0] > 1
+        else date(year, 1, 1)
+    )
+    pts = [(d, v) for d, v in series if pre <= _parse_date(d) <= hi]
+    if len(pts) < 3:
+        return {
+            "date": None,
+            "ndvi": None,
+            "method": "insufficient",
+            "note_zh": "出苗期推算：依据不足（种植窗内绿度点不足）",
+            "year": year,
+        }
+
+    window_pts = [(d, v) for d, v in pts if lo <= _parse_date(d) <= hi]
+    if len(window_pts) < 2:
+        return {
+            "date": None,
+            "ndvi": None,
+            "method": "insufficient",
+            "note_zh": "出苗期推算：依据不足（种植窗内有效观测不足）",
+            "year": year,
+        }
+
+    # Find first sustained climb: NDVI rises >= min_rise from a local low,
+    # and the next (sustain_n-1) points stay above that low + min_rise/2.
+    best: tuple[str, float] | None = None
+    for i in range(len(pts) - sustain_n):
+        d0, v0 = pts[i]
+        if not (lo <= _parse_date(d0) <= hi):
+            continue
+        # local low-ish: not already high canopy
+        if v0 >= 0.45:
+            continue
+        ok = True
+        last_v = v0
+        for j in range(1, sustain_n + 1):
+            if i + j >= len(pts):
+                ok = False
+                break
+            dj, vj = pts[i + j]
+            if _parse_date(dj) > hi:
+                ok = False
+                break
+            if vj < last_v - 0.02:
+                ok = False
+                break
+            last_v = vj
+        if not ok:
+            continue
+        rise = pts[min(i + sustain_n, len(pts) - 1)][1] - v0
+        if rise < min_rise:
+            continue
+        # emergence ≈ first point of the climb (or next if still near floor)
+        cand_d, cand_v = pts[i]
+        # prefer the first point after the low that has risen a bit
+        for j in range(0, sustain_n + 1):
+            if i + j >= len(pts):
+                break
+            dj, vj = pts[i + j]
+            if vj >= v0 + min_rise * 0.5 and lo <= _parse_date(dj) <= hi:
+                cand_d, cand_v = dj, vj
+                break
+        best = (cand_d, float(cand_v))
+        break
+
+    if best is None:
+        # Fallback: earliest window point near the NDVI trough before peak rise
+        trough = min(window_pts, key=lambda x: x[1])
+        # if trough is very early and later rises, use trough date
+        later = [p for p in window_pts if _parse_date(p[0]) >= _parse_date(trough[0])]
+        if later and max(v for _, v in later) - trough[1] >= min_rise:
+            best = (trough[0], float(trough[1]))
+        else:
+            return {
+                "date": None,
+                "ndvi": None,
+                "method": "insufficient",
+                "note_zh": "出苗期推算：依据不足（未见持续绿度抬升）",
+                "year": year,
+            }
+
+    return {
+        "date": best[0],
+        "ndvi": round(best[1], 3),
+        "method": "ndvi_rise",
+        "note_zh": f"出苗期推算：{best[0]}（依据绿度抬升）",
+        "year": year,
+    }
 
 
 def pick_phenology_year(by_date: dict[str, dict[str, float]]) -> int | None:
@@ -109,10 +229,11 @@ def pick_phenology_stages(
     """Choose real observation dates for 4 maize phenology stages.
 
     Heuristics:
-    - seedling ~ mid-Jun (low but rising)
-    - vegetative early-Jul (rising)
+    - seedling / 出苗 = first sustained NDVI rise in planting window (not fixed 06-01)
+    - vegetative ~ emergence + 25d (or early-Jul fallback)
     - peak = max NDVI in Jul–Aug
     - maturity late-Sep after peak (prefer drop from peak)
+    Attaches stages["_emergence"] with estimate metadata.
     Prefers dates that have usable pixel_data when pixel_dates is provided.
     """
     series = [(d, v) for d, v in _ndvi_series(by_date) if int(d[:4]) == year]
@@ -157,37 +278,57 @@ def pick_phenology_stages(
     )
     peak_ndvi = float(stages["peak"]["ndvi"]) if "peak" in stages else 0.0
 
-    # Seedling: near mid-Jun, prefer lower NDVI than peak
-    seed_pool = pool({6}) or [(d, v) for d, v in pool() if _parse_date(d) < peak_date]
-    hit = _nearest_date(seed_pool, date(year, 6, 15), window_days=20, prefer_high=False)
-    if hit is None and seed_pool:
-        hit = min(
-            seed_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 6, 15)).days)
-        )
-    if hit:
+    # Emergence / seedling: estimate from sustained NDVI rise (not fixed 06-01)
+    emergence = estimate_emergence(by_date, year)
+    stages["_emergence"] = emergence
+    em_date = None
+    if emergence.get("date"):
+        em_date = _parse_date(emergence["date"])
         stages["seedling"] = {
             "key": "seedling",
-            "label": "苗期",
-            "title": "苗期/早期 (绿度偏低，正常)",
-            "date": hit[0],
-            "ndvi": hit[1],
+            "label": "出苗",
+            "title": "出苗/早期 (绿度抬升)",
+            "date": emergence["date"],
+            "ndvi": float(emergence.get("ndvi") or 0.0),
         }
+    else:
+        seed_pool = pool({6}) or [
+            (d, v) for d, v in pool() if _parse_date(d) < peak_date
+        ]
+        hit = _nearest_date(
+            seed_pool, date(year, 6, 15), window_days=20, prefer_high=False
+        )
+        if hit is None and seed_pool:
+            hit = min(
+                seed_pool,
+                key=lambda x: abs((_parse_date(x[0]) - date(year, 6, 15)).days),
+            )
+        if hit:
+            stages["seedling"] = {
+                "key": "seedling",
+                "label": "苗期",
+                "title": "苗期/早期 (绿度偏低，正常)",
+                "date": hit[0],
+                "ndvi": hit[1],
+            }
 
-    # Vegetative: early Jul, rising between seedling and peak
+    # Vegetative: ~20–30 days after emergence (or early Jul fallback)
     veg_lo = (
         _parse_date(stages["seedling"]["date"])
         if "seedling" in stages
         else date(year, 6, 20)
     )
-    veg_pool = pool({7}) or [
+    if em_date is not None:
+        veg_target = em_date + timedelta(days=25)
+    else:
+        veg_target = date(year, 7, 7)
+    veg_pool = pool({veg_target.month, 7}) or [
         (d, v) for d, v in pool() if veg_lo < _parse_date(d) < peak_date
     ]
     # Prefer mid-rise: not as low as seedling, not peak
-    hit = _nearest_date(veg_pool, date(year, 7, 7), window_days=18, prefer_high=True)
+    hit = _nearest_date(veg_pool, veg_target, window_days=18, prefer_high=True)
     if hit is None and veg_pool:
-        hit = min(
-            veg_pool, key=lambda x: abs((_parse_date(x[0]) - date(year, 7, 7)).days)
-        )
+        hit = min(veg_pool, key=lambda x: abs((_parse_date(x[0]) - veg_target).days))
     if hit:
         stages["vegetative"] = {
             "key": "vegetative",
@@ -269,8 +410,15 @@ def render_phenology_curve(
     xs = [datetime.fromisoformat(d) for d, _ in series]
     ys = [v for _, v in series]
     fig, ax = plt.subplots(figsize=(10.5, 3.6), dpi=130)
+    em_meta = (stages.get("_emergence") or {}) if stages else {}
+    shade_start = datetime(year, 6, 1)
+    if em_meta.get("date"):
+        try:
+            shade_start = datetime.fromisoformat(str(em_meta["date"])[:10])
+        except ValueError:
+            pass
     ax.axvspan(
-        datetime(year, 6, 1),
+        shade_start,
         datetime(year, 9, 30),
         color="#d8f3dc",
         alpha=0.45,

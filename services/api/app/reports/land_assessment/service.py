@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.reports.land_assessment.charts import (
+    estimate_emergence,
     pick_phenology_stages,
     pick_phenology_year,
     render_charts,
@@ -73,7 +74,13 @@ def _load_stage_pixels(
     index = load_agri_pixel_date_index(session, land_id, cloud_max=None)
     pixel_dates = {row["date"] for row in index if row.get("has_pixels")}
     stages = pick_phenology_stages(by_date, year, pixel_dates=pixel_dates or None)
-    wanted = sorted({st["date"] for st in stages.values()})
+    wanted = sorted(
+        {
+            st["date"]
+            for k, st in stages.items()
+            if not str(k).startswith("_") and st.get("date")
+        }
+    )
     if not wanted:
         return {}
 
@@ -200,7 +207,11 @@ def generate_assessment_pdf(
                 year,
                 pixel_dates=set(pixels_by_date.keys()) or None,
             )
-            stage_dates = [st["date"] for st in stages.values()]
+            stage_dates = [
+                st["date"]
+                for k, st in stages.items()
+                if not str(k).startswith("_") and st.get("date")
+            ]
             if stage_dates:
                 stage_media = load_oss_media_for_dates(session, land_id, stage_dates)
 
@@ -230,6 +241,28 @@ def generate_assessment_pdf(
     )
     analysis["phenology_stage_summary"] = pheno
     analysis["phenology_year"] = year
+
+    # Emergence estimates (per year + primary phenology year)
+    by_date = computed.get("by_date") or {}
+    years = sorted({int(d[:4]) for d in by_date if len(d) >= 4})
+    emergence_by_year: dict[int, str] = {}
+    emergence_meta_by_year: dict[int, dict] = {}
+    for y in years:
+        em = estimate_emergence(by_date, y)
+        emergence_meta_by_year[y] = em
+        if em.get("date"):
+            emergence_by_year[y] = str(em["date"])
+    primary_em = (
+        (stages_for_summary.get("_emergence") if stages_for_summary else None)
+        or (emergence_meta_by_year.get(year) if year is not None else None)
+        or {"note_zh": "出苗期推算：依据不足", "method": "insufficient"}
+    )
+    analysis["emergence"] = primary_em
+    analysis["emergence_by_year"] = {
+        str(k): v for k, v in emergence_meta_by_year.items()
+    }
+    analysis["emergence_note"] = primary_em.get("note_zh")
+
     analysis["narrative_bridge"] = build_narrative_bridge(
         soil_plain=analysis.get("soil_analysis_plain") or "",
         weather_plain=analysis.get("weather_history_plain") or "",
@@ -251,11 +284,28 @@ def generate_assessment_pdf(
         or {},
         ndvi_p30=meta.get("ndvi_p30"),
         ndwi_p85=meta.get("ndwi_p85"),
+        emergence_by_year=emergence_by_year or None,
     )
     analysis["risk_events_evidence"] = enriched_events
     # Keep risk.events in sync for LLM facts + PDF
     if isinstance(computed.get("risk"), dict):
         computed["risk"]["events"] = enriched_events
+
+    # Soft-update season start labels with estimated emergence (display only)
+    risk_obj = computed.get("risk") if isinstance(computed.get("risk"), dict) else None
+    if risk_obj and isinstance(risk_obj.get("seasons"), list):
+        for season in risk_obj["seasons"]:
+            if not isinstance(season, dict):
+                continue
+            start = str(season.get("start") or "")
+            try:
+                y = int(start[:4])
+            except (TypeError, ValueError):
+                continue
+            em_d = emergence_by_year.get(y)
+            if em_d:
+                season["start"] = em_d
+                season["emergence_estimated"] = True
 
     chart_paths = render_charts(
         computed["by_date"],
@@ -289,7 +339,7 @@ def generate_assessment_pdf(
         analysis=analysis,
         flood_evidence=flood_evidence,
     )
-    ai = generate_land_assessment_narrative(llm_facts, timeout=120.0)
+    ai = generate_land_assessment_narrative(llm_facts, timeout=180.0, parallel=True)
 
     render_pdf(
         out_path=out_path,

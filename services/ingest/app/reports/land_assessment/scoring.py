@@ -16,13 +16,16 @@ from typing import Any
 
 import numpy as np
 
+from app.reports.land_assessment.soil_labels import (
+    soil_drainage_zh,
+    soil_texture_zh,
+)
+
 SEASON_MONTHS = {6, 7, 8, 9}
 PEAK_MONTHS = {7, 8}
 UNCROPPED_NDVI = 0.25
 PEAK_GOOD = 0.65
 PEAK_OK = 0.50
-PEAK_WEAK = 0.35
-
 PEAK_WEAK = 0.35
 
 # 长势等级（地块场景均值 NDVI）——与前端/报告口径一致
@@ -164,9 +167,14 @@ def compute_ndvi_grade_shares(
 def build_soil_analysis_plain(soil: dict[str, Any], crop_label: str) -> str:
     """Coherent Chinese soil paragraph for PDF narrative."""
     soil = soil or {}
-    texture = soil.get("dominant_texture") or "质地未知"
+    texture = (
+        soil_texture_zh(soil.get("dominant_texture"), fallback="质地未知") or "质地未知"
+    )
     ph = soil.get("avg_ph")
-    drain = soil.get("drainage_class") or "排水等级未知"
+    drain = (
+        soil_drainage_zh(soil.get("drainage_class"), fallback="排水等级未知")
+        or "排水等级未知"
+    )
     awc = soil.get("rootzone_awc_mm")
     wl = soil.get("waterlogging_risk")
     soc = soil.get("total_soc_stock_t_ha") or soil.get("topsoil_soc_stock_t_ha")
@@ -635,7 +643,7 @@ def compute_assessment(
     ph = float(soil.get("avg_ph") or 7)
     soil_score = 100.0
     soil_bits: list[str] = []
-    texture = soil.get("dominant_texture") or ""
+    texture = soil_texture_zh(soil.get("dominant_texture")) or ""
     if texture:
         soil_bits.append(str(texture))
     if ph > 7.5:
@@ -647,9 +655,12 @@ def compute_assessment(
     if wl > 0.3:
         soil_score -= min(20, wl * 30)
         soil_bits.append("有一定渍水风险")
-    drain = soil.get("drainage_class") or ""
-    if "well" in drain.lower():
+    drain_raw = str(soil.get("drainage_class") or "")
+    drain = soil_drainage_zh(drain_raw) or drain_raw
+    if "well" in drain_raw.lower() or "排水良好" in drain or "排水较好" in drain:
         soil_bits.append(f"排水较好（{crop_label}一般合适，过干年份要看墒）")
+    elif drain:
+        soil_bits.append(f"排水：{drain}")
     soil_score = max(35.0, min(95.0, soil_score))
 
     if not peak_dates and not season_dates:
@@ -950,13 +961,40 @@ def compute_assessment(
     }
 
 
-def _phenology_stage_label(date_str: str) -> str:
-    """Map calendar date to coarse maize-season stage label (display only)."""
+def _phenology_stage_label(
+    date_str: str,
+    *,
+    emergence_date: str | None = None,
+) -> str:
+    """Map date to coarse maize-season stage label (display only).
+
+    When ``emergence_date`` is known, stages are anchored to days-after-emergence
+    instead of a fixed calendar (e.g. hard-coded 06-01).
+    """
     try:
-        m = int(date_str[5:7])
-        day = int(date_str[8:10])
-    except (TypeError, ValueError, IndexError):
+        d = datetime.fromisoformat(str(date_str)[:10]).date()
+    except (TypeError, ValueError):
         return "—"
+
+    if emergence_date:
+        try:
+            em = datetime.fromisoformat(str(emergence_date)[:10]).date()
+            das = (d - em).days
+            if das < -10:
+                return "季外"
+            if das < 18:
+                return "苗期"
+            if das < 40:
+                return "拔节—抽雄"
+            if das < 75:
+                return "旺长"
+            if das < 110:
+                return "成熟回落"
+            return "季外"
+        except (TypeError, ValueError):
+            pass
+
+    m, day = d.month, d.day
     if m <= 6:
         return "苗期"
     if m == 7 and day < 20:
@@ -976,6 +1014,7 @@ def enrich_risk_events(
     weather_history: dict[str, Any] | None = None,
     ndvi_p30: float | None = None,
     ndwi_p85: float | None = None,
+    emergence_by_year: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Attach display-only evidence to program risk events (E1…).
 
@@ -1087,7 +1126,13 @@ def enrich_risk_events(
         weather_text = "；".join(wx_bits) if wx_bits else "—"
 
         mid = start if start == end else end
-        stage = _phenology_stage_label(mid)
+        em = None
+        if emergence_by_year:
+            try:
+                em = emergence_by_year.get(int(mid[:4]))
+            except (TypeError, ValueError):
+                em = None
+        stage = _phenology_stage_label(mid, emergence_date=em)
 
         row["mean_ndvi"] = mean_ndvi
         row["mean_evi"] = mean_evi
