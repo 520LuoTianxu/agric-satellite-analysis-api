@@ -227,7 +227,7 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 | **D0** | 文档/配置约定；下载机 Redis 改本机；停误起 PostGIS | 无通往 API `:6379` 的连接 |
 | **D1** | 迁移 `work_items`；实现 claim/heartbeat/progress/complete/fail；API 入队接线（先 1–2 类任务，如 assessment / season_growth） | 多 worker 不重复领；无公网出站可跑通 |
 | **D2** | Internal resolve + jobs get/patch + agri scene dates；mq_consumer/ingest 热读改 HTTP（`API_BASE_URL` 未设则 DB 回退） | 配置 HTTP 后下载机热读不经 PG；写路径仍 DB（D3） |
-| **D3** | complete 落库覆盖景/天气/土壤等写路径；删除下载机写 PG | 下载机无 PG TCP |
+| **D3** | complete / `results/apply` 落库（复用 mq_result_writer 逻辑）；ingest 报告 job 可走 HTTP PATCH；`INGEST_PG_WRITES` 开关；**不**一键切断 prod PG | 代码+flag；cutover 见下文 |
 | **D4** | 其余任务类型切流；可选下线 MQ | 全链路无 MQ 可运行 |
 
 每阶段：回滚开关、冒烟（claim → 执行 → complete → UI 可见）。
@@ -268,3 +268,28 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 
 **主方案 = 无 MQ + Postgres work_items + HTTP Claim + 本机 Celery Redis + 出站短轮询。**  
 CloudAMQP 为可选兼容。开发按 **D0 → D4** 推进。
+
+---
+
+## D3 cutover（写路径）
+
+**已落地（代码）**
+
+- `openfarm_common.result_apply`：与 mq_result_writer 同一套 assessment/season job 更新 + weather/soil/scene upsert。
+- `POST /v1/internal/work/{id}/complete` → `apply_complete_result`。
+- `POST /v1/internal/results/apply`：无 work_item 时的域写入。
+- ingest：`http_writes_enabled()` 时 assessment / season_growth 走 `PATCH /internal/jobs`；带 `work_item_id` 时任务结束再 `complete`（claim agent 只 progress=dispatched）。
+- 默认 **`INGEST_PG_WRITES=1`**、`WORK_QUEUE_MODE=legacy`：行为与切流前兼容。
+
+**仍直连 PG（D4）**
+
+- weather / soil / agri scene **ingest 本地 upsert**（HTTP apply 已具备，ingest 侧全面改投递与禁本地写待 D4）。
+- raster_layers / field_stats / advisory locks / 重报告 data_loader。
+- 其余任务类型 claim 切流；可选下线 MQ。
+
+**建议切流顺序**
+
+1. API 热更含 `result_apply` + internal results。
+2. 下载机设 `API_BASE_URL` + token（D2 已支持读）；可先 `INGEST_HTTP_WRITES=1` 双写验证 job 进度。
+3. 再 `INGEST_PG_WRITES=0`（报告路径）→ 验证 UI。
+4. `WORK_QUEUE_MODE=claim` 仅在 work_items 入队与 agent 稳定后开启。

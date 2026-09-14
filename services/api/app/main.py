@@ -35,6 +35,7 @@ from app.routers import (
     internal_fields,
     internal_jobs,
     internal_agri,
+    internal_results,
 )
 
 
@@ -111,6 +112,7 @@ app.include_router(internal_work.router, prefix=PREFIX)
 app.include_router(internal_fields.router, prefix=PREFIX)
 app.include_router(internal_jobs.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
+app.include_router(internal_results.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────

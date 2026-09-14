@@ -203,6 +203,7 @@ async def complete_work_item(
     *,
     result: dict[str, Any] | None = None,
     worker_id: str | None = None,
+    apply_result: bool = True,
 ) -> WorkItem:
     item = await db.get(WorkItem, work_id)
     if not item:
@@ -211,14 +212,36 @@ async def complete_work_item(
         return item
     _require_lease(item, worker_id)
     now = datetime.now(timezone.utc)
+    result_dict = dict(result or {})
     item.status = "done"
-    item.result_json = dict(result or {})
+    item.result_json = result_dict
     item.lease_owner = None
     item.lease_until = None
     item.error = None
     item.updated_at = now
     await db.flush()
     logger.info("work_item_completed", work_id=str(work_id), type=item.type)
+
+    # D3: apply domain upserts / job metadata via shared result_apply (SyncSession).
+    if apply_result and result_dict:
+        try:
+            import asyncio
+            from openfarm_common.result_apply import apply_complete_result
+
+            apply_stats = await asyncio.to_thread(apply_complete_result, result_dict)
+            # Stash apply stats only when something ran (avoid noise on ack payloads)
+            if isinstance(apply_stats, dict) and not apply_stats.get("skipped"):
+                merged = dict(result_dict)
+                merged["_apply"] = apply_stats
+                item.result_json = merged
+                await db.flush()
+        except Exception as exc:
+            logger.exception(
+                "work_item_complete_apply_failed",
+                work_id=str(work_id),
+                error=str(exc),
+            )
+            # Do not fail the lease completion — result_json is stored; ops can replay.
     return item
 
 

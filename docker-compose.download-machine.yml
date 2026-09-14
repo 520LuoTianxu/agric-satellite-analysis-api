@@ -38,6 +38,9 @@ services:
       # D2: prefer internal HTTP reads when set (writes still use DATABASE_URL until D3)
       API_BASE_URL: ${API_BASE_URL:-}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      # D3: keep 1 until cutover; set 0 to force HTTP job/result writes
+      INGEST_PG_WRITES: ${INGEST_PG_WRITES:-1}
+      INGEST_HTTP_WRITES: ${INGEST_HTTP_WRITES:-0}
       MPLCONFIGDIR: /tmp/matplotlib
       SYNC_DB_POOL_SIZE: "8"
       SYNC_DB_MAX_OVERFLOW: "8"

@@ -8,8 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
-from sqlalchemy.orm.attributes import flag_modified
-
 from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.tasks.storage_tasks import upload_file_via_storage
@@ -21,23 +19,23 @@ from app.worker import celery_app
 
 def _update_job(
     session,
-    job: Job,
+    job: Job | None,
     status: str,
     progress: dict | None = None,
     error: str | None = None,
+    *,
+    job_id: str | None = None,
 ):
-    job.status = status
-    if progress is not None:
-        job.progress_json = progress
-        flag_modified(job, "progress_json")
-    if error is not None:
-        job.error = error
-    if status == "running" and job.started_at is None:
-        job.started_at = datetime.now(timezone.utc)
-    if status in ("succeeded", "failed"):
-        job.finished_at = datetime.now(timezone.utc)
-    session.add(job)
-    session.commit()
+    from app.core.job_http import update_job_record
+
+    update_job_record(
+        session,
+        job,
+        status,
+        progress=progress,
+        error=error,
+        job_id=job_id or (str(job.id) if job is not None else None),
+    )
 
 
 def _publish_mq_result(
@@ -319,6 +317,7 @@ def generate_assessment_report(
     self,
     job_id: str | None = None,
     mq_task_id: str | None = None,
+    work_item_id: str | None = None,
     field_id: str | None = None,
     crop_type: str | None = None,
     crop_name_zh: str | None = None,
@@ -356,8 +355,8 @@ def generate_assessment_report(
                 job_id=job_id_str,
                 mq_task_id=mq_task_id,
             )
-            if job:
-                _update_job(session, job, "failed", error="field_id required")
+            if job or job_id_str:
+                _update_job(session, job, "failed", error="field_id required", job_id=job_id_str)
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
@@ -432,8 +431,8 @@ def generate_assessment_report(
                     "celery_ready": status["celery_ready"],
                     "pending_celery": len(status["pending_celery_ids"]),
                 }
-                if job:
-                    _update_job(session, job, "running", progress=progress_wait)
+                if job or job_id_str:
+                    _update_job(session, job, "running", progress=progress_wait, job_id=job_id_str)
                 if retries < max_r:
                     logger.info(
                         "assessment_waiting_for_bootstrap",
@@ -470,12 +469,13 @@ def generate_assessment_report(
                     },
                 )
 
-        if job:
+        if job or job_id_str:
             _update_job(
                 session,
                 job,
                 "running",
                 progress={"stage": "scoring", "percent": 60 if pull_data else 10},
+                job_id=job_id_str,
             )
 
         result = generate_assessment_pdf(
@@ -483,8 +483,8 @@ def generate_assessment_report(
         )
         pdf_path = Path(result["out_path"])
         if not pdf_path.exists():
-            if job:
-                _update_job(session, job, "failed", error="PDF not produced")
+            if job or job_id_str:
+                _update_job(session, job, "failed", error="PDF not produced", job_id=job_id_str)
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
@@ -497,7 +497,7 @@ def generate_assessment_report(
             )
             return {"error": "PDF not produced"}
 
-        if job:
+        if job or job_id_str:
             _update_job(
                 session,
                 job,
@@ -507,6 +507,7 @@ def generate_assessment_report(
                     "percent": 70,
                     "score": result["score"],
                 },
+                job_id=job_id_str,
             )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -606,8 +607,8 @@ def generate_assessment_report(
             progress["data_notes"] = notes
             progress["data_partial"] = True
 
-        if job:
-            _update_job(session, job, "succeeded", progress=progress)
+        if job or job_id_str:
+            _update_job(session, job, "succeeded", progress=progress, job_id=job_id_str)
         logger.info(
             "assessment_report_done",
             job_id=job_id_str,
@@ -655,6 +656,25 @@ def generate_assessment_report(
             oss_urls=oss_urls,
             extras=extras_out,
         )
+        try:
+            from app.core.job_http import complete_work_item_http
+
+            complete_work_item_http(work_item_id, mq_payload)
+        except Exception:
+            pass
+        # When HTTP writes on and local job missing, still patch API job via apply
+        if job is None and job_id_str:
+            try:
+                from openfarm_common.internal_api import apply_results, http_writes_enabled
+
+                if http_writes_enabled():
+                    apply_results(mq_payload)
+            except Exception as e:
+                logger.warning(
+                    "assessment_http_apply_failed",
+                    job_id=job_id_str,
+                    error=str(e),
+                )
         return progress
     except Exception as exc:
         from celery.exceptions import Retry
@@ -680,18 +700,34 @@ def generate_assessment_report(
         extras_fail: dict = {"source": "assessment_report"}
         if job_id_str:
             extras_fail["job_id"] = job_id_str
+        fail_payload = {
+            "kind": "assessment_report",
+            "field_id": field_id_str,
+            "error": str(exc)[:2000],
+            **({"job_id": job_id_str} if job_id_str else {}),
+        }
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="failed",
             field_id=field_id_str,
             error=str(exc)[:500],
             extras=extras_fail,
-            payload={
-                "kind": "assessment_report",
-                "field_id": field_id_str,
-                **({"job_id": job_id_str} if job_id_str else {}),
-            },
+            payload=fail_payload,
         )
+        try:
+            from app.core.job_http import fail_work_item_http
+
+            fail_work_item_http(work_item_id, str(exc)[:2000])
+        except Exception:
+            pass
+        if job is None and job_id_str:
+            try:
+                from openfarm_common.internal_api import apply_results, http_writes_enabled
+
+                if http_writes_enabled():
+                    apply_results({**fail_payload, "status": "failed"})
+            except Exception:
+                pass
         raise
     finally:
         session.close()
