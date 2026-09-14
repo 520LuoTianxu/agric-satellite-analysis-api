@@ -1105,6 +1105,38 @@ export interface SoilNpkFetchResponse {
     message?: string | null;
 }
 
+
+export interface SiteAdmission {
+    id?: string | null;
+    field_id?: string | null;
+    group_id: string;
+    land_id?: string | null;
+    source: string;
+    status?: string | null;
+    score?: number | null;
+    score_bank?: string | null;
+    survey_id?: number | null;
+    answer_id?: number | null;
+    total_area_mu?: number | null;
+    avg_yield?: number | null;
+    mu_profit?: number | null;
+    key_labels?: Record<string, string> | null;
+    item_answers?: Record<string, string> | null;
+    red_line_answers?: Record<string, string> | null;
+    planned_crops?: string[] | null;
+    dimensions?: Array<Record<string, unknown>> | null;
+    summary?: Record<string, unknown> | null;
+    fetched_at: string;
+}
+
+export interface SiteAdmissionFetchResponse {
+    field_id?: string | null;
+    group_id: string;
+    status: string;
+    admission: SiteAdmission;
+    message?: string | null;
+}
+
 export const soilApi = {
     get: (fieldId: string) =>
         apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
@@ -1131,6 +1163,26 @@ export const soilApi = {
         body: { token?: string; auth_query?: string; force?: boolean; hr_base_id?: string },
     ) =>
         apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
+            method: "POST",
+            body: JSON.stringify(body),
+            headers: body.token
+                ? { Authorization: body.token.startsWith("Bearer ") ? body.token : `Bearer ${body.token}` }
+                : undefined,
+        }),
+    getSiteAdmission: (fieldId: string) =>
+        apiFetch<SiteAdmission>(`/fields/${fieldId}/site-admission`),
+    fetchSiteAdmission: (
+        fieldId: string,
+        body: {
+            token?: string;
+            group_id?: string | number;
+            auth_query?: string;
+            force?: boolean;
+            hr_base_id?: string;
+            link_field_tag?: boolean;
+        },
+    ) =>
+        apiFetch<SiteAdmissionFetchResponse>(`/fields/${fieldId}/site-admission`, {
             method: "POST",
             body: JSON.stringify(body),
             headers: body.token

@@ -26,6 +26,7 @@ from app.models.tables import (
     Field,
     Job,
     SoilFieldSummary,
+    GroupSiteAdmission,
     SoilNutrientNpk,
     SoilProfile,
     WeatherDaily,
@@ -40,6 +41,9 @@ from app.schemas.soil import (
     SoilNpkFetchRequest,
     SoilNpkFetchResponse,
     SoilNpkIndicatorOut,
+    SiteAdmissionFetchRequest,
+    SiteAdmissionFetchResponse,
+    SiteAdmissionOut,
     SoilNpkOut,
     SoilProfileOut,
     SoilRefreshResponse,
@@ -527,7 +531,9 @@ def _npk_row_to_out(
 
     norm = normalize_vendor_payload(payload) if payload else {}
     indicators = [
-        SoilNpkIndicatorOut(**i) for i in (norm.get("indicators") or []) if isinstance(i, dict)
+        SoilNpkIndicatorOut(**i)
+        for i in (norm.get("indicators") or [])
+        if isinstance(i, dict)
     ]
     return SoilNpkOut(
         field_id=row.field_id,
@@ -554,9 +560,7 @@ def _npk_row_to_out(
     )
 
 
-async def _load_agri_admin_and_boundary(
-    db: AsyncSession, land_id: str
-) -> dict:
+async def _load_agri_admin_and_boundary(db: AsyncSession, land_id: str) -> dict:
     """Return admin codes + boundary_geojson for an agri land."""
     from sqlalchemy import text as sa_text
 
@@ -761,3 +765,262 @@ async def fetch_soil_npk(
         message="已从中和农信拉取并保存 NPK。",
     )
 
+
+# ── Vendor site admission (cdfinance groupSiteAdmission) ─────────────
+
+
+def _admission_row_to_out(
+    row: GroupSiteAdmission, *, include_payload: bool = False
+) -> SiteAdmissionOut:
+    summary = row.summary_json if isinstance(row.summary_json, dict) else {}
+    return SiteAdmissionOut(
+        id=row.id,
+        field_id=row.field_id,
+        group_id=row.group_id,
+        land_id=row.land_id,
+        source=row.source,
+        status=row.status,
+        score=row.score,
+        score_bank=row.score_bank,
+        survey_id=row.survey_id,
+        answer_id=row.answer_id,
+        total_area_mu=row.total_area_mu,
+        avg_yield=row.avg_yield,
+        mu_profit=row.mu_profit,
+        key_labels=summary.get("key_labels"),
+        item_answers=summary.get("item_answers"),
+        red_line_answers=summary.get("red_line_answers"),
+        planned_crops=summary.get("planned_crops"),
+        dimensions=summary.get("dimensions"),
+        summary=summary,
+        fetched_at=row.fetched_at,
+        vendor_payload=row.vendor_payload if include_payload else None,
+    )
+
+
+async def _resolve_group_id_for_field(
+    db: AsyncSession, field: Field, explicit: str | int | None
+) -> tuple[str | None, str | None]:
+    """Return (group_id, land_id). Prefer explicit, then field tag, then agri.land_parcels."""
+    from app.core.agri_tags import parse_agri_land_id, parse_cdfinance_group_id
+    from sqlalchemy import text as sa_text
+
+    land_id = parse_agri_land_id(field.tags_json)
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip(), land_id
+
+    tagged = parse_cdfinance_group_id(field.tags_json)
+    if tagged:
+        return tagged, land_id
+
+    if land_id:
+        result = await db.execute(
+            sa_text(
+                """
+                SELECT group_id::text AS group_id
+                FROM agri.land_parcels
+                WHERE land_id = :land_id
+                LIMIT 1
+                """
+            ),
+            {"land_id": land_id},
+        )
+        row = result.mappings().first()
+        if row and row.get("group_id"):
+            return str(row["group_id"]), land_id
+    return None, land_id
+
+
+@router.get(
+    "/fields/{field_id}/site-admission",
+    response_model=SiteAdmissionOut,
+)
+async def get_site_admission(
+    field_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_payload: bool = False,
+):
+    """Return stored site-admission questionnaire for a field (404 if none)."""
+    field = await _get_field_or_404(field_id, ctx.org_id, db)
+    result = await db.execute(
+        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        # fallback: resolve group via agri and look up by group_id
+        gid, _ = await _resolve_group_id_for_field(db, field, None)
+        if gid:
+            result = await db.execute(
+                select(GroupSiteAdmission).where(GroupSiteAdmission.group_id == gid)
+            )
+            row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Site admission not yet available")
+    return _admission_row_to_out(row, include_payload=include_payload)
+
+
+@router.post(
+    "/fields/{field_id}/site-admission",
+    response_model=SiteAdmissionFetchResponse,
+)
+@limiter.limit("10/minute")
+async def fetch_site_admission(
+    request: Request,
+    field_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: SiteAdmissionFetchRequest | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    """Fetch cdfinance groupSiteAdmission by groupId, upsert, return summary.
+
+    Auth: H5 Bearer in ``Authorization`` or body.token (same as NPK).
+    groupId: body.group_id, else field tag ``cdfinance_group:`` / ``group:``,
+    else ``agri.land_parcels.group_id`` via ``agri:<land_id>`` tag.
+    """
+    from datetime import datetime, timezone
+
+    import httpx
+
+    from app.core.agri_tags import ensure_cdfinance_group_tag
+    from app.core.cdfinance_site_admission import (
+        SOURCE_NAME,
+        fetch_group_site_admission,
+        normalize_admission_payload,
+    )
+
+    body = body or SiteAdmissionFetchRequest()
+    field = await _get_field_or_404(field_id, ctx.org_id, db)
+    group_id, land_id = await _resolve_group_id_for_field(db, field, body.group_id)
+    if not group_id:
+        raise HTTPException(
+            status_code=400,
+            detail="需要 groupId（body.group_id，或字段 tags 中 cdfinance_group:/group:，或 agri.land_parcels.group_id）",
+        )
+
+    existing = (
+        await db.execute(
+            select(GroupSiteAdmission).where(GroupSiteAdmission.group_id == group_id)
+        )
+    ).scalar_one_or_none()
+    # Prefer field-linked row if present
+    field_row = (
+        await db.execute(
+            select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+        )
+    ).scalar_one_or_none()
+    if field_row and not body.force:
+        return SiteAdmissionFetchResponse(
+            field_id=str(field_id),
+            group_id=field_row.group_id,
+            status="cached",
+            admission=_admission_row_to_out(field_row),
+            message="已有现场问卷缓存；传 force=true 可重新拉取。",
+        )
+    if existing and not body.force and existing.field_id == field_id:
+        return SiteAdmissionFetchResponse(
+            field_id=str(field_id),
+            group_id=existing.group_id,
+            status="cached",
+            admission=_admission_row_to_out(existing),
+            message="已有现场问卷缓存；传 force=true 可重新拉取。",
+        )
+    if existing and not body.force and existing.field_id is None:
+        # link cached group row to this field without refetch
+        existing.field_id = field_id
+        if land_id and not existing.land_id:
+            existing.land_id = land_id
+        if body.link_field_tag:
+            field.tags_json = ensure_cdfinance_group_tag(field.tags_json, group_id)
+        await db.commit()
+        await db.refresh(existing)
+        return SiteAdmissionFetchResponse(
+            field_id=str(field_id),
+            group_id=existing.group_id,
+            status="linked",
+            admission=_admission_row_to_out(existing),
+            message="已关联已有问卷缓存到本田块。",
+        )
+
+    token = body.token or authorization
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="需要中和农信 Bearer token（Authorization 头或 body.token）",
+        )
+
+    try:
+        record = await fetch_group_site_admission(
+            group_id=group_id,
+            bearer_token=token,
+            auth_query=body.auth_query,
+            hr_base_id=body.hr_base_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else 502
+        detail = "上游现场问卷 API 调用失败"
+        try:
+            detail = e.response.text[:300]
+        except Exception:
+            pass
+        logger.warning(
+            "cdfinance_site_admission_http_error",
+            field_id=str(field_id),
+            group_id=group_id,
+            status=status,
+        )
+        raise HTTPException(status_code=502, detail=detail) from e
+    except httpx.HTTPError as e:
+        logger.warning("cdfinance_site_admission_transport_error", error=str(e))
+        raise HTTPException(status_code=502, detail="上游现场问卷 API 网络错误") from e
+
+    summary = normalize_admission_payload(record)
+    now = datetime.now(timezone.utc)
+    summary["fetched_at"] = now.isoformat()
+
+    row = existing or field_row
+    if row is None:
+        row = GroupSiteAdmission(group_id=group_id)
+        db.add(row)
+
+    row.field_id = field_id
+    row.group_id = str(summary.get("group_id") or group_id)
+    row.land_id = land_id
+    row.source = SOURCE_NAME
+    row.status = summary.get("status")
+    row.score = summary.get("score")
+    row.score_bank = summary.get("score_bank")
+    row.survey_id = summary.get("survey_id")
+    row.answer_id = summary.get("answer_id")
+    row.total_area_mu = summary.get("total_area_mu")
+    row.avg_yield = summary.get("avg_yield")
+    row.mu_profit = summary.get("mu_profit")
+    row.summary_json = summary
+    row.vendor_payload = record
+    row.fetched_at = now
+    row.updated_at = now
+
+    if body.link_field_tag:
+        field.tags_json = ensure_cdfinance_group_tag(field.tags_json, row.group_id)
+
+    await db.commit()
+    await db.refresh(row)
+
+    logger.info(
+        "site_admission_upserted",
+        field_id=str(field_id),
+        group_id=row.group_id,
+        land_id=land_id,
+        score=row.score,
+    )
+
+    return SiteAdmissionFetchResponse(
+        field_id=str(field_id),
+        group_id=row.group_id,
+        status="fetched",
+        admission=_admission_row_to_out(row),
+        message="已从中和农信拉取并保存现场准入问卷。",
+    )

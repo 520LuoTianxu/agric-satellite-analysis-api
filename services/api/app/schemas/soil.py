@@ -209,3 +209,52 @@ class SoilNpkFetchResponse(BaseModel):
     status: str
     npk: SoilNpkOut
     message: str | None = None
+
+
+# ── Vendor site admission (cdfinance groupSiteAdmission) ─────────────
+
+
+class SiteAdmissionOut(BaseModel):
+    id: uuid.UUID | None = None
+    field_id: uuid.UUID | None = None
+    group_id: str
+    land_id: str | None = None
+    source: str
+    status: str | None = None
+    score: float | None = None
+    score_bank: str | None = None
+    survey_id: int | None = None
+    answer_id: int | None = None
+    total_area_mu: float | None = None
+    avg_yield: float | None = None
+    mu_profit: float | None = None
+    key_labels: dict[str, Any] | None = None
+    item_answers: dict[str, Any] | None = None
+    red_line_answers: dict[str, Any] | None = None
+    planned_crops: list[str] | None = None
+    dimensions: list[dict[str, Any]] | None = None
+    summary: dict[str, Any] | None = None
+    fetched_at: datetime
+    vendor_payload: dict[str, Any] | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class SiteAdmissionFetchRequest(BaseModel):
+    """Fetch site admission by groupId. Token via body or Authorization."""
+
+    token: str | None = None
+    group_id: str | int | None = None
+    auth_query: str | None = None
+    hr_base_id: str | None = None
+    force: bool = False
+    # Persist cdfinance_group:<id> onto field.tags_json when True (default).
+    link_field_tag: bool = True
+
+
+class SiteAdmissionFetchResponse(BaseModel):
+    field_id: str | None = None
+    group_id: str
+    status: str
+    admission: SiteAdmissionOut
+    message: str | None = None

@@ -641,6 +641,7 @@ def facts_for_llm(
     weather_summary: dict[str, Any],
     analysis: dict[str, Any] | None = None,
     flood_evidence: dict[str, Any] | None = None,
+    site_admission: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compact program facts for the Bailian prompt (no chart binaries)."""
     analysis = analysis or {}
@@ -767,11 +768,36 @@ def facts_for_llm(
             "risk_events_evidence": (analysis.get("risk_events_evidence") or [])[:8],
         },
         "flood_evidence": fe,
+        "site_admission": (
+            {
+                "group_id": site_admission.get("group_id"),
+                "status": site_admission.get("status"),
+                "score": site_admission.get("score"),
+                "total_area_mu": site_admission.get("total_area_mu"),
+                "avg_yield": site_admission.get("avg_yield"),
+                "mu_profit": site_admission.get("mu_profit"),
+                "planned_crops": site_admission.get("planned_crops") or [],
+                "现场问卷_地块条件": site_admission.get("key_labels") or {},
+                "红线排查": site_admission.get("red_line_answers") or {},
+                "维度得分": [
+                    {
+                        "name": d.get("name"),
+                        "score": d.get("score"),
+                        "max": d.get("max_score"),
+                    }
+                    for d in (site_admission.get("dimensions") or [])
+                    if isinstance(d, dict)
+                ],
+            }
+            if isinstance(site_admission, dict) and site_admission
+            else None
+        ),
         "business_model": None,
         "yield_model": None,
         "notes": [
             "无产量模型：yield_potential.level 仅可 高/中/低 或 null，禁止亩产数字。",
             "无经营模型：business.available=false，禁止金额。",
+            "site_admission 为现场准入问卷（软缺失为 null）；有则结合土壤/水利/红线作管理建议，勿编造未给出的选项。",
         ],
     }
 
