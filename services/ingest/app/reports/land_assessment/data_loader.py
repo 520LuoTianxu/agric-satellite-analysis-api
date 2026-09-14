@@ -289,18 +289,53 @@ def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     s = session.execute(
         select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
     ).scalar_one_or_none()
-    if not s:
-        return {}
-    return {
-        "dominant_texture": s.dominant_texture,
-        "avg_ph": s.avg_ph,
-        "total_soc_stock_t_ha": s.total_soc_stock_t_ha,
-        "rootzone_awc_mm": s.rootzone_awc_mm,
-        "drainage_class": s.drainage_class,
-        "waterlogging_risk": s.waterlogging_risk,
-        "topsoil_soc_stock_t_ha": s.topsoil_soc_stock_t_ha,
-        "data_quality_score": s.data_quality_score,
-    }
+    out: dict[str, Any] = {}
+    if s:
+        out = {
+            "dominant_texture": s.dominant_texture,
+            "avg_ph": s.avg_ph,
+            "total_soc_stock_t_ha": s.total_soc_stock_t_ha,
+            "rootzone_awc_mm": s.rootzone_awc_mm,
+            "drainage_class": s.drainage_class,
+            "waterlogging_risk": s.waterlogging_risk,
+            "topsoil_soc_stock_t_ha": s.topsoil_soc_stock_t_ha,
+            "data_quality_score": s.data_quality_score,
+        }
+
+    # Vendor NPK (cdfinance) — optional overlay; does not replace SoilGrids
+    try:
+        from app.models.tables import SoilNutrientNpk
+    except ImportError:
+        SoilNutrientNpk = None  # type: ignore
+    if SoilNutrientNpk is not None:
+        npk = session.execute(
+            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+        ).scalar_one_or_none()
+        if npk:
+            out["npk"] = {
+                "source": npk.source,
+                "tn_g_kg": npk.tn_g_kg,
+                "an_mg_kg": npk.an_mg_kg,
+                "ap_mg_kg": npk.ap_mg_kg,
+                "ak_mg_kg": npk.ak_mg_kg,
+                "tp_g_kg": npk.tp_g_kg,
+                "tk_g_kg": npk.tk_g_kg,
+                "som_g_kg": npk.som_g_kg,
+                "ph": npk.ph,
+                "sqi_score": npk.sqi_score,
+                "sqi_rating": npk.sqi_rating,
+                "texture_usda_cn": npk.texture_usda_cn,
+                "fetched_at": npk.fetched_at.isoformat() if npk.fetched_at else None,
+            }
+            # Prefer vendor texture/ph when SoilGrids missing
+            if not out.get("dominant_texture") and npk.texture_usda_cn:
+                out["dominant_texture"] = npk.texture_usda_cn
+            if out.get("avg_ph") is None and npk.ph is not None:
+                out["avg_ph"] = npk.ph
+            out["nitrogen"] = npk.tn_g_kg
+            out["available_p"] = npk.ap_mg_kg
+            out["available_k"] = npk.ak_mg_kg
+    return out
 
 
 def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:

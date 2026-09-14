@@ -66,6 +66,18 @@ class Settings(BaseSettings):
     soil_fetch_timeout_seconds: int = 60
     soil_source_priority: str = "auto"  # auto | soilgrids | polaris
 
+    # cdfinance / 中和农信 analyzeSoilV2 (NPK). Token is NEVER stored here —
+    # callers pass Bearer at request time. App key is a public H5 header.
+    cdfinance_soil_base_url: str = (
+        "https://joint-venture.cdfinance.com.cn/agric-api"
+    )
+    cdfinance_app_key: str = "83f94deg-k4d3-5gc4-0a6d-fd995a6f03g5"
+    cdfinance_channel_net: str = "H5"
+    cdfinance_hr_base_id: str = "38"
+    cdfinance_origin: str = "https://joint-venture.cdfinance.com.cn"
+    cdfinance_referer: str = "https://joint-venture.cdfinance.com.cn/"
+    cdfinance_soil_timeout_seconds: int = 60
+
     # Email (Resend)
     resend_api_key: str = ""
     resend_from_email: str = "OpenFarm <noreply@openfarm.app>"

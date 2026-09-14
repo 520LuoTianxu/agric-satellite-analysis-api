@@ -7,6 +7,7 @@ from datetime import date as _date, datetime
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -459,3 +460,55 @@ class SoilFieldSummary(Base):
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class SoilNutrientNpk(Base):
+    """Vendor NPK / fertility snapshot (cdfinance analyzeSoilV2).
+
+    Separate from SoilGrids ``soil_profiles`` / ``soil_field_summary`` so
+    SoilGrids data is never overwritten.
+    """
+
+    __tablename__ = "soil_nutrient_npk"
+    __table_args__ = (
+        UniqueConstraint("field_id", name="uq_soil_nutrient_npk_field"),
+        Index("idx_soil_nutrient_npk_field_id", "field_id"),
+        Index("idx_soil_nutrient_npk_land_id", "land_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    )
+    field_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("fields.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, server_default="cdfinance_analyzeSoilV2"
+    )
+
+    tn_g_kg: Mapped[float | None] = mapped_column(Float)  # 全氮
+    an_mg_kg: Mapped[float | None] = mapped_column(Float)  # 碱解氮
+    ap_mg_kg: Mapped[float | None] = mapped_column(Float)  # 有效磷
+    ak_mg_kg: Mapped[float | None] = mapped_column(Float)  # 速效钾
+    tp_g_kg: Mapped[float | None] = mapped_column(Float)  # 全磷
+    tk_g_kg: Mapped[float | None] = mapped_column(Float)  # 全钾
+    som_g_kg: Mapped[float | None] = mapped_column(Float)  # 有机质
+    ph: Mapped[float | None] = mapped_column(Float)
+    sqi_score: Mapped[float | None] = mapped_column(Float)
+    sqi_rating: Mapped[str | None] = mapped_column(Text)
+    texture_usda_cn: Mapped[str | None] = mapped_column(String(40))
+    vendor_log_id: Mapped[int | None] = mapped_column(BigInteger)
+    vendor_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+

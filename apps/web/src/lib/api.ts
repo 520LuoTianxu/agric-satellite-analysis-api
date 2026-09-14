@@ -1064,6 +1064,47 @@ export interface SoilWeatherStressResponse {
     factors: string[];
 }
 
+
+export interface SoilNpkIndicator {
+    code: string;
+    name_cn?: string | null;
+    value?: number | null;
+    unit?: string | null;
+    grade?: string | null;
+    grade_level?: number | null;
+    sqi_score?: number | null;
+}
+
+export interface SoilNpk {
+    field_id: string;
+    land_id?: string | null;
+    source: string;
+    tn_g_kg?: number | null;
+    an_mg_kg?: number | null;
+    ap_mg_kg?: number | null;
+    ak_mg_kg?: number | null;
+    tp_g_kg?: number | null;
+    tk_g_kg?: number | null;
+    som_g_kg?: number | null;
+    ph?: number | null;
+    sqi_score?: number | null;
+    sqi_rating?: string | null;
+    texture_usda_cn?: string | null;
+    vendor_log_id?: number | null;
+    indicators?: SoilNpkIndicator[];
+    n?: Record<string, unknown> | null;
+    p?: Record<string, unknown> | null;
+    k?: Record<string, unknown> | null;
+    fetched_at: string;
+}
+
+export interface SoilNpkFetchResponse {
+    field_id: string;
+    status: string;
+    npk: SoilNpk;
+    message?: string | null;
+}
+
 export const soilApi = {
     get: (fieldId: string) =>
         apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
@@ -1083,6 +1124,19 @@ export const soilApi = {
         apiFetch<CarbonEstimateResponse>(`/fields/${fieldId}/soil/carbon`),
     getWeatherStress: (fieldId: string) =>
         apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
+    getNpk: (fieldId: string) =>
+        apiFetch<SoilNpk>(`/fields/${fieldId}/soil/npk`),
+    fetchNpk: (
+        fieldId: string,
+        body: { token?: string; auth_query?: string; force?: boolean; hr_base_id?: string },
+    ) =>
+        apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
+            method: "POST",
+            body: JSON.stringify(body),
+            headers: body.token
+                ? { Authorization: body.token.startsWith("Bearer ") ? body.token : `Bearer ${body.token}` }
+                : undefined,
+        }),
 };
 
 // ── Agri (地块 S1/S2 场景产品) ────────────────────────────────────
