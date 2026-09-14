@@ -16,6 +16,7 @@ from app.reports.season_growth.bailian import generate_season_narrative
 from app.reports.season_growth.charts import render_season_charts
 from app.reports.season_growth.facts import build_season_facts, facts_for_llm
 from app.reports.season_growth.materials import download_material_keys
+from app.reports.season_growth.media import download_spatial_media
 from app.reports.season_growth.pdf_render import render_season_growth_pdf
 
 
@@ -69,7 +70,13 @@ def generate_season_growth_pdf(
 
     with tempfile.TemporaryDirectory(prefix="season_growth_") as tmp:
         tmp_dir = Path(tmp)
-        chart_paths = render_season_charts(facts, tmp_dir)
+        # Download RGB previews before chart/PDF render so paths exist in facts.spatial
+        spatial = facts.setdefault("spatial", {})
+        media_paths = download_spatial_media(spatial, tmp_dir / "media")
+        chart_paths = render_season_charts(facts, tmp_dir / "charts")
+        # Expose downloaded RGB under chart_paths for PDF convenience
+        for k, p in media_paths.items():
+            chart_paths[k] = p
         if out_path:
             dest = Path(out_path)
         else:
@@ -93,6 +100,15 @@ def generate_season_growth_pdf(
         "harvest": facts.get("harvest"),
         "drought_scene_count": (facts.get("drought") or {}).get("drought_scene_count"),
         "flood_status": (facts.get("flood") or {}).get("status"),
+        "confidence": facts.get("confidence"),
+        "status_cards": facts.get("status_cards"),
+        "spatial": {
+            "latest_rgb_date": (facts.get("spatial") or {}).get("latest_rgb_date"),
+            "peak_rgb_date": (facts.get("spatial") or {}).get("peak_rgb_date"),
+            "has_pixel_stats": (facts.get("spatial") or {}).get("has_pixel_stats"),
+            "pixel_n": (facts.get("spatial") or {}).get("pixel_n"),
+            "grade_shares": (facts.get("spatial") or {}).get("grade_shares"),
+        },
         "window": facts.get("window"),
         "materials": materials_meta,
         "field_name": field_name,
