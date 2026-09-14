@@ -92,6 +92,9 @@ interface NdviChartProps {
     /** Timeline markers (e.g. historical drought days) */
     eventMarks?: ChartEventMark[];
     /** Optional caption / legend note under chart is handled by parent */
+    /** Controlled "only valid observations" filter (default true when uncontrolled). */
+    onlyRealistic?: boolean;
+    onOnlyRealisticChange?: (value: boolean) => void;
 }
 
 export default function NdviChart({
@@ -108,12 +111,19 @@ export default function NdviChart({
     stageBands,
     bareThreshold = 0.25,
     eventMarks,
+    onlyRealistic: onlyRealisticProp,
+    onOnlyRealisticChange,
 }: NdviChartProps) {
     const t = useTranslations("ndviChart");
     const [showObservations, setShowObservations] = useState(false);
     const [showEvents, setShowEvents] = useState(false);
-    /** Checked = hide unrealistic / cloud-hole points (default). */
-    const [onlyRealistic, setOnlyRealistic] = useState(true);
+    /** Checked = hide unrealistic / cloud-hole points (default). Uncontrolled unless parent passes props. */
+    const [onlyRealisticInternal, setOnlyRealisticInternal] = useState(true);
+    const onlyRealistic = onlyRealisticProp ?? onlyRealisticInternal;
+    const setOnlyRealistic = (value: boolean) => {
+        if (onlyRealisticProp === undefined) setOnlyRealisticInternal(value);
+        onOnlyRealisticChange?.(value);
+    };
     const displayStats = useMemo(
         () => (onlyRealistic ? filterRealisticNdviStats(stats, { seasonMonths, peakMonths }) : stats),
         [onlyRealistic, stats, seasonMonths, peakMonths],

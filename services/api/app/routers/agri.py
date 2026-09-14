@@ -25,6 +25,8 @@ from app.schemas.agri import (
     HarvestDetectOut,
     LandParcelOut,
     LandScenesSummaryOut,
+    NdviDayGradeShareItem,
+    NdviDayGradeSharesOut,
     ProjectAreaLandOut,
     ProjectAreaOut,
     SceneProductOut,
@@ -843,6 +845,127 @@ async def harvest_detect_for_land(
             evidence={"reason": "soft_fail", "error": str(exc)[:200]},
             window={},
         )
+
+
+@router.get(
+    "/lands/{land_id}/ndvi-day-grade-shares",
+    response_model=NdviDayGradeSharesOut,
+)
+async def list_ndvi_day_grade_shares(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
+    limit: int = Query(200, ge=1, le=500),
+):
+    """Server-side 图一 grade shares per S2 date from DB lonlat_v1 pixels.
+
+    Returns aggregated counts/pct/n/mean only (no raw pixels). Prefer clear=1
+    pixels when present. Multiple scenes on one day → prefer official optical.
+    """
+    await _agri_ready(db)
+    exists = (
+        await db.execute(
+            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+            {"land_id": land_id},
+        )
+    ).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Land parcel not found")
+
+    from app.core.agri_classify import is_official_optical_product
+    from app.core.ndvi_day_grade import (
+        NDVI_DAY_GRADE_RULE_ZH,
+        compute_pixel_ndvi_day_grade_shares,
+    )
+
+    where = [
+        "land_id = :land_id",
+        "sensor = 'S2'",
+        "pixel_data->>'format' = 'lonlat_v1'",
+        "jsonb_typeof(pixel_data->'pixels') = 'array'",
+        "jsonb_array_length(pixel_data->'pixels') > 0",
+    ]
+    params: dict[str, Any] = {"land_id": land_id, "limit": limit}
+    if date_from is not None:
+        where.append("date >= :date_from")
+        params["date_from"] = date_from
+    if date_to is not None:
+        where.append("date <= :date_to")
+        params["date_to"] = date_to
+    wh = " AND ".join(where)
+
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT date, scene_id, pixel_data, ndvi_avg,
+                       pixel_data->>'source' AS source,
+                       pixel_data->>'decloud_quality' AS decloud_quality,
+                       parcel_cloud_cover_pct, cloud_cover, cloud_cover_over_30,
+                       pixel_data->>'parcel_cloud_source' AS parcel_cloud_source
+                FROM agri.parcel_scene_products
+                WHERE {wh}
+                ORDER BY date ASC, scene_id ASC
+                LIMIT :limit
+                """
+            ),
+            params,
+        )
+    ).fetchall()
+
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        d = _row_to_dict(r)
+        day = str(d.get("date"))[:10]
+        by_date.setdefault(day, []).append(d)
+
+    items: list[NdviDayGradeShareItem] = []
+    for day in sorted(by_date.keys()):
+        group = by_date[day]
+        official = [
+            s
+            for s in group
+            if is_official_optical_product(
+                source=s.get("source"),
+                scene_id=s.get("scene_id"),
+                decloud_quality=s.get("decloud_quality"),
+                parcel_cloud_cover_pct=s.get("parcel_cloud_cover_pct"),
+                cloud_cover=s.get("cloud_cover"),
+                cloud_cover_over_30=s.get("cloud_cover_over_30"),
+                parcel_cloud_source=s.get("parcel_cloud_source"),
+            )
+        ]
+        candidates = official or group
+        chosen = None
+        share = None
+        for s in candidates:
+            pixels = _pixels_from_db_lonlat(s.get("pixel_data"))
+            if not pixels:
+                continue
+            share = compute_pixel_ndvi_day_grade_shares(pixels)
+            if share:
+                chosen = s
+                break
+        if not share or chosen is None:
+            continue
+        items.append(
+            NdviDayGradeShareItem(
+                date=day,
+                counts=share["counts"],
+                pct=share["pct"],
+                n=share["n"],
+                mean=share.get("mean"),
+                scene_id=chosen.get("scene_id"),
+            )
+        )
+
+    return NdviDayGradeSharesOut(
+        land_id=land_id,
+        items=items,
+        rule_zh=NDVI_DAY_GRADE_RULE_ZH,
+    )
 
 
 # China overview (全国态势) — country/province/city/county stats

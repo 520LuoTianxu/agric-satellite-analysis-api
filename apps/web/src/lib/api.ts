@@ -1326,6 +1326,20 @@ export const agriApi = {
             `/agri/lands/${encodeURIComponent(landId)}/harvest-detect${q ? `?${q}` : ""}`,
         );
     },
+    /** Server-side 图一 NDVI day-grade shares (aggregated; no raw pixels). */
+    ndviDayGradeShares: (
+        landId: string,
+        opts: { from?: string; to?: string; limit?: number } = {},
+    ) => {
+        const params = new URLSearchParams();
+        if (opts.from) params.set("from", opts.from);
+        if (opts.to) params.set("to", opts.to);
+        if (opts.limit != null) params.set("limit", String(opts.limit));
+        const q = params.toString();
+        return apiFetch<NdviDayGradeSharesResult>(
+            `/agri/lands/${encodeURIComponent(landId)}/ndvi-day-grade-shares${q ? `?${q}` : ""}`,
+        );
+    },
 };
 
 export interface HarvestDetectResult {
@@ -1337,6 +1351,21 @@ export interface HarvestDetectResult {
     evidence?: Record<string, unknown>;
     alternates?: Record<string, unknown>[];
     window?: Record<string, unknown>;
+}
+
+export interface NdviDayGradeShareItem {
+    date: string;
+    counts: Record<string, number>;
+    pct: Record<string, number>;
+    n: number;
+    mean?: number | null;
+    scene_id?: string | null;
+}
+
+export interface NdviDayGradeSharesResult {
+    land_id: string;
+    items: NdviDayGradeShareItem[];
+    rule_zh?: string;
 }
 
 

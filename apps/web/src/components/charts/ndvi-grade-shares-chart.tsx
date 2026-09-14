@@ -10,6 +10,7 @@ import {
     LegendComponent,
     TitleComponent,
     DataZoomComponent,
+    GraphicComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { axisLabel, baseTooltip, legendStyle, secondaryValueAxis, valueAxis } from "./chart-base";
@@ -23,6 +24,7 @@ echarts.use([
     LegendComponent,
     TitleComponent,
     DataZoomComponent,
+    GraphicComponent,
     CanvasRenderer,
 ]);
 
@@ -113,15 +115,18 @@ export default function NdviGradeSharesChart({
 
     const donutOption = useMemo(() => {
         const share = selectedShare;
+        // Drop 0% slices from the ring so tiny/empty wedges do not clutter; legend stays full.
         const data = NDVI_DAY_GRADE_ORDER.map((g) => ({
             name: g,
             value: share ? share.pct[g] : 0,
             itemStyle: { color: NDVI_DAY_GRADE_COLORS[g] },
-        }));
+        })).filter((d) => d.value > 0);
         const centerTop =
             areaMu != null && Number.isFinite(areaMu)
                 ? `${areaMu.toFixed(areaMu >= 100 ? 0 : 1)}亩`
                 : "—";
+        // Pie sits left of vertical legend; hole center aligned for graphic label.
+        const pieCenter: [string, string] = ["34%", "52%"];
         return {
             animation: false,
             tooltip: {
@@ -135,43 +140,75 @@ export default function NdviGradeSharesChart({
             },
             legend: {
                 orient: "vertical" as const,
-                right: 4,
+                right: 8,
                 top: "middle",
-                ...legendStyle(),
+                itemGap: 10,
+                ...legendStyle({ itemWidth: 10, itemHeight: 10 }),
+                formatter: (name: string) => {
+                    const g = name as NdviDayGrade;
+                    const pct = share?.pct[g];
+                    return pct != null ? `${g}  ${pct}%` : g;
+                },
                 data: NDVI_DAY_GRADE_ORDER,
             },
-            title: [
+            // Date is rendered outside ECharts (HTML header); center area via graphic.
+            graphic: [
                 {
-                    text: selectedDate ? selectedDate : "当日",
-                    left: 8,
-                    top: 4,
-                    textStyle: { fontSize: 11, fontWeight: 600, color: "#374151" },
-                },
-                {
-                    text: centerTop,
-                    subtext: "总面积",
-                    left: "38%",
-                    top: "54%",
-                    textAlign: "center",
-                    textVerticalAlign: "middle",
-                    textStyle: { fontSize: 14, fontWeight: 700, color: "#111827", lineHeight: 18 },
-                    subtextStyle: { fontSize: 10, color: "#6b7280", lineHeight: 14 },
+                    type: "group",
+                    left: pieCenter[0],
+                    top: pieCenter[1],
+                    bounding: "raw",
+                    z: 100,
+                    children: [
+                        {
+                            type: "text",
+                            style: {
+                                text: centerTop,
+                                fill: "#111827",
+                                fontSize: 15,
+                                fontWeight: 700,
+                                align: "center",
+                                verticalAlign: "bottom",
+                            },
+                            y: -2,
+                        },
+                        {
+                            type: "text",
+                            style: {
+                                text: "总面积",
+                                fill: "#6b7280",
+                                fontSize: 10,
+                                align: "center",
+                                verticalAlign: "top",
+                            },
+                            y: 4,
+                        },
+                    ],
                 },
             ],
             series: [
                 {
                     name: "长势等级占比",
                     type: "pie",
-                    radius: ["46%", "70%"],
-                    center: ["38%", "54%"],
+                    radius: ["48%", "72%"],
+                    center: pieCenter,
                     avoidLabelOverlap: true,
                     label: { show: false },
                     labelLine: { show: false },
-                    data,
+                    data: data.length
+                        ? data
+                        : [
+                              {
+                                  name: "无",
+                                  value: 1,
+                                  itemStyle: { color: "#e5e7eb" },
+                                  tooltip: { show: false },
+                              },
+                          ],
                 },
             ],
         };
-    }, [selectedShare, areaMu, selectedDate]);
+    }, [selectedShare, areaMu]);
 
     const stackedOption = useMemo(() => {
         const dates = historyDates;
@@ -300,24 +337,35 @@ export default function NdviGradeSharesChart({
 
     if (variant === "donut") {
         const h = height ?? 200;
+        const headerH = 22;
         if (!selectedShare) {
             return (
                 <div
-                    className="flex items-center justify-center text-[11px] text-muted-foreground px-1"
+                    className="flex flex-col"
                     style={{ height: h }}
                 >
-                    当日暂无像素分档（可点选其他日期或等待色斑加载）
+                    <div className="shrink-0 px-1 text-[11px] font-medium text-foreground/80 tabular-nums leading-5">
+                        {selectedDate ?? "当日"}
+                    </div>
+                    <div className="flex flex-1 items-center justify-center text-[11px] text-muted-foreground px-1">
+                        当日暂无像素分档（可点选其他日期或等待色斑加载）
+                    </div>
                 </div>
             );
         }
         return (
-            <ReactEChartsCore
-                echarts={echarts}
-                option={donutOption}
-                style={{ height: h, width: "100%" }}
-                notMerge
-                lazyUpdate
-            />
+            <div className="flex w-full flex-col" style={{ height: h }}>
+                <div className="shrink-0 px-1 text-[11px] font-medium text-foreground/80 tabular-nums leading-5">
+                    {selectedDate ?? "当日"}
+                </div>
+                <ReactEChartsCore
+                    echarts={echarts}
+                    option={donutOption}
+                    style={{ height: Math.max(h - headerH, 160), width: "100%" }}
+                    notMerge
+                    lazyUpdate
+                />
+            </div>
         );
     }
 

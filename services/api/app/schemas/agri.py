@@ -371,3 +371,20 @@ class HarvestDetectOut(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
     alternates: list[dict[str, Any]] = Field(default_factory=list)
     window: dict[str, Any] = Field(default_factory=dict)
+
+
+class NdviDayGradeShareItem(BaseModel):
+    """One observation day: pixel NDVI 图一 grade shares (no raw pixels)."""
+
+    date: date
+    counts: dict[str, int]
+    pct: dict[str, float]
+    n: int
+    mean: float | None = None
+    scene_id: str | None = None
+
+
+class NdviDayGradeSharesOut(BaseModel):
+    land_id: str
+    items: list[NdviDayGradeShareItem]
+    rule_zh: str = "红<0.25 / 橙0.25–0.35 / 黄0.35–0.50 / 绿≥0.50"
