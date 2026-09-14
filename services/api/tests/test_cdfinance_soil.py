@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from app.core.cdfinance_soil import (
     geojson_to_coords_string,
     normalize_bearer,
@@ -32,8 +30,11 @@ def test_geojson_to_coords_drops_closing_point():
 def test_normalize_bearer():
     assert normalize_bearer("Bearer abc") == "abc"
     assert normalize_bearer("abc") == "abc"
-    with pytest.raises(ValueError):
+    try:
         normalize_bearer("")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
 
 
 def test_parse_auth_query():
