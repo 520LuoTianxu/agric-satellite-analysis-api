@@ -1,8 +1,11 @@
-"""Internal HTTP client for download-host → API control/data plane (D2).
+"""Internal HTTP client for download-host → API control/data plane (D2/D3).
 
 When ``API_BASE_URL`` (and ``INTERNAL_API_TOKEN``) are set, workers can read
 field resolve / jobs / agri scene dates via HTTP instead of SyncSession.
 If unset, callers should fall back to legacy DATABASE_URL reads.
+
+D3 writes: prefer HTTP when ``http_writes_enabled()`` (see that helper).
+Keep SyncSession PG writes until ``INGEST_PG_WRITES=0`` or claim+HTTP.
 """
 
 from __future__ import annotations
@@ -20,12 +23,18 @@ __all__ = [
     "agri_scene_dates",
     "agri_scenes_summary",
     "api_base_url",
+    "apply_results",
+    "complete_work",
+    "fail_work",
     "field_geom",
     "get_job",
+    "http_writes_enabled",
+    "ingest_pg_writes_enabled",
     "internal_api_enabled",
     "internal_api_token",
     "internal_client",
     "patch_job",
+    "progress_work",
     "resolve_field",
 ]
 
@@ -53,6 +62,43 @@ def internal_api_token() -> str:
 def internal_api_enabled() -> bool:
     """True when download-side HTTP reads should be preferred over SyncSession."""
     return bool(api_base_url() and internal_api_token())
+
+
+def _truthy(val: str) -> bool:
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _falsey(val: str) -> bool:
+    return val.strip().lower() in ("0", "false", "no", "off")
+
+
+def ingest_pg_writes_enabled() -> bool:
+    """Legacy SyncSession PG writes on download host (default on).
+
+    Set ``INGEST_PG_WRITES=0`` to disable direct PG writes once HTTP path is ready.
+    """
+    raw = _env("INGEST_PG_WRITES", "1")
+    if _falsey(raw):
+        return False
+    return True
+
+
+def http_writes_enabled() -> bool:
+    """True when ingest should write job/domain results via internal HTTP.
+
+    Enabled when internal API is configured AND either:
+    - ``INGEST_PG_WRITES=0`` (force HTTP writes), or
+    - ``WORK_QUEUE_MODE=claim`` (claim path implies HTTP result delivery), or
+    - ``INGEST_HTTP_WRITES=1`` (explicit dual-run / canary)
+    """
+    if not internal_api_enabled():
+        return False
+    if not ingest_pg_writes_enabled():
+        return True
+    mode = _env("WORK_QUEUE_MODE", "legacy").lower()
+    if mode == "claim":
+        return True
+    return _truthy(_env("INGEST_HTTP_WRITES", "0"))
 
 
 def _headers() -> dict[str, str]:
@@ -258,3 +304,105 @@ def field_geom(
         return _do(client)
     with internal_client() as c:
         return _do(c)
+
+
+def apply_results(
+    result: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/results/apply — domain upserts without a work_item lease."""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post("/v1/internal/results/apply", json={"result": result})
+        _raise_for_status(r, context="results/apply")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("results/apply returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def complete_work(
+    work_id: str,
+    result: dict[str, Any] | None = None,
+    *,
+    worker_id: str | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """POST /v1/internal/work/{id}/complete (triggers API-side result apply)."""
+    body: dict[str, Any] = {"result": dict(result or {})}
+    if worker_id:
+        body["worker_id"] = worker_id
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(f"/v1/internal/work/{work_id}/complete", json=body)
+        _raise_for_status(r, context="work/complete")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("work/complete returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)
+
+
+def fail_work(
+    work_id: str,
+    error: str,
+    *,
+    worker_id: str | None = None,
+    retry: bool = False,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """POST /v1/internal/work/{id}/fail."""
+    body: dict[str, Any] = {"error": error, "retry": retry}
+    if worker_id:
+        body["worker_id"] = worker_id
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(f"/v1/internal/work/{work_id}/fail", json=body)
+        _raise_for_status(r, context="work/fail")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("work/fail returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)
+
+
+def progress_work(
+    work_id: str,
+    progress: dict[str, Any],
+    *,
+    worker_id: str | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """POST /v1/internal/work/{id}/progress."""
+    body: dict[str, Any] = {"progress": dict(progress or {})}
+    if worker_id:
+        body["worker_id"] = worker_id
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(f"/v1/internal/work/{work_id}/progress", json=body)
+        _raise_for_status(r, context="work/progress")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("work/progress returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)
+

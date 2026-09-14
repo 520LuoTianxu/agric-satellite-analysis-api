@@ -117,5 +117,25 @@ class InternalApiClientTests(unittest.TestCase):
         self.assertEqual(out["status"], "running")
 
 
+class HttpWritesTests(unittest.TestCase):
+    def test_http_writes_requires_api(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"API_BASE_URL": "", "INTERNAL_API_TOKEN": "", "INGEST_PG_WRITES": "0"},
+            clear=False,
+        ):
+            self.assertFalse(ia.http_writes_enabled())
+
+    def test_apply_results_client(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/internal/results/apply")
+            return httpx.Response(200, json={"ok": True, "stats": {"domain": {}}})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.apply_results({"kind": "weather_daily", "rows": []}, client=client)
+        self.assertTrue(out["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 Enabled when WORK_QUEUE_MODE=claim. Uses API_BASE_URL + INTERNAL_API_TOKEN.
 Does not require DATABASE_URL or CloudAMQP.
+Celery tasks call work complete/fail when finished (D3 upsert path).
 """
 
 from __future__ import annotations
@@ -176,13 +177,35 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"unsupported work type for claim agent: {wtype}")
 
 
+def progress(client: httpx.Client, work_id: str, progress_body: dict[str, Any]) -> None:
+    r = client.post(
+        f"/v1/internal/work/{work_id}/progress",
+        json={"worker_id": worker_id(), "progress": progress_body},
+    )
+    r.raise_for_status()
+
+
 def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
+    """Dispatch Celery; leave work_item leased until the task POSTs complete (D3).
+
+    Previously we marked complete on dispatch, which prevented complete→upsert
+    of assessment/season result metadata. Progress records the celery id instead.
+    """
     work_id = str(item["id"])
     try:
         result = _dispatch_celery(item)
-        complete(client, work_id, result)
+        progress(
+            client,
+            work_id,
+            {
+                "stage": "dispatched",
+                "celery_id": result.get("celery_id"),
+                "dispatched": result.get("dispatched"),
+                "job_id": result.get("job_id"),
+            },
+        )
         logger.info(
-            "work_item_dispatched_complete id=%s type=%s celery=%s",
+            "work_item_dispatched id=%s type=%s celery=%s",
             work_id,
             item.get("type"),
             result.get("celery_id"),

@@ -509,6 +509,20 @@ def backfill_weather_for_field(
                 payload = None
                 if status == "success":
                     payload = _weather_result_payload(field_id, days=backfill)
+                    try:
+                        from openfarm_common.internal_api import (
+                            apply_results,
+                            http_writes_enabled,
+                        )
+
+                        if http_writes_enabled() and payload:
+                            apply_results(payload)
+                    except Exception as e:
+                        logger.warning(
+                            "weather_http_apply_failed",
+                            field_id=field_id,
+                            error=str(e),
+                        )
                 publish_task_result(
                     task_id=mq_task_id,
                     status=status,
