@@ -1,4 +1,4 @@
-"""Unit tests for land-assessment AI JSON parse / fallback."""
+"""Unit tests for land-assessment AI JSON parse / fallback / parallel / anomaly schema."""
 
 from __future__ import annotations
 
@@ -10,6 +10,54 @@ from unittest.mock import patch
 import httpx
 
 from app.reports.land_assessment import ai_analysis
+from app.reports.land_assessment.charts import estimate_emergence
+from app.reports.land_assessment.soil_labels import (
+    soil_drainage_zh,
+    soil_texture_zh,
+    translate_soil_jargon,
+)
+
+
+class SoilZhMappingTests(unittest.TestCase):
+    def test_texture_and_drainage(self) -> None:
+        self.assertEqual(soil_texture_zh("clay loam"), "黏壤土")
+        self.assertEqual(soil_texture_zh("Clay Loam"), "黏壤土")
+        self.assertEqual(soil_drainage_zh("well drained"), "排水良好")
+        self.assertEqual(soil_drainage_zh("Well drained"), "排水良好")
+        self.assertEqual(soil_texture_zh("粉壤土"), "粉壤土")
+
+    def test_translate_free_text(self) -> None:
+        s = translate_soil_jargon("Clay loam + Well drained; Rootzone AWC 164 mm")
+        self.assertIn("黏壤土", s)
+        self.assertIn("排水良好", s)
+        self.assertIn("根系层有效持水量(mm)", s)
+        self.assertNotIn("clay loam", s.lower())
+        self.assertNotIn("well drained", s.lower())
+
+
+class EmergenceEstimateTests(unittest.TestCase):
+    def test_estimates_from_ndvi_rise(self) -> None:
+        # Spring low then sustained climb mid-June (post-wheat corn)
+        by_date = {
+            "2025-05-20": {"NDVI": 0.18},
+            "2025-06-01": {"NDVI": 0.17},
+            "2025-06-10": {"NDVI": 0.19},
+            "2025-06-18": {"NDVI": 0.28},
+            "2025-06-25": {"NDVI": 0.35},
+            "2025-07-05": {"NDVI": 0.48},
+            "2025-08-01": {"NDVI": 0.82},
+        }
+        em = estimate_emergence(by_date, 2025)
+        self.assertEqual(em["method"], "ndvi_rise")
+        self.assertIsNotNone(em["date"])
+        self.assertTrue(str(em["date"]).startswith("2025-06"))
+        self.assertIn("依据绿度抬升", em["note_zh"])
+
+    def test_insufficient_data(self) -> None:
+        em = estimate_emergence({"2025-08-01": {"NDVI": 0.8}}, 2025)
+        self.assertEqual(em["method"], "insufficient")
+        self.assertIsNone(em["date"])
+        self.assertIn("依据不足", em["note_zh"])
 
 
 class LandAssessmentAiTests(unittest.TestCase):
@@ -27,7 +75,7 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertFalse(out["business"]["available"])
         self.assertEqual(out["business"]["note"], "数据不足")
 
-    def test_normalize_structured_json(self) -> None:
+    def test_normalize_anomaly_card_schema(self) -> None:
         payload = {
             "version": 1,
             "overall": {
@@ -49,23 +97,36 @@ class LandAssessmentAiTests(unittest.TestCase):
             },
             "rs_growth": {
                 "phenology_normality": "升-峰-落基本正常",
-                "anomalies": ["某年峰值偏低"],
+                "anomalies": [
+                    {
+                        "event_id": "E2",
+                        "problem": "拔节前后绿度明显偏低",
+                        "likely_cause": "天气",
+                        "basis": "均NDVI≈0.265，对照P30=0.322；6月降水偏少",
+                        "confidence": "中",
+                    }
+                ],
                 "ranked_causes": [
-                    {"rank": 1, "cause": "可能未种植", "evidence": "峰值 NDVI<0.25"}
+                    {"rank": 1, "cause": "可能干旱", "evidence": "降水偏少"}
                 ],
             },
             "spatial": {
-                "watch_zones": ["低洼处"],
+                "watch_zones": [{"zone": "低洼处", "note": "偏湿信号"}],
                 "why": ["水分偏高信号"],
                 "temporal_caveat": "单景不足定论",
             },
             "soil": {
                 "indicators_to_farm": [
                     {
-                        "indicator": "pH 7.8",
-                        "farm_impact": "养分有效性下降",
-                        "management": "选耐碱品种/测土",
-                    }
+                        "indicator": "clay loam + well drained",
+                        "farm_impact": "质地中等",
+                        "management": "保墒",
+                    },
+                    {
+                        "indicator": "Rootzone AWC 164",
+                        "farm_impact": "持水中等",
+                        "management": "及时灌溉",
+                    },
                 ]
             },
             "climate": {
@@ -86,13 +147,38 @@ class LandAssessmentAiTests(unittest.TestCase):
         }
         out = ai_analysis.normalize_ai(payload)
         self.assertEqual(out["overall"]["strengths"], ["旺季绿度尚可"])
-        self.assertEqual(out["rs_growth"]["ranked_causes"][0]["cause"], "可能未种植")
+        cards = out["rs_growth"]["anomalies"]
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["event_id"], "E2")
+        self.assertEqual(cards[0]["problem"], "拔节前后绿度明显偏低")
+        self.assertEqual(cards[0]["likely_cause"], "天气")
+        self.assertEqual(cards[0]["confidence"], "中")
+        self.assertIn("低洼处", out["spatial"]["watch_zones"][0])
+        soil_inds = [r["indicator"] for r in out["soil"]["indicators_to_farm"]]
+        self.assertTrue(any("黏壤土" in x for x in soil_inds))
+        self.assertTrue(any("根系层有效持水量" in x for x in soil_inds))
+        self.assertFalse(any("clay loam" in x.lower() for x in soil_inds))
         self.assertEqual(out["yield_potential"]["level"], "中")
         self.assertNotIn("亩产", out["yield_potential"])
         self.assertFalse(out["business"]["available"])
         self.assertNotIn("收益", out["business"])
         self.assertEqual(out["custom_extra"], {"ok": True})
         self.assertIsNone(out["error"])
+
+    def test_spatial_empty_zones_with_why_is_no_hotspot(self) -> None:
+        out = ai_analysis.normalize_ai(
+            {
+                "overall": {"evaluation": "ok", "strengths": ["a"]},
+                "spatial": {
+                    "watch_zones": [],
+                    "why": ["全地块同步，未见斑块"],
+                    "temporal_caveat": "单景不足",
+                },
+            }
+        )
+        self.assertTrue(out["spatial"]["no_hotspot"])
+        self.assertEqual(out["spatial"]["watch_zones"], [])
+        self.assertTrue(out["spatial"]["why"])
 
     def test_yield_level_strips_numbers(self) -> None:
         out = ai_analysis.normalize_ai(
@@ -108,7 +194,7 @@ class LandAssessmentAiTests(unittest.TestCase):
         client = httpx.Client(transport=transport)
         with patch.dict(os.environ, {"BAILIAN_API_KEY": "k"}, clear=False):
             out = ai_analysis.generate_land_assessment_narrative(
-                {"field": {}}, client=client
+                {"field": {}}, client=client, parallel=False
             )
         client.close()
         self.assertTrue(out["llm_configured"])
@@ -183,13 +269,141 @@ class LandAssessmentAiTests(unittest.TestCase):
             clear=False,
         ):
             out = ai_analysis.generate_land_assessment_narrative(
-                {"field": {"name": "x"}}, client=client
+                {"field": {"name": "x"}}, client=client, parallel=False
             )
         client.close()
         self.assertTrue(out["llm_configured"])
         self.assertIn("适合玉米", out["overall"]["evaluation"])
         self.assertEqual(out["yield_potential"]["level"], "中")
         self.assertIsNone(out["error"])
+
+    def test_parallel_section_soft_fail(self) -> None:
+        """One section HTTP-fails; others still assemble."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            body = json.loads(request.content.decode("utf-8"))
+            user = body["messages"][1]["content"]
+            if "分节=spatial" in user:
+                return httpx.Response(500, text="spatial boom")
+            # Return minimal matching section
+            if "分节=overall" in user:
+                payload = {
+                    "overall": {
+                        "evaluation": "并行 overall 成功",
+                        "strengths": ["ok"],
+                        "main_risks": [],
+                        "core_advice": ["因程序分数中等，保持常规管理"],
+                    }
+                }
+            elif "分节=soil" in user:
+                payload = {
+                    "soil": {
+                        "indicators_to_farm": [
+                            {
+                                "indicator": "黏壤土",
+                                "farm_impact": "适中",
+                                "management": "保墒",
+                            }
+                        ]
+                    }
+                }
+            else:
+                # generic empty-ish success for other sections
+                key = "portrait"
+                for name, _, _ in ai_analysis.SECTION_SPECS:
+                    if f"分节={name}" in user:
+                        key = name
+                        break
+                if key == "rs_growth":
+                    payload = {
+                        "rs_growth": {
+                            "phenology_normality": "正常",
+                            "anomalies": [],
+                            "ranked_causes": [],
+                        }
+                    }
+                elif key == "yield_potential":
+                    payload = {
+                        "yield_potential": {"level": "中", "rationale": "无模型"}
+                    }
+                elif key == "business":
+                    payload = {
+                        "business": {"available": False, "note": "数据不足"},
+                        "evidence_gaps": [],
+                    }
+                elif key == "climate":
+                    payload = {
+                        "climate": {
+                            "risk_present": [],
+                            "disaster_occurred": [],
+                            "notes": "",
+                        }
+                    }
+                elif key == "management":
+                    payload = {
+                        "management": {
+                            "variety_direction": "常规",
+                            "planting_focus": [],
+                            "water_fertility_watch": [],
+                            "scouting": [],
+                        }
+                    }
+                elif key == "score_explain":
+                    payload = {
+                        "score_explain": {
+                            "high_dims": [],
+                            "low_dims": [],
+                            "biggest_drivers": [],
+                            "how_to_improve": [],
+                        }
+                    }
+                elif key == "portrait":
+                    payload = {
+                        "portrait": {
+                            "regional_ag_traits": "华北",
+                            "crop_fit": "较适宜",
+                            "limits": [],
+                        }
+                    }
+                else:
+                    payload = {key: {}}
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(payload, ensure_ascii=False)
+                            }
+                        }
+                    ]
+                },
+            )
+
+        # Parallel path creates its own clients; patch httpx.Client
+        transport = httpx.MockTransport(handler)
+
+        class _C(httpx.Client):
+            def __init__(self, *a, **k):
+                k.setdefault("transport", transport)
+                super().__init__(*a, **k)
+
+        with patch.dict(os.environ, {"BAILIAN_API_KEY": "k"}, clear=False):
+            with patch.object(httpx, "Client", _C):
+                out = ai_analysis.generate_land_assessment_narrative(
+                    {"field": {}, "scorecard": {}, "rs": {}, "risk": {}, "soil": {}},
+                    parallel=True,
+                    max_workers=4,
+                    timeout=30.0,
+                )
+        self.assertTrue(out["llm_configured"])
+        self.assertIn("并行 overall 成功", out["overall"]["evaluation"])
+        self.assertTrue(out["soil"]["indicators_to_farm"])
+        self.assertTrue(out.get("section_errors"))
+        self.assertTrue(any("spatial" in e for e in out["section_errors"]))
+        self.assertGreaterEqual(calls["n"], 5)
 
     def test_facts_for_llm_compact(self) -> None:
         facts = ai_analysis.facts_for_llm(
@@ -209,7 +423,12 @@ class LandAssessmentAiTests(unittest.TestCase):
             },
             rs={"peak_ndvi_mean": 0.7},
             risk={"period": "2024", "events": []},
-            soil={"avg_ph": 7.2},
+            soil={
+                "avg_ph": 7.2,
+                "dominant_texture": "clay loam",
+                "drainage_class": "well drained",
+                "rootzone_awc_mm": 164,
+            },
             weather_summary={},
             analysis={},
             flood_evidence=None,
@@ -217,6 +436,9 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertEqual(facts["field"]["area_mu"], 15.0)
         self.assertIsNone(facts["yield_model"])
         self.assertIsNone(facts["business_model"])
+        self.assertEqual(facts["soil"]["dominant_texture"], "黏壤土")
+        self.assertEqual(facts["soil"]["drainage_class"], "排水良好")
+        self.assertIn("根系层有效持水量", facts["soil"]["rootzone_awc_label"])
 
 
 if __name__ == "__main__":

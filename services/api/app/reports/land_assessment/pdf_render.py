@@ -28,6 +28,12 @@ from reportlab.platypus import (
 )
 
 from app.reports.land_assessment.paths import FONT_PATH
+from app.reports.land_assessment.soil_labels import (
+    AWC_LABEL_ZH,
+    soil_drainage_zh,
+    soil_texture_zh,
+    translate_soil_jargon,
+)
 
 LIGHT_WORD = {"绿": "不错", "黄": "一般", "红": "要盯紧"}
 LIGHT_COLOR = {"绿": "#1b7a3d", "黄": "#c48a00", "红": "#c0392b"}
@@ -550,7 +556,10 @@ def render_pdf(
         kv_card(
             "土壤关键指标（程序）",
             [
-                ("质地", soil.get("dominant_texture") or "—"),
+                (
+                    "质地",
+                    soil_texture_zh(soil.get("dominant_texture")) or "—",
+                ),
                 (
                     "pH",
                     (
@@ -559,9 +568,12 @@ def render_pdf(
                         else "—"
                     ),
                 ),
-                ("排水", soil.get("drainage_class") or "—"),
                 (
-                    "根区持水",
+                    "排水",
+                    soil_drainage_zh(soil.get("drainage_class")) or "—",
+                ),
+                (
+                    AWC_LABEL_ZH,
                     (
                         f"{soil.get('rootzone_awc_mm')} mm"
                         if soil.get("rootzone_awc_mm") is not None
@@ -721,6 +733,11 @@ def render_pdf(
             ratio=0.40,
             caption="生育阶段绿度走势（程序）",
         )
+    em = analysis.get("emergence") or {}
+    if em.get("note_zh"):
+        story.append(p(f"<b>{_esc(em.get('note_zh'))}</b>", "body"))
+    elif analysis.get("emergence_note"):
+        story.append(p(f"<b>{_esc(analysis.get('emergence_note'))}</b>", "body"))
     story.append(
         ai_block(
             "物候与长势解读",
@@ -728,9 +745,46 @@ def render_pdf(
         )
     )
 
-    # 异常点：程序事件证据表（WHAT），AI 列表作补充
-    story.append(sub_title("1. 异常点（程序证据）"))
+    # 异常点：AI 农户可读卡片为主，程序证据表作脚注
+    story.append(sub_title("1. 异常点（AI 解读）"))
     events = analysis.get("risk_events_evidence") or risk.get("events") or []
+    ai_anoms = rs_ai.get("anomalies") or []
+    # Build lookup from program events for period/stage footnotes on cards
+    ev_by_id = {
+        str(ev.get("id")): ev for ev in events if isinstance(ev, dict) and ev.get("id")
+    }
+    if ai_anoms:
+        for card in ai_anoms:
+            if isinstance(card, dict) and card.get("problem"):
+                eid = str(card.get("event_id") or "")
+                ev = ev_by_id.get(eid) or {}
+                period = ev.get("period_full") or ""
+                stage = ev.get("stage") or ""
+                head = eid or "异常"
+                if period:
+                    head += f" · {period}"
+                if stage:
+                    head += f" · {stage}"
+                rows = [
+                    ("问题是什么", card.get("problem") or "—"),
+                    ("更可能原因", card.get("likely_cause") or "—"),
+                    ("判断依据", card.get("basis") or "—"),
+                    ("把握", card.get("confidence") or "—"),
+                ]
+                story.append(kv_card(head, rows))
+            else:
+                story.append(p(f"• {_esc(card)}", "bullet"))
+    elif events:
+        story.append(
+            p(
+                "已有程序异常证据，但 AI 事件卡片未返回；请见下方程序证据表。",
+                "small",
+            )
+        )
+    else:
+        story.append(p("程序未检出生育期长势/偏湿聚类事件。", "small"))
+
+    story.append(sub_title("1b. 程序证据表（技术脚注）"))
     if events:
         erows = [
             [
@@ -764,16 +818,13 @@ def render_pdf(
         story.append(
             p(
                 "说明：表现中的 NDVI/EVI/NDWI 取自事件窗内已观测场景均值；"
-                "无月尺度天气时仅给水分指数或地块级摘要，不编造日降水。",
+                "无月尺度天气时仅给水分指数或地块级摘要，不编造日降水。"
+                "上表为程序事实，供核对；农户请优先阅读上方 AI 卡片。",
                 "small",
             )
         )
     else:
-        story.append(p("程序未检出生育期长势/偏湿聚类事件。", "small"))
-    ai_anoms = rs_ai.get("anomalies") or []
-    if ai_anoms:
-        story.append(sub_title("1b. AI 补充异常描述"))
-        story += bullets(ai_anoms)
+        story.append(p("无程序异常事件行。", "small"))
 
     story.append(sub_title("2. 可能原因（排序）"))
     ranked = rs_ai.get("ranked_causes") or []
@@ -819,9 +870,23 @@ def render_pdf(
             )
         )
     story.append(sub_title("1. 需关注区域"))
-    story += bullets(spatial_ai.get("watch_zones") or [])
+    zones = spatial_ai.get("watch_zones") or []
+    why = spatial_ai.get("why") or []
+    if zones:
+        story += bullets(zones)
+    elif spatial_ai.get("no_hotspot") or why:
+        # Empty watch_zones with why/no_hotspot is a valid AI answer, not a fail
+        story.append(
+            p(
+                "未发现需特别关注的空间异质斑块（程序未见局部异常；"
+                "异常事件多为全地块同步，见下方原因）。",
+                "body",
+            )
+        )
+    else:
+        story += bullets([], empty=AI_FAIL)
     story.append(sub_title("2. 原因"))
-    story += bullets(spatial_ai.get("why") or [])
+    story += bullets(why)
     story.append(
         ai_block(
             "时间连续性提示",
@@ -836,16 +901,19 @@ def render_pdf(
     story.append(PageBreak())
     story.append(section_title("六、土壤"))
     story.append(hr())
-    soil_plain = analysis.get("soil_analysis_plain") or ""
+    soil_plain = translate_soil_jargon(analysis.get("soil_analysis_plain") or "")
     if soil_plain:
         story.append(p(f"<b>程序土壤分析：</b>{_esc(soil_plain)}", "body"))
     else:
+        tex = soil_texture_zh(soil.get("dominant_texture")) or "—"
+        drain = soil_drainage_zh(soil.get("drainage_class")) or "—"
         story.append(
             p(
-                f"质地 {_esc(soil.get('dominant_texture') or '—')}；"
+                f"质地 {_esc(tex)}；"
                 f"pH {soil.get('avg_ph') if soil.get('avg_ph') is not None else '—'}；"
-                f"排水 {_esc(soil.get('drainage_class') or '—')}；"
-                f"持水 {soil.get('rootzone_awc_mm') if soil.get('rootzone_awc_mm') is not None else '—'} mm；"
+                f"排水 {_esc(drain)}；"
+                f"{_esc(AWC_LABEL_ZH)} "
+                f"{soil.get('rootzone_awc_mm') if soil.get('rootzone_awc_mm') is not None else '—'}；"
                 f"渍水风险 {soil.get('waterlogging_risk') if soil.get('waterlogging_risk') is not None else '—'}。",
                 "body",
             )
@@ -864,9 +932,18 @@ def render_pdf(
             if isinstance(r, dict):
                 srows.append(
                     [
-                        cell(r.get("indicator") or "—", "tbl_b"),
-                        cell(r.get("farm_impact") or "—", "tbl_c"),
-                        cell(r.get("management") or "—", "tbl_c"),
+                        cell(
+                            translate_soil_jargon(r.get("indicator") or "—"),
+                            "tbl_b",
+                        ),
+                        cell(
+                            translate_soil_jargon(r.get("farm_impact") or "—"),
+                            "tbl_c",
+                        ),
+                        cell(
+                            translate_soil_jargon(r.get("management") or "—"),
+                            "tbl_c",
+                        ),
                     ]
                 )
             else:
