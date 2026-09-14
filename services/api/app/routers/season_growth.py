@@ -403,6 +403,57 @@ async def get_latest_season_growth_report(
     return Response(content=data, media_type="application/pdf", headers=headers)
 
 
+async def _latest_report_job_for_meta(
+    db: AsyncSession,
+    *,
+    ctx: OrgContext,
+    field_id: uuid.UUID,
+    job_type: str,
+) -> Job | None:
+    """Latest job for UI polling, without letting zombie failures shadow PDFs.
+
+    - pending/running: return the in-flight job (polling).
+    - failed/cancelled newest + a succeeded job with object_key: return succeeded
+      so download UI binds to a downloadable report.
+    - otherwise: return the newest job by created_at.
+    """
+    latest = (
+        await db.execute(
+            select(Job)
+            .where(
+                org_scope(None, ctx),
+                Job.field_id == field_id,
+                Job.type == job_type,
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not latest:
+        return None
+    if latest.status in ("pending", "running"):
+        return latest
+    if latest.status in ("failed", "cancelled"):
+        succeeded = (
+            await db.execute(
+                select(Job)
+                .where(
+                    org_scope(None, ctx),
+                    Job.field_id == field_id,
+                    Job.type == job_type,
+                    Job.status == "succeeded",
+                )
+                .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if succeeded:
+            progress = succeeded.progress_json or {}
+            if progress.get("object_key"):
+                return succeeded
+    return latest
+
+
 @router.get(
     "/fields/{field_id}/season-growth-report/latest/meta",
     response_model=JobOut,
@@ -412,20 +463,16 @@ async def get_latest_season_growth_meta(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Return the latest season-growth job (any status) for UI polling."""
+    """Return the latest season-growth job for UI polling / download binding.
+
+    While generating, returns the in-flight job. If the newest job is a
+    terminal failure/cancel but an earlier succeeded PDF exists, prefer that
+    succeeded job so the UI is not shadowed by a zombie error.
+    """
     await _get_field(field_id, ctx.org_id, db)
-    job = (
-        await db.execute(
-            select(Job)
-            .where(
-                org_scope(None, ctx),
-                Job.field_id == field_id,
-                Job.type == "season_growth_report",
-            )
-            .order_by(Job.created_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    job = await _latest_report_job_for_meta(
+        db, ctx=ctx, field_id=field_id, job_type="season_growth_report"
+    )
     if not job:
         raise HTTPException(status_code=404, detail="No season growth report yet")
     return job
