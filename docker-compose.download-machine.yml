@@ -1,9 +1,19 @@
-# Download machine: remote PG/Redis, host networking (box bridge NAT broken),
-# no local db/redis/minio/api/web/writer.
-# Usage:
+# Download machine: host networking; optional local Redis for Celery only.
+# Primary control plane (D1+): HTTP claim → API (no MQ required).
+# See docs/design/download-host-no-direct-pg-redis.md
+#
+# Usage (legacy MQ still default until WORK_QUEUE_MODE=claim):
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 #     -f docker-compose.download-machine.yml --profile consumer \
 #     up -d --build ingest storage beat tiler mq_consumer decloud
+#
+# REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
+# Claim mode env (set in .env when enabling):
+#   API_BASE_URL=http://<api-lb>:8000
+#   INTERNAL_API_TOKEN=<same as API>
+#   WORKER_ID=download-1
+#   WORK_CLAIM_INTERVAL_SEC=4
+#   WORK_QUEUE_MODE=claim   # optional; default legacy keeps MQ consumer
 #
 # Secrets stay in .env / docker-compose.dev.yml — never hard-code credentials here.
 
@@ -99,6 +109,16 @@ services:
     network_mode: host
     depends_on: !reset []
     restart: unless-stopped
+    environment:
+      # Claim mode (WORK_QUEUE_MODE=claim): poll API; REDIS_URL stays localhost Celery.
+      API_BASE_URL: ${API_BASE_URL:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      WORKER_ID: ${WORKER_ID:-}
+      WORK_CLAIM_INTERVAL_SEC: ${WORK_CLAIM_INTERVAL_SEC:-4}
+      WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-legacy}
+      WORK_LEASE_SECONDS: ${WORK_LEASE_SECONDS:-600}
+      # Celery broker must be local Redis on download host (not API Redis).
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
   tiler:
     network_mode: host
     ports: !reset []

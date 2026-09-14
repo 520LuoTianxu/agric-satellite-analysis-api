@@ -258,6 +258,20 @@ def publish_api_task(
     extras = dict(extras or {})
     tid = task_id or str(uuid.uuid4())
 
+    # WORK_QUEUE_MODE=claim skips CloudAMQP (work_items inserted by callers).
+    try:
+        from app.services.work_items import should_publish_mq
+    except Exception:
+        should_publish_mq = lambda: True  # noqa: E731
+    if not should_publish_mq():
+        logger.info(
+            "mq_publish_skipped_claim_mode",
+            task_id=tid,
+            type=type,
+            field_id=field_id,
+        )
+        return tid
+
     try:
         from openfarm_common.mq import publish_task
         from openfarm_common.mq_schemas import TaskMessage

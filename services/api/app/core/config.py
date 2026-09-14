@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     resend_from_email: str = "OpenFarm <noreply@openfarm.app>"
     app_url: str = "http://localhost:3000"
 
+    # Internal download-host control plane (HTTP claim). Never expose to browsers.
+    # WORK_QUEUE_MODE: legacy = MQ/Celery only; claim = work_items only;
+    # dual = insert work_items AND keep MQ publish (transition).
+    internal_api_token: str = ""
+    work_queue_mode: str = "legacy"
+    work_lease_seconds: int = 600
+    work_claim_default_limit: int = 1
+    work_reaper_on_claim: bool = True
+
     class Config:
         env_file = ".env"
         extra = "ignore"
