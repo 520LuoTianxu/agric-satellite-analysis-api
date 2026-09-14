@@ -205,6 +205,10 @@ async def create_assessment_report(
         from app.mq_publish import publish_api_task
 
         if pull_data:
+            # Do NOT publish assessment_report in parallel — that raced PDF ahead of
+            # weather/RS (soil-only reports). Bootstrap fans out pulls with allow_agri
+            # and enqueues assessment as followup after Celery ids are known.
+            assessment_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
                 "date_from": date_from,
                 "date_to": date_to,
@@ -212,6 +216,17 @@ async def create_assessment_report(
                 "weather_days": weather_days,
                 "years": years_used,
                 "source": "assessment_one_click",
+                "allow_agri": True,
+                "with_bridge": True,
+                "followup_assessment": {
+                    "job_id": str(job.id),
+                    "mq_task_id": assessment_mq_task_id,
+                    "crop_type": crop_key,
+                    "crop_name_zh": crop_name_zh(crop_key),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "years": years_used,
+                },
             }
             bootstrap_task_id = publish_api_task(
                 type="field_bootstrap",
@@ -223,33 +238,35 @@ async def create_assessment_report(
                 job_id=str(job.id),
                 field_id=str(field_id),
                 mq_task_id=bootstrap_task_id,
+                assessment_mq_task_id=assessment_mq_task_id,
                 date_from=date_from,
                 date_to=date_to,
                 weather_days=weather_days,
+                pull_data=True,
             )
-
-        mq_task_id = publish_api_task(
-            type="assessment_report",
-            field_id=str(field_id),
-            extras={
-                "job_id": str(job.id),
-                "crop_type": crop_key,
-                "crop_name_zh": crop_name_zh(crop_key),
-                "date_from": date_from,
-                "date_to": date_to,
-                "years": years_used,
-                "pull_data": pull_data,
-            },
-        )
-        logger.info(
-            "assessment_job_dispatched",
-            job_id=str(job.id),
-            field_id=str(field_id),
-            mq_task_id=mq_task_id,
-            date_from=date_from,
-            date_to=date_to,
-            pull_data=pull_data,
-        )
+        else:
+            mq_task_id = publish_api_task(
+                type="assessment_report",
+                field_id=str(field_id),
+                extras={
+                    "job_id": str(job.id),
+                    "crop_type": crop_key,
+                    "crop_name_zh": crop_name_zh(crop_key),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "years": years_used,
+                    "pull_data": False,
+                },
+            )
+            logger.info(
+                "assessment_job_dispatched",
+                job_id=str(job.id),
+                field_id=str(field_id),
+                mq_task_id=mq_task_id,
+                date_from=date_from,
+                date_to=date_to,
+                pull_data=False,
+            )
     except Exception as e:
         logger.error(
             "assessment_job_dispatch_failed",

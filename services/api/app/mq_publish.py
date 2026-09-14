@@ -114,9 +114,7 @@ def _fallback_celery(
                 start = _date.fromisoformat(str(extras["date_from"])[:10])
                 end_raw = extras.get("date_to")
                 end = (
-                    _date.fromisoformat(str(end_raw)[:10])
-                    if end_raw
-                    else _date.today()
+                    _date.fromisoformat(str(end_raw)[:10]) if end_raw else _date.today()
                 )
                 days = max(1, (end - start).days)
             except ValueError:
@@ -130,7 +128,11 @@ def _fallback_celery(
         )
         send_task("app.tasks.soil.fetch_soil_for_field", args=[fid])
         if not extras.get("skip_indices"):
-            kwargs = {}
+            kwargs = {
+                "allow_agri": True
+                if extras.get("allow_agri") is None
+                else bool(extras.get("allow_agri")),
+            }
             if extras.get("sentinel_job_id"):
                 kwargs["sentinel_job_id"] = str(extras["sentinel_job_id"])
             if extras.get("date_from"):
@@ -142,6 +144,28 @@ def _fallback_celery(
                 args=[fid],
                 kwargs=kwargs,
             )
+            followup = extras.get("followup_assessment")
+            if isinstance(followup, dict) and followup.get("job_id"):
+                ak: dict[str, Any] = {
+                    "job_id": str(followup["job_id"]),
+                    "field_id": fid,
+                    "pull_data": True,
+                }
+                for key in (
+                    "crop_type",
+                    "crop_name_zh",
+                    "date_from",
+                    "date_to",
+                    "years",
+                    "mq_task_id",
+                ):
+                    if followup.get(key) is not None:
+                        ak[key] = followup[key]
+                send_task(
+                    "app.tasks.assessment_report.generate_assessment_report",
+                    kwargs=ak,
+                    queue="ingest",
+                )
     elif type == "agri_bridge":
         send_task(
             "app.tasks.agri_bridge.bridge_field_stac_to_agri",

@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import func, select
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.tasks.storage_tasks import upload_file_via_storage
-from app.models.tables import Job
+from app.models.tables import Job, SoilProfile, WeatherDaily
 from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.service import generate_assessment_pdf
 from app.worker import celery_app
@@ -82,10 +83,138 @@ def _resolve_job(session, job_id: str | None) -> Job | None:
         return None
 
 
+def _celery_ids_ready(wait_celery_ids: list[str] | None) -> tuple[bool, list[str]]:
+    """Return (all_ready, pending_ids). Missing/unknown ids treated as ready."""
+    if not wait_celery_ids:
+        return True, []
+    pending: list[str] = []
+    try:
+        from celery.result import AsyncResult
+    except Exception:
+        return True, []
+    for cid in wait_celery_ids:
+        if not cid:
+            continue
+        try:
+            r = AsyncResult(str(cid), app=celery_app)
+            # pending/started/retry → not ready; success/failure/revoked → ready
+            if not r.ready():
+                pending.append(str(cid))
+        except Exception:
+            # Broker blip: do not block forever on inspection errors
+            continue
+    return (len(pending) == 0), pending
+
+
+def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -> int:
+    """Count in-flight index / agri-optical / S1 backfill child jobs."""
+    rows = session.execute(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.field_id == field_id,
+            Job.status.in_(("pending", "running")),
+            Job.params_json["is_backfill"].as_boolean().is_(True),
+            Job.type.notin_(("backfill", "agri_bridge", "assessment_report")),
+            Job.created_at >= wave_cutoff,
+        )
+    ).scalar()
+    return int(rows or 0)
+
+
+def _weather_row_count(
+    session, field_id: uuid.UUID, date_from: str | None, date_to: str | None
+) -> int:
+    q = (
+        select(func.count())
+        .select_from(WeatherDaily)
+        .where(WeatherDaily.field_id == field_id)
+    )
+    if date_from:
+        try:
+            q = q.where(
+                WeatherDaily.date >= datetime.fromisoformat(date_from[:10]).date()
+            )
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            q = q.where(
+                WeatherDaily.date <= datetime.fromisoformat(date_to[:10]).date()
+            )
+        except ValueError:
+            pass
+    return int(session.execute(q).scalar() or 0)
+
+
+def _soil_ready(session, field_id: uuid.UUID) -> bool:
+    row = session.execute(
+        select(SoilProfile.id).where(SoilProfile.field_id == field_id).limit(1)
+    ).first()
+    return bool(row)
+
+
+def bootstrap_pulls_ready(
+    session,
+    *,
+    field_id: uuid.UUID,
+    date_from: str | None,
+    date_to: str | None,
+    wait_celery_ids: list[str] | None,
+    wave_cutoff: datetime,
+    weather_min_rows: int = 7,
+    started_at: datetime | None = None,
+    min_wait_seconds: int = 45,
+) -> dict:
+    """Check whether weather + soil + RS wave are ready for assessment PDF.
+
+    Returns a status dict used by the Celery waiter (and unit tests).
+
+    ``min_wait_seconds`` guards the legacy race where assessment starts before
+    bootstrap has created agri_optical child jobs — "0 active RS" must not
+    look ready in the first seconds.
+    """
+    celery_ready, pending_ids = _celery_ids_ready(wait_celery_ids)
+    weather_rows = _weather_row_count(session, field_id, date_from, date_to)
+    soil_ok = _soil_ready(session, field_id)
+    active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+
+    weather_ok = weather_rows >= weather_min_rows
+    # After top-level weather/soil/indices orchestration finishes, wait until
+    # child agri_optical / index jobs drain (or never started).
+    rs_ok = celery_ready and active_rs == 0
+
+    elapsed_ok = True
+    if started_at is not None and min_wait_seconds > 0:
+        now = datetime.now(timezone.utc)
+        started = (
+            started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        )
+        elapsed_ok = (now - started).total_seconds() >= min_wait_seconds
+
+    # Without explicit celery ids, require soil+weather evidence before trusting
+    # an empty RS wave (avoids soil-only race with parallel MQ publish).
+    if not wait_celery_ids:
+        rs_ok = rs_ok and weather_ok and soil_ok and elapsed_ok
+
+    ready = celery_ready and weather_ok and soil_ok and rs_ok and elapsed_ok
+    return {
+        "ready": ready,
+        "celery_ready": celery_ready,
+        "pending_celery_ids": pending_ids,
+        "weather_rows": weather_rows,
+        "weather_ok": weather_ok,
+        "soil_ok": soil_ok,
+        "active_rs_jobs": active_rs,
+        "rs_ok": rs_ok,
+        "elapsed_ok": elapsed_ok,
+    }
+
+
 @celery_app.task(
     name="app.tasks.assessment_report.generate_assessment_report",
     bind=True,
-    max_retries=1,
+    max_retries=90,
     default_retry_delay=30,
 )
 def generate_assessment_report(
@@ -98,6 +227,8 @@ def generate_assessment_report(
     date_from: str | None = None,
     date_to: str | None = None,
     years: int | None = None,
+    pull_data: bool = False,
+    wait_celery_ids: list | None = None,
 ) -> dict:
     """Generate land assessment PDF for a field.
 
@@ -106,6 +237,10 @@ def generate_assessment_report(
     progress as before. Missing local Job is not a hard failure — still
     generate/upload/publish ResultMessage (with ``job_id`` in payload) so the
     process-host writer can update the API Job.
+
+    When ``pull_data`` is true (one-click CTA), wait for bootstrap weather +
+    soil + agri RS wave before building the PDF so we do not race a soil-only
+    report. After max retries, proceed with whatever data is available.
     """
     session = SyncSession()
     field_id_str: str | None = str(field_id) if field_id else None
@@ -146,12 +281,101 @@ def generate_assessment_report(
                 mq_task_id=mq_task_id,
             )
 
+        if pull_data:
+            wave_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+            if job and job.created_at:
+                # Include bootstrap fan-out shortly before assessment job row
+                wave_cutoff = job.created_at - timedelta(minutes=2)
+            weather_min_rows = 7
+            if date_from and date_to:
+                try:
+                    span = (
+                        datetime.fromisoformat(date_to[:10]).date()
+                        - datetime.fromisoformat(date_from[:10]).date()
+                    ).days + 1
+                    weather_min_rows = max(1, min(7, span))
+                except ValueError:
+                    pass
+            # Do not wait on bridge_after_backfill id itself forever via AsyncResult
+            # alone — it retries up to ~90min; we still list top-level pull ids and
+            # use active_rs_jobs for the RS wave.
+            started_at = None
+            if job and job.created_at:
+                started_at = job.created_at
+            elif job and job.started_at:
+                started_at = job.started_at
+            else:
+                started_at = datetime.now(timezone.utc)
+            status = bootstrap_pulls_ready(
+                session,
+                field_id=uuid.UUID(field_id_str),
+                date_from=date_from,
+                date_to=date_to,
+                wait_celery_ids=[str(x) for x in (wait_celery_ids or []) if x],
+                wave_cutoff=wave_cutoff,
+                weather_min_rows=weather_min_rows,
+                started_at=started_at,
+                min_wait_seconds=45,
+            )
+            if not status["ready"]:
+                retries = int(getattr(self.request, "retries", 0) or 0)
+                max_r = int(getattr(self, "max_retries", 90) or 90)
+                progress_wait = {
+                    "stage": "waiting_for_data",
+                    "percent": min(55, 10 + retries),
+                    "pull_data": True,
+                    "weather_rows": status["weather_rows"],
+                    "weather_ok": status["weather_ok"],
+                    "soil_ok": status["soil_ok"],
+                    "active_rs_jobs": status["active_rs_jobs"],
+                    "rs_ok": status["rs_ok"],
+                    "celery_ready": status["celery_ready"],
+                    "pending_celery": len(status["pending_celery_ids"]),
+                }
+                if job:
+                    _update_job(session, job, "running", progress=progress_wait)
+                if retries < max_r:
+                    logger.info(
+                        "assessment_waiting_for_bootstrap",
+                        field_id=field_id_str,
+                        job_id=job_id_str,
+                        retry=retries,
+                        **{
+                            k: status[k]
+                            for k in (
+                                "weather_rows",
+                                "weather_ok",
+                                "soil_ok",
+                                "active_rs_jobs",
+                                "rs_ok",
+                                "celery_ready",
+                            )
+                        },
+                    )
+                    raise self.retry(countdown=30)
+                logger.warning(
+                    "assessment_bootstrap_wait_timeout",
+                    field_id=field_id_str,
+                    job_id=job_id_str,
+                    **{
+                        k: status[k]
+                        for k in (
+                            "weather_rows",
+                            "weather_ok",
+                            "soil_ok",
+                            "active_rs_jobs",
+                            "rs_ok",
+                            "celery_ready",
+                        )
+                    },
+                )
+
         if job:
             _update_job(
                 session,
                 job,
                 "running",
-                progress={"stage": "scoring", "percent": 10},
+                progress={"stage": "scoring", "percent": 60 if pull_data else 10},
             )
 
         result = generate_assessment_pdf(
@@ -268,6 +492,8 @@ def generate_assessment_report(
             progress["date_to"] = date_to
         if years is not None:
             progress["years"] = years
+        if pull_data:
+            progress["pull_data"] = True
 
         # Soft note when series are sparse — PDF still generated with available data
         notes: list[str] = []
@@ -291,6 +517,7 @@ def generate_assessment_report(
             score=result["score"],
             mq_task_id=mq_task_id,
             local_job_updated=bool(job),
+            pull_data=bool(pull_data),
         )
 
         oss_urls: dict[str, str] = {}
@@ -330,6 +557,10 @@ def generate_assessment_report(
         )
         return progress
     except Exception as exc:
+        from celery.exceptions import Retry
+
+        if isinstance(exc, Retry):
+            raise
         logger.exception(
             "assessment_report_failed",
             job_id=job_id_str,
