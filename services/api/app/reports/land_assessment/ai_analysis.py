@@ -738,6 +738,16 @@ def facts_for_llm(
                 "organic_carbon": soil.get("organic_carbon") or soil.get("soc"),
                 "cec": soil.get("cec"),
                 "nitrogen": soil.get("nitrogen"),
+                "npk": soil.get("npk"),
+                "氮_全氮_g_kg": (soil.get("npk") or {}).get("tn_g_kg")
+                if isinstance(soil.get("npk"), dict)
+                else soil.get("nitrogen"),
+                "磷_有效磷_mg_kg": (soil.get("npk") or {}).get("ap_mg_kg")
+                if isinstance(soil.get("npk"), dict)
+                else None,
+                "钾_速效钾_mg_kg": (soil.get("npk") or {}).get("ak_mg_kg")
+                if isinstance(soil.get("npk"), dict)
+                else None,
             }
         )(soil_display_fields(soil)),
         "weather_summary": weather_summary or {},

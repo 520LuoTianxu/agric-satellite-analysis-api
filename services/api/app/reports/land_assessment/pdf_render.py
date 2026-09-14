@@ -552,45 +552,71 @@ def render_pdf(
             ],
         )
     )
-    story.append(
-        kv_card(
-            "土壤关键指标（程序）",
+    _soil_rows = [
+        (
+            "质地",
+            soil_texture_zh(soil.get("dominant_texture")) or "—",
+        ),
+        (
+            "pH",
+            (
+                str(soil.get("avg_ph"))
+                if soil.get("avg_ph") is not None
+                else "—"
+            ),
+        ),
+        (
+            "排水",
+            soil_drainage_zh(soil.get("drainage_class")) or "—",
+        ),
+        (
+            AWC_LABEL_ZH,
+            (
+                f"{soil.get('rootzone_awc_mm')} mm"
+                if soil.get("rootzone_awc_mm") is not None
+                else "—"
+            ),
+        ),
+        (
+            "渍水风险",
+            (
+                str(soil.get("waterlogging_risk"))
+                if soil.get("waterlogging_risk") is not None
+                else "—"
+            ),
+        ),
+    ]
+    _npk = soil.get("npk") if isinstance(soil.get("npk"), dict) else None
+    if _npk:
+        _soil_rows.extend(
             [
                 (
-                    "质地",
-                    soil_texture_zh(soil.get("dominant_texture")) or "—",
-                ),
-                (
-                    "pH",
+                    "氮（全氮）",
                     (
-                        str(soil.get("avg_ph"))
-                        if soil.get("avg_ph") is not None
+                        f"{_npk.get('tn_g_kg')} g/kg"
+                        if _npk.get("tn_g_kg") is not None
                         else "—"
                     ),
                 ),
                 (
-                    "排水",
-                    soil_drainage_zh(soil.get("drainage_class")) or "—",
-                ),
-                (
-                    AWC_LABEL_ZH,
+                    "磷（有效磷）",
                     (
-                        f"{soil.get('rootzone_awc_mm')} mm"
-                        if soil.get("rootzone_awc_mm") is not None
+                        f"{_npk.get('ap_mg_kg')} mg/kg"
+                        if _npk.get("ap_mg_kg") is not None
                         else "—"
                     ),
                 ),
                 (
-                    "渍水风险",
+                    "钾（速效钾）",
                     (
-                        str(soil.get("waterlogging_risk"))
-                        if soil.get("waterlogging_risk") is not None
+                        f"{_npk.get('ak_mg_kg')} mg/kg"
+                        if _npk.get("ak_mg_kg") is not None
                         else "—"
                     ),
                 ),
-            ],
+            ]
         )
-    )
+    story.append(kv_card("土壤关键指标（程序）", _soil_rows))
     wh_plain = analysis.get("weather_history_plain") or ""
     climate_rows = [("气候本底摘要", wh_plain or "—")]
     if weather_summary:
@@ -915,6 +941,27 @@ def render_pdf(
                 f"{_esc(AWC_LABEL_ZH)} "
                 f"{soil.get('rootzone_awc_mm') if soil.get('rootzone_awc_mm') is not None else '—'}；"
                 f"渍水风险 {soil.get('waterlogging_risk') if soil.get('waterlogging_risk') is not None else '—'}。",
+                "body",
+            )
+        )
+    npk = soil.get("npk") if isinstance(soil.get("npk"), dict) else None
+    if npk:
+        tn = npk.get("tn_g_kg")
+        ap = npk.get("ap_mg_kg")
+        ak = npk.get("ak_mg_kg")
+        an = npk.get("an_mg_kg")
+        som = npk.get("som_g_kg")
+        sqi = npk.get("sqi_rating") or npk.get("sqi_score")
+        story.append(
+            p(
+                f"<b>养分（氮/磷/钾）：</b>"
+                f"全氮 {tn if tn is not None else '—'} g/kg；"
+                f"碱解氮 {an if an is not None else '—'} mg/kg；"
+                f"有效磷 {ap if ap is not None else '—'} mg/kg；"
+                f"速效钾 {ak if ak is not None else '—'} mg/kg"
+                + (f"；有机质 {som} g/kg" if som is not None else "")
+                + (f"；综合地力 {_esc(sqi)}" if sqi is not None else "")
+                + "。",
                 "body",
             )
         )

@@ -150,3 +150,62 @@ class SoilWeatherStressResponse(BaseModel):
     awc_rootzone_mm: float | None = None
     water_balance_30d_mm: float | None = None
     factors: list[str] = []
+
+
+# ── Vendor NPK (cdfinance analyzeSoilV2) ─────────────────────────────
+
+
+class SoilNpkIndicatorOut(BaseModel):
+    code: str
+    name_cn: str | None = None
+    value: float | None = None
+    unit: str | None = None
+    grade: str | None = None
+    grade_level: int | None = None
+    sqi_score: float | None = None
+
+
+class SoilNpkOut(BaseModel):
+    field_id: uuid.UUID
+    land_id: str | None = None
+    source: str
+    # Normalized
+    tn_g_kg: float | None = None  # 全氮
+    an_mg_kg: float | None = None  # 碱解氮
+    ap_mg_kg: float | None = None  # 有效磷
+    ak_mg_kg: float | None = None  # 速效钾
+    tp_g_kg: float | None = None
+    tk_g_kg: float | None = None
+    som_g_kg: float | None = None
+    ph: float | None = None
+    sqi_score: float | None = None
+    sqi_rating: str | None = None
+    texture_usda_cn: str | None = None
+    vendor_log_id: int | None = None
+    indicators: list[SoilNpkIndicatorOut] = []
+    # UI aliases 氮/磷/钾
+    n: dict[str, Any] | None = None
+    p: dict[str, Any] | None = None
+    k: dict[str, Any] | None = None
+    fetched_at: datetime
+    # Full vendor JSON when include_payload=1
+    vendor_payload: dict[str, Any] | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class SoilNpkFetchRequest(BaseModel):
+    """Fetch NPK from cdfinance. Token via body or Authorization header."""
+
+    token: str | None = None
+    # Optional prebuilt gateway query: timestamp&nonce&z_seller&sv&sign=...
+    auth_query: str | None = None
+    hr_base_id: str | None = None
+    force: bool = False
+
+
+class SoilNpkFetchResponse(BaseModel):
+    field_id: str
+    status: str
+    npk: SoilNpkOut
+    message: str | None = None

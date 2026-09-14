@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta, timezone, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -22,7 +22,14 @@ from app.core.soil_intelligence import (
     estimate_sequestration_potential,
 )
 from app.middleware.auth import OrgContext, get_org_context, require_roles
-from app.models.tables import Field, Job, SoilFieldSummary, SoilProfile, WeatherDaily
+from app.models.tables import (
+    Field,
+    Job,
+    SoilFieldSummary,
+    SoilNutrientNpk,
+    SoilProfile,
+    WeatherDaily,
+)
 from app.schemas.soil import (
     CarbonEstimateResponse,
     CropSuitabilityItem,
@@ -30,6 +37,10 @@ from app.schemas.soil import (
     NutrientContextResponse,
     SamplingZonesResponse,
     SoilFieldSummaryOut,
+    SoilNpkFetchRequest,
+    SoilNpkFetchResponse,
+    SoilNpkIndicatorOut,
+    SoilNpkOut,
     SoilProfileOut,
     SoilRefreshResponse,
     SoilWeatherStressResponse,
@@ -503,3 +514,250 @@ async def get_soil_weather_stress(
         water_balance_30d_mm=result.water_balance_30d_mm,
         factors=result.factors,
     )
+
+
+# ── Vendor NPK (cdfinance analyzeSoilV2) ─────────────────────────────
+
+
+def _npk_row_to_out(
+    row: SoilNutrientNpk, *, include_payload: bool = False
+) -> SoilNpkOut:
+    payload = row.vendor_payload if isinstance(row.vendor_payload, dict) else {}
+    from app.core.cdfinance_soil import normalize_vendor_payload
+
+    norm = normalize_vendor_payload(payload) if payload else {}
+    indicators = [
+        SoilNpkIndicatorOut(**i) for i in (norm.get("indicators") or []) if isinstance(i, dict)
+    ]
+    return SoilNpkOut(
+        field_id=row.field_id,
+        land_id=row.land_id,
+        source=row.source,
+        tn_g_kg=row.tn_g_kg,
+        an_mg_kg=row.an_mg_kg,
+        ap_mg_kg=row.ap_mg_kg,
+        ak_mg_kg=row.ak_mg_kg,
+        tp_g_kg=row.tp_g_kg,
+        tk_g_kg=row.tk_g_kg,
+        som_g_kg=row.som_g_kg,
+        ph=row.ph,
+        sqi_score=row.sqi_score,
+        sqi_rating=row.sqi_rating,
+        texture_usda_cn=row.texture_usda_cn,
+        vendor_log_id=row.vendor_log_id,
+        indicators=indicators,
+        n=norm.get("n"),
+        p=norm.get("p"),
+        k=norm.get("k"),
+        fetched_at=row.fetched_at,
+        vendor_payload=payload if include_payload else None,
+    )
+
+
+async def _load_agri_admin_and_boundary(
+    db: AsyncSession, land_id: str
+) -> dict:
+    """Return admin codes + boundary_geojson for an agri land."""
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(
+        sa_text(
+            """
+            SELECT land_id, province_code, province_name, city_code, city_name,
+                   county_code, county_name, boundary_geojson
+            FROM agri.land_parcels
+            WHERE land_id = :land_id
+            LIMIT 1
+            """
+        ),
+        {"land_id": land_id},
+    )
+    row = result.mappings().first()
+    return dict(row) if row else {}
+
+
+def _field_coords_string(field: Field) -> str:
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import mapping
+
+    from app.core.cdfinance_soil import geojson_to_coords_string
+
+    if field.geom is None:
+        raise HTTPException(status_code=400, detail="Field has no geometry")
+    gj = mapping(to_shape(field.geom))
+    try:
+        return geojson_to_coords_string(gj)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/fields/{field_id}/soil/npk", response_model=SoilNpkOut)
+async def get_soil_npk(
+    field_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_payload: bool = False,
+):
+    """Return stored vendor NPK for a field (404 if never fetched)."""
+    await _get_field_or_404(field_id, ctx.org_id, db)
+    result = await db.execute(
+        select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Soil NPK not yet available")
+    return _npk_row_to_out(row, include_payload=include_payload)
+
+
+@router.post(
+    "/fields/{field_id}/soil/npk",
+    response_model=SoilNpkFetchResponse,
+)
+@limiter.limit("10/minute")
+async def fetch_soil_npk(
+    request: Request,
+    field_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    body: SoilNpkFetchRequest | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    """Call cdfinance analyzeSoilV2, upsert DB, return normalized NPK.
+
+    Auth: paste H5 Bearer in ``Authorization`` header **or** body.token.
+    Optional body.auth_query for gateway sign params (usually unnecessary).
+    """
+    from datetime import datetime, timezone
+
+    import httpx
+
+    from app.core.agri_tags import parse_agri_land_id
+    from app.core.cdfinance_soil import (
+        SOURCE_NAME,
+        analyze_soil_v2,
+        build_analysis_body,
+        geojson_to_coords_string,
+        normalize_vendor_payload,
+    )
+
+    body = body or SoilNpkFetchRequest()
+    field = await _get_field_or_404(field_id, ctx.org_id, db)
+
+    existing = (
+        await db.execute(
+            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+        )
+    ).scalar_one_or_none()
+    if existing and not body.force:
+        return SoilNpkFetchResponse(
+            field_id=str(field_id),
+            status="cached",
+            npk=_npk_row_to_out(existing),
+            message="已有 NPK 缓存；传 force=true 可重新拉取。",
+        )
+
+    token = body.token or authorization
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="需要中和农信 Bearer token（Authorization 头或 body.token）",
+        )
+
+    land_id = parse_agri_land_id(field.tags_json)
+    admin: dict = {}
+    coords: str | None = None
+    if land_id:
+        admin = await _load_agri_admin_and_boundary(db, land_id)
+        bj = admin.get("boundary_geojson")
+        if bj:
+            try:
+                coords = geojson_to_coords_string(bj if isinstance(bj, dict) else None)
+            except ValueError:
+                coords = None
+    if not coords:
+        coords = _field_coords_string(field)
+
+    req_body = build_analysis_body(
+        coords=coords,
+        province_code=admin.get("province_code") or "",
+        city_code=admin.get("city_code") or "",
+        district_code=admin.get("county_code") or "",
+        province_name=admin.get("province_name") or "",
+        city_name=admin.get("city_name") or "",
+        district_name=admin.get("county_name") or "",
+        land_id=land_id,
+        source=2,
+    )
+
+    try:
+        payload = await analyze_soil_v2(
+            bearer_token=token,
+            body=req_body,
+            auth_query=body.auth_query,
+            hr_base_id=body.hr_base_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else 502
+        detail = "上游土壤 API 调用失败"
+        try:
+            detail = e.response.text[:300]
+        except Exception:
+            pass
+        logger.warning(
+            "cdfinance_soil_http_error",
+            field_id=str(field_id),
+            status=status,
+        )
+        raise HTTPException(status_code=502, detail=detail) from e
+    except httpx.HTTPError as e:
+        logger.warning("cdfinance_soil_transport_error", error=str(e))
+        raise HTTPException(status_code=502, detail="上游土壤 API 网络错误") from e
+
+    norm = normalize_vendor_payload(payload)
+    now = datetime.now(timezone.utc)
+
+    if existing:
+        row = existing
+    else:
+        row = SoilNutrientNpk(field_id=field_id)
+        db.add(row)
+
+    row.land_id = land_id
+    row.source = SOURCE_NAME
+    row.tn_g_kg = norm.get("tn_g_kg")
+    row.an_mg_kg = norm.get("an_mg_kg")
+    row.ap_mg_kg = norm.get("ap_mg_kg")
+    row.ak_mg_kg = norm.get("ak_mg_kg")
+    row.tp_g_kg = norm.get("tp_g_kg")
+    row.tk_g_kg = norm.get("tk_g_kg")
+    row.som_g_kg = norm.get("som_g_kg")
+    row.ph = norm.get("ph")
+    row.sqi_score = norm.get("sqi_score")
+    row.sqi_rating = norm.get("sqi_rating")
+    row.texture_usda_cn = norm.get("texture_usda_cn")
+    row.vendor_log_id = norm.get("vendor_log_id")
+    row.vendor_payload = payload
+    row.fetched_at = now
+    row.updated_at = now
+
+    await db.commit()
+    await db.refresh(row)
+
+    logger.info(
+        "soil_npk_upserted",
+        field_id=str(field_id),
+        land_id=land_id,
+        tn=row.tn_g_kg,
+        ap=row.ap_mg_kg,
+        ak=row.ak_mg_kg,
+    )
+
+    return SoilNpkFetchResponse(
+        field_id=str(field_id),
+        status="fetched",
+        npk=_npk_row_to_out(row),
+        message="已从中和农信拉取并保存 NPK。",
+    )
+

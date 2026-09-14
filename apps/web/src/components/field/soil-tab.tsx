@@ -13,6 +13,7 @@ import type {
     CarbonEstimateResponse,
     SoilWeatherStressResponse,
     SamplingZonesResponse,
+    SoilNpk,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
@@ -121,6 +122,33 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
     const [carbonEstimate, setCarbonEstimate] = useState<CarbonEstimateResponse | null>(null);
     const [weatherStress, setWeatherStress] = useState<SoilWeatherStressResponse | null>(null);
     const [samplingZones, setSamplingZones] = useState<SamplingZonesResponse | null>(null);
+    const [npk, setNpk] = useState<SoilNpk | null>(null);
+    const [npkToken, setNpkToken] = useState("");
+    const [npkLoading, setNpkLoading] = useState(false);
+    const [npkForce, setNpkForce] = useState(false);
+
+
+    const handleFetchNpk = useCallback(async () => {
+        const token = npkToken.trim();
+        if (!token) {
+            toast.error(t("npkTokenRequired"));
+            return;
+        }
+        setNpkLoading(true);
+        try {
+            const res = await soilApi.fetchNpk(fieldId, {
+                token,
+                force: npkForce || !!npk,
+            });
+            setNpk(res.npk);
+            toast.success(res.message || t("npkFetchOk"));
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : t("npkFetchFail");
+            toast.error(msg);
+        } finally {
+            setNpkLoading(false);
+        }
+    }, [fieldId, npkToken, npkForce, npk, t]);
 
     /* ── Sampling zone map markers (target / bullseye style) ── */
 
@@ -285,6 +313,13 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
             ]);
             if (p.status === "fulfilled") setProfile(p.value);
             if (s.status === "fulfilled") setSummary(s.value);
+
+            try {
+                const cachedNpk = await soilApi.getNpk(fieldId);
+                setNpk(cachedNpk);
+            } catch {
+                setNpk(null);
+            }
 
             // Load intelligence data (only if soil data exists)
             if (p.status === "fulfilled" && p.value) {
@@ -763,6 +798,84 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                     </div>
                 </section>
             )}
+
+
+            {/* Vendor NPK (cdfinance) */}
+            <section className="space-y-2">
+                <h4 className="text-xs font-semibold flex items-center gap-1.5">
+                    <Sprout className="h-4 w-4" />
+                    {t("npkTitle")}
+                </h4>
+                <div className="rounded-lg border bg-card p-3 space-y-3">
+                    {npk ? (
+                        <div className="grid grid-cols-3 gap-2">
+                            <div className="rounded-md bg-surface-2 p-2 text-center">
+                                <div className="text-[10px] text-muted-foreground">{t("npkN")} · {t("npkTN")}</div>
+                                <div className="text-lg font-semibold tabular-nums">
+                                    {npk.tn_g_kg != null ? npk.tn_g_kg : "—"}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">g/kg</div>
+                            </div>
+                            <div className="rounded-md bg-surface-2 p-2 text-center">
+                                <div className="text-[10px] text-muted-foreground">{t("npkP")} · {t("npkAP")}</div>
+                                <div className="text-lg font-semibold tabular-nums">
+                                    {npk.ap_mg_kg != null ? npk.ap_mg_kg : "—"}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">mg/kg</div>
+                            </div>
+                            <div className="rounded-md bg-surface-2 p-2 text-center">
+                                <div className="text-[10px] text-muted-foreground">{t("npkK")} · {t("npkAK")}</div>
+                                <div className="text-lg font-semibold tabular-nums">
+                                    {npk.ak_mg_kg != null ? npk.ak_mg_kg : "—"}
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">mg/kg</div>
+                            </div>
+                        </div>
+                    ) : (
+                        <p className="text-[11px] text-muted-foreground">{t("npkEmpty")}</p>
+                    )}
+                    {npk?.sqi_rating && (
+                        <p className="text-[11px] text-muted-foreground">
+                            {t("npkSQI")}: {npk.sqi_rating}
+                            {npk.som_g_kg != null ? ` · ${t("npkSOM")} ${npk.som_g_kg} g/kg` : ""}
+                        </p>
+                    )}
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] text-muted-foreground">{t("npkTokenPrompt")}</label>
+                        <input
+                            type="password"
+                            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                            placeholder={t("npkTokenPlaceholder")}
+                            value={npkToken}
+                            onChange={(e) => setNpkToken(e.target.value)}
+                            autoComplete="off"
+                        />
+                        <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={npkForce}
+                                    onChange={(e) => setNpkForce(e.target.checked)}
+                                />
+                                {t("npkForce")}
+                            </label>
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                className="ml-auto h-7 text-xs"
+                                disabled={npkLoading}
+                                onClick={handleFetchNpk}
+                            >
+                                {npkLoading ? (
+                                    <><Loader2 className="h-3 w-3 animate-spin mr-1" />{t("npkFetching")}</>
+                                ) : (
+                                    npk ? t("npkRefetch") : t("npkFetch")
+                                )}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
             {/* Nutrient Context */}
             {nutrientContext && (
