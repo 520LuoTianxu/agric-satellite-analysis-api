@@ -47,9 +47,27 @@ def test_normalize_vendor_payload():
     payload = {
         "logId": 17419,
         "indicators": [
-            {"name": "TN", "value": 0.55, "unit": "g/kg", "grade": "差", "name_cn": "全氮"},
-            {"name": "AP", "value": 2.47, "unit": "mg/kg", "grade": "差", "name_cn": "有效磷"},
-            {"name": "AK", "value": 112.49, "unit": "mg/kg", "grade": "良好", "name_cn": "速效钾"},
+            {
+                "name": "TN",
+                "value": 0.55,
+                "unit": "g/kg",
+                "grade": "差",
+                "name_cn": "全氮",
+            },
+            {
+                "name": "AP",
+                "value": 2.47,
+                "unit": "mg/kg",
+                "grade": "差",
+                "name_cn": "有效磷",
+            },
+            {
+                "name": "AK",
+                "value": 112.49,
+                "unit": "mg/kg",
+                "grade": "良好",
+                "name_cn": "速效钾",
+            },
         ],
         "sqi": {"rating": "四等", "total_score": 48.61},
         "texture": {"usda_cn": "粘壤土"},
