@@ -114,9 +114,7 @@ def _fallback_celery(
                 start = _date.fromisoformat(str(extras["date_from"])[:10])
                 end_raw = extras.get("date_to")
                 end = (
-                    _date.fromisoformat(str(end_raw)[:10])
-                    if end_raw
-                    else _date.today()
+                    _date.fromisoformat(str(end_raw)[:10]) if end_raw else _date.today()
                 )
                 days = max(1, (end - start).days)
             except ValueError:
@@ -153,7 +151,14 @@ def _fallback_celery(
                     "field_id": fid,
                     "pull_data": True,
                 }
-                for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years", "mq_task_id"):
+                for key in (
+                    "crop_type",
+                    "crop_name_zh",
+                    "date_from",
+                    "date_to",
+                    "years",
+                    "mq_task_id",
+                ):
                     if followup.get(key) is not None:
                         ak[key] = followup[key]
                 send_task(

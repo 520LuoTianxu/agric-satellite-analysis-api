@@ -108,36 +108,40 @@ def _celery_ids_ready(wait_celery_ids: list[str] | None) -> tuple[bool, list[str
 
 def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -> int:
     """Count in-flight index / agri-optical / S1 backfill child jobs."""
-    rows = (
-        session.execute(
-            select(func.count())
-            .select_from(Job)
-            .where(
-                Job.field_id == field_id,
-                Job.status.in_(("pending", "running")),
-                Job.params_json["is_backfill"].as_boolean().is_(True),
-                Job.type.notin_(("backfill", "agri_bridge", "assessment_report")),
-                Job.created_at >= wave_cutoff,
-            )
-        ).scalar()
-    )
+    rows = session.execute(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.field_id == field_id,
+            Job.status.in_(("pending", "running")),
+            Job.params_json["is_backfill"].as_boolean().is_(True),
+            Job.type.notin_(("backfill", "agri_bridge", "assessment_report")),
+            Job.created_at >= wave_cutoff,
+        )
+    ).scalar()
     return int(rows or 0)
 
 
 def _weather_row_count(
     session, field_id: uuid.UUID, date_from: str | None, date_to: str | None
 ) -> int:
-    q = select(func.count()).select_from(WeatherDaily).where(
-        WeatherDaily.field_id == field_id
+    q = (
+        select(func.count())
+        .select_from(WeatherDaily)
+        .where(WeatherDaily.field_id == field_id)
     )
     if date_from:
         try:
-            q = q.where(WeatherDaily.date >= datetime.fromisoformat(date_from[:10]).date())
+            q = q.where(
+                WeatherDaily.date >= datetime.fromisoformat(date_from[:10]).date()
+            )
         except ValueError:
             pass
     if date_to:
         try:
-            q = q.where(WeatherDaily.date <= datetime.fromisoformat(date_to[:10]).date())
+            q = q.where(
+                WeatherDaily.date <= datetime.fromisoformat(date_to[:10]).date()
+            )
         except ValueError:
             pass
     return int(session.execute(q).scalar() or 0)
@@ -183,7 +187,9 @@ def bootstrap_pulls_ready(
     elapsed_ok = True
     if started_at is not None and min_wait_seconds > 0:
         now = datetime.now(timezone.utc)
-        started = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        started = (
+            started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        )
         elapsed_ok = (now - started).total_seconds() >= min_wait_seconds
 
     # Without explicit celery ids, require soil+weather evidence before trusting
@@ -334,28 +340,34 @@ def generate_assessment_report(
                         field_id=field_id_str,
                         job_id=job_id_str,
                         retry=retries,
-                        **{k: status[k] for k in (
-                            "weather_rows",
-                            "weather_ok",
-                            "soil_ok",
-                            "active_rs_jobs",
-                            "rs_ok",
-                            "celery_ready",
-                        )},
+                        **{
+                            k: status[k]
+                            for k in (
+                                "weather_rows",
+                                "weather_ok",
+                                "soil_ok",
+                                "active_rs_jobs",
+                                "rs_ok",
+                                "celery_ready",
+                            )
+                        },
                     )
                     raise self.retry(countdown=30)
                 logger.warning(
                     "assessment_bootstrap_wait_timeout",
                     field_id=field_id_str,
                     job_id=job_id_str,
-                    **{k: status[k] for k in (
-                        "weather_rows",
-                        "weather_ok",
-                        "soil_ok",
-                        "active_rs_jobs",
-                        "rs_ok",
-                        "celery_ready",
-                    )},
+                    **{
+                        k: status[k]
+                        for k in (
+                            "weather_rows",
+                            "weather_ok",
+                            "soil_ok",
+                            "active_rs_jobs",
+                            "rs_ok",
+                            "celery_ready",
+                        )
+                    },
                 )
 
         if job:

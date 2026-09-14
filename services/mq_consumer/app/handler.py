@@ -262,11 +262,7 @@ def _dispatch_field_bootstrap(
 
             start = _date.fromisoformat(str(extras["date_from"])[:10])
             end_raw = extras.get("date_to")
-            end = (
-                _date.fromisoformat(str(end_raw)[:10])
-                if end_raw
-                else _date.today()
-            )
+            end = _date.fromisoformat(str(end_raw)[:10]) if end_raw else _date.today()
             days = max(1, (end - start).days)
         except ValueError:
             days = None
@@ -295,7 +291,9 @@ def _dispatch_field_bootstrap(
         # Agri parcels need lonlat-direct optical/S1 path (same as satellite_analysis).
         # Without allow_agri=True, backfill_indices_for_field skips immediately.
         bk: dict[str, Any] = {
-            "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
+            "allow_agri": True
+            if extras.get("allow_agri") is None
+            else bool(extras.get("allow_agri")),
         }
         if sentinel_job_id:
             bk["sentinel_job_id"] = str(sentinel_job_id)
@@ -321,7 +319,9 @@ def _dispatch_field_bootstrap(
         if "with_bridge" not in extras and land_id:
             with_bridge = True
         if with_bridge:
-            bridge_kwargs: dict[str, Any] = {"land_id": land_id or extras.get("land_id")}
+            bridge_kwargs: dict[str, Any] = {
+                "land_id": land_id or extras.get("land_id")
+            }
             if extras.get("bridge_job_id"):
                 bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
             br = celery_client.send_task(
@@ -370,8 +370,12 @@ def _dispatch_field_bootstrap(
             "date_from": extras.get("date_from"),
             "date_to": extras.get("date_to"),
             "days": weather_kwargs.get("days"),
-            "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
-            "followup_assessment": bool(isinstance(followup, dict) and followup.get("job_id")),
+            "allow_agri": True
+            if extras.get("allow_agri") is None
+            else bool(extras.get("allow_agri")),
+            "followup_assessment": bool(
+                isinstance(followup, dict) and followup.get("job_id")
+            ),
         },
         upload_summary_if_empty=True,
     )
@@ -382,9 +386,10 @@ def _dispatch_field_bootstrap(
         "date_from": extras.get("date_from"),
         "date_to": extras.get("date_to"),
         "days": weather_kwargs.get("days"),
-        "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
+        "allow_agri": True
+        if extras.get("allow_agri") is None
+        else bool(extras.get("allow_agri")),
     }
-
 
 
 def _dispatch_assessment_report(
@@ -427,7 +432,6 @@ def _dispatch_assessment_report(
     }
 
 
-
 def _dispatch_season_growth_report(
     task: TaskMessage,
     field_id: str,
@@ -457,6 +461,7 @@ def _dispatch_season_growth_report(
         "job_id": str(job_id) if job_id else None,
         "field_id": field_id,
     }
+
 
 def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
     """Process one TaskMessage. Permanent failures publish failed result (no raise)."""
