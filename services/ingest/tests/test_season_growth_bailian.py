@@ -91,6 +91,7 @@ class BailianClientTests(unittest.TestCase):
         self.assertTrue(out["llm_configured"])
         self.assertIsNotNone(out["error"])
         self.assertIn("失败", out["synthesis"] or out["summary"] or "")
+        self.assertIn("AI 分析失败", out["core_conclusion"] or out["synthesis"] or "")
         self.assertIn("factors_strong", out)
         self.assertIn("evidence_gaps", out)
         self.assertIsInstance(out["factors_mid"], list)
