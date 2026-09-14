@@ -213,6 +213,8 @@ def generate_season_growth_report(
                     "soil_ok": status["soil_ok"],
                     "active_rs_jobs": status["active_rs_jobs"],
                     "rs_ok": status["rs_ok"],
+                    "rs_coverage_ok": status.get("rs_coverage_ok"),
+                    "rs_coverage": status.get("rs_coverage"),
                     "celery_ready": status["celery_ready"],
                     "pending_celery": len(status["pending_celery_ids"]),
                 }
@@ -321,8 +323,7 @@ def generate_season_growth_report(
             "percent": 100,
             "object_key": object_key,
             "public_url": public_url,
-            "filename": result.get("download_filename")
-            or "生育期长势分析报告.pdf",
+            "filename": result.get("download_filename") or "生育期长势分析报告.pdf",
             "one_liner": summary.get("one_liner"),
             "llm_configured": summary.get("llm_configured"),
             "scenes": summary.get("scenes"),
