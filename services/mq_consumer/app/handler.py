@@ -292,13 +292,21 @@ def _dispatch_field_bootstrap(
     celery_ids.append(s.id)
 
     if not skip_indices:
-        bk: dict[str, Any] = {}
+        # Agri parcels need lonlat-direct optical/S1 path (same as satellite_analysis).
+        # Without allow_agri=True, backfill_indices_for_field skips immediately.
+        bk: dict[str, Any] = {
+            "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
+        }
         if sentinel_job_id:
             bk["sentinel_job_id"] = str(sentinel_job_id)
         if extras.get("date_from"):
             bk["date_from"] = str(extras["date_from"])[:10]
         if extras.get("date_to"):
             bk["date_to"] = str(extras["date_to"])[:10]
+        if extras.get("months") is not None:
+            bk["months"] = int(extras["months"])
+        if extras.get("force") is not None:
+            bk["force"] = bool(extras["force"])
         b = celery_client.send_task(
             "app.tasks.backfill.backfill_indices_for_field",
             args=[field_id],
@@ -307,6 +315,48 @@ def _dispatch_field_bootstrap(
         )
         dispatched.append("app.tasks.backfill.backfill_indices_for_field")
         celery_ids.append(b.id)
+
+        # Match satellite_analysis: wait-publisher after agri lonlat wave when land known.
+        with_bridge = bool(extras.get("with_bridge") or False)
+        if "with_bridge" not in extras and land_id:
+            with_bridge = True
+        if with_bridge:
+            bridge_kwargs: dict[str, Any] = {"land_id": land_id or extras.get("land_id")}
+            if extras.get("bridge_job_id"):
+                bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
+            br = celery_client.send_task(
+                "app.tasks.agri_bridge.bridge_after_backfill",
+                args=[field_id],
+                kwargs=bridge_kwargs,
+                queue="ingest",
+            )
+            dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
+            celery_ids.append(br.id)
+
+    # Optional one-click assessment: enqueue PDF worker AFTER pull tasks are queued
+    # so it can wait on celery ids + child RS jobs (no API race with empty data).
+    followup = extras.get("followup_assessment")
+    if isinstance(followup, dict) and followup.get("job_id"):
+        assess_kwargs: dict[str, Any] = {
+            "job_id": str(followup["job_id"]),
+            "field_id": str(field_id),
+            "pull_data": True,
+            "wait_celery_ids": list(celery_ids),
+        }
+        for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
+            if followup.get(key) is not None:
+                assess_kwargs[key] = followup[key]
+            elif extras.get(key) is not None and key not in assess_kwargs:
+                assess_kwargs[key] = extras[key]
+        if followup.get("mq_task_id"):
+            assess_kwargs["mq_task_id"] = str(followup["mq_task_id"])
+        a = celery_client.send_task(
+            "app.tasks.assessment_report.generate_assessment_report",
+            kwargs=assess_kwargs,
+            queue="ingest",
+        )
+        dispatched.append("app.tasks.assessment_report.generate_assessment_report")
+        celery_ids.append(a.id)
 
     publish_task_result(
         task_id=task.task_id,
@@ -320,6 +370,8 @@ def _dispatch_field_bootstrap(
             "date_from": extras.get("date_from"),
             "date_to": extras.get("date_to"),
             "days": weather_kwargs.get("days"),
+            "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
+            "followup_assessment": bool(isinstance(followup, dict) and followup.get("job_id")),
         },
         upload_summary_if_empty=True,
     )
@@ -330,6 +382,7 @@ def _dispatch_field_bootstrap(
         "date_from": extras.get("date_from"),
         "date_to": extras.get("date_to"),
         "days": weather_kwargs.get("days"),
+        "allow_agri": True if extras.get("allow_agri") is None else bool(extras.get("allow_agri")),
     }
 
 
@@ -357,6 +410,10 @@ def _dispatch_assessment_report(
     for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
+    if extras.get("pull_data") is not None:
+        kwargs["pull_data"] = bool(extras.get("pull_data"))
+    if extras.get("wait_celery_ids"):
+        kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
     async_result = celery_client.send_task(
         "app.tasks.assessment_report.generate_assessment_report",
         kwargs=kwargs,
