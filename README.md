@@ -56,6 +56,10 @@ cp .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
+For a split deployment, start the control plane on the API machine with
+`docker-compose.api-machine.yml`; run `docker-compose.download-machine.yml`
+only on download workers.
+
 Do **not** commit `.env`. Only `.env.example` is in git.
 
 | Service | URL | Purpose |

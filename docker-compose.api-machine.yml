@@ -1,0 +1,19 @@
+# API machine: control plane only.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.api-machine.yml up -d --build
+#
+# The API machine owns Postgres, API Redis, FastAPI, Web, Caddy and the
+# optional legacy scheduler. Foreign-data download and de-cloud workers stay
+# on docker-compose.download-machine.yml so the API host is not used as a
+# cross-border data-processing worker.
+
+services:
+  # These workers belong to download machines. Profiles prevent a plain
+  # `docker compose up` on the API host from starting them accidentally.
+  ingest:
+    profiles: ["download-machine"]
+
+  storage:
+    profiles: ["download-machine"]

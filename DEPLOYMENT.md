@@ -118,6 +118,19 @@ cd /opt/openfarm
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
+On an API/control-plane machine, add the API-machine override so download
+workers are not started there:
+
+```bash
+sudo docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml \
+  -f docker-compose.api-machine.yml \
+  up -d --build
+```
+
+Run `docker-compose.download-machine.yml` separately on download machines.
+
 First build takes 5–10 minutes (downloading images, compiling). Subsequent deploys are faster with Docker layer caching.
 
 ---
