@@ -17,7 +17,7 @@ class TaskMessage(BaseModel):
 
     task_id: str
     type: str = "satellite_analysis"
-    # OpenFarm field UUID (preferred when known)
+# agric-satellite-analysis field UUID (preferred when known)
     field_id: str | None = None
     # agric_satellite.land_parcels.land_id — user sample field_id often means this
     parcel_id: str | None = None

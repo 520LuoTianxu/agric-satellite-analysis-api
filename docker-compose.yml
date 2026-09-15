@@ -110,7 +110,7 @@ services:
       STAC_API_URL: ${STAC_API_URL}
       S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
-      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-OpenFarm <noreply@openfarm.earth>}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-agric-satellite-analysis <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}

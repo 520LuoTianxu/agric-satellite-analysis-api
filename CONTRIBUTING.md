@@ -1,6 +1,6 @@
-# Contributing to OpenFarm
+# Contributing to agric-satellite-analysis
 
-Thank you for your interest in contributing to OpenFarm! Whether it's a bug fix, new feature, documentation improvement, or feedback - every contribution matters. This guide covers everything you need to get up and running.
+Thank you for your interest in contributing to agric-satellite-analysis! Whether it's a bug fix, new feature, documentation improvement, or feedback - every contribution matters. This guide covers everything you need to get up and running.
 
 ## Table of Contents
 
@@ -33,12 +33,12 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 1. **Fork** the repository on GitHub
 2. **Clone** your fork locally:
    ```bash
-   git clone https://github.com/<your-username>/OpenFarm.git
-   cd OpenFarm
+   git clone https://github.com/<your-username>/agric-satellite-analysis.git
+   cd agric-satellite-analysis
    ```
 3. **Add upstream** remote:
    ```bash
-   git remote add upstream https://github.com/superzero11/OpenFarm.git
+   git remote add upstream https://github.com/520LuoTianxu/agric-satellite-analysis.git
    ```
 4. **Enable pre-commit hooks** (runs lint + type-check before each commit):
    ```bash
@@ -128,7 +128,7 @@ uvicorn app.main:app --reload --port 8000
 ## Project Structure
 
 ```
-openfarm/
+agric-satellite-analysis/
 ├── apps/web/                → Next.js 14 frontend
 │   ├── src/
 │   │   ├── app/             → App Router pages & layouts
@@ -376,7 +376,7 @@ alembic upgrade head
 
 ## Internationalization (i18n)
 
-OpenFarm uses `next-intl` with `en` and `es` locales.
+agric-satellite-analysis uses `next-intl` with `en` and `es` locales.
 
 - Translation files: `apps/web/messages/en.json` and `apps/web/messages/es.json`
 - Routes use the `[locale]` segment with `localePrefix: "as-needed"`
@@ -454,4 +454,4 @@ Please see [SECURITY.md](SECURITY.md) for our responsible disclosure policy.
 
 ---
 
-Thank you for contributing to OpenFarm! Every contribution helps bring transparent, affordable crop intelligence to farms everywhere.
+Thank you for contributing to agric-satellite-analysis! Every contribution helps bring transparent, affordable crop intelligence to farms everywhere.

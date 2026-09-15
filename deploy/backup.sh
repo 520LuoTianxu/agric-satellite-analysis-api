@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-# OpenFarm - Automated PostgreSQL Backup Script
+# agric-satellite-analysis - Automated PostgreSQL Backup Script
 #
 # Usage:
 #   ./deploy/backup.sh              # Manual run

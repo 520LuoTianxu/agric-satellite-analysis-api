@@ -21,7 +21,7 @@ depends_on = None
 APP_SCHEMA = "agric_satellite"
 LEGACY_AGRI_SCHEMA = "agri"
 
-# OpenFarm's former public application tables.  Keep this allowlist explicit
+# Former public application tables.  Keep this allowlist explicit
 # so PostGIS metadata in public can never be moved by accident at this step.
 PUBLIC_APPLICATION_TABLES = (
     "farms",

@@ -1,7 +1,7 @@
 [project]
 name = "openfarm-common"
 version = "0.1.0"
-description = "Shared settings, object storage, Celery helpers, and CloudAMQP bus for OpenFarm workers"
+description = "Shared settings, object storage, Celery helpers, and CloudAMQP bus for agric-satellite-analysis workers"
 requires-python = ">=3.11"
 dependencies = [
     "celery[redis]>=5.4.0",

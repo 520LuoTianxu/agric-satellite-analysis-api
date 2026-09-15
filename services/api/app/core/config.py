@@ -1,4 +1,4 @@
-"""OpenFarm API - Core configuration."""
+"""agric-satellite-analysis API - Core configuration."""
 
 from pydantic_settings import BaseSettings
 
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
 
     # Email (Resend)
     resend_api_key: str = ""
-    resend_from_email: str = "OpenFarm <noreply@openfarm.app>"
+    resend_from_email: str = "agric-satellite-analysis <noreply@openfarm.app>"
     app_url: str = "http://localhost:3000"
 
     # Internal download-host control plane (HTTP claim). Never expose to browsers.

@@ -6,7 +6,7 @@ We currently support security fixes on the `main` branch. If you are running a f
 
 ## Reporting a Vulnerability
 
-- Use [GitHub private vulnerability reporting](https://github.com/superzero11/OpenFarm/security/advisories/new) (Security → Report a vulnerability).
+- Use [GitHub private vulnerability reporting](https://github.com/520LuoTianxu/agric-satellite-analysis/security/advisories/new) (Security → Report a vulnerability).
 - Please include a detailed description, steps to reproduce, and the potential impact.
 - **Do not** open public GitHub issues or Discord posts for security reports.
 
@@ -14,11 +14,11 @@ We aim to acknowledge reports within 2 business days and provide a resolution or
 
 ## Scope
 
-- OpenFarm backend (`services/api`, `services/tiler`)
-- OpenFarm frontend (`apps/web`)
+- agric-satellite-analysis backend (`services/api`, `services/tiler`)
+- agric-satellite-analysis frontend (`apps/web`)
 - Infrastructure in this repository (`docker-compose.yml`)
 
-Out of scope: third-party services and forks not maintained by the OpenFarm team.
+Out of scope: third-party services and forks not maintained by the agric-satellite-analysis team.
 
 ## Handling
 

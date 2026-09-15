@@ -4,7 +4,7 @@
     "signOut": "退出登录",
     "getStarted": "开始使用",
     "github": "GitHub",
-    "builtWith": "基于 OpenFarm 构建",
+    "builtWith": "基于 agric-satellite-analysis 构建",
     "dashboard": "仪表盘",
     "welcomeBack": "欢迎回来",
     "signInDesc": "登录以访问你的农场和地块",
@@ -43,7 +43,7 @@
     "badge": "开源 · BSD-3-Clause · 可自行部署",
     "heroTitle1": "了解地块正在发生什么——",
     "heroTitle2": "以及为什么",
-    "heroDesc": "农业卫星分析是开源作物智能平台（基于 OpenFarm）：将 Sentinel-2 影像、气象、土壤与时间融合为你所管理的每一块地块的可解释图景——包含观测结果、变化幅度、时间窗口及其背后的环境条件。",
+    "heroDesc": "agric-satellite-analysis（农业卫星分析）是开源作物智能平台：将 Sentinel-2 影像、气象、土壤与时间融合为你所管理的每一块地块的可解释图景——包含观测结果、变化幅度、时间窗口及其背后的环境条件。",
     "deployCta": "自行部署",
     "demoCta": "试用在线演示",
     "navHow": "工作原理",
@@ -124,7 +124,7 @@
     "statLicense": "无席位限制",
     "thanksTag": "致谢",
     "thanksTitle": "建立在他人的工作之上",
-    "thanksDesc": "农业卫星分析是叠在数十年开源与开放数据之上的一层薄封装（基于 OpenFarm）。这些项目完成了最难的部分，任何人都可以免费使用；自行部署农业卫星分析，同样是站在它们的工作之上。",
+    "thanksDesc": "agric-satellite-analysis（农业卫星分析）是叠在数十年开源与开放数据之上的一层薄封装。这些项目完成了最难的部分，任何人都可以免费使用；自行部署 agric-satellite-analysis，同样是站在它们的工作之上。",
     "thanksDataLabel": "数据与影像",
     "thanksAlsoLabel": "同时使用",
     "thanksHostingLabel": "在线演示托管",
@@ -573,7 +573,7 @@
   },
   "shareReport": {
     "fieldHealthReport": "地块健康报告",
-    "poweredBy": "由农业卫星分析提供支持（基于 OpenFarm）",
+    "poweredBy": "由 agric-satellite-analysis（农业卫星分析）提供支持",
     "fieldBoundary": "地块边界",
     "fieldInfo": "地块信息",
     "area": "面积",
@@ -618,7 +618,7 @@
   },
   "changelog": {
     "title": "更新日志",
-    "description": "农业卫星分析的最新更新与改进（基于 OpenFarm）",
+    "description": "agric-satellite-analysis（农业卫星分析）的最新更新与改进",
     "unreleased": "未发布"
   },
   "weather": {
@@ -832,14 +832,14 @@
     "siteAdmissionHrBaseIdPlaceholder": "例如 10；留空用服务端默认"
   },
   "seo": {
-    "title": "农业卫星分析：开源作物智能平台（基于 OpenFarm）",
+    "title": "agric-satellite-analysis（农业卫星分析）：开源作物智能平台",
     "description": "开源作物智能：将 Sentinel-2 影像、气象与土壤融合为可解释的逐地块洞察。可自行部署，BSD-3-Clause，无需 API 密钥。",
-    "longDescription": "农业卫星分析是开源作物智能平台（基于 OpenFarm）。它将 Sentinel-2 卫星影像、逐日气象和土壤数据融合为逐地块洞察，并展示每条预警背后的证据：哪个指数发生了变化、时间窗口有多长，以及能够解释它的环境条件。",
+    "longDescription": "agric-satellite-analysis（农业卫星分析）是开源作物智能平台。它将 Sentinel-2 卫星影像、逐日气象和土壤数据融合为逐地块洞察，并展示每条预警背后的证据：哪个指数发生了变化、时间窗口有多长，以及能够解释它的环境条件。",
     "category": "作物智能与遥感",
     "featureList": "Sentinel-2 植被指数，10 m 分辨率 | 每个地块回填 24 个月历史 | 逐日气象历史与 7 日预报 | 土层特性深至 200 cm | 可解释的异常预警 | 基于影像的地块边界检测 | 使用 Docker Compose 自行部署 | 多租户与基于角色的访问控制",
     "ogHeadline": "了解地块正在发生什么，以及为什么",
     "ogSubhead": "来自卫星、气象与土壤的开源作物智能",
-    "ogAlt": "农业卫星分析，来自卫星、气象与土壤的开源作物智能（基于 OpenFarm）",
+    "ogAlt": "agric-satellite-analysis（农业卫星分析），来自卫星、气象与土壤的开源作物智能",
     "datasetDesc": {
       "sentinel": "来自欧洲航天局 Sentinel-2 任务的多光谱光学影像：13 个波段，分辨率 10 至 60 m，赤道附近五日重访。农业卫星分析根据红光、近红外和短波红外波段，按景计算 NDVI、EVI、SAVI 和 NDWI，并为每条地块边界回填 24 个月历史。",
       "weather": "汇集各国气象部门的逐日、逐时气象历史与预报。农业卫星分析从中读取气温、降水、蒸散、风速和土壤湿度，并为每个地块计算生长度日、参考蒸散、水分平衡和干旱指数。",
@@ -849,10 +849,10 @@
   "faq": {
     "tag": "问题",
     "title": "部署前先看这些答案",
-    "desc": "在自己的地块上运行农业卫星分析（基于 OpenFarm）之前，人们常问的问题。",
+    "desc": "在自己的地块上运行 agric-satellite-analysis（农业卫星分析）之前，人们常问的问题。",
     "what": {
       "q": "什么是农业卫星分析？",
-      "a": "农业卫星分析是开源作物智能平台（基于 OpenFarm）。它将 Sentinel-2 卫星影像、逐日气象和土壤数据融合为逐地块洞察，并展示每条预警背后的证据：哪个指数发生了变化、时间窗口有多长，以及能够解释它的环境条件。"
+      "a": "agric-satellite-analysis（农业卫星分析）是开源作物智能平台。它将 Sentinel-2 卫星影像、逐日气象和土壤数据融合为逐地块洞察，并展示每条预警背后的证据：哪个指数发生了变化、时间窗口有多长，以及能够解释它的环境条件。"
     },
     "stress": {
       "q": "农业卫星分析如何检测作物胁迫？",

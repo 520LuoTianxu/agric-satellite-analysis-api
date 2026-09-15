@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenFarm - Server Setup Script
+# agric-satellite-analysis - Server Setup Script
 #
-# Provisions a fresh Ubuntu 22.04+ server (AMD64 or ARM64) for OpenFarm.
+# Provisions a fresh Ubuntu 22.04+ server (AMD64 or ARM64) for agric-satellite-analysis.
 # Run as root or with sudo on the target server.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/superzero11/OpenFarm/main/deploy/setup.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis/main/deploy/setup.sh | bash
 #   # or
 #   sudo bash deploy/setup.sh
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-REPO_URL="https://github.com/superzero11/OpenFarm.git"
+REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis.git"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_DIR="/opt/openfarm"
 
 echo "──────────────────────────────────────────────────────────"
-echo " OpenFarm - Server Setup"
+echo " agric-satellite-analysis - Server Setup"
 echo "──────────────────────────────────────────────────────────"
 
 # ── 0. Wait for apt locks ────────────────────────────────────────────
@@ -112,10 +112,10 @@ systemctl start fail2ban
 
 # ── 7. Clone repository ─────────────────────────────────────────────
 if [ ! -d "$INSTALL_DIR" ]; then
-    echo "▸ Cloning OpenFarm ($REPO_BRANCH) to $INSTALL_DIR..."
+    echo "▸ Cloning agric-satellite-analysis ($REPO_BRANCH) to $INSTALL_DIR..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
 else
-    echo "▸ OpenFarm already cloned, pulling latest..."
+    echo "▸ agric-satellite-analysis already cloned, pulling latest..."
     cd "$INSTALL_DIR" && git pull origin "$REPO_BRANCH"
 fi
 

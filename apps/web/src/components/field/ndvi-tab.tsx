@@ -457,7 +457,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
 
     return (
         <div className="space-y-4">
-            {/* ── Section: Run Analysis + Backfill (classic OpenFarm only) ─────── */}
+            {/* ── Section: Run Analysis + Backfill (legacy COG path only) ─────── */}
             {/* agri 地块遥感直接读 agric_satellite.parcel_scene_products，不走 Celery NDVI / backfill-indices */}
             {!isAgriField && (
             <div className="flex gap-2">
@@ -814,7 +814,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
                 </Card>
             )}
 
-            {/* ── No data message (classic OpenFarm only; agri uses AgriTimeseriesPanel) ── */}
+            {/* ── No data message (legacy COG path only; agri uses AgriTimeseriesPanel) ── */}
             {!isAgriField && layers.length === 0 && !activeJob && (
                 <Card>
                     <CardContent className="flex flex-col items-center justify-center py-6 text-center">

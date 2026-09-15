@@ -4,9 +4,9 @@
 
 ### 农业卫星分析 / Agricultural Satellite Analysis
 
-基于开源 [OpenFarm](https://github.com/superzero11/OpenFarm)（BSD-3-Clause）的作物遥感与地块智能分析平台。
+农业卫星分析（`agric-satellite-analysis`）是面向作物遥感与地块智能分析的开源平台，基于 [OpenFarm](https://github.com/superzero11/OpenFarm)（BSD-3-Clause）演进。
 
-An OpenFarm-based, self-hostable crop intelligence stack: Sentinel-2, weather, and soil fused into explainable per-field insights.
+`agric-satellite-analysis` is a self-hostable crop intelligence stack: Sentinel-2, weather, and soil fused into explainable per-field insights.
 
 [![CI](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
@@ -18,11 +18,11 @@ An OpenFarm-based, self-hostable crop intelligence stack: Sentinel-2, weather, a
 
 </div>
 
-This repository is a fork of **[OpenFarm](https://github.com/superzero11/OpenFarm)** by [superzero11](https://github.com/superzero11). See [NOTICE](NOTICE) and [LICENSE](LICENSE). Default UI locale is **简体中文 (`zh`)**; English (`en`) and Spanish (`es`) remain available.
+This repository is the **agric-satellite-analysis** project, derived from **[OpenFarm](https://github.com/superzero11/OpenFarm)** by [superzero11](https://github.com/superzero11). See [NOTICE](NOTICE) and [LICENSE](LICENSE). Default UI locale is **简体中文 (`zh`)**; English (`en`) and Spanish (`es`) remain available.
 
-本仓库第一版在 OpenFarm 全栈之上加入：
+本项目在上游全栈基础上加入：
 
-- ~~Google OAuth / Demo 登录~~（OpenFarm auth 已移除，见 `services/api/AUTH_REMOVAL.md`；独立登录后续再加）
+- ~~Google OAuth / Demo 登录~~（认证已移除，见 `services/api/AUTH_REMOVAL.md`；独立登录后续再加）
 - next-intl 简体中文（默认语言 `zh`）
 
 ---
@@ -104,7 +104,7 @@ OAuth consent screen: add your test users while the app is in **Testing**. The s
 
 ### Optional Demo login / 可选演示登录
 
-Upstream OpenFarm is Google-only. This fork adds a NextAuth **Credentials** provider with id `demo`, gated by **both** flags:
+The original upstream authentication was Google-only. This fork adds a NextAuth **Credentials** provider with id `demo`, gated by **both** flags:
 
 ```bash
 ENABLE_DEMO_LOGIN=true
@@ -172,11 +172,11 @@ This fork treats the **`agric_satellite`** PostgreSQL schema as the only applica
 | S1/S2 产品时序 | `agric_satellite.parcel_scene_products` | `GET /v1/agri/lands/{land_id}/scenes` |
 
 Seed / import: see [`scripts/agri_seed/README.md`](scripts/agri_seed/README.md) (`make agri-seed`).  
-OpenFarm `/v1/farms` and `/v1/fields` remain available but are **legacy** for this product direction. Scene list APIs return S2 optical index averages and S1 VV/VH without `pixel_data` unless `?include_pixels=1`. Optional UnCRtainTS cloud removal (off by default) is documented in [`docs/decloud-uncrtaints.md`](docs/decloud-uncrtaints.md).
+`/v1/farms` and `/v1/fields` remain available but are **legacy** for this product direction. Scene list APIs return S2 optical index averages and S1 VV/VH without `pixel_data` unless `?include_pixels=1`. Optional UnCRtainTS cloud removal (off by default) is documented in [`docs/decloud-uncrtaints.md`](docs/decloud-uncrtaints.md).
 
 ## Architecture / 架构
 
-Same 3-layer OpenFarm architecture:
+Same 3-layer agric-satellite-analysis architecture:
 
 ```
 Layer C - Delivery:     Map UI · Reports · API

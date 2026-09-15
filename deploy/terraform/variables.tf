@@ -49,12 +49,12 @@ variable "ssh_allowed_cidr" {
 # ── Application ──────────────────────────────────────────────────────
 
 variable "domain" {
-  description = "Public hostname OpenFarm is served on (bare domain, no scheme, no trailing slash). You must point an A record at the instance IP."
+  description = "Public hostname agric-satellite-analysis is served on (bare domain, no scheme, no trailing slash). You must point an A record at the instance IP."
   type        = string
 
   validation {
     condition     = !can(regex("^https?://", var.domain)) && !endswith(var.domain, "/")
-    error_message = "domain must be a bare hostname like openfarm.example.com - no http(s):// prefix, no trailing slash."
+    error_message = "domain must be a bare hostname like agric-satellite-analysis.example.com - no http(s):// prefix, no trailing slash."
   }
 }
 
@@ -77,7 +77,7 @@ variable "resend_api_key" {
 }
 
 variable "git_branch" {
-  description = "Branch of the OpenFarm repo to deploy."
+  description = "Branch of the agric-satellite-analysis repo to deploy."
   type        = string
   default     = "main"
 }
@@ -126,5 +126,5 @@ variable "subnet_cidr" {
 
 locals {
   compartment_id = var.compartment_ocid != "" ? var.compartment_ocid : var.tenancy_ocid
-  repo_url       = "https://github.com/superzero11/OpenFarm.git"
+  repo_url       = "https://github.com/520LuoTianxu/agric-satellite-analysis.git"
 }

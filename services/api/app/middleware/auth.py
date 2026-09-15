@@ -1,4 +1,4 @@
-"""Auth dependencies — OpenFarm login/orgs removed; anonymous bypass.
+"""Auth dependencies — agric-satellite-analysis login/orgs removed; anonymous bypass.
 
 Independent login will be added later. Until then every route is open:
 JWT and X-Org-Id are ignored, role checks always pass, and org scoping

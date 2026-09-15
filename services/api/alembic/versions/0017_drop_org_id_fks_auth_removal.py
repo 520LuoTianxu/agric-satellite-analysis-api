@@ -1,4 +1,4 @@
-"""Drop org_id / user FKs for OpenFarm auth removal.
+"""Drop org_id / user FKs for legacy auth removal.
 
 DESTRUCTIVE / schema-loosening:
 - Drops all foreign keys from domain tables to orgs.id (org_id columns).

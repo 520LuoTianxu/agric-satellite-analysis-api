@@ -2,13 +2,13 @@
 
 > Last updated: March 2026
 
-This document outlines where OpenFarm is today and where it's headed. If you'd like to contribute to any of these areas, check the [Contributing Guide](CONTRIBUTING.md) and look for issues labeled [`help wanted`](https://github.com/superzero11/OpenFarm/labels/help%20wanted) or [`good first issue`](https://github.com/superzero11/OpenFarm/labels/good%20first%20issue).
+This document outlines where agric-satellite-analysis is today and where it's headed. If you'd like to contribute to any of these areas, check the [Contributing Guide](CONTRIBUTING.md) and look for issues labeled [`help wanted`](https://github.com/520LuoTianxu/agric-satellite-analysis/labels/help%20wanted) or [`good first issue`](https://github.com/520LuoTianxu/agric-satellite-analysis/labels/good%20first%20issue).
 
 ---
 
 ## Strategic Architecture
 
-OpenFarm is built on a 3-layer architecture where each layer has a distinct strategic role:
+agric-satellite-analysis is built on a 3-layer architecture where each layer has a distinct strategic role:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -52,7 +52,7 @@ Every insight carries: confidence score, contributing signal breakdown ("NDVI dr
 
 ### Layer C - Delivery Surfaces (Distribution)
 
-Ensures OpenFarm is a platform others can build on, not just a tool.
+Ensures agric-satellite-analysis is a platform others can build on, not just a tool.
 
 | Surface | Current State | Next |
 |---|---|---|
@@ -67,7 +67,7 @@ Ensures OpenFarm is a platform others can build on, not just a tool.
 
 ## Current Status
 
-OpenFarm **Milestone 11 (Soil Intelligence & Decision Support) is complete**. The platform delivers end-to-end satellite-powered crop intelligence with four vegetation indices (NDVI, EVI, SAVI, NDWI), daily weather data with agricultural indices, automatic 24-month historical index backfill, soil profile intelligence with derived agronomic layers, and a full intelligence engine - crop suitability scoring (68 crops, 4-pillar model), nutrient risk classification, carbon sequestration estimation, soil×weather stress monitoring, intelligent sampling zones, and soil-aware alerts - all functional and deployed. The focus now shifts to anomaly detection, phenology tracking, and broader agricultural intelligence. See [Future Ideas](#future-ideas-post-mvp) for what's next.
+agric-satellite-analysis **Milestone 11 (Soil Intelligence & Decision Support) is complete**. The platform delivers end-to-end satellite-powered crop intelligence with four vegetation indices (NDVI, EVI, SAVI, NDWI), daily weather data with agricultural indices, automatic 24-month historical index backfill, soil profile intelligence with derived agronomic layers, and a full intelligence engine - crop suitability scoring (68 crops, 4-pillar model), nutrient risk classification, carbon sequestration estimation, soil×weather stress monitoring, intelligent sampling zones, and soil-aware alerts - all functional and deployed. The focus now shifts to anomaly detection, phenology tracking, and broader agricultural intelligence. See [Future Ideas](#future-ideas-post-mvp) for what's next.
 
 ---
 
@@ -358,6 +358,6 @@ Each tier builds on the one above it.
 The MVP is complete! The highest-impact contributions right now are:
 
 1. **Automated tests** - API integration tests, frontend component tests, and E2E acceptance tests (Milestone 4 remaining items)
-2. **Future Ideas** - pick any item from the list above or browse [open issues](https://github.com/superzero11/OpenFarm/issues)
+2. **Future Ideas** - pick any item from the list above or browse [open issues](https://github.com/520LuoTianxu/agric-satellite-analysis/issues)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.

@@ -2,7 +2,7 @@
 
 WRITE_INDEX_COGS (unset = safe default):
   agri fields: off (do not upload index .tif / COG products)
-  classic OpenFarm fields: on (TiTiler still needs COGs)
+  legacy fields: on (TiTiler still needs COGs)
 
 Explicit values:
   0 / false / off / no  -> never upload index TIFs

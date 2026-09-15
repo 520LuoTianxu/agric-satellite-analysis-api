@@ -1,6 +1,6 @@
-# OpenFarm - Sprint Task List
+# agric-satellite-analysis - Sprint Task List
 
-> Auto-generated review against [openfarm.md](openfarm.md) PRD (Phase 1 MVP v1).
+> Auto-generated review against the agric-satellite-analysis product requirements (Phase 1 MVP v1).
 > Last updated: 16 February 2026
 
 **Legend:** [x] Done | [~] Partial | [ ] Not Started

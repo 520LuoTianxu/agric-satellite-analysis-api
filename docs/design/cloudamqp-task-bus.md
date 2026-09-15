@@ -72,7 +72,7 @@ Process host: mq_result_writer
 {
   "task_id": "uuid",
   "type": "satellite_analysis|agri_bridge|weather_backfill|soil_fetch|field_bootstrap|assessment_report",
-  "field_id": "optional-openfarm-field-uuid",
+  "field_id": "optional-agric-satellite-analysis-field-uuid",
   "parcel_id": "optional-agri-land_id",
   "land_id": "optional-same-as-parcel_id",
   "extras": {},

@@ -1,8 +1,8 @@
-# OpenFarm - Copilot Instructions
+# agric-satellite-analysis - Copilot Instructions
 
 ## Architecture Overview
 
-OpenFarm is an open, modular field intelligence platform built on a **3-layer strategic architecture** (see `ARCHITECTURE.md`):
+agric-satellite-analysis is an open, modular field intelligence platform built on a **3-layer strategic architecture** (see `ARCHITECTURE.md`):
 
 - **Layer A - Observation Infrastructure** (Data Gravity): satellite imagery, weather, soil profiles, field boundaries, sensors
 - **Layer B - Intelligence Engine** (Moat): anomaly detection, stress signals, risk models, explainability
@@ -115,7 +115,7 @@ curl http://localhost:3000/api/health # Web
 | Dev port overrides | `docker-compose.dev.yml` |
 | Prod overrides (Caddy, limits) | `docker-compose.prod.yml` |
 | Strategic architecture | `ARCHITECTURE.md` |
-| PRD (full product spec) | `docs/openfarm.md` |
+| Product overview and requirements | `README.md` |
 
 ## Changelog Guidelines
 

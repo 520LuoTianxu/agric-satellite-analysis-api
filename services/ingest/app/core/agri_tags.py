@@ -1,8 +1,8 @@
-"""Helpers for agri-tagged OpenFarm fields.
+"""Helpers for agric-satellite-analysis agri-tagged field records.
 
 Agri-first data plane:
 - Remote sensing truth lives in agric_satellite.parcel_scene_products (lonlat_v1).
-- OpenFarm fields may carry tags like ``agri:<land_id>`` so soil/weather
+- Field records may carry tags like ``agri:<land_id>`` so soil/weather
   (keyed by fields.id) bind to the same parcel the UI shows.
 """
 

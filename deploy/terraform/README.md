@@ -1,6 +1,6 @@
-# OpenFarm on Oracle Cloud - Terraform
+# agric-satellite-analysis on Oracle Cloud - Terraform
 
-Provisions the complete OpenFarm stack on an Oracle Cloud **Always Free** ARM VM
+Provisions the complete agric-satellite-analysis stack on an Oracle Cloud **Always Free** ARM VM
 (Ampere A1 Flex, 2 OCPU / 12 GB / 100 GB) with one `terraform apply`:
 
 - VCN, public subnet, internet gateway, security list (22 / 80 / 443)

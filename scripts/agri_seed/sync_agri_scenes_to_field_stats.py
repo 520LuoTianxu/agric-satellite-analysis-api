@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge agric_satellite.parcel_scene_products → OpenFarm raster_layers + field_stats.
+"""Bridge agric_satellite.parcel_scene_products → raster_layers + field_stats.
 
 For each agric_satellite.fields row tagged ``agri:<land_id>``, copy S2 optical index
 averages (ndvi/evi/ndmi/ndre/mndwi/cire) and S1 SAR (vv/vh) into monitoring
@@ -205,7 +205,7 @@ def run_via_docker(sql: str, container: str) -> int:
         cmd,
         input=sql,
         text=True,
-        # SQL 同时写入 OpenFarm 监控表和遥感表，统一走业务 schema。
+        # SQL 同时写入监控表和遥感表，统一走业务 schema。
         env={**os.environ, "PGOPTIONS": "-csearch_path=agric_satellite"},
     )
     return proc.returncode

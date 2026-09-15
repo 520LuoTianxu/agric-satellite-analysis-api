@@ -1,4 +1,4 @@
-# OpenFarm auth / orgs removal (0017 + 0018)
+# agric-satellite-analysis auth / orgs removal (0017 + 0018)
 
 ## What this change does
 

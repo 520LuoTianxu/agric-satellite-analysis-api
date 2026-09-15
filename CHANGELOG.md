@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenFarm will be documented in this file.
+All notable changes to agric-satellite-analysis will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
@@ -196,7 +196,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.0] - 2025-12-15
 
 ### Added
-- Initial release of OpenFarm platform.
+- Initial release of agric-satellite-analysis platform.
 - Google OAuth authentication with NextAuth and JWT bridge to FastAPI.
 - Multi-tenant organization support with workspace switching.
 - Farm and field CRUD with GeoJSON geometry and PostGIS storage.

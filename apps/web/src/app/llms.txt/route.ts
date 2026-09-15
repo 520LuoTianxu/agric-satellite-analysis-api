@@ -5,22 +5,21 @@ import { DISCORD_URL, REPO_URL, SITE_URL } from "@/lib/site";
  *
  * The landing page argues; this states. Everything here is a fact an
  * engine can quote without inferring it from marketing copy, including
- * the disambiguation that matters most to us - there are other projects
- * called OpenFarm, and this is not them.
+ * the project identity that matters most to us - this is the
+ * agric-satellite-analysis project.
  */
 export const dynamic = "force-static";
 
-const BODY = `# OpenFarm
+const BODY = `# agric-satellite-analysis
 
-> OpenFarm is an open source crop intelligence platform. It fuses Sentinel-2
+> agric-satellite-analysis is an open source crop intelligence platform. It fuses Sentinel-2
 > satellite imagery, daily weather and soil data into per-field insights, and
 > shows the evidence behind every alert: which index moved, over what window,
 > and the conditions that explain it.
 
-Disambiguation: this is OpenFarm at ${SITE_URL}, a satellite and weather crop
-intelligence platform for growers and agronomists. It is unrelated to other
-projects that share the name OpenFarm, including gardening and plant-database
-projects. The canonical source is ${REPO_URL}.
+This is agric-satellite-analysis at ${SITE_URL}, a satellite and weather crop
+intelligence platform for growers and agronomists. The canonical source is
+${REPO_URL}.
 
 ## What it does
 

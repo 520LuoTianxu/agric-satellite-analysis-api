@@ -21,7 +21,7 @@ ssh_public_key = "ssh-ed25519 AAAA... you@machine"
 ssh_allowed_cidr = "0.0.0.0/0"
 
 # Bare hostname - you will point its A record at the VM after apply
-domain = "openfarm.example.com"
+domain = "agric-satellite-analysis.example.com"
 
 # Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client
 google_client_id     = "1234567890-abc.apps.googleusercontent.com"

@@ -1,4 +1,4 @@
-"""Upsert agric_satellite.land_parcels from OpenFarm field geom + agri tags.
+"""Upsert agric_satellite.land_parcels from field geometry + agri tags.
 
 When a field carries ``agri:<land_id>``, the API provisions a complete
 ``agric_satellite.land_parcels`` row so download-machine / claim / UI can resolve the
@@ -106,7 +106,7 @@ ON CONFLICT (land_id) DO UPDATE SET
 
 
 def build_openfarm_tile_id(land_id: str, group_id: str | None = None) -> str:
-    """tile_id convention for OpenFarm-provisioned parcels."""
+    """tile_id convention for agric-satellite-analysis-provisioned parcels."""
     lid = str(land_id).strip()
     if group_id is not None and str(group_id).strip():
         return f"p{str(group_id).strip()}_t00001_a{lid}"

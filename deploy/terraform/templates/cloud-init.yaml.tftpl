@@ -1,5 +1,5 @@
 #cloud-config
-# OpenFarm first-boot provisioning. Rendered by Terraform (templatefile).
+# agric-satellite-analysis first-boot provisioning. Rendered by Terraform (templatefile).
 # Progress: tail -f /var/log/openfarm-bootstrap.log
 # Completion: cloud-init status --wait   (expect ~15-25 min: apt + Docker + ARM image builds)
 
@@ -9,7 +9,7 @@ write_files:
   - path: /etc/cron.d/openfarm-backup
     permissions: "0644"
     content: |
-      # Daily OpenFarm Postgres backup (see deploy/backup.sh)
+      # Daily agric-satellite-analysis Postgres backup (see deploy/backup.sh)
       0 2 * * * root /opt/openfarm/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 
   - path: /opt/openfarm-bootstrap/bootstrap.sh
@@ -20,14 +20,14 @@ write_files:
 
       INSTALL_DIR=/opt/openfarm
 
-      echo "── OpenFarm bootstrap: wait for apt ──────────────────────"
+      echo "── agric-satellite-analysis bootstrap: wait for apt ─────"
       # First boot: unattended-upgrades may hold the apt lock for minutes.
       while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
           echo "waiting for apt lock..."
           sleep 10
       done
 
-      echo "── OpenFarm bootstrap: clone ─────────────────────────────"
+      echo "── agric-satellite-analysis bootstrap: clone ────────────"
       if [ ! -d "$INSTALL_DIR" ]; then
           # setup.sh would clone too, but cloning first means we run the
           # branch-pinned copy of setup.sh itself (single source of truth).
@@ -35,10 +35,10 @@ write_files:
           git clone --branch '${git_branch}' '${repo_url}' "$INSTALL_DIR"
       fi
 
-      echo "── OpenFarm bootstrap: setup.sh ──────────────────────────"
+      echo "── agric-satellite-analysis bootstrap: setup.sh ─────────"
       REPO_BRANCH='${git_branch}' bash "$INSTALL_DIR/deploy/setup.sh"
 
-      echo "── OpenFarm bootstrap: .env overlay ──────────────────────"
+      echo "── agric-satellite-analysis bootstrap: .env overlay ─────"
       cd "$INSTALL_DIR"
 
       # Replace KEY=... if present (commented or not), else append.
@@ -70,11 +70,11 @@ write_files:
 
       chmod 600 .env
 
-      echo "── OpenFarm bootstrap: docker compose up (long) ──────────"
+      echo "── agric-satellite-analysis bootstrap: docker compose up ─"
       docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
       touch "$INSTALL_DIR/.bootstrap-complete"
-      echo "── OpenFarm bootstrap complete ───────────────────────────"
+      echo "── agric-satellite-analysis bootstrap complete ──────────"
 
 runcmd:
   - bash /opt/openfarm-bootstrap/bootstrap.sh 2>&1 | tee -a /var/log/openfarm-bootstrap.log

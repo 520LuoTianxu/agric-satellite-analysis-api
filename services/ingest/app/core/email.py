@@ -41,7 +41,7 @@ async def send_invite_email(
     invited_by_name: str,
 ) -> dict | None:
     """Send a workspace invite notification."""
-    subject = f"You've been invited to {org_name} on OpenFarm"
+    subject = f"You've been invited to {org_name} on agric-satellite-analysis"
     html = f"""\
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px;">
   <h2 style="margin: 0 0 16px; font-size: 20px; color: #111;">
@@ -57,7 +57,7 @@ async def send_invite_email(
   <a href="{settings.app_url}"
      style="display: inline-block; padding: 12px 28px; background: #16a34a; color: #fff;
             text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px;">
-    Open OpenFarm
+    Open agric-satellite-analysis
   </a>
   <p style="margin: 24px 0 0; font-size: 13px; color: #888; line-height: 1.4;">
     If you weren't expecting this invitation, you can safely ignore this email.
@@ -76,7 +76,7 @@ async def send_ownership_transferred_email(
 ) -> dict | None:
     """Notify both parties about an ownership transfer."""
     if is_new_owner:
-        subject = f"You are now the owner of {org_name} on OpenFarm"
+        subject = f"You are now the owner of {org_name} on agric-satellite-analysis"
         body_text = (
             f"<strong>{other_party_name}</strong> has transferred ownership of "
             f"<strong>{org_name}</strong> to you. You now have full control over "
@@ -100,7 +100,7 @@ async def send_ownership_transferred_email(
   <a href="{settings.app_url}"
      style="display: inline-block; padding: 12px 28px; background: #16a34a; color: #fff;
             text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px;">
-    Open OpenFarm
+    Open agric-satellite-analysis
   </a>
 </div>
 """
@@ -123,7 +123,7 @@ async def send_invite_accepted_email(
             f"and joined <strong>{org_name}</strong> as a <strong>{role}</strong>."
         )
     else:
-        subject = f"Welcome to {org_name} on OpenFarm!"
+        subject = f"Welcome to {org_name} on agric-satellite-analysis!"
         body_text = (
             f"You've successfully joined <strong>{org_name}</strong> as a "
             f"<strong>{role}</strong>. You can now collaborate with your team."
@@ -139,7 +139,7 @@ async def send_invite_accepted_email(
   <a href="{settings.app_url}"
      style="display: inline-block; padding: 12px 28px; background: #16a34a; color: #fff;
             text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px;">
-    Open OpenFarm
+    Open agric-satellite-analysis
   </a>
 </div>
 """
@@ -189,7 +189,7 @@ async def send_role_changed_email(
   <a href="{settings.app_url}"
      style="display: inline-block; padding: 12px 28px; background: #16a34a; color: #fff;
             text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px;">
-    Open OpenFarm
+    Open agric-satellite-analysis
   </a>
 </div>
 """

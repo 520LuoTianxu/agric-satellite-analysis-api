@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upsert OpenFarm farms/fields from agric_satellite.virtual_project_areas / land_parcels."""
+"""Upsert agric-satellite-analysis farms/fields from agric_satellite.virtual_project_areas / land_parcels."""
 
 from __future__ import annotations
 

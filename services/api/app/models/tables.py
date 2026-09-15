@@ -518,7 +518,7 @@ class SoilNutrientNpk(Base):
 class GroupSiteAdmission(Base):
     """cdfinance groupSiteAdmission questionnaire snapshot (pre-flow).
 
-    Keyed by vendor ``group_id``; optionally linked to an OpenFarm field /
+    Keyed by vendor ``group_id``; optionally linked to an agric-satellite-analysis field /
     agri ``land_id``. Soft-absent for assessment when no row.
     """
 

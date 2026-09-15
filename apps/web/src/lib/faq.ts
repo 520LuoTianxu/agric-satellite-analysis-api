@@ -1,5 +1,5 @@
 /**
- * The questions answer engines get asked about OpenFarm.
+ * The questions answer engines get asked about agric-satellite-analysis.
  *
  * One list, two consumers: the visible FAQ section on the landing page
  * and the FAQPage structured data emitted with it. They must not drift,

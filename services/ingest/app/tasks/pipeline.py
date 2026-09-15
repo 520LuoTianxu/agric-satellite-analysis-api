@@ -804,7 +804,7 @@ def process_scene(
     index_data[~field_mask] = np.nan
     complete_step(session, job, compute_step)
 
-    # -- write COG (classic OpenFarm / explicit WRITE_INDEX_COGS=1 only) --
+    # -- write COG (legacy path / explicit WRITE_INDEX_COGS=1 only) --
     cog_uri = None
     if write_cogs:
         update_job_progress(session, job, "write_cog")

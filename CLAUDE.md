@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-# OpenFarm
+# agric-satellite-analysis
 
-Open source crop intelligence platform. Fuses satellite (Sentinel-2), weather (Open-Meteo), and soil (SoilGrids/POLARIS) data into per-field insights. BSD-3-Clause. Repo: https://github.com/superzero11/OpenFarm
+Open source crop intelligence platform. Fuses satellite (Sentinel-2), weather (Open-Meteo), and soil (SoilGrids/POLARIS) data into per-field insights. BSD-3-Clause. Repo: https://github.com/520LuoTianxu/agric-satellite-analysis
 
-Deeper docs: ARCHITECTURE.md (3-layer strategic architecture), docs/openfarm.md (full PRD), DEPLOYMENT.md, ROADMAP.md. `.github/copilot-instructions.md` mirrors much of this file - keep them in sync when conventions change.
+Deeper docs: ARCHITECTURE.md (3-layer strategic architecture), README.md (product overview), DEPLOYMENT.md, ROADMAP.md. `.github/copilot-instructions.md` mirrors much of this file - keep them in sync when conventions change.
 
 ## Branch workflow
 

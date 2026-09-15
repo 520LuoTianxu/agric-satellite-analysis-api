@@ -1,7 +1,7 @@
 [project]
 name = "openfarm-ingest"
 version = "0.1.0"
-description = "OpenFarm ingest Celery worker (STAC / weather / soil / raster)"
+description = "agric-satellite-analysis ingest Celery worker (STAC / weather / soil / raster)"
 requires-python = ">=3.11"
 dependencies = [
     "sqlalchemy[asyncio]>=2.0.0",

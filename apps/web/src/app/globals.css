@@ -1,5 +1,5 @@
 /* ============================================================================
-   OpenFarm Design System — token layer
+   agric-satellite-analysis Design System — token layer
    Drop-in replacement for apps/web/src/app/globals.css (token blocks only).
    Architecture is unchanged: HSL triplets consumed as hsl(var(--x)) by Tailwind.
    Every existing shadcn token keeps its name, so nothing breaks on migration.

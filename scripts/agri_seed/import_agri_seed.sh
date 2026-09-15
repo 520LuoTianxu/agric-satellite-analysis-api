@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Import Aliyun agricultural data into the OpenFarm agric_satellite schema.
+# Import Aliyun agricultural data into the agric-satellite-analysis agric_satellite schema.
 set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"

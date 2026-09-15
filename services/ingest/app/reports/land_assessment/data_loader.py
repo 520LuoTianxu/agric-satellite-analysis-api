@@ -869,7 +869,7 @@ def load_field_bundle(
 
 
 def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
-    """Load JSON/CSV fixtures (openfarm-report-hebei style) for CLI offline runs."""
+    """Load JSON/CSV fixtures (legacy report-hebei style) for CLI offline runs."""
     data_dir = Path(data_dir)
     field = json.loads((data_dir / "field.json").read_text(encoding="utf-8"))
     soil = (
@@ -1262,7 +1262,7 @@ def download_url_bytes(url: str, *, timeout: float = 25.0) -> bytes | None:
 
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "OpenFarm-land-assessment/1.0"},
+            headers={"User-Agent": "agric-satellite-analysis-land-assessment/1.0"},
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310

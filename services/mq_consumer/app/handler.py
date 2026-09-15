@@ -48,7 +48,7 @@ def _resolve_field_and_land_db(
                             lid = tag[5:].strip() or lid
                             break
         if lid and not fid:
-            # parcel_id / land_id → OpenFarm field tagged agri:<land_id>
+            # parcel_id / land_id → agric-satellite-analysis field tagged agri:<land_id>
             row = session.execute(
                 text(
                     """

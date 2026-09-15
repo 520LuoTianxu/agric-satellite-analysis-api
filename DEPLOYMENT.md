@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Deploy OpenFarm on a single VPS using Docker Compose + Caddy (auto-SSL).
+Deploy agric-satellite-analysis on a single VPS using Docker Compose + Caddy (auto-SSL).
 
 This guide uses **Oracle Cloud Free Tier** (always-free ARM VM with 12 GB RAM), but the steps work on any Ubuntu 22.04+ server.
 
@@ -19,7 +19,7 @@ Ubuntu 22.04+ server.
 
 ## Prerequisites
 
-- A domain name (e.g., `openfarm.example.com`) - free from [Freenom](https://freenom.com) or your registrar
+- A domain name (e.g., `agric-satellite-analysis.example.com`) - free from [Freenom](https://freenom.com) or your registrar
 - Google OAuth credentials - [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
 - SSH client on your local machine
 
@@ -59,7 +59,7 @@ SSH into your new VM and run the setup script:
 ssh ubuntu@<your-vm-ip>
 
 # Download and run setup script
-curl -sSL https://raw.githubusercontent.com/superzero11/OpenFarm/main/deploy/setup.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis/main/deploy/setup.sh | sudo bash
 ```
 
 This installs Docker, configures the firewall, creates swap, clones the repo, and generates secure random passwords.
@@ -77,20 +77,20 @@ Update these values (the setup script already generated secure random secrets fo
 
 ```bash
 # Your domain
-DOMAIN=openfarm.example.com
-NEXTAUTH_URL=https://openfarm.example.com
-NEXT_PUBLIC_API_URL=https://openfarm.example.com/v1
-NEXT_PUBLIC_TITILER_URL=https://openfarm.example.com/tiles
-NEXT_PUBLIC_PROTOMAPS_URL=https://openfarm.example.com/storage/openfarm/basemap
-TITILER_PUBLIC_URL=https://openfarm.example.com/tiles
-CORS_ORIGINS=https://openfarm.example.com
+DOMAIN=agric-satellite-analysis.example.com
+NEXTAUTH_URL=https://agric-satellite-analysis.example.com
+NEXT_PUBLIC_API_URL=https://agric-satellite-analysis.example.com/v1
+NEXT_PUBLIC_TITILER_URL=https://agric-satellite-analysis.example.com/tiles
+NEXT_PUBLIC_PROTOMAPS_URL=https://agric-satellite-analysis.example.com/storage/openfarm/basemap
+TITILER_PUBLIC_URL=https://agric-satellite-analysis.example.com/tiles
+CORS_ORIGINS=https://agric-satellite-analysis.example.com
 
 # Google OAuth (from Google Cloud Console)
 GOOGLE_CLIENT_ID=your-actual-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-actual-client-secret
 ```
 
-> **Important**: In Google Cloud Console, add `https://openfarm.example.com/api/auth/callback/google` as an authorized redirect URI.
+> **Important**: In Google Cloud Console, add `https://agric-satellite-analysis.example.com/api/auth/callback/google` as an authorized redirect URI.
 
 ---
 
@@ -100,12 +100,12 @@ At your domain registrar, create an **A record**:
 
 | Type | Name | Value | TTL |
 |------|------|-------|-----|
-| A | `openfarm` (or `@`) | `<your-vm-ip>` | 300 |
+| A | `agric-satellite-analysis` (or `@`) | `<your-vm-ip>` | 300 |
 
 Wait a few minutes for DNS propagation:
 
 ```bash
-dig openfarm.example.com +short
+dig agric-satellite-analysis.example.com +short
 # Should return your VM's IP
 ```
 
@@ -133,7 +133,7 @@ sudo docker compose ps
 # Check health endpoints
 curl -s http://localhost:8000/healthz    # API
 curl -s http://localhost:3000/api/health # Web (internal)
-curl -s https://openfarm.example.com    # Public (through Caddy)
+curl -s https://agric-satellite-analysis.example.com    # Public (through Caddy)
 ```
 
 Caddy automatically provisions a Let's Encrypt SSL certificate on first HTTPS request. This may take 30–60 seconds.
@@ -205,7 +205,7 @@ sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --bui
 
 ### Database Backup
 
-OpenFarm includes an automated backup script at `deploy/backup.sh`.
+agric-satellite-analysis includes an automated backup script at `deploy/backup.sh`.
 
 **Manual backup:**
 

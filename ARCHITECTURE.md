@@ -1,8 +1,8 @@
-# OpenFarm Strategic Architecture
+# agric-satellite-analysis Strategic Architecture
 
-> **OpenFarm is an open, modular field intelligence platform that fuses satellite, weather, soil, and time to explain what is happening in a field - and why.**
+> **agric-satellite-analysis is an open, modular field intelligence platform that fuses satellite, weather, soil, and time to explain what is happening in a field - and why.**
 
-OpenFarm follows a 3-layer strategic architecture. Each layer has a distinct role: the Observation layer creates **data gravity**, the Intelligence layer is the **moat**, and the Delivery layer drives **distribution**.
+agric-satellite-analysis follows a 3-layer strategic architecture. Each layer has a distinct role: the Observation layer creates **data gravity**, the Intelligence layer is the **moat**, and the Delivery layer drives **distribution**.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -94,7 +94,7 @@ Field = {
 
 *"What does it mean?"*
 
-The heart of OpenFarm - where raw signals are converted into explainable, agronomically meaningful insights. This is the strategic differentiator.
+The heart of agric-satellite-analysis - where raw signals are converted into explainable, agronomically meaningful insights. This is the strategic differentiator.
 
 ### Field Understanding Engine
 - Temporal analytics (trend, deviation, anomaly)
@@ -150,7 +150,7 @@ Insight = {
 
 *"How is it consumed?"*
 
-Ensures OpenFarm is not just a tool - but a platform others can build on.
+Ensures agric-satellite-analysis is not just a tool - but a platform others can build on.
 
 ### Visual Interface (UI)
 - Interactive field maps (MapLibre + PMTiles)
@@ -184,11 +184,11 @@ Ensures OpenFarm is not just a tool - but a platform others can build on.
 
 ---
 
-## What OpenFarm IS
+## What agric-satellite-analysis IS
 
 > An open, modular field intelligence platform that fuses satellite, weather, soil, and time to explain what is happening in a field - and why.
 
-## What OpenFarm is NOT
+## What agric-satellite-analysis is NOT
 
 - Not: Farm ERP
 - Not: Task/operations manager

@@ -416,7 +416,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     agri_heatmap_available = False
     rs_source: str | None = None
 
-    # Available index types (distinct layer_type values) — classic OpenFarm COG path
+    # Available index types (distinct layer_type values) — legacy COG path
     types_result = await db.execute(
         select(RasterLayer.layer_type)
         .where(RasterLayer.field_id == field.id)

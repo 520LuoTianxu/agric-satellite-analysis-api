@@ -1,4 +1,4 @@
-# OpenFarm / agric-satellite-analysis helpers
+# agric-satellite-analysis helpers
 
 .PHONY: agri-schema agri-seed agri-seed-reset
 

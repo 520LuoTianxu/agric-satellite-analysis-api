@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for OpenFarm
+about: Suggest an idea for agric-satellite-analysis
 labels: enhancement
 ---
 

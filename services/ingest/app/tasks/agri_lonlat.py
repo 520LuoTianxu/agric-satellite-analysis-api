@@ -3,7 +3,7 @@
 Does **not** upload index COG/TIF rasters. Compact scene JSON may still go
 to ``OSS_PREFIX`` (see ``UPLOAD_SCENE_JSON``).
 
-Classic OpenFarm (non-agri) keeps per-index ``write_cog`` in ``pipeline.py``.
+The legacy non-agri path keeps per-index ``write_cog`` in ``pipeline.py``.
 """
 
 from __future__ import annotations

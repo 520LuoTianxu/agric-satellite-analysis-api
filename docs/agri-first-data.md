@@ -1,6 +1,6 @@
 # Agri-first data plane
 
-How OpenFarm fields relate to the `agric_satellite` schema after the lonlat_v1 / no-OSS work.
+How agric-satellite-analysis field records relate to the `agric_satellite` schema after the lonlat_v1 / no-OSS work.
 
 ## Object storage (uploads / COGs)
 
@@ -39,7 +39,7 @@ Env knobs (ingest worker):
 | Source | Role |
 | --- | --- |
 | **`agric_satellite.parcel_scene_products`** | **Primary** RS for agri parcels. Prefer `pixel_data.format = lonlat_v1` at insert/ingest time. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1`. |
-| `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Classic OpenFarm COG + TiTiler path only. Not required for agri field detail / 色斑图 / growth curves. |
+| `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Legacy COG + TiTiler path only. Not required for agri field detail / 色斑图 / growth curves. |
 
 Rules:
 
@@ -48,14 +48,14 @@ Rules:
 - Ingest / seed must write **lonlat_v1** pixels into `parcel_scene_products` at insert time when available.
 - Do **not** implement soil inside `parcel_scene_products`.
 
-## Soil + weather (still OpenFarm tables)
+## Soil + weather tables
 
 | Table | Key | Binding |
 | --- | --- | --- |
 | `soil_profiles` / `soil_layers` / `soil_field_summary` | `field_id` | Same `fields.id` as the UI field |
 | `weather_daily` | `field_id` | Same |
 
-Agri parcels bind soil/weather by tagging the OpenFarm field:
+Agri parcels bind soil/weather by tagging the corresponding field record:
 
 ```text
 tags_json: ["agri:13691", "source:agric_satellite.land_parcels", ...]

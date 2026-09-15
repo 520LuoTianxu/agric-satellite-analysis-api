@@ -2,7 +2,7 @@
     "version": "0.0.1",
     "configurations": [
         {
-            "name": "openfarm-web",
+            "name": "agric-satellite-analysis-web",
             "runtimeExecutable": "npm",
             "runtimeArgs": ["run", "dev", "--prefix", "apps/web"],
             "port": 3000,

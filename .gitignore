@@ -1,4 +1,4 @@
-# OpenFarm - Ignore patterns
+# agric-satellite-analysis - Ignore patterns
 
 # ── Environment / Secrets ────────────────────────────────────────────
 .env

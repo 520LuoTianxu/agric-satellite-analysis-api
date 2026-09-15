@@ -1,7 +1,7 @@
 /**
- * OpenFarm API client.
+ * agric-satellite-analysis API client.
  *
- * JWT / X-Org-Id are optional after OpenFarm auth removal (API AUTH_DISABLED).
+ * JWT / X-Org-Id are optional after the agric-satellite-analysis auth removal (API AUTH_DISABLED).
  * All methods return typed responses; throws on HTTP errors.
  */
 

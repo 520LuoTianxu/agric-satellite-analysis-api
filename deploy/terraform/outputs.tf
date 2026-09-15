@@ -1,5 +1,5 @@
 output "instance_public_ip" {
-  description = "Public IP of the OpenFarm VM - point your domain's A record here."
+  description = "Public IP of the agric-satellite-analysis VM - point your domain's A record here."
   value       = oci_core_instance.openfarm.public_ip
 }
 
@@ -11,7 +11,7 @@ output "next_steps" {
   value = <<-EOT
 
     ┌─────────────────────────────────────────────────────────────────┐
-    │ OpenFarm is provisioning (first boot takes ~15-25 minutes).     │
+    │ agric-satellite-analysis is provisioning (first boot takes ~15-25 minutes). │
     └─────────────────────────────────────────────────────────────────┘
 
     1. NOW: add a DNS A record at your registrar:

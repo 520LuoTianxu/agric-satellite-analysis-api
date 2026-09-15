@@ -1,4 +1,4 @@
-"""User routes removed — OpenFarm auth/orgs dropped in migration 0018."""
+"""User routes removed — agric-satellite-analysis auth/orgs dropped in migration 0018."""
 
 from __future__ import annotations
 

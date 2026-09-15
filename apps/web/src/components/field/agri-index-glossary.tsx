@@ -97,7 +97,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "最常用的植被长势指标",
         body: "NDVI = (NIR − Red) / (NIR + Red)，值域通常约 −1～1。健康植被强烈反射近红外、吸收红光，NDVI 偏高。\n\n怎么看：接近 0 或负值多为水体、裸地或建筑；0.2～0.5 多为一般植被；>0.5 通常长势较好、覆盖更密。\n\n可理解为作物的「健康分」，适合生长季监测、覆盖估计与灾损对比；密植时可能饱和，可对照 EVI/NDRE。",
         tip: "看多日趋势比单日绝对值更稳。",
-        imageSrc: glossaryAsset("ndvi.png"),
+        imageSrc: glossaryAsset("ndvi-20260915.png"),
         imageAlt: "NDVI 专业说明图",
     },
     {
@@ -133,7 +133,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "垂发垂收 · 对水面与粗糙度敏感",
         body: "VV 表示垂直发射、垂直接收的同极化 SAR 通道，常用后向散射系数 σ⁰（dB）表征。\n\n光滑水面呈镜面反射，VV 回波弱（偏暗）；粗糙地表、植被或建筑散射更强（偏亮）。适合水体/洪涝提取、土壤湿度与地表变化监测。\n\n可理解为「竖着打出去再竖着收回来」的雷达手电筒，反映表面粗糙与含水量信息。",
         tip: "与 VH 对照：开阔水面常 VV、VH 都偏弱。",
-        imageSrc: glossaryAsset("vv.png"),
+        imageSrc: glossaryAsset("vv-20260915.png"),
         imageAlt: "VV 雷达同极化说明图",
     },
     {
@@ -142,7 +142,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "垂发横收 · 对植株体散射敏感",
         body: "VH 表示垂直发射、水平接收的交叉极化通道，对植被冠层体散射更敏感，能反映结构、粗糙度与一定水分信息。\n\n特点：穿云全天候；水体 VH 通常很低（暗）；农田中等；森林/密植偏高（亮）。与 VV 互补，利于区分「水 / 土 / 有庄稼」。\n\n生长季 VH 走强常对应冠层发育；洪涝时积水区 VH 也偏弱。",
         tip: "长势与结构变化可重点看 VH 时序。",
-        imageSrc: glossaryAsset("vh.png"),
+        imageSrc: glossaryAsset("vh-20260915.png"),
         imageAlt: "VH 雷达交叉极化说明图",
     },
     {
@@ -169,7 +169,8 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "叶绿素含量与营养诊断",
         body: "CIRE = (NIR / RedEdge) − 1，基于红边波段，对叶绿素浓度变化敏感。\n\n高值：叶绿素更厚实、营养与光合潜力更好；低值：可能缺素、病害或生长受抑。用于叶绿素监测、施肥决策与营养诊断。\n\n与 NDRE 同源红边信息，可互相印证；比 NDVI 更适合高生物量阶段。",
         tip: "追肥前后各看一次，便于评估肥效。",
-        imageSrc: glossaryAsset("cire.png"),
+        // OSS 中 CIRE 与 MNDWI 的历史资源内容对调，这里按实际图片语义使用对应地址。
+        imageSrc: glossaryAsset("mndwi.png"),
         imageAlt: "CIRE 叶绿素红边说明图",
     },
     {
@@ -178,7 +179,7 @@ export const GLOSSARY_ENTRIES: GlossaryEntry[] = [
         subtitle: "提取水体、积水与洪涝范围",
         body: "MNDWI = (Green − SWIR) / (Green + SWIR)。用水体对绿光与短波红外的响应差，更好区分水面与建筑物、裸土等。\n\n高值：更可能是河塘、积水或洪涝区；低值：多为植被、土壤或城镇。相对传统 NDWI，城镇区抑制建筑噪声更好。\n\n与雷达洪涝互补：晴空光学日边界更清晰。",
         tip: "有云时改看哨兵一号洪涝。",
-        imageSrc: glossaryAsset("mndwi.png"),
+        imageSrc: glossaryAsset("cire.png"),
         imageAlt: "MNDWI 水体指数说明图",
     },
 ];

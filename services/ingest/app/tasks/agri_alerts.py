@@ -353,7 +353,7 @@ def evaluate_agri_alerts_for_field(
     land_id: str | None = None,
     scene_date: str | None = None,
     replace_open: bool = True) -> dict:
-    """Celery entry: agri lonlat → openfarm alerts."""
+    """Celery entry: agri lonlat → agric-satellite-analysis alerts."""
     try:
         return evaluate_agri_rs_alerts_for_field(
             field_id,

@@ -1,7 +1,7 @@
 """Agri-first APIs: 项目区 (virtual_project_areas), 地块 (land_parcels), S1/S2 scenes.
 
-Primary product surface for this fork. OpenFarm /v1/farms and /v1/fields remain
-available but are treated as legacy for agri-satellite-analysis.
+Primary product surface for agric-satellite-analysis. The legacy `/v1/farms`
+and `/v1/fields` endpoints remain available for compatibility.
 """
 
 from __future__ import annotations

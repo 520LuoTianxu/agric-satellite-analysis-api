@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ensure agri-tagged OpenFarm fields have parcel geom + soil/weather.
+"""Ensure agric-satellite-analysis agri-tagged fields have parcel geom + soil/weather.
 
 For each ``agric_satellite.fields`` row with tags containing ``agri:<land_id>``:
 
@@ -37,7 +37,7 @@ PGDB = os.environ.get("POSTGRES_DB", "openfarm")
 
 
 def psql(sql: str) -> str:
-    # 查询同时使用 OpenFarm 和遥感表，避免 psql 默认落到 public。
+    # 查询同时使用业务字段表和遥感表，避免 psql 默认落到 public。
     r = subprocess.run(
         [
             "docker",

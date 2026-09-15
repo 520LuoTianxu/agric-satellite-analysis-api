@@ -14,7 +14,7 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate 选地体检（白话版）PDF")
-    parser.add_argument("--field-id", help="OpenFarm field UUID")
+    parser.add_argument("--field-id", help="agric-satellite-analysis field UUID")
     parser.add_argument(
         "--from-dir", help="Fixture directory (field.json + all_indices.csv)"
     )

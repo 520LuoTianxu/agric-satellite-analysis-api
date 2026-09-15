@@ -1,6 +1,6 @@
 # Agri schema seed (Aliyun PostgreSQL dump)
 
-Imports the Aliyun agricultural data into the single `agric_satellite` application schema in OpenFarm Postgres (default user/db `openfarm`).
+Imports the Aliyun agricultural data into the single `agric_satellite` application schema in the agric-satellite-analysis Postgres database (default user/db `openfarm`).
 
 ## What you get
 
@@ -113,7 +113,7 @@ Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; membe
 | `land_parcels` | 地块 with `boundary_geojson` |
 | `parcel_scene_products` | S2 optical indices + S1 VV/VH time series |
 
-OpenFarm `/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should target `/v1/agri/*`.
+`/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should target `/v1/agri/*`.
 
 ## Files in this folder
 
@@ -123,7 +123,7 @@ OpenFarm `/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should targe
 - `manifest.json` — part checksums + expected joined sha256
 
 
-## Sync project areas → OpenFarm farms/fields
+## Sync project areas → agric-satellite-analysis farms/fields
 
 Map each `agric_satellite.virtual_project_areas` tile to a `farms` row and each
 `agric_satellite.land_parcels` parcel to a `fields` row (tagged `agri:<land_id>`, geom
@@ -136,9 +136,9 @@ python3 scripts/agri_seed/sync_project_areas_to_farms.py
 Uses `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` or `DATABASE_URL_SYNC`.
 Does not delete existing sample farms.
 
-## Bridge agri scenes → OpenFarm monitoring (optional)
+## Bridge agri scenes → agric-satellite-analysis monitoring (optional)
 
-For OpenFarm fields tagged `agri:<land_id>`, copy S1/S2 index averages into
+For field records tagged `agri:<land_id>`, copy S1/S2 index averages into
 `raster_layers` + `field_stats` so classic NdviTab charts work without Celery:
 
 ```bash
@@ -158,5 +158,5 @@ image overlay client-side.
 See **[docs/agri-first-data.md](../../docs/agri-first-data.md)** for the binding rules:
 
 - RS → `agric_satellite.parcel_scene_products` only (`lonlat_v1`). Agri satellite jobs write lonlat-direct (no new index COGs). The OSS TIF scanner is migration-only.
-- **Soil / weather** → `agric_satellite` OpenFarm tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
+- **Soil / weather** → `agric_satellite` tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
 - Ops: `python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply`

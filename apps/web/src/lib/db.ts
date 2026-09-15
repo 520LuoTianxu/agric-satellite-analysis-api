@@ -8,5 +8,5 @@ export async function upsertUser(
     _name: string,
     _image?: string | null,
 ): Promise<never> {
-    throw new Error("upsertUser removed — OpenFarm auth/orgs dropped (AUTH_REMOVAL.md)");
+    throw new Error("upsertUser removed — agric-satellite-analysis auth/orgs dropped (AUTH_REMOVAL.md)");
 }
