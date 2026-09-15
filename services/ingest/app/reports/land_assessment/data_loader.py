@@ -91,7 +91,7 @@ def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list
 
 
 def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
-    """Map agri.parcel_scene_products S2 averages into index rows.
+    """Map agric_satellite.parcel_scene_products S2 averages into index rows.
 
     Uses MNDWI as NDWI proxy when NDWI is absent.
     """
@@ -101,7 +101,7 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
                 f"""
             SELECT date, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
                    parcel_cloud_cover_pct, cloud_cover
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
               AND {official_s2_sql("")}
             ORDER BY date
@@ -220,7 +220,7 @@ def load_agri_lonlat_pixels(
     sql = f"""
         SELECT date, pixel_data, ndvi_avg,
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud
-        FROM agri.parcel_scene_products
+        FROM agric_satellite.parcel_scene_products
         WHERE {" AND ".join(where)}
         ORDER BY date
     """
@@ -260,7 +260,7 @@ def load_agri_pixel_date_index(
                  THEN jsonb_array_length(pixel_data->'pixels')
                  ELSE 0
                END AS npix
-        FROM agri.parcel_scene_products
+        FROM agric_satellite.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
           AND EXTRACT(MONTH FROM date) BETWEEN 6 AND 9
           AND {official_s2_sql("")}
@@ -719,7 +719,7 @@ def load_site_admission(
 
         gid = session.execute(
             sa_text(
-                "SELECT group_id::text FROM agri.land_parcels WHERE land_id = :lid LIMIT 1"
+                "SELECT group_id::text FROM agric_satellite.land_parcels WHERE land_id = :lid LIMIT 1"
             ),
             {"lid": land_id},
         ).scalar()
@@ -812,7 +812,7 @@ def load_field_bundle(
         agri_idx = load_indices_from_agri(session, land_id)
         if len(agri_idx) > len(indices):
             indices = agri_idx
-            source = "agri.parcel_scene_products"
+            source = "agric_satellite.parcel_scene_products"
 
     soil = load_soil(session, field_id)
     wsum, wstress = load_weather(session, field_id)
@@ -972,7 +972,7 @@ def load_oss_media_for_dates(
         placeholders.append(f"CAST(:{key} AS date)")
     sql = f"""
         SELECT date, json_oss_key
-        FROM agri.parcel_scene_products
+        FROM agric_satellite.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
           AND date IN ({", ".join(placeholders)})
           AND json_oss_key IS NOT NULL AND json_oss_key <> ''

@@ -1,8 +1,8 @@
 # S1/S2 地块产品：Aliyun OSS JSON → PostgreSQL
 
-独立小工具：从 bucket `agric-dev` 前缀 `s1s2_parcel/json/{tile_id}/parcel_{id}/{date}_{S1|S2}.json` 拉取产品 JSON，upsert 到 PostgreSQL schema `agri`。
+独立小工具：从 bucket `agric-dev` 前缀 `s1s2_parcel/json/{tile_id}/parcel_{id}/{date}_{S1|S2}.json` 拉取产品 JSON，upsert 到 PostgreSQL schema `agric_satellite`。
 
-相对旧脚本 `agri_s1s2_parcel_bundle/scripts/oss_json_to_postgres.py` 的改进：独立 schema/视图/入库日志、更多元数据列、`--apply-schema`、可配置 `OSS_ENV`、兼容 psycopg3/psycopg2。
+相对旧脚本 `agri_s1s2_parcel_bundle/scripts/oss_json_to_postgres.py` 的改进：统一业务 schema/视图/入库日志、更多元数据列、`--apply-schema`、可配置 `OSS_ENV`、兼容 psycopg3/psycopg2。
 
 ## 依赖
 
@@ -50,9 +50,9 @@ python3 scripts/oss_to_pg.py --apply-schema --limit 1
 
 | 对象 | 说明 |
 |------|------|
-| `agri.parcel_scene_products` | 主表，PK `(parcel_id, date, sensor, scene_id)` |
-| `agri.v_parcel_scene_products_meta` | 去掉 `pixels` 的轻量视图 |
-| `agri.ingest_runs` | 可选入库运行日志 |
+| `agric_satellite.parcel_scene_products` | 主表，PK `(parcel_id, date, sensor, scene_id)` |
+| `agric_satellite.v_parcel_scene_products_meta` | 去掉 `pixels` 的轻量视图 |
+| `agric_satellite.ingest_runs` | 可选入库运行日志 |
 
 更多示例见 `sql/002_sample_queries.sql`。
 
@@ -102,19 +102,19 @@ python3 scripts/oss_to_pg.py --keys-file keys.txt --limit 100
 ```sql
 -- 按瓦片/日期/传感器列元数据（无 pixels）
 SELECT parcel_id, date, sensor, scene_id, cloud_cover, rgb_url
-FROM agri.v_parcel_scene_products_meta
+FROM agric_satellite.v_parcel_scene_products_meta
 WHERE tile_id = 'p4079_t00001_a15526'
   AND date >= '2025-06-01' AND sensor = 'S2'
 ORDER BY date
 LIMIT 50;
 
 -- 计数
-SELECT sensor, count(*) FROM agri.parcel_scene_products GROUP BY 1;
+SELECT sensor, count(*) FROM agric_satellite.parcel_scene_products GROUP BY 1;
 
 -- jsonb 抽一个像元 NDVI
 SELECT parcel_id, date,
        payload #>> '{pixels,0,ndvi}' AS ndvi0
-FROM agri.parcel_scene_products
+FROM agric_satellite.parcel_scene_products
 WHERE sensor = 'S2' AND parcel_id = '15526'
 ORDER BY date DESC LIMIT 10;
 ```
@@ -152,4 +152,3 @@ python3 scripts/oss_to_pg.py --keys-file data/oss_json_keys.txt --apply-schema
 ```bash
 python3 scripts/oss_to_pg.py --from-done-dir /path/to/parcel_products --apply-schema
 ```
-

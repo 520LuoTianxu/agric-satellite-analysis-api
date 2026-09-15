@@ -2,9 +2,9 @@
 -- 应用：psql "$PGDATABASE" -f sql/001_schema.sql
 -- 或：python scripts/oss_to_pg.py --apply-schema ...
 
-CREATE SCHEMA IF NOT EXISTS agri;
+CREATE SCHEMA IF NOT EXISTS agric_satellite;
 
-CREATE TABLE IF NOT EXISTS agri.parcel_scene_products (
+CREATE TABLE IF NOT EXISTS agric_satellite.parcel_scene_products (
   parcel_id               text        NOT NULL,
   tile_id                 text        NOT NULL,
   date                    date        NOT NULL,
@@ -33,16 +33,16 @@ CREATE TABLE IF NOT EXISTS agri.parcel_scene_products (
 );
 
 CREATE INDEX IF NOT EXISTS idx_psp_tile_date
-  ON agri.parcel_scene_products (tile_id, date);
+  ON agric_satellite.parcel_scene_products (tile_id, date);
 CREATE INDEX IF NOT EXISTS idx_psp_sensor
-  ON agri.parcel_scene_products (sensor);
+  ON agric_satellite.parcel_scene_products (sensor);
 CREATE INDEX IF NOT EXISTS idx_psp_date
-  ON agri.parcel_scene_products (date);
+  ON agric_satellite.parcel_scene_products (date);
 CREATE INDEX IF NOT EXISTS idx_psp_payload_gin
-  ON agri.parcel_scene_products USING gin (payload);
+  ON agric_satellite.parcel_scene_products USING gin (payload);
 
 -- 轻量视图：去掉重型 pixels，便于列表/元数据查询
-CREATE OR REPLACE VIEW agri.v_parcel_scene_products_meta AS
+CREATE OR REPLACE VIEW agric_satellite.v_parcel_scene_products_meta AS
 SELECT
   parcel_id,
   tile_id,
@@ -68,14 +68,10 @@ SELECT
   payload - 'pixels' AS payload_meta,
   generated_at_shanghai,
   ingested_at
-FROM agri.parcel_scene_products;
-
--- 兼容：public 同名视图（指向 agri 表）
-CREATE OR REPLACE VIEW public.v_parcel_scene_products_meta AS
-SELECT * FROM agri.v_parcel_scene_products_meta;
+FROM agric_satellite.parcel_scene_products;
 
 -- 可选：入库运行日志
-CREATE TABLE IF NOT EXISTS agri.ingest_runs (
+CREATE TABLE IF NOT EXISTS agric_satellite.ingest_runs (
   run_id        bigserial PRIMARY KEY,
   started_at    timestamptz NOT NULL DEFAULT now(),
   finished_at   timestamptz,
@@ -90,7 +86,7 @@ CREATE TABLE IF NOT EXISTS agri.ingest_runs (
   status        text DEFAULT 'running'  -- running | ok | error
 );
 
-COMMENT ON TABLE agri.parcel_scene_products IS
+COMMENT ON TABLE agric_satellite.parcel_scene_products IS
   'Sentinel-1/2 地块场景产品（自 Aliyun OSS JSON 入库）';
-COMMENT ON COLUMN agri.parcel_scene_products.payload IS
+COMMENT ON COLUMN agric_satellite.parcel_scene_products.payload IS
   '完整产品 JSON，含 pixels 数组；列表查询请用 v_parcel_scene_products_meta';

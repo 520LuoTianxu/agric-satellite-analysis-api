@@ -1,6 +1,6 @@
 """Fields router - CRUD, import, with geometry handling.
 
-Legacy in this fork: primary 地块 model is agri.land_parcels via /v1/agri/lands.
+Legacy in this fork: primary 地块 model is agric_satellite.land_parcels via /v1/agri/lands.
 Use /v1/agri/lands/{land_id}/scenes for S1/S2 growth-curve indices.
 """
 
@@ -139,7 +139,7 @@ async def create_field(
     agri_field = is_agri_tagged(body.tags)
     agri_land_id = parse_agri_land_id(body.tags) if agri_field else None
 
-    # Provision agri.land_parcels so RS/UI can resolve the parcel later.
+    # Provision agric_satellite.land_parcels so RS/UI can resolve the parcel later.
     # Bootstrap still skips classic COG indices (user triggers 补数 separately).
     if agri_field and agri_land_id:
         await ensure_agri_land_parcel_for_field(
@@ -147,7 +147,7 @@ async def create_field(
         )
 
     # Sentinel job only for classic COG index backfill progress tracking.
-    # Agri fields skip RS backfill (truth = agri.parcel_scene_products).
+    # Agri fields skip RS backfill (truth = agric_satellite.parcel_scene_products).
     sentinel = None
     if not agri_field:
         sentinel = Job(

@@ -125,7 +125,7 @@ def backfill_indices_for_field(
                 "backfill_indices_skipped_agri_field",
                 field_id=field_id,
                 land_id=land_id,
-                reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill",
+                reason="RS from agric_satellite.parcel_scene_products (lonlat_v1), not COG backfill",
             )
             if sentinel_job_id:
                 sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
@@ -361,7 +361,7 @@ def _backfill_indices_http_only(
             "backfill_indices_skipped_agri_field",
             field_id=field_id,
             land_id=land_id,
-            reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill",
+            reason="RS from agric_satellite.parcel_scene_products (lonlat_v1), not COG backfill",
             http_only=True,
         )
         if sentinel_job_id:

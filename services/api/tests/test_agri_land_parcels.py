@@ -1,4 +1,4 @@
-"""Unit tests for agri.land_parcels upsert helper (no live DB)."""
+"""Unit tests for agric_satellite.land_parcels upsert helper (no live DB)."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ class UpsertParamsTests(unittest.TestCase):
         self.assertEqual(props["field_id"], "319c1a96-5111-44ed-b62b-c77dd4a780b3")
         self.assertIn("ON CONFLICT (land_id) DO UPDATE", UPSERT_LAND_PARCEL_SQL)
         self.assertIn("CAST(:boundary_geojson AS jsonb)", UPSERT_LAND_PARCEL_SQL)
-        self.assertIn("agri.land_parcels.source_file = :source_file", UPSERT_LAND_PARCEL_SQL)
+        self.assertIn("agric_satellite.land_parcels.source_file = :source_file", UPSERT_LAND_PARCEL_SQL)
 
     def test_group_from_tags_when_not_passed(self) -> None:
         boundary = {
@@ -123,7 +123,7 @@ class EnsureUpsertTests(unittest.IsolatedAsyncioTestCase):
         db.execute.assert_awaited_once()
         args, kwargs = db.execute.await_args
         sql = str(args[0])
-        self.assertIn("INSERT INTO agri.land_parcels", sql)
+        self.assertIn("INSERT INTO agric_satellite.land_parcels", sql)
         self.assertIn("ON CONFLICT (land_id)", sql)
         bind = args[1]
         self.assertEqual(bind["land_id"], "25106")

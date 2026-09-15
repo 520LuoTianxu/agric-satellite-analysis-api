@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    MetaData,
     Numeric,
     String,
     Text,
@@ -27,7 +28,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
-    pass
+    # 统一应用业务表的命名空间；public 仅保留 PostGIS 和数据库系统对象。
+    metadata = MetaData(schema="agric_satellite")
 
 
 # ── Farms / Fields ───────────────────────────────────────────────────

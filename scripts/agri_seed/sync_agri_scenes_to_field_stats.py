@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Bridge agri.parcel_scene_products → OpenFarm raster_layers + field_stats.
+"""Bridge agric_satellite.parcel_scene_products → OpenFarm raster_layers + field_stats.
 
-For each public.fields row tagged ``agri:<land_id>``, copy S2 optical index
+For each agric_satellite.fields row tagged ``agri:<land_id>``, copy S2 optical index
 averages (ndvi/evi/ndmi/ndre/mndwi/cire) and S1 SAR (vv/vh) into monitoring
 tables so NdviTab works without waiting for the COG pipeline.
 
@@ -71,7 +71,7 @@ def build_sql() -> str:
                 SELECT DISTINCT ON (p.date)
                        p.date, p.scene_id, p.cloud_cover, p.parcel_cloud_cover_pct,
                        p.{col}_avg, p.{col}_min, p.{col}_max
-                FROM agri.parcel_scene_products p
+                FROM agric_satellite.parcel_scene_products p
                 WHERE p.land_id = land.land_id
                   AND p.sensor = '{sat}'
                   AND p.{col}_avg IS NOT NULL
@@ -107,7 +107,7 @@ SELECT
     s.min_v,
     s.max_v,
     jsonb_build_object(
-        'source', 'agri.parcel_scene_products',
+        'source', 'agric_satellite.parcel_scene_products',
         'land_id', s.land_id,
         'scene_id', s.scene_id,
         'cloud_cover', s.cloud_cover,
@@ -189,6 +189,8 @@ def run_via_docker(sql: str, container: str) -> int:
         "docker",
         "exec",
         "-i",
+        "-e",
+        "PGOPTIONS=-csearch_path=agric_satellite,public",
         container,
         "psql",
         "-U",
@@ -199,7 +201,13 @@ def run_via_docker(sql: str, container: str) -> int:
         "ON_ERROR_STOP=1",
     ]
     print(f"Running sync via docker exec {container} …", file=sys.stderr)
-    proc = subprocess.run(cmd, input=sql, text=True)
+    proc = subprocess.run(
+        cmd,
+        input=sql,
+        text=True,
+        # SQL 同时写入 OpenFarm 监控表和遥感表，统一走业务 schema。
+        env={**os.environ, "PGOPTIONS": "-csearch_path=agric_satellite,public"},
+    )
     return proc.returncode
 
 
@@ -231,6 +239,7 @@ def main() -> int:
     password = os.environ.get("POSTGRES_PASSWORD", "openfarm_dev")
     env = os.environ.copy()
     env["PGPASSWORD"] = password
+    env["PGOPTIONS"] = "-csearch_path=agric_satellite,public"
     cmd = [
         "psql",
         "-h",

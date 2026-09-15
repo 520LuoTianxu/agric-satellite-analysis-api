@@ -134,7 +134,7 @@ def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
 
 
 def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
-    """Extract lonlat_v1 pixels from agri.parcel_scene_products.pixel_data."""
+    """Extract lonlat_v1 pixels from agric_satellite.parcel_scene_products.pixel_data."""
     if not isinstance(pixel_data, dict):
         return None
     if pixel_data.get("format") != "lonlat_v1":
@@ -269,13 +269,13 @@ def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) ->
 async def _agri_ready(db: AsyncSession) -> None:
     q = await db.execute(
         text(
-            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'agri' LIMIT 1"
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'agric_satellite' LIMIT 1"
         )
     )
     if q.scalar() is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="agri schema not installed; run: make agri-seed (see scripts/agri_seed/README.md)",
+            detail="agric_satellite schema not installed; run: make agri-seed (see scripts/agri_seed/README.md)",
         )
 
 
@@ -298,7 +298,7 @@ async def agri_stats(
     ]
     counts: list[AgriTableCount] = []
     for t in tables:
-        r = await db.execute(text(f"SELECT count(*) FROM agri.{t}"))  # noqa: S608
+        r = await db.execute(text(f"SELECT count(*) FROM agric_satellite.{t}"))  # noqa: S608
         counts.append(AgriTableCount(table=t, count=int(r.scalar() or 0)))
     return AgriStatsOut(
         tables=counts,
@@ -349,7 +349,7 @@ async def list_project_areas(
 
     total = (
         await db.execute(
-            text(f"SELECT count(*) FROM agri.virtual_project_areas WHERE {wh}"), params
+            text(f"SELECT count(*) FROM agric_satellite.virtual_project_areas WHERE {wh}"), params
         )
     ).scalar() or 0
 
@@ -366,7 +366,7 @@ async def list_project_areas(
                        {boundary_expr}, boundary_srid,
                        min_lon, min_lat, max_lon, max_lat, created_at, updated_at,
                        parcel_count AS land_count
-                FROM agri.virtual_project_areas
+                FROM agric_satellite.virtual_project_areas
                 WHERE {wh}
                 ORDER BY province_name NULLS LAST, city_name NULLS LAST, county_name NULLS LAST, tile_id
                 LIMIT :limit OFFSET :offset
@@ -392,9 +392,9 @@ async def get_project_area(
             text(
                 """
                 SELECT a.*,
-                       (SELECT count(*) FROM agri.virtual_project_area_lands l
+                       (SELECT count(*) FROM agric_satellite.virtual_project_area_lands l
                         WHERE l.tile_id = a.tile_id) AS land_count
-                FROM agri.virtual_project_areas a
+                FROM agric_satellite.virtual_project_areas a
                 WHERE a.tile_id = :tile_id
                 """
             ),
@@ -420,7 +420,7 @@ async def list_project_area_lands(
     await _agri_ready(db)
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agri.virtual_project_areas WHERE tile_id = :tile_id"),
+            text("SELECT 1 FROM agric_satellite.virtual_project_areas WHERE tile_id = :tile_id"),
             {"tile_id": tile_id},
         )
     ).scalar()
@@ -431,7 +431,7 @@ async def list_project_area_lands(
     total = (
         await db.execute(
             text(
-                "SELECT count(*) FROM agri.virtual_project_area_lands WHERE tile_id = :tile_id"
+                "SELECT count(*) FROM agric_satellite.virtual_project_area_lands WHERE tile_id = :tile_id"
             ),
             params,
         )
@@ -445,8 +445,8 @@ async def list_project_area_lands(
                        p.land_name, p.land_area_mu,
                        p.province_name, p.city_name, p.county_name,
                        p.min_lon, p.min_lat, p.max_lon, p.max_lat
-                FROM agri.virtual_project_area_lands l
-                JOIN agri.land_parcels p ON p.land_id = l.land_id
+                FROM agric_satellite.virtual_project_area_lands l
+                JOIN agric_satellite.land_parcels p ON p.land_id = l.land_id
                 WHERE l.tile_id = :tile_id
                 ORDER BY l.is_anchor DESC, p.land_name NULLS LAST, l.land_id
                 LIMIT :limit OFFSET :offset
@@ -468,7 +468,7 @@ async def get_land(
     await _agri_ready(db)
     row = (
         await db.execute(
-            text("SELECT * FROM agri.land_parcels WHERE land_id = :land_id"),
+            text("SELECT * FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
             {"land_id": land_id},
         )
     ).fetchone()
@@ -517,7 +517,7 @@ async def list_land_scenes(
     await _agri_ready(db)
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+            text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
             {"land_id": land_id},
         )
     ).scalar()
@@ -544,7 +544,7 @@ async def list_land_scenes(
 
     total = (
         await db.execute(
-            text(f"SELECT count(*) FROM agri.parcel_scene_products WHERE {wh}"), params
+            text(f"SELECT count(*) FROM agric_satellite.parcel_scene_products WHERE {wh}"), params
         )
     ).scalar() or 0
 
@@ -554,7 +554,7 @@ async def list_land_scenes(
             text(
                 f"""
                 SELECT {cols}
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE {wh}
                 ORDER BY date {order_sql}, sensor {order_sql}, scene_id {order_sql}
                 LIMIT :limit OFFSET :offset
@@ -642,7 +642,7 @@ async def land_scenes_summary(
     await _agri_ready(db)
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+            text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
             {"land_id": land_id},
         )
     ).scalar()
@@ -657,7 +657,7 @@ async def land_scenes_summary(
                        count(*)::int AS count,
                        min(date) AS date_min,
                        max(date) AS date_max
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id
                 GROUP BY sensor
                 ORDER BY sensor
@@ -677,7 +677,7 @@ async def land_scenes_summary(
                 text(
                     """
                     SELECT date, ndvi_avg, evi_avg, vv_avg, vh_avg
-                    FROM agri.parcel_scene_products
+                    FROM agric_satellite.parcel_scene_products
                     WHERE land_id = :land_id AND sensor = :sensor
                     ORDER BY date DESC
                     LIMIT 1
@@ -729,7 +729,7 @@ async def harvest_detect_for_land(
         await _agri_ready(db)
         exists = (
             await db.execute(
-                text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+                text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
                 {"land_id": land_id},
             )
         ).scalar()
@@ -788,7 +788,7 @@ async def harvest_detect_for_land(
                 text(
                     f"""
                     SELECT {_SCENE_COLS}
-                    FROM agri.parcel_scene_products
+                    FROM agric_satellite.parcel_scene_products
                     WHERE {wh}
                     ORDER BY date ASC, scene_id ASC
                     LIMIT 500
@@ -867,7 +867,7 @@ async def list_ndvi_day_grade_shares(
     await _agri_ready(db)
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :land_id"),
+            text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
             {"land_id": land_id},
         )
     ).scalar()
@@ -905,7 +905,7 @@ async def list_ndvi_day_grade_shares(
                        pixel_data->>'decloud_quality' AS decloud_quality,
                        parcel_cloud_cover_pct, cloud_cover, cloud_cover_over_30,
                        pixel_data->>'parcel_cloud_source' AS parcel_cloud_source
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE {wh}
                 ORDER BY date ASC, scene_id ASC
                 LIMIT :limit

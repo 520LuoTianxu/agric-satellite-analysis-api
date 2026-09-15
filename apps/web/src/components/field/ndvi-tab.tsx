@@ -151,7 +151,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
     const loadGenRef = useRef(0); // prevents stale fetch results
 
     // ── Load layers + stats for active index ─────────
-    // Agri fields: RS comes only from agri.parcel_scene_products — skip
+    // Agri fields: RS comes only from agric_satellite.parcel_scene_products — skip
     // classic monitoring/COG path so AgriTimeseriesPanel mounts immediately.
     const loadData = useCallback(async () => {
         const gen = ++loadGenRef.current;
@@ -458,7 +458,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
     return (
         <div className="space-y-4">
             {/* ── Section: Run Analysis + Backfill (classic OpenFarm only) ─────── */}
-            {/* agri 地块遥感直接读 agri.parcel_scene_products，不走 Celery NDVI / backfill-indices */}
+            {/* agri 地块遥感直接读 agric_satellite.parcel_scene_products，不走 Celery NDVI / backfill-indices */}
             {!isAgriField && (
             <div className="flex gap-2">
                 <Button

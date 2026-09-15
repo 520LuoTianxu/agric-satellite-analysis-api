@@ -22,7 +22,7 @@ INLINE_PAYLOAD_MAX_BYTES = 100_000
 
 
 def collect_parcel_oss_urls(land_id: str, *, limit: int = 50) -> dict[str, str]:
-    """Build public URLs from agri.parcel_scene_products.json_oss_key."""
+    """Build public URLs from agric_satellite.parcel_scene_products.json_oss_key."""
     if not land_id:
         return {}
     urls: dict[str, str] = {}
@@ -33,7 +33,7 @@ def collect_parcel_oss_urls(land_id: str, *, limit: int = 50) -> dict[str, str]:
                 text(
                     """
                 SELECT date::text AS d, sensor, json_oss_key
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id
                   AND json_oss_key IS NOT NULL
                   AND json_oss_key <> ''

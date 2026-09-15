@@ -1,7 +1,7 @@
 """Farms router - CRUD with soft-delete.
 
 Legacy in this fork: prefer /v1/agri/project-areas and /v1/agri/lands
-(agri.virtual_project_areas / agri.land_parcels) as the primary product model.
+(agric_satellite.virtual_project_areas / agric_satellite.land_parcels) as the primary product model.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI: bridge STAC/Celery COGs → agri.parcel_scene_products lonlat_v1.
+"""CLI: bridge STAC/Celery COGs → agric_satellite.parcel_scene_products lonlat_v1.
 
 Implementation lives in ``services/api/app/tasks/bridge_stac_cogs_to_agri_lonlat.py``
 so Celery can import ``bridge_field_stac_to_agri``.

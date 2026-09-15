@@ -1,4 +1,4 @@
-"""Evaluate RS alerts from agri.parcel_scene_products (lonlat_v1).
+"""Evaluate RS alerts from agric_satellite.parcel_scene_products (lonlat_v1).
 
 Classic COG pipeline calls ``run_alerts`` after FieldStat. Agri-tagged fields
 skip that path, so we re-run threshold/drop rules from S2 scene averages here —
@@ -60,7 +60,7 @@ def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
                    ndvi_avg, evi_avg, ndmi_avg, ndre_avg, cire_avg, mndwi_avg,
                    scene_id, pixel_data->>'source' AS source,
                    pixel_data->>'decloud_quality' AS decloud_quality
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :lid AND sensor = 'S2'
             ORDER BY date ASC
             """

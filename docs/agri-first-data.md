@@ -1,6 +1,6 @@
 # Agri-first data plane
 
-How OpenFarm fields relate to the `agri` schema after the lonlat_v1 / no-OSS work.
+How OpenFarm fields relate to the `agric_satellite` schema after the lonlat_v1 / no-OSS work.
 
 ## Object storage (uploads / COGs)
 
@@ -38,8 +38,8 @@ Env knobs (ingest worker):
 
 | Source | Role |
 | --- | --- |
-| **`agri.parcel_scene_products`** | **Primary** RS for agri parcels. Prefer `pixel_data.format = lonlat_v1` at insert/ingest time. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1`. |
-| `public.raster_layers` / `public.field_stats` | Classic OpenFarm COG + TiTiler path only. Not required for agri field detail / 色斑图 / growth curves. |
+| **`agric_satellite.parcel_scene_products`** | **Primary** RS for agri parcels. Prefer `pixel_data.format = lonlat_v1` at insert/ingest time. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1`. |
+| `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Classic OpenFarm COG + TiTiler path only. Not required for agri field detail / 色斑图 / growth curves. |
 
 Rules:
 
@@ -58,7 +58,7 @@ Rules:
 Agri parcels bind soil/weather by tagging the OpenFarm field:
 
 ```text
-tags_json: ["agri:13691", "source:agri.land_parcels", ...]
+tags_json: ["agri:13691", "source:agric_satellite.land_parcels", ...]
 ```
 
 UI uses `parseAgriLandId(tags)` for RS (`/v1/agri/...`) and the field UUID for soil/weather (`/v1/fields/{id}/soil`, weather APIs). Drought and flood date classes plus NDVI tooltip cloud / de-cloud text are in `docs/agri-drought-flood.md`.

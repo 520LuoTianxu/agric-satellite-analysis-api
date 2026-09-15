@@ -1,4 +1,4 @@
-"""Celery: daily pre-aggregation of China overview stats into agri.overview_stats_daily."""
+"""Celery: daily pre-aggregation of China overview stats into agric_satellite.overview_stats_daily."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 
 # Mirror router DDL (keep in sync with agri_overview._ENSURE_CACHE_SQL).
 _ENSURE_CACHE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS agri.overview_stats_daily (
+CREATE TABLE IF NOT EXISTS agric_satellite.overview_stats_daily (
     as_of_date date NOT NULL,
     level text NOT NULL,
     region_code text NOT NULL DEFAULT '',
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS agri.overview_stats_daily (
 """
 _ENSURE_CACHE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS overview_stats_daily_lookup_idx
-    ON agri.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
+    ON agric_satellite.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
 """
 
 
@@ -59,7 +59,7 @@ def _upsert_row(
     session.execute(
         text(
             """
-            INSERT INTO agri.overview_stats_daily (
+            INSERT INTO agric_satellite.overview_stats_daily (
                 as_of_date, level, region_code, region_name, parent_code,
                 metric_json, window_from, window_to, crop, updated_at
             ) VALUES (
@@ -152,7 +152,7 @@ def _list_provinces_sync() -> list[tuple[str | None, str]]:
             text(
                 """
                 SELECT province_code AS code, province_name AS name, count(*) AS n
-                FROM agri.land_parcels
+                FROM agric_satellite.land_parcels
                 WHERE province_name IS NOT NULL
                 GROUP BY province_code, province_name
                 ORDER BY n DESC, name

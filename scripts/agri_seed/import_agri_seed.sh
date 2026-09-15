@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Import Aliyun agri schema/data into OpenFarm Postgres.
+# Import Aliyun agricultural data into the OpenFarm agric_satellite schema.
 set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -17,7 +17,7 @@ usage() {
 Usage: $(basename "$0") [options] [agri_export.sql]
 
 Options:
-  --reset          DROP SCHEMA agri CASCADE before import
+  --reset          DROP SCHEMA agric_satellite CASCADE before import
   --schema-only    Apply scripts/agri_seed/001_agri_schema.sql only (no COPY data)
   --data-dir DIR   Join agri_export.sql.part-*.sql in DIR, then import
   -h, --help       Show this help
@@ -151,8 +151,8 @@ run_sql() {
 }
 
 if [[ "$RESET" -eq 1 ]]; then
-  echo "DROP SCHEMA agri CASCADE…"
-  run_sql "DROP SCHEMA IF EXISTS agri CASCADE;"
+  echo "DROP SCHEMA agric_satellite CASCADE…"
+  run_sql "DROP SCHEMA IF EXISTS agric_satellite CASCADE;"
 fi
 
 echo "Applying…"
@@ -160,6 +160,6 @@ run_psql_file "$SQL_PATH"
 
 echo "Row counts:"
 run_sql "SELECT relname AS table, n_live_tup AS approx_rows
-         FROM pg_stat_user_tables WHERE schemaname='agri' ORDER BY 1;"
+         FROM pg_stat_user_tables WHERE schemaname='agric_satellite' ORDER BY 1;"
 
 echo "Done. Tip: GET /v1/agri/stats or /v1/agri/admin/import-status"

@@ -1,4 +1,4 @@
-"""Re-sign agri.parcel_scene_products.rgb_url from rgb_oss_key (20y GET)."""
+"""Re-sign agric_satellite.parcel_scene_products.rgb_url from rgb_oss_key (20y GET)."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,9 @@ from openfarm_common.storage import get_storage, signed_get_expire_sec
 url = (os.environ.get("DATABASE_URL_SYNC") or os.environ["DATABASE_URL"]).replace(
     "postgresql+asyncpg://", "postgresql://"
 ).replace("postgresql+psycopg://", "postgresql://")
-eng = create_engine(url)
+eng = create_engine(
+    url, connect_args={"options": "-csearch_path=agric_satellite,public"}
+)
 st = get_storage()
 print("backend", st.backend, "expire", signed_get_expire_sec(years=20))
 sample = st.presigned_get("s1s2_parcel/img/6592/2026-09-03_S2/field_rgb.png")
@@ -18,7 +20,7 @@ updated = 0
 with eng.connect() as conn:
     rows = conn.execute(text("""
         SELECT land_id, date::text AS date, scene_id, rgb_oss_key
-        FROM agri.parcel_scene_products
+        FROM agric_satellite.parcel_scene_products
         WHERE rgb_oss_key IS NOT NULL AND rgb_oss_key <> ''
           AND sensor = 'S2'
           AND scene_id NOT LIKE '%\\_decloud' ESCAPE '\\'
@@ -34,7 +36,7 @@ with eng.begin() as conn:
             continue
         conn.execute(
             text("""
-                UPDATE agri.parcel_scene_products
+                UPDATE agric_satellite.parcel_scene_products
                 SET rgb_url = :u
                 WHERE land_id = :lid AND date = :d AND sensor = 'S2'
                   AND scene_id = :sid

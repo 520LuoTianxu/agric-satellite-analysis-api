@@ -175,7 +175,7 @@ def _agri_rs_coverage_ok(
     date_from: str | None,
     date_to: str | None,
 ) -> dict:
-    """True when agri.parcel_scene_products already cover the assessment window.
+    """True when agric_satellite.parcel_scene_products already cover the assessment window.
 
     Used to avoid blocking PDF generation on staggered skip-noop backfill chunks
     (90-day shards with 30s countdown) when S2/S1 lonlat rows already exist.
@@ -220,7 +220,7 @@ def _agri_rs_coverage_ok(
             SELECT
               COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
               COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id
               AND date >= :d0
               AND date <= :d1

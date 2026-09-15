@@ -451,7 +451,7 @@ def _neighbor_ndvi(session, land_id: str, target: date) -> float | None:
         text(
             f"""
             SELECT avg(ndvi_avg)::float AS m
-            FROM agri.parcel_scene_products s
+            FROM agric_satellite.parcel_scene_products s
             WHERE s.land_id = :lid
               AND s.sensor = 'S2'
               AND s.date BETWEEN CAST(:d0 AS date) AND CAST(:d1 AS date)

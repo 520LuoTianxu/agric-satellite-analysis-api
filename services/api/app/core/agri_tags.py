@@ -1,7 +1,7 @@
 """Helpers for agri-tagged OpenFarm fields.
 
 Agri-first data plane:
-- Remote sensing truth lives in agri.parcel_scene_products (lonlat_v1).
+- Remote sensing truth lives in agric_satellite.parcel_scene_products (lonlat_v1).
 - OpenFarm fields may carry tags like ``agri:<land_id>`` so soil/weather
   (keyed by fields.id) bind to the same parcel the UI shows.
 """
@@ -70,7 +70,7 @@ def ensure_cdfinance_group_tag(tags: Any, group_id: str | int) -> list[str]:
 def ensure_agri_land_tag(tags: Any, land_id: str | int | None) -> list[str]:
     """Replace any ``agri:*`` tag with ``agri:<land_id>``, or drop agri tags if empty.
 
-    Idempotent for the same land_id. Does not require ``agri.land_parcels`` to exist.
+    Idempotent for the same land_id. Does not require ``agric_satellite.land_parcels`` to exist.
     """
     out = [t for t in iter_tag_strings(tags) if not t.startswith("agri:")]
     if land_id is None:

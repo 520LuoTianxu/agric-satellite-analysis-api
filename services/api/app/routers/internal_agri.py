@@ -55,7 +55,7 @@ async def get_land(
                 text(
                     """
                 SELECT land_id, tile_id, land_name, group_id::text AS group_id
-                FROM agri.land_parcels
+                FROM agric_satellite.land_parcels
                 WHERE land_id = :lid
                 LIMIT 1
                 """
@@ -97,7 +97,7 @@ async def land_scene_dates(
             text(
                 """
                 SELECT DISTINCT date
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id
                   AND sensor = :sensor
                   AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
@@ -128,7 +128,7 @@ async def land_scenes_summary(
 ):
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :lid"),
+            text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :lid"),
             {"lid": land_id},
         )
     ).scalar()
@@ -144,7 +144,7 @@ async def land_scenes_summary(
                        count(*)::int AS count,
                        min(date) AS date_min,
                        max(date) AS date_max
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id
                 GROUP BY sensor
                 ORDER BY sensor

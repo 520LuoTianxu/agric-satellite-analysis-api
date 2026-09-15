@@ -82,7 +82,7 @@ def _drop_fk(table: str, column: str) -> None:
             JOIN information_schema.key_column_usage kcu
               ON tc.constraint_name = kcu.constraint_name
              AND tc.table_schema = kcu.table_schema
-            WHERE tc.table_schema = 'public'
+            WHERE tc.table_schema = 'agric_satellite'
               AND tc.table_name = :table
               AND tc.constraint_type = 'FOREIGN KEY'
               AND kcu.column_name = :column

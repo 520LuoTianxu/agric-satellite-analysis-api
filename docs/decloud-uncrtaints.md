@@ -95,7 +95,7 @@ After reconstruct, a heuristic scores the parcel window:
 Only **`good`** may enter official drought, land-assessment
 RS inputs, overview drought/weak-growth, and share optical drought series.
 
-`fair` and `bad` are **always stored** (OSS + MQ upsert → `agri.parcel_scene_products`) whenever a
+`fair` and `bad` are **always stored** (OSS + MQ upsert → `agric_satellite.parcel_scene_products`) whenever a
 reconstruction produced a usable array, even if lonlat sampling found few
 or weak pixels. Column averages (`ndvi_avg`, …) and `pixel_data.decloud_metrics`
 (rgb / reconstr NDVI / neighbor NDVI / gap) are kept for audit; only

@@ -76,7 +76,7 @@ async def _resolve_group_id(
             sa_text(
                 """
                 SELECT group_id::text AS group_id
-                FROM agri.land_parcels
+                FROM agric_satellite.land_parcels
                 WHERE land_id = :land_id
                 LIMIT 1
                 """
@@ -112,7 +112,7 @@ async def _load_agri_admin_and_boundary(
             """
             SELECT land_id, province_code, province_name, city_code, city_name,
                    county_code, county_name, boundary_geojson
-            FROM agri.land_parcels
+            FROM agric_satellite.land_parcels
             WHERE land_id = :land_id
             LIMIT 1
             """

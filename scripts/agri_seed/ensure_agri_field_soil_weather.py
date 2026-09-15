@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Ensure agri-tagged OpenFarm fields have parcel geom + soil/weather.
 
-For each public.fields row with tags containing ``agri:<land_id>``:
+For each ``agric_satellite.fields`` row with tags containing ``agri:<land_id>``:
 
-1. If geom is missing/empty, copy boundary from agri.land_parcels.boundary_geojson.
+1. If geom is missing/empty, copy boundary from agric_satellite.land_parcels.boundary_geojson.
 2. If no soil_field_summary row, enqueue fetch_soil_for_field (or print SQL hint).
 3. If no weather_daily rows, enqueue backfill_weather_for_field.
 
@@ -37,11 +37,14 @@ PGDB = os.environ.get("POSTGRES_DB", "openfarm")
 
 
 def psql(sql: str) -> str:
+    # 查询同时使用 OpenFarm 和遥感表，避免 psql 默认落到 public。
     r = subprocess.run(
         [
             "docker",
             "exec",
             "-i",
+            "-e",
+            "PGOPTIONS=-csearch_path=agric_satellite,public",
             DB_CONTAINER,
             "psql",
             "-U",
@@ -161,13 +164,13 @@ UPDATE fields f
 SET geom = ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(p.boundary_geojson::text), 4326)),
     area_ha = ROUND((ST_Area(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(p.boundary_geojson::text), 4326), 6933)) / 10000.0)::numeric, 4),
     updated_at = now()
-FROM agri.land_parcels p
+FROM agric_satellite.land_parcels p
 WHERE f.id = '{r['id']}'::uuid
   AND p.land_id = '{r['land_id']}'
   AND (f.geom IS NULL OR ST_IsEmpty(f.geom));
 """
             psql(geom_sql)
-            print(f"    synced geom from agri.land_parcels {r['land_id']}")
+            print(f"    synced geom from agric_satellite.land_parcels {r['land_id']}")
 
         if "fetch_soil" in actions:
             celery_delay("soil", r["id"])

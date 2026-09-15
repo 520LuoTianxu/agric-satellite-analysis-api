@@ -1,16 +1,16 @@
 # Agri schema seed (Aliyun PostgreSQL dump)
 
-Imports the Aliyun `agri` schema into the OpenFarm Postgres (default user/db `openfarm`).
+Imports the Aliyun agricultural data into the single `agric_satellite` application schema in OpenFarm Postgres (default user/db `openfarm`).
 
 ## What you get
 
 | Object | Role | Seed rows (sample dump) |
 | --- | --- | --- |
-| `agri.virtual_project_areas` | 项目区 / ~5km tiles | 6158 |
-| `agri.virtual_project_area_lands` | tile ↔ land | 14050 |
-| `agri.land_parcels` | 地块 + `boundary_geojson` | 14050 |
-| `agri.parcel_scene_products` | S1/S2 products (indexes + optional `pixel_data`) | **1000 sample** |
-| `agri.ingest_*` | OSS ingest ledger / runs | full |
+| `agric_satellite.virtual_project_areas` | 项目区 / ~5km tiles | 6158 |
+| `agric_satellite.virtual_project_area_lands` | tile ↔ land | 14050 |
+| `agric_satellite.land_parcels` | 地块 + `boundary_geojson` | 14050 |
+| `agric_satellite.parcel_scene_products` | S1/S2 products (indexes + optional `pixel_data`) | **1000 sample** |
+| `agric_satellite.ingest_*` | OSS ingest ledger / runs | full |
 
 - Sensor CHECK: `S1` \| `S2`.
 - Optical growth curves: S2 `ndvi/evi/ndmi/ndre/mndwi/cire` averages.
@@ -75,7 +75,7 @@ make agri-seed
 # Join parts from a directory, then import:
 ./scripts/agri_seed/import_agri_seed.sh --data-dir /path/to/unzipped-parts
 
-# Drop schema agri CASCADE then re-import (destructive):
+# Drop schema agric_satellite CASCADE then re-import (destructive):
 ./scripts/agri_seed/import_agri_seed.sh --reset data/agri_export.sql
 ```
 
@@ -125,8 +125,8 @@ OpenFarm `/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should targe
 
 ## Sync project areas → OpenFarm farms/fields
 
-Map each `agri.virtual_project_areas` tile to a `farms` row and each
-`agri.land_parcels` parcel to a `fields` row (tagged `agri:<land_id>`, geom
+Map each `agric_satellite.virtual_project_areas` tile to a `farms` row and each
+`agric_satellite.land_parcels` parcel to a `fields` row (tagged `agri:<land_id>`, geom
 from `boundary_geojson`). Deterministic uuid5 IDs; conflicts skipped.
 
 ```bash
@@ -157,7 +157,6 @@ image overlay client-side.
 
 See **[docs/agri-first-data.md](../../docs/agri-first-data.md)** for the binding rules:
 
-- RS → `agri.parcel_scene_products` only (`lonlat_v1`). Agri satellite jobs write lonlat-direct (no new index COGs). The OSS TIF scanner is migration-only.
-- **Soil / weather** → public OpenFarm tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
+- RS → `agric_satellite.parcel_scene_products` only (`lonlat_v1`). Agri satellite jobs write lonlat-direct (no new index COGs). The OSS TIF scanner is migration-only.
+- **Soil / weather** → `agric_satellite` OpenFarm tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
 - Ops: `python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply`
-

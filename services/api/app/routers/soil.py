@@ -569,7 +569,7 @@ async def _load_agri_admin_and_boundary(db: AsyncSession, land_id: str) -> dict:
             """
             SELECT land_id, province_code, province_name, city_code, city_name,
                    county_code, county_name, boundary_geojson
-            FROM agri.land_parcels
+            FROM agric_satellite.land_parcels
             WHERE land_id = :land_id
             LIMIT 1
             """
@@ -801,7 +801,7 @@ def _admission_row_to_out(
 async def _resolve_group_id_for_field(
     db: AsyncSession, field: Field, explicit: str | int | None
 ) -> tuple[str | None, str | None]:
-    """Return (group_id, land_id). Prefer explicit, then field tag, then agri.land_parcels."""
+    """Return (group_id, land_id). Prefer explicit, then field tag, then agric_satellite.land_parcels."""
     from app.core.agri_tags import parse_agri_land_id, parse_cdfinance_group_id
     from sqlalchemy import text as sa_text
 
@@ -818,7 +818,7 @@ async def _resolve_group_id_for_field(
             sa_text(
                 """
                 SELECT group_id::text AS group_id
-                FROM agri.land_parcels
+                FROM agric_satellite.land_parcels
                 WHERE land_id = :land_id
                 LIMIT 1
                 """
@@ -877,7 +877,7 @@ async def fetch_site_admission(
 
     Auth: H5 Bearer in ``Authorization`` or body.token (same as NPK).
     groupId: body.group_id, else field tag ``cdfinance_group:`` / ``group:``,
-    else ``agri.land_parcels.group_id`` via ``agri:<land_id>`` tag.
+    else ``agric_satellite.land_parcels.group_id`` via ``agri:<land_id>`` tag.
     """
     from datetime import datetime, timezone
 
@@ -896,7 +896,7 @@ async def fetch_site_admission(
     if not group_id:
         raise HTTPException(
             status_code=400,
-            detail="需要 groupId（body.group_id，或字段 tags 中 cdfinance_group:/group:，或 agri.land_parcels.group_id）",
+            detail="需要 groupId（body.group_id，或字段 tags 中 cdfinance_group:/group:，或 agric_satellite.land_parcels.group_id）",
         )
 
     existing = (

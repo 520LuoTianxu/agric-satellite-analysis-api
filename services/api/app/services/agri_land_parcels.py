@@ -1,7 +1,7 @@
-"""Upsert agri.land_parcels from OpenFarm field geom + agri tags.
+"""Upsert agric_satellite.land_parcels from OpenFarm field geom + agri tags.
 
 When a field carries ``agri:<land_id>``, the API provisions a complete
-``agri.land_parcels`` row so download-machine / claim / UI can resolve the
+``agric_satellite.land_parcels`` row so download-machine / claim / UI can resolve the
 parcel without a manual SQL fix. Does not enqueue RS backfill.
 """
 
@@ -25,7 +25,7 @@ SOURCE_FILE = "openfarm_field_upsert"
 SOURCE_FEATURE_INDEX = 0
 
 UPSERT_LAND_PARCEL_SQL = """
-INSERT INTO agri.land_parcels (
+INSERT INTO agric_satellite.land_parcels (
     land_id,
     tile_id,
     land_name,
@@ -74,10 +74,10 @@ INSERT INTO agri.land_parcels (
 )
 ON CONFLICT (land_id) DO UPDATE SET
     land_name = EXCLUDED.land_name,
-    group_id = COALESCE(EXCLUDED.group_id, agri.land_parcels.group_id),
-    land_area_mu = COALESCE(EXCLUDED.land_area_mu, agri.land_parcels.land_area_mu),
+    group_id = COALESCE(EXCLUDED.group_id, agric_satellite.land_parcels.group_id),
+    land_area_mu = COALESCE(EXCLUDED.land_area_mu, agric_satellite.land_parcels.land_area_mu),
     original_area_mu = COALESCE(
-        EXCLUDED.original_area_mu, agri.land_parcels.original_area_mu
+        EXCLUDED.original_area_mu, agric_satellite.land_parcels.original_area_mu
     ),
     boundary_geojson = EXCLUDED.boundary_geojson,
     min_lon = EXCLUDED.min_lon,
@@ -88,18 +88,18 @@ ON CONFLICT (land_id) DO UPDATE SET
     source_file = EXCLUDED.source_file,
     source_feature_index = EXCLUDED.source_feature_index,
     province_name = COALESCE(
-        EXCLUDED.province_name, agri.land_parcels.province_name
+        EXCLUDED.province_name, agric_satellite.land_parcels.province_name
     ),
-    city_name = COALESCE(EXCLUDED.city_name, agri.land_parcels.city_name),
-    county_name = COALESCE(EXCLUDED.county_name, agri.land_parcels.county_name),
-    town_name = COALESCE(EXCLUDED.town_name, agri.land_parcels.town_name),
+    city_name = COALESCE(EXCLUDED.city_name, agric_satellite.land_parcels.city_name),
+    county_name = COALESCE(EXCLUDED.county_name, agric_satellite.land_parcels.county_name),
+    town_name = COALESCE(EXCLUDED.town_name, agric_satellite.land_parcels.town_name),
     village_name = COALESCE(
-        EXCLUDED.village_name, agri.land_parcels.village_name
+        EXCLUDED.village_name, agric_satellite.land_parcels.village_name
     ),
     tile_id = CASE
-        WHEN agri.land_parcels.source_file = :source_file
+        WHEN agric_satellite.land_parcels.source_file = :source_file
         THEN EXCLUDED.tile_id
-        ELSE agri.land_parcels.tile_id
+        ELSE agric_satellite.land_parcels.tile_id
     END,
     updated_at = now()
 """
@@ -197,7 +197,7 @@ async def ensure_agri_land_parcel_for_field(
     land_id: str | None = None,
     group_id: str | None = None,
 ) -> bool:
-    """Upsert ``agri.land_parcels`` from field geom + tags.
+    """Upsert ``agric_satellite.land_parcels`` from field geom + tags.
 
     Returns True when an upsert was executed, False when skipped (no land_id
     or no usable geometry). Raises on SQL / geometry errors.

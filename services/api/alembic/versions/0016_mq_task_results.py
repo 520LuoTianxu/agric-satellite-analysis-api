@@ -1,4 +1,4 @@
-"""Add agri.mq_task_results for CloudAMQP result writer.
+"""Add agric_satellite.mq_task_results for CloudAMQP result writer.
 
 Revision ID: 0016
 Revises: 0015
@@ -14,10 +14,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE SCHEMA IF NOT EXISTS agri")
+    op.execute("CREATE SCHEMA IF NOT EXISTS agric_satellite")
     op.execute(
         """
-        CREATE TABLE IF NOT EXISTS agri.mq_task_results (
+        CREATE TABLE IF NOT EXISTS agric_satellite.mq_task_results (
             task_id text PRIMARY KEY,
             status text NOT NULL,
             oss_urls jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -36,16 +36,16 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE INDEX IF NOT EXISTS ix_mq_task_results_updated_at
-            ON agri.mq_task_results (updated_at DESC)
+            ON agric_satellite.mq_task_results (updated_at DESC)
         """
     )
     op.execute(
         """
-        COMMENT ON TABLE agri.mq_task_results IS
+        COMMENT ON TABLE agric_satellite.mq_task_results IS
             'CloudAMQP outer bus results (OSS URLs + downloaded JSON payloads)'
         """
     )
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE IF EXISTS agri.mq_task_results")
+    op.execute("DROP TABLE IF EXISTS agric_satellite.mq_task_results")

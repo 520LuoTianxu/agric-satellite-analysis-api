@@ -142,7 +142,7 @@ def _load_agri_meta(session, field) -> dict[str, Any]:
         session.execute(
             text(
                 "SELECT land_id, tile_id, land_name "
-                "FROM agri.land_parcels WHERE land_id = :lid"
+                "FROM agric_satellite.land_parcels WHERE land_id = :lid"
             ),
             {"lid": str(land_id)},
         )
@@ -150,7 +150,7 @@ def _load_agri_meta(session, field) -> dict[str, Any]:
         .first()
     )
     if not row:
-        raise RuntimeError(f"agri.land_parcels missing land_id={land_id}")
+        raise RuntimeError(f"agric_satellite.land_parcels missing land_id={land_id}")
     return {
         "land_id": row["land_id"],
         "tile_id": row["tile_id"],
@@ -197,7 +197,7 @@ def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) ->
     if sensor:
         n = session.execute(
             text(
-                "SELECT COUNT(*) FROM agri.parcel_scene_products "
+                "SELECT COUNT(*) FROM agric_satellite.parcel_scene_products "
                 "WHERE land_id = :lid AND sensor = :sensor"
             ),
             {"lid": str(land_id), "sensor": sensor},
@@ -205,7 +205,7 @@ def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) ->
     else:
         n = session.execute(
             text(
-                "SELECT COUNT(*) FROM agri.parcel_scene_products WHERE land_id = :lid"
+                "SELECT COUNT(*) FROM agric_satellite.parcel_scene_products WHERE land_id = :lid"
             ),
             {"lid": str(land_id)},
         ).scalar()
@@ -222,7 +222,7 @@ def publish_optical_lonlat_to_oss_mq(
 ) -> str | None:
     """Upload S2 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
 
-    Producer mq_result_writer pulls the OSS URL and writes agri.parcel_scene_products.
+    Producer mq_result_writer pulls the OSS URL and writes agric_satellite.parcel_scene_products.
     ``oss_sensor`` only changes the object key / MQ label (e.g. ``S2_decloud``).
     The stored row stays ``sensor='S2'`` so existing clients keep working.
     """

@@ -1,4 +1,4 @@
-"""Pydantic schemas for agri schema (项目区 / 地块 / S1·S2 产品)."""
+"""Pydantic schemas for agric_satellite data (项目区 / 地块 / S1·S2 产品)."""
 
 from __future__ import annotations
 
@@ -247,7 +247,7 @@ class AgriTableCount(BaseModel):
 
 
 class AgriStatsOut(BaseModel):
-    schema_name: str = "agri"
+    schema_name: str = "agric_satellite"
     tables: list[AgriTableCount]
     note: str | None = None
 

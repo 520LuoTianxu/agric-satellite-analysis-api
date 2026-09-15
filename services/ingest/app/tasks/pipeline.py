@@ -159,7 +159,7 @@ def existing_layer_dates(
 
 
 def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
-    """Dates already present in agri.parcel_scene_products for land_id + sensor.
+    """Dates already present in agric_satellite.parcel_scene_products for land_id + sensor.
 
     Prefers internal HTTP when ``API_BASE_URL`` + ``INTERNAL_API_TOKEN`` are set
     (download-host D2); falls back to SyncSession otherwise.
@@ -199,7 +199,7 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
         sa_text(
             """
             SELECT DISTINCT date
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id
               AND sensor = :sensor
               AND COALESCE(scene_id, '') NOT LIKE '%_decloud'

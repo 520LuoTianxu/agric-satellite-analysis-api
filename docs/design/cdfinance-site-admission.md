@@ -22,7 +22,7 @@
 
 1. 请求体显式 `group_id`
 2. 字段 tags：`cdfinance_group:<id>` 或 `group:<id>`（拉取成功后可写入）
-3. `agri:<land_id>` → `agri.land_parcels.group_id`
+3. `agri:<land_id>` → `agric_satellite.land_parcels.group_id`
 
 ## API
 

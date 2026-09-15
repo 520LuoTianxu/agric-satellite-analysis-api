@@ -19,7 +19,7 @@ class TaskMessage(BaseModel):
     type: str = "satellite_analysis"
     # OpenFarm field UUID (preferred when known)
     field_id: str | None = None
-    # agri.land_parcels.land_id — user sample field_id often means this
+    # agric_satellite.land_parcels.land_id — user sample field_id often means this
     parcel_id: str | None = None
     land_id: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)

@@ -71,7 +71,7 @@ _LEVEL_NAME_COL = {
 _CACHE_FRESH_HOURS = 36
 
 _ENSURE_CACHE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS agri.overview_stats_daily (
+CREATE TABLE IF NOT EXISTS agric_satellite.overview_stats_daily (
     as_of_date date NOT NULL,
     level text NOT NULL,
     region_code text NOT NULL DEFAULT '',
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS agri.overview_stats_daily (
 """
 _ENSURE_CACHE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS overview_stats_daily_lookup_idx
-    ON agri.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
+    ON agric_satellite.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
 """
 
 
@@ -139,13 +139,13 @@ def _pad_adcode(level: OverviewLevel, code: str | None) -> str | None:
 async def _agri_ready(db: AsyncSession) -> None:
     q = await db.execute(
         text(
-            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'agri' LIMIT 1"
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'agric_satellite' LIMIT 1"
         )
     )
     if q.scalar() is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="agri schema not installed",
+            detail="agric_satellite schema not installed",
         )
 
 
@@ -205,7 +205,7 @@ async def _resolve_region_label(
             text(
                 f"""
                 SELECT p.{code_col} AS code, p.{name_col} AS name
-                FROM agri.land_parcels p
+                FROM agric_satellite.land_parcels p
                 WHERE {wh} AND p.{name_col} IS NOT NULL
                 LIMIT 1
                 """
@@ -237,7 +237,7 @@ async def _build_path(
                 f"""
                 SELECT province_code, province_name, city_code, city_name,
                        county_code, county_name
-                FROM agri.land_parcels p
+                FROM agric_satellite.land_parcels p
                 WHERE {wh}
                 LIMIT 1
                 """
@@ -303,7 +303,7 @@ async def _read_cache(
             text(
                 """
                 SELECT metric_json, updated_at
-                FROM agri.overview_stats_daily
+                FROM agric_satellite.overview_stats_daily
                 WHERE level = :level
                   AND region_code = :region_code
                   AND window_from = :from_d
@@ -376,7 +376,7 @@ async def _compute_live_stats(
                        p.province_code, p.province_name,
                        p.city_code, p.city_name,
                        p.county_code, p.county_name
-                FROM agri.land_parcels p
+                FROM agric_satellite.land_parcels p
                 WHERE {region_wh}
                 """
             ),
@@ -451,8 +451,8 @@ async def _compute_live_stats(
                     SELECT DISTINCT ON (s.land_id)
                            s.land_id, s.date, s.ndvi_avg, s.ndmi_avg
                            {pixel_col}
-                    FROM agri.parcel_scene_products s
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    FROM agric_satellite.parcel_scene_products s
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
@@ -510,8 +510,8 @@ async def _compute_live_stats(
                     f"""
                     SELECT DISTINCT ON (s.land_id)
                            s.land_id, s.vv_avg, s.vh_avg
-                    FROM agri.parcel_scene_products s
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    FROM agric_satellite.parcel_scene_products s
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND s.sensor = 'S1'
                       AND s.date >= :from_d AND s.date <= :to_d
@@ -542,8 +542,8 @@ async def _compute_live_stats(
                     f"""
                     SELECT s.land_id,
                            avg(s.ndvi_avg)::float AS mean_ndvi
-                    FROM agri.parcel_scene_products s
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    FROM agric_satellite.parcel_scene_products s
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
@@ -867,7 +867,7 @@ async def overview_regions(
                        p.{name_col} AS name,
                        count(*)::int AS parcel_count,
                        coalesce(sum(p.land_area_mu), 0)::float AS area_mu
-                FROM agri.land_parcels p
+                FROM agric_satellite.land_parcels p
                 WHERE {wh} AND p.{name_col} IS NOT NULL
                 GROUP BY p.{code_col}, p.{name_col}
                 ORDER BY parcel_count DESC, name
@@ -946,8 +946,8 @@ async def overview_weak_parcels(
                 SELECT count(*)::int AS total
                 FROM (
                     SELECT s.land_id
-                    FROM agri.parcel_scene_products s
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    FROM agric_satellite.parcel_scene_products s
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND {clear_s2}
                     GROUP BY s.land_id
@@ -967,8 +967,8 @@ async def overview_weak_parcels(
                 WITH weak AS (
                     SELECT s.land_id,
                            avg(s.ndvi_avg)::float AS ndvi_avg
-                    FROM agri.parcel_scene_products s
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    FROM agric_satellite.parcel_scene_products s
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND {clear_s2}
                     GROUP BY s.land_id
@@ -979,9 +979,9 @@ async def overview_weak_parcels(
                            s.land_id,
                            s.date AS scene_date,
                            coalesce(s.parcel_cloud_cover_pct, s.cloud_cover)::float AS cloud_pct
-                    FROM agri.parcel_scene_products s
+                    FROM agric_satellite.parcel_scene_products s
                     JOIN weak w ON w.land_id = s.land_id
-                    JOIN agri.land_parcels p ON p.land_id = s.land_id
+                    JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND {clear_s2}
                     ORDER BY s.land_id, s.date DESC
@@ -996,7 +996,7 @@ async def overview_weak_parcels(
                        l.scene_date,
                        l.cloud_pct
                 FROM weak w
-                JOIN agri.land_parcels p ON p.land_id = w.land_id
+                JOIN agric_satellite.land_parcels p ON p.land_id = w.land_id
                 LEFT JOIN latest l ON l.land_id = w.land_id
                 ORDER BY w.ndvi_avg ASC, coalesce(p.land_area_mu, 0) DESC
                 LIMIT :limit OFFSET :offset

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge STAC/Celery COGs in object storage → agri.parcel_scene_products lonlat_v1.
+"""Bridge STAC/Celery COGs in object storage → agric_satellite.parcel_scene_products lonlat_v1.
 
 **Legacy / migration only.** The agri satellite path writes lonlat_v1 in memory
 after index compute (``app.tasks.agri_lonlat``) and does not upload index TIFs.
@@ -58,7 +58,7 @@ REQUIRED_BAND = "ndvi"
 EMIT_PIXEL_KEYS = ("NDVI", "EVI", "NDMI", "NDRE", "CIre", "MNDWI")
 
 UPSERT_SQL = """
-INSERT INTO agri.parcel_scene_products (
+INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
   json_oss_key, pixel_count, generated_at_shanghai,
@@ -89,7 +89,7 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
-  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agri.parcel_scene_products.json_oss_key),
+  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agric_satellite.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   pixel_data_url = EXCLUDED.pixel_data_url,
@@ -175,14 +175,14 @@ def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
         cur.execute(
             """
             SELECT land_id, tile_id, land_name
-            FROM agri.land_parcels
+            FROM agric_satellite.land_parcels
             WHERE land_id = %s
             """,
             (resolved,),
         )
         parcel = cur.fetchone()
         if not parcel:
-            raise SystemExit(f"agri.land_parcels missing land_id={resolved}")
+            raise SystemExit(f"agric_satellite.land_parcels missing land_id={resolved}")
 
         return {
             "field_id": row["field_id"],
@@ -611,7 +611,10 @@ def bridge_field_stac_to_agri(
     storage = get_storage()
     configure_gdal_vsis3(storage)
     bucket = storage.bucket
-    conn = psycopg2.connect(_dsn())
+    # 该 CLI 直接创建 psycopg2 连接，必须显式对齐应用连接的业务 schema。
+    conn = psycopg2.connect(
+        _dsn(), options="-csearch_path=agric_satellite,public"
+    )
     conn.autocommit = False
 
     def _log(msg: str) -> None:
@@ -758,7 +761,7 @@ def bridge_field_stac_to_agri(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--field-id", required=True, help="public.fields UUID")
+    ap.add_argument("--field-id", required=True, help="agric_satellite.fields UUID")
     ap.add_argument("--land-id", default=None, help="agri land_id (or agri: tag)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="Max dates (0=all)")

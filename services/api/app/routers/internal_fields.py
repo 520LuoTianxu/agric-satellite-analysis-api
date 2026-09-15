@@ -213,7 +213,7 @@ async def field_geom(
 
 
 class FieldTagsPatch(BaseModel):
-    """Set agri / cdfinance tags; upserts agri.land_parcels when land_id + geom."""
+    """Set agri / cdfinance tags; upserts agric_satellite.land_parcels when land_id + geom."""
 
     land_id: str | None = None
     group_id: str | None = None
@@ -231,7 +231,7 @@ async def patch_field_tags(
 
     Ops / download-machine can fix tagging without a user JWT.
     When ``land_id`` is set and the field has geometry, also upserts
-    ``agri.land_parcels`` (does not enqueue RS backfill).
+    ``agric_satellite.land_parcels`` (does not enqueue RS backfill).
     """
     from app.core.agri_tags import (
         ensure_agri_land_tag,
@@ -273,7 +273,7 @@ async def patch_field_tags(
     row.tags_json = tags
     row.updated_at = datetime.now(timezone.utc)
 
-    # When land_id is present, provision agri.land_parcels from field geom.
+    # When land_id is present, provision agric_satellite.land_parcels from field geom.
     land_id_for_parcel = parse_agri_land_id(tags)
     if land_id_for_parcel and row.geom is not None:
         from app.services.agri_land_parcels import ensure_agri_land_parcel_for_field
@@ -407,7 +407,7 @@ async def data_readiness(
                         SELECT
                           COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
                           COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
-                        FROM agri.parcel_scene_products
+                        FROM agric_satellite.parcel_scene_products
                         WHERE land_id = :land_id
                           AND date >= CAST(:d0 AS date)
                           AND date <= CAST(:d1 AS date)
@@ -515,7 +515,7 @@ def _sync_load_season_growth_inputs(
                                  THEN jsonb_array_length(pixel_data->'pixels')
                                  ELSE 0
                                END AS pixel_n
-                        FROM agri.parcel_scene_products
+                        FROM agric_satellite.parcel_scene_products
                         WHERE land_id = :land_id AND sensor = 'S2'
                           AND date >= :start_date AND date <= :end_date
                         ORDER BY date
@@ -572,7 +572,7 @@ def _sync_load_season_growth_inputs(
                         SELECT date, scene_id, vv_avg, vh_avg,
                                pixel_data->>'relative_orbit' AS relative_orbit,
                                rgb_url, large_rgb_url, rgb_oss_key
-                        FROM agri.parcel_scene_products
+                        FROM agric_satellite.parcel_scene_products
                         WHERE land_id = :land_id AND sensor = 'S1'
                           AND date >= :start_date AND date <= :end_date
                         ORDER BY date
@@ -652,7 +652,7 @@ def _sync_load_season_growth_inputs(
                                parcel_cloud_cover_pct, cloud_cover,
                                pixel_data->>'source' AS source,
                                pixel_data->>'decloud_quality' AS decloud_quality
-                        FROM agri.parcel_scene_products
+                        FROM agric_satellite.parcel_scene_products
                         WHERE land_id = :land_id AND sensor = 'S2'
                           AND date >= :start_date AND date <= :end_date
                         ORDER BY date

@@ -108,7 +108,7 @@ def load_agri_s2_rows(
                      THEN jsonb_array_length(pixel_data->'pixels')
                      ELSE 0
                    END AS pixel_n
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
               AND date >= :start_date AND date <= :end_date
             ORDER BY date
@@ -181,7 +181,7 @@ def load_agri_s1_rows(
                 """
             SELECT date, scene_id, vv_avg, vh_avg,
                    NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S1'
               AND date >= :start_date AND date <= :end_date
             ORDER BY date
@@ -1478,7 +1478,7 @@ def load_scene_lonlat_pixels(
             text(
                 """
             SELECT pixel_data
-            FROM agri.parcel_scene_products
+            FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2' AND date = CAST(:d AS date)
               AND pixel_data->>'format' = 'lonlat_v1'
             ORDER BY
@@ -1796,7 +1796,7 @@ def build_season_facts(
             )
         else:
             prior = {}
-        data_source = "agri.parcel_scene_products"
+        data_source = "agric_satellite.parcel_scene_products"
     else:
         indices = (
             classic_preloaded

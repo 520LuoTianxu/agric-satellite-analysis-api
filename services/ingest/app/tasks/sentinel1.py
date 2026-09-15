@@ -1,4 +1,4 @@
-"""Sentinel-1 GRD → agri.parcel_scene_products lonlat_v1 (VV_db/VH_db).
+"""Sentinel-1 GRD → agric_satellite.parcel_scene_products lonlat_v1 (VV_db/VH_db).
 
 Searches Microsoft Planetary Computer ``sentinel-1-grd`` (VV/VH on Azure Blob,
 SAS-signed via ``planetary_computer``), converts amplitude DN to approximate
@@ -75,7 +75,7 @@ _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
 
 UPSERT_S1_SQL = """
-INSERT INTO agri.parcel_scene_products (
+INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
   json_oss_key, pixel_count, generated_at_shanghai,
@@ -95,7 +95,7 @@ INSERT INTO agri.parcel_scene_products (
 ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   tile_id = EXCLUDED.tile_id,
   land_name = EXCLUDED.land_name,
-  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agri.parcel_scene_products.json_oss_key),
+  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agric_satellite.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   pixel_data_url = EXCLUDED.pixel_data_url,
@@ -371,7 +371,7 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
     row = (
         session.execute(
             text(
-                "SELECT land_id, tile_id, land_name FROM agri.land_parcels WHERE land_id = :lid"
+                "SELECT land_id, tile_id, land_name FROM agric_satellite.land_parcels WHERE land_id = :lid"
             ),
             {"lid": str(land_id)},
         )

@@ -1,7 +1,7 @@
 -- CloudAMQP outer task-bus result store (also applied via Alembic 0016).
-CREATE SCHEMA IF NOT EXISTS agri;
+CREATE SCHEMA IF NOT EXISTS agric_satellite;
 
-CREATE TABLE IF NOT EXISTS agri.mq_task_results (
+CREATE TABLE IF NOT EXISTS agric_satellite.mq_task_results (
     task_id text PRIMARY KEY,
     status text NOT NULL,
     oss_urls jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS agri.mq_task_results (
 );
 
 CREATE INDEX IF NOT EXISTS ix_mq_task_results_updated_at
-    ON agri.mq_task_results (updated_at DESC);
+    ON agric_satellite.mq_task_results (updated_at DESC);
 
-COMMENT ON TABLE agri.mq_task_results IS
+COMMENT ON TABLE agric_satellite.mq_task_results IS
     'CloudAMQP outer bus results (OSS URLs + downloaded JSON payloads)';

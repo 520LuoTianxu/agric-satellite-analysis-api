@@ -7,7 +7,7 @@ import os
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from openfarm_common.settings import sync_database_url
+from openfarm_common.settings import settings, sync_database_url
 
 # Celery prefork: each child process gets its own engine. Keep pools tiny so
 # N workers × (pool_size+overflow) stays well under Postgres max_connections.
@@ -25,7 +25,11 @@ sync_engine = create_engine(
     max_overflow=_max_overflow,
     pool_timeout=60,
     pool_recycle=_pool_recycle,
-    connect_args={"application_name": _app_name},
+    # 任务 SQL 同时包含 ORM 和原生查询，统一设置搜索路径避免落到 public。
+    connect_args={
+        "application_name": _app_name,
+        "options": f"-csearch_path={settings.database_schema},public",
+    },
 )
 SyncSession = sessionmaker(sync_engine, class_=Session, expire_on_commit=False)
 

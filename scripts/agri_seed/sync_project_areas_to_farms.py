@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upsert OpenFarm farms/fields from agri.virtual_project_areas / land_parcels."""
+"""Upsert OpenFarm farms/fields from agric_satellite.virtual_project_areas / land_parcels."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ def connect():
         user=os.environ["PGUSER"],
         password=os.environ.get("PGPASSWORD", ""),
         dbname=os.environ.get("PGDATABASE", "openfarm"),
+        options="-csearch_path=agric_satellite,public",
     )
 
 
@@ -66,9 +67,9 @@ def main() -> int:
     conn = connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM agri.virtual_project_areas")
+            cur.execute("SELECT count(*) FROM agric_satellite.virtual_project_areas")
             n_tiles = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM agri.land_parcels")
+            cur.execute("SELECT count(*) FROM agric_satellite.land_parcels")
             n_parcels = cur.fetchone()[0]
         print(f"agri tiles={n_tiles} parcels={n_parcels}", flush=True)
         print("using python uuid5 batch upsert", flush=True)
@@ -78,7 +79,7 @@ def main() -> int:
             cur.execute(
                 """
                 SELECT tile_id, group_name, county_name, city_name, project_key, province_name
-                FROM agri.virtual_project_areas ORDER BY tile_id
+                FROM agric_satellite.virtual_project_areas ORDER BY tile_id
                 """
             )
             tiles = cur.fetchall()
@@ -106,7 +107,7 @@ def main() -> int:
             cur.execute(
                 """
                 SELECT land_id, tile_id, land_name, land_area_mu, boundary_geojson::text
-                FROM agri.land_parcels ORDER BY land_id
+                FROM agric_satellite.land_parcels ORDER BY land_id
                 """
             )
             # stream

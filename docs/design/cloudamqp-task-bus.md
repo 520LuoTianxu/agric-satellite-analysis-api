@@ -48,11 +48,11 @@ Download host: mq_consumer  ──send_task──▶  Redis ──▶ ingest / s
     ▼
 Process host: mq_result_writer
     ├─ payload.kind=weather_daily / soil_profile → upsert 业务表
-    ├─ payload.kind=assessment_report → 仅记入 agri.mq_task_results（PDF 已在 OSS；`oss_urls.assessment_pdf` 为下载链）
+    ├─ payload.kind=assessment_report → 仅记入 agric_satellite.mq_task_results（PDF 已在 OSS；`oss_urls.assessment_pdf` 为下载链）
     ├─ oss_urls → GET JSON（**跳过** `.pdf` / `assessment_pdf` 链接，不当 JSON 拉）
-    │     ├─ lonlat_v1 scene → agri.parcel_scene_products
+    │     ├─ lonlat_v1 scene → agric_satellite.parcel_scene_products
     │     └─ weather/soil fallback body → 同上 upsert
-    └─ 始终写入 agri.mq_task_results
+    └─ 始终写入 agric_satellite.mq_task_results
 ```
 
 ### 部署角色约定
@@ -62,7 +62,7 @@ Process host: mq_result_writer
 - **Process host（`mq_result_writer`）**：消费 `openfarm_process` 并 upsert 业务 DB。
 - **Weather / soil**：仍经 download 队列入队（页面点击）→ worker 拉取 → `ResultMessage`（inline payload）→ process 队列 → writer upsert。  
   **Follow-up**：ingest 天气/土壤任务目前可能仍直接写库（与 writer 双写）；以 result-writer 为单一真相源需另开小改，本轮不做大爆炸重写。
-- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report`（`field_id` + `extras.job_id`）→ download → ingest **以 `field_id` 生成 PDF**（本地无 Job 不失败）、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`，`payload.job_id` 带回）→ process → writer 写入 `agri.mq_task_results` **并回写 API 机 `jobs.progress_json`**。`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
+- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report`（`field_id` + `extras.job_id`）→ download → ingest **以 `field_id` 生成 PDF**（本地无 Job 不失败）、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`，`payload.job_id` 带回）→ process → writer 写入 `agric_satellite.mq_task_results` **并回写 API 机 `jobs.progress_json`**。`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
 
 ## 3. 消息约定
 
@@ -160,7 +160,7 @@ python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
 python scripts/mq_publish_test.py --field-id <uuid> --type assessment_report --job-id <job-uuid>
 
 docker compose --profile mq up -d --build api ingest mq_consumer mq_result_writer
-# SELECT task_id, status, payload, oss_urls, updated_at FROM agri.mq_task_results ORDER BY updated_at DESC LIMIT 10;
+# SELECT task_id, status, payload, oss_urls, updated_at FROM agric_satellite.mq_task_results ORDER BY updated_at DESC LIMIT 10;
 ```
 
 > 共享 CloudAMQP 时注意：勿同时拉起多个 competing consumer；本机验证优先 code/compose，慎启 `mq_consumer` / `mq_result_writer`。

@@ -96,7 +96,7 @@ ON CONFLICT (field_id, date) DO UPDATE SET
 """
 
 UPSERT_SCENE_SQL = """
-INSERT INTO agri.parcel_scene_products (
+INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
   json_oss_key, pixel_count, generated_at_shanghai,
@@ -133,13 +133,13 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
-  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agri.parcel_scene_products.json_oss_key),
+  json_oss_key = COALESCE(EXCLUDED.json_oss_key, agric_satellite.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   pixel_data_url = EXCLUDED.pixel_data_url,
-  rgb_url = COALESCE(EXCLUDED.rgb_url, agri.parcel_scene_products.rgb_url),
-  large_rgb_url = COALESCE(EXCLUDED.large_rgb_url, agri.parcel_scene_products.large_rgb_url),
-  rgb_oss_key = COALESCE(EXCLUDED.rgb_oss_key, agri.parcel_scene_products.rgb_oss_key),
+  rgb_url = COALESCE(EXCLUDED.rgb_url, agric_satellite.parcel_scene_products.rgb_url),
+  large_rgb_url = COALESCE(EXCLUDED.large_rgb_url, agric_satellite.parcel_scene_products.large_rgb_url),
+  rgb_oss_key = COALESCE(EXCLUDED.rgb_oss_key, agric_satellite.parcel_scene_products.rgb_oss_key),
   ndvi_avg = EXCLUDED.ndvi_avg,
   ndvi_min = EXCLUDED.ndvi_min,
   ndvi_max = EXCLUDED.ndvi_max,
@@ -158,12 +158,12 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   mndwi_avg = EXCLUDED.mndwi_avg,
   mndwi_min = EXCLUDED.mndwi_min,
   mndwi_max = EXCLUDED.mndwi_max,
-  vv_avg = COALESCE(EXCLUDED.vv_avg, agri.parcel_scene_products.vv_avg),
-  vv_min = COALESCE(EXCLUDED.vv_min, agri.parcel_scene_products.vv_min),
-  vv_max = COALESCE(EXCLUDED.vv_max, agri.parcel_scene_products.vv_max),
-  vh_avg = COALESCE(EXCLUDED.vh_avg, agri.parcel_scene_products.vh_avg),
-  vh_min = COALESCE(EXCLUDED.vh_min, agri.parcel_scene_products.vh_min),
-  vh_max = COALESCE(EXCLUDED.vh_max, agri.parcel_scene_products.vh_max),
+  vv_avg = COALESCE(EXCLUDED.vv_avg, agric_satellite.parcel_scene_products.vv_avg),
+  vv_min = COALESCE(EXCLUDED.vv_min, agric_satellite.parcel_scene_products.vv_min),
+  vv_max = COALESCE(EXCLUDED.vv_max, agric_satellite.parcel_scene_products.vv_max),
+  vh_avg = COALESCE(EXCLUDED.vh_avg, agric_satellite.parcel_scene_products.vh_avg),
+  vh_min = COALESCE(EXCLUDED.vh_min, agric_satellite.parcel_scene_products.vh_min),
+  vh_max = COALESCE(EXCLUDED.vh_max, agric_satellite.parcel_scene_products.vh_max),
   pixel_data = EXCLUDED.pixel_data,
   ingested_at = now()
 """
@@ -211,7 +211,7 @@ def _is_lonlat_scene_product(obj: Any) -> bool:
 def apply_parcel_scene_product(
     obj: dict[str, Any], *, json_oss_key: str | None = None
 ) -> None:
-    """Upsert one lonlat_v1 scene product into agri.parcel_scene_products."""
+    """Upsert one lonlat_v1 scene product into agric_satellite.parcel_scene_products."""
     pixel_data = obj.get("pixel_data")
     if isinstance(pixel_data, dict):
         pixel_data_str = json.dumps(pixel_data, separators=(",", ":"))
@@ -542,7 +542,7 @@ def _apply_assessment_job_progress(
     *,
     status: str = "success",
 ) -> bool:
-    """Update public.jobs from assessment_report ResultMessage when job_id present."""
+    """Update agric_satellite.jobs from assessment_report ResultMessage when job_id present."""
     job_id = payload.get("job_id")
     if not job_id:
         return False
@@ -634,7 +634,7 @@ def _apply_season_growth_job_progress(
     *,
     status: str = "success",
 ) -> bool:
-    """Update public.jobs from season_growth_report ResultMessage when job_id present."""
+    """Update agric_satellite.jobs from season_growth_report ResultMessage when job_id present."""
     job_id = payload.get("job_id")
     if not job_id:
         return False

@@ -62,7 +62,7 @@ def _drop_fk_on_column(table: str, column: str) -> None:
             JOIN information_schema.key_column_usage kcu
               ON tc.constraint_name = kcu.constraint_name
              AND tc.table_schema = kcu.table_schema
-            WHERE tc.table_schema = 'public'
+            WHERE tc.table_schema = 'agric_satellite'
               AND tc.table_name = :table
               AND tc.constraint_type = 'FOREIGN KEY'
               AND kcu.column_name = :column
@@ -80,7 +80,7 @@ def _table_exists(table: str) -> bool:
         sa.text(
             """
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = :t
+            WHERE table_schema = 'agric_satellite' AND table_name = :t
             """
         ),
         {"t": table},
@@ -94,7 +94,7 @@ def _column_exists(table: str, column: str) -> bool:
         sa.text(
             """
             SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
+            WHERE table_schema = 'agric_satellite'
               AND table_name = :t AND column_name = :c
             """
         ),
@@ -109,7 +109,7 @@ def _index_exists(name: str) -> bool:
         sa.text(
             """
             SELECT 1 FROM pg_indexes
-            WHERE schemaname = 'public' AND indexname = :n
+            WHERE schemaname = 'agric_satellite' AND indexname = :n
             """
         ),
         {"n": name},
@@ -120,7 +120,7 @@ def _index_exists(name: str) -> bool:
 def upgrade() -> None:
     for table, index_name in ORG_ID_INDEXES:
         if _index_exists(index_name):
-            op.drop_index(index_name, table_name=table)
+            op.drop_index(index_name, table_name=table, schema="agric_satellite")
 
     for table in ORG_ID_COLUMNS:
         if _column_exists(table, "org_id"):

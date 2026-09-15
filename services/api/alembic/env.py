@@ -3,7 +3,7 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 # Ensure the project root is on sys.path so 'app' is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -24,10 +24,29 @@ from app.models.tables import Base  # noqa: E402
 
 target_metadata = Base.metadata
 
+# 业务表统一放在 agric_satellite；public 只保留 PostGIS/系统对象，
+# Alembic 版本表仍显式放在 public，确保迁移入口稳定。
+APP_DB_SCHEMA = "agric_satellite"
+
+
+def include_name(name: str | None, type_: str, parent_names: dict[str, str]) -> bool:
+    """让 Alembic 自动审计只关注业务 schema，排除 PostGIS 的 public 对象。"""
+
+    if type_ == "schema":
+        return name == APP_DB_SCHEMA
+    return True
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        version_table_schema="public",
+        include_schemas=True,
+        include_name=include_name,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -39,7 +58,15 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        # 原生 SQL、历史迁移和自动生成的 DDL 都必须解析到统一业务 schema。
+        connection.execute(text(f"SET search_path TO {APP_DB_SCHEMA}, public"))
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema="public",
+            include_schemas=True,
+            include_name=include_name,
+        )
         with context.begin_transaction():
             context.run_migrations()
 

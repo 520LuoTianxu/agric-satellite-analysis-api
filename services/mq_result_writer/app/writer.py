@@ -1,4 +1,4 @@
-"""Persist ResultMessage payloads into agri.mq_task_results (+ domain upserts).
+"""Persist ResultMessage payloads into agric_satellite.mq_task_results (+ domain upserts).
 
 Domain upserts live in ``openfarm_common.result_apply`` so API work-complete
 can reuse the same logic (download-host isolation D3).
@@ -52,7 +52,7 @@ def upsert_mq_task_result(msg: ResultMessage, payloads: dict[str, Any]) -> None:
         session.execute(
             text(
                 """
-                INSERT INTO agri.mq_task_results (
+                INSERT INTO agric_satellite.mq_task_results (
                     task_id, status, oss_urls, payload, error,
                     field_id, land_id, finished_at, updated_at
                 ) VALUES (
@@ -64,8 +64,8 @@ def upsert_mq_task_result(msg: ResultMessage, payloads: dict[str, Any]) -> None:
                     oss_urls = EXCLUDED.oss_urls,
                     payload = EXCLUDED.payload,
                     error = EXCLUDED.error,
-                    field_id = COALESCE(EXCLUDED.field_id, agri.mq_task_results.field_id),
-                    land_id = COALESCE(EXCLUDED.land_id, agri.mq_task_results.land_id),
+                    field_id = COALESCE(EXCLUDED.field_id, agric_satellite.mq_task_results.field_id),
+                    land_id = COALESCE(EXCLUDED.land_id, agric_satellite.mq_task_results.land_id),
                     finished_at = EXCLUDED.finished_at,
                     updated_at = now()
                 """

@@ -3,7 +3,7 @@
 从阿里云 OSS 拉取 S1/S2 地块产品 JSON，upsert 到 PostgreSQL。
 
 改进自 agri_s1s2_parcel_bundle/scripts/oss_json_to_postgres.py：
-  - 独立 schema（agri.*）+ 元数据视图 + ingest_runs
+  - 独立业务 schema（agric_satellite.*）+ 元数据视图 + ingest_runs
   - 更多列：land_name / parcel_cloud_cover_pct / clear_pixel_count / res_m / epsg / generated_at_shanghai
   - --apply-schema / --dry-run / --limit / OSS_ENV 可配
   - --from-done-dir / --keys-file：无 ListObjects 时按 key GetObject
@@ -55,7 +55,7 @@ SCHEMA_SQL = ROOT / "sql" / "001_schema.sql"
 COMMIT_EVERY = 50
 
 UPSERT_SQL = """
-INSERT INTO agri.parcel_scene_products (
+INSERT INTO agric_satellite.parcel_scene_products (
   parcel_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
   json_oss_key, json_url, rgb_url, large_rgb_url, heatmap_url, s2_heatmap_url,
@@ -135,6 +135,7 @@ def pg_connect():
         user=os.environ["PGUSER"],
         password=os.environ.get("PGPASSWORD", ""),
         dbname=os.environ.get("PGDATABASE", "postgres"),
+        options="-csearch_path=agric_satellite,public",
     )
     return psycopg.connect(**kwargs)
 
@@ -247,7 +248,7 @@ def start_ingest_run(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO agri.ingest_runs (oss_prefix, oss_bucket, limit_n, dry_run, status)
+                INSERT INTO agric_satellite.ingest_runs (oss_prefix, oss_bucket, limit_n, dry_run, status)
                 VALUES (%s, %s, %s, %s, 'running')
                 RETURNING run_id
                 """,
@@ -277,7 +278,7 @@ def finish_ingest_run(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE agri.ingest_runs SET
+                UPDATE agric_satellite.ingest_runs SET
                   finished_at = now(),
                   listed_n = %s,
                   upserted_n = %s,
@@ -324,7 +325,7 @@ def main(argv: Optional[list] = None) -> int:
     load_dotenv_file(ROOT / ".env")
 
     ap = argparse.ArgumentParser(
-        description="OSS s1s2_parcel JSON → PostgreSQL agri.parcel_scene_products"
+        description="OSS s1s2_parcel JSON → PostgreSQL agric_satellite.parcel_scene_products"
     )
     ap.add_argument(
         "--prefix",

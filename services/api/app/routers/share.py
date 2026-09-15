@@ -164,7 +164,7 @@ def _stat_point(
 async def _load_agri_share_series(
     db: AsyncSession, field_id: uuid.UUID, land_id: str
 ) -> tuple[list[str], dict[str, list[ShareStatPoint]], list[ShareStatPoint], bool]:
-    """Load S1/S2 means from agri.parcel_scene_products into share chart series.
+    """Load S1/S2 means from agric_satellite.parcel_scene_products into share chart series.
 
     Returns (available_index_types, stats_by_type, all_stats, heatmap_available).
     """
@@ -190,7 +190,7 @@ async def _load_agri_share_series(
                              THEN jsonb_array_length(pixel_data->'pixels')
                              ELSE 0
                            END AS lonlat_pixels
-                    FROM agri.parcel_scene_products
+                    FROM agric_satellite.parcel_scene_products
                     WHERE land_id = :land_id
                     ORDER BY date DESC
                     LIMIT 500
@@ -202,7 +202,7 @@ async def _load_agri_share_series(
             .mappings()
             .all()
         )
-    except Exception as exc:  # noqa: BLE001 — agri schema may be absent
+    except Exception as exc:  # noqa: BLE001 — application schema may be absent
         logger.warning("agri share series load failed land_id=%s: %s", land_id, exc)
         return [], {}, [], False
 
@@ -755,7 +755,7 @@ async def get_share_agri_pixels(
                     f"""
                 SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                        mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id AND sensor = :sensor
                   {date_clause}
                   AND pixel_data->>'format' = 'lonlat_v1'
@@ -781,7 +781,7 @@ async def get_share_agri_pixels(
                         f"""
                     SELECT date, sensor, ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                            mndwi_avg, cire_avg, vv_avg, vh_avg, pixel_data
-                    FROM agri.parcel_scene_products
+                    FROM agric_satellite.parcel_scene_products
                     WHERE land_id = :land_id AND sensor = :sensor
                       {date_clause}
                     ORDER BY date DESC

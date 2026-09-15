@@ -1,7 +1,7 @@
 [project]
 name = "openfarm-mq-result-writer"
 version = "0.1.0"
-description = "CloudAMQP result consumer → OSS download → agri.mq_task_results"
+description = "CloudAMQP result consumer → OSS download → agric_satellite.mq_task_results"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",

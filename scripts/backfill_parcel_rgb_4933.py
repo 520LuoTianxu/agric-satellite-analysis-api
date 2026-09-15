@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backfill parcel true-color RGB for land_id=4933 (2025-08..10 raw S2).
 
-Uploads field_rgb.png to OSS, patches scene JSON, UPDATEs agri.parcel_scene_products
+Uploads field_rgb.png to OSS, patches scene JSON, UPDATEs agric_satellite.parcel_scene_products
 rgb_url / rgb_oss_key. Safe to re-run.
 """
 from __future__ import annotations
@@ -89,7 +89,9 @@ def asset_href(item, *names: str) -> str | None:
 
 
 def main() -> int:
-    eng = create_engine(db_url())
+    eng = create_engine(
+        db_url(), connect_args={"options": "-csearch_path=agric_satellite,public"}
+    )
     storage = get_storage()
     with eng.connect() as conn:
         field = conn.execute(
@@ -110,7 +112,7 @@ def main() -> int:
             text(
                 """
                 SELECT date::text AS date, scene_id, json_oss_key
-                FROM agri.parcel_scene_products
+                FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :lid AND sensor = 'S2'
                   AND date >= :d0 AND date <= :d1
                   AND scene_id NOT LIKE '%\\_decloud' ESCAPE '\\'
@@ -199,7 +201,7 @@ def main() -> int:
                 conn.execute(
                     text(
                         """
-                        UPDATE agri.parcel_scene_products
+                        UPDATE agric_satellite.parcel_scene_products
                         SET rgb_url = :u, rgb_oss_key = :k
                         WHERE land_id = :lid AND date = :d AND sensor = 'S2'
                           AND scene_id NOT LIKE '%\\_decloud' ESCAPE '\\'
