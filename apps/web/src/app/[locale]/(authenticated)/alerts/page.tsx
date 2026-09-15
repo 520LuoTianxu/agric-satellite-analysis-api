@@ -241,7 +241,7 @@ export default function AlertsPage() {
                             <AlertRow
                                 key={alert.id}
                                 alert={alert}
-                                fieldName={alert.field_name ?? undefined}
+                                fieldName={alert.land_name ?? undefined}
                                 farmId={alert.farm_id ?? undefined}
                                 farmName={alert.farm_name ?? undefined}
                                 showActions

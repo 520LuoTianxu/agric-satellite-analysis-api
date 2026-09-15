@@ -75,6 +75,26 @@ class CeleryRedisTransportTests(unittest.TestCase):
             conf["result_backend_transport_options"]["socket_timeout"],
         )
 
+    def test_beat_schedule_is_opt_in(self) -> None:
+        with_beat = create_celery_app(
+            name="openfarm-beat-test",
+            include=[],
+            default_queue="ingest",
+            with_beat_schedule=True,
+        )
+        without_beat = create_celery_app(
+            name="openfarm-nobeat-test",
+            include=[],
+            default_queue="ingest",
+        )
+        self.assertIn("compute-indices-weekly", with_beat.conf.beat_schedule)
+        self.assertIn("fetch-weather-daily", with_beat.conf.beat_schedule)
+        self.assertIn(
+            "refresh-overview-stats-daily",
+            with_beat.conf.beat_schedule,
+        )
+        self.assertFalse(without_beat.conf.beat_schedule)
+
     def test_create_celery_app_inherits_shared_transport(self) -> None:
         expected = celery_app_config()
         app = create_celery_app(

@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import sys
 
+from openfarm_common.trace import install_stdlib_trace_log_record
+
 from app.work_agent import run_forever as run_claim_agent
 from app.work_agent import should_run_claim_agent, work_queue_mode
 
+install_stdlib_trace_log_record()
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s trace_id=%(trace_id)s %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("mq_consumer")

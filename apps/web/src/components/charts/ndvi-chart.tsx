@@ -14,7 +14,7 @@ import {
     DataZoomComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import type { FieldStat, IndexType, WeatherDaily } from "@/lib/api";
+import type { LandStat, IndexType, WeatherDaily } from "@/lib/api";
 import { INDEX_CONFIG } from "@/lib/api";
 import { tokenColor } from "@/lib/design-tokens";
 import { useTranslations } from "next-intl";
@@ -66,9 +66,9 @@ export type ChartEventMark = {
 };
 
 interface NdviChartProps {
-    stats: FieldStat[];
+    stats: LandStat[];
     /** Unused decloud products (fair/bad or unused good) as marked overlays. */
-    decloudAltStats?: FieldStat[];
+    decloudAltStats?: LandStat[];
     /** Currently selected date (highlights point) */
     selectedDate?: string | null;
     /** Callback when a chart point is clicked */

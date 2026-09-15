@@ -1,4 +1,4 @@
-"""Soil router - field soil profile, summary, refresh, intelligence endpoints."""
+"""Soil profile and vendor soil endpoints for canonical land parcels."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from app.core.soil_intelligence import (
 )
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import (
-    Field,
+    LandParcel,
     Job,
     SoilFieldSummary,
     GroupSiteAdmission,
@@ -55,28 +55,28 @@ router = APIRouter()
 _writer = require_roles("owner", "admin")
 
 
-async def _get_field_or_404(
-    field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession
-) -> Field:
-    field = await db.get(Field, field_id)
+async def _get_land_or_404(
+    land_id: str, org_id: uuid.UUID, db: AsyncSession
+) -> LandParcel:
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="Land parcel not found")
     return field
 
 
-@router.get("/fields/{field_id}/soil", response_model=SoilProfileOut)
+@router.get("/lands/{land_id}/soil", response_model=SoilProfileOut)
 async def get_soil_profile(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return the soil profile with all layers for a field."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
 
     result = await db.execute(
         select(SoilProfile)
         .options(selectinload(SoilProfile.layers))
-        .where(SoilProfile.field_id == field_id)
+        .where(SoilProfile.land_id == land_id)
         .order_by(SoilProfile.fetched_at.desc())
         .limit(1)
     )
@@ -87,17 +87,17 @@ async def get_soil_profile(
     return profile
 
 
-@router.get("/fields/{field_id}/soil/summary", response_model=SoilFieldSummaryOut)
+@router.get("/lands/{land_id}/soil/summary", response_model=SoilFieldSummaryOut)
 async def get_soil_summary(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return the aggregated soil summary for a field."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
 
     result = await db.execute(
-        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+        select(SoilFieldSummary).where(SoilFieldSummary.land_id == land_id)
     )
     summary = result.scalar_one_or_none()
     if not summary:
@@ -107,22 +107,22 @@ async def get_soil_summary(
 
 
 @router.post(
-    "/fields/{field_id}/soil/refresh",
+    "/lands/{land_id}/soil/refresh",
     response_model=SoilRefreshResponse,
     status_code=202,
 )
 @limiter.limit("5/minute")
 async def refresh_soil(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Trigger a re-fetch of soil data for a field."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
 
     # Create a Job row for progress tracking
-    job = Job(field_id=field_id, type="soil_fetch", status="pending")
+    job = Job(land_id=land_id, type="soil_fetch", status="pending")
     db.add(job)
     await db.flush()
 
@@ -131,18 +131,18 @@ async def refresh_soil(
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
-        type="soil_fetch", field_id=str(field_id), extras={"job_id": str(job.id)}
+        type="soil_fetch", land_id=str(land_id), extras={"job_id": str(job.id)}
     )
 
     logger.info(
         "soil_refresh_triggered",
-        field_id=str(field_id),
+        land_id=str(land_id),
         job_id=str(job.id),
         mq_task_id=task_id,
     )
 
     return SoilRefreshResponse(
-        field_id=str(field_id),
+        land_id=str(land_id),
         job_id=str(job.id),
         status="accepted",
         message="Soil data refresh queued.",
@@ -153,13 +153,13 @@ async def refresh_soil(
 
 
 async def _get_profile_and_summary(
-    field_id: uuid.UUID, db: AsyncSession
+    land_id: str, db: AsyncSession
 ) -> tuple[SoilProfile, SoilFieldSummary]:
     """Load profile with layers + summary, or raise 404."""
     result = await db.execute(
         select(SoilProfile)
         .options(selectinload(SoilProfile.layers))
-        .where(SoilProfile.field_id == field_id)
+        .where(SoilProfile.land_id == land_id)
         .order_by(SoilProfile.fetched_at.desc())
         .limit(1)
     )
@@ -168,7 +168,7 @@ async def _get_profile_and_summary(
         raise HTTPException(status_code=404, detail="Soil data not yet available")
 
     s_result = await db.execute(
-        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+        select(SoilFieldSummary).where(SoilFieldSummary.land_id == land_id)
     )
     summary = s_result.scalar_one_or_none()
     if not summary:
@@ -244,16 +244,16 @@ def _summary_to_dict(s: SoilFieldSummary) -> dict:
 
 
 @router.get(
-    "/fields/{field_id}/soil/sampling-zones", response_model=SamplingZonesResponse
+    "/lands/{land_id}/soil/sampling-zones", response_model=SamplingZonesResponse
 )
 async def get_sampling_zones(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return suggested sampling zone GeoJSON based on soil variability."""
-    field = await _get_field_or_404(field_id, ctx.org_id, db)
-    profile, _summary = await _get_profile_and_summary(field_id, db)
+    land = await _get_land_or_404(land_id, ctx.org_id, db)
+    profile, _summary = await _get_profile_and_summary(land_id, db)
 
     layer_dicts = _layers_to_dicts(profile.layers)
 
@@ -264,27 +264,27 @@ async def get_sampling_zones(
     if centroid_lat is None or centroid_lon is None:
         from geoalchemy2.shape import to_shape
 
-        geom = to_shape(field.geom)
+        geom = to_shape(land.geom)
         centroid = geom.centroid
         centroid_lat, centroid_lon = centroid.y, centroid.x
 
-    area_ha = float(field.area_ha) if field.area_ha else None
+    area_ha = float(land.area_ha) if land.area_ha else None
 
     zones = compute_sampling_zones(layer_dicts, centroid_lat, centroid_lon, area_ha)
     return SamplingZonesResponse(features=zones)
 
 
 @router.get(
-    "/fields/{field_id}/soil/crop-suitability", response_model=CropSuitabilityResponse
+    "/lands/{land_id}/soil/crop-suitability", response_model=CropSuitabilityResponse
 )
 async def get_crop_suitability(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return crop suitability scores for the field's soil conditions."""
-    field = await _get_field_or_404(field_id, ctx.org_id, db)
-    profile, summary = await _get_profile_and_summary(field_id, db)
+    field = await _get_land_or_404(land_id, ctx.org_id, db)
+    profile, summary = await _get_profile_and_summary(land_id, db)
 
     summary_dict = _summary_to_dict(summary)
     layer_dicts = _layers_to_dicts(profile.layers)
@@ -302,7 +302,7 @@ async def get_crop_suitability(
             func.min(WeatherDaily.temperature_2m_min),
             func.max(WeatherDaily.temperature_2m_max),
             func.count(),
-        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
+        ).where(WeatherDaily.land_id == land_id, WeatherDaily.date >= one_year_ago)
     )
     arow = annual_result.one_or_none()
     day_count = int(arow[4]) if arow and arow[4] else 0
@@ -326,7 +326,7 @@ async def get_crop_suitability(
         recent_result = await db.execute(
             select(WeatherDaily)
             .where(
-                WeatherDaily.field_id == field_id,
+                WeatherDaily.land_id == land_id,
                 WeatherDaily.date >= now - timedelta(days=30),
             )
             .order_by(WeatherDaily.date.desc())
@@ -387,16 +387,16 @@ async def get_crop_suitability(
 
 
 @router.get(
-    "/fields/{field_id}/soil/nutrient-context", response_model=NutrientContextResponse
+    "/lands/{land_id}/soil/nutrient-context", response_model=NutrientContextResponse
 )
 async def get_nutrient_context(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return nutrient risk zone classification for the field."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
-    profile, summary = await _get_profile_and_summary(field_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
+    profile, summary = await _get_profile_and_summary(land_id, db)
 
     summary_dict = _summary_to_dict(summary)
     layer_dicts = _layers_to_dicts(profile.layers)
@@ -411,15 +411,15 @@ async def get_nutrient_context(
     )
 
 
-@router.get("/fields/{field_id}/soil/carbon", response_model=CarbonEstimateResponse)
+@router.get("/lands/{land_id}/soil/carbon", response_model=CarbonEstimateResponse)
 async def get_carbon_estimate(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return SOC stock, saturation estimate, and sequestration potential."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
-    profile, summary = await _get_profile_and_summary(field_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
+    profile, summary = await _get_profile_and_summary(land_id, db)
 
     summary_dict = _summary_to_dict(summary)
     layer_dicts = _layers_to_dicts(profile.layers)
@@ -433,7 +433,7 @@ async def get_carbon_estimate(
             func.sum(WeatherDaily.precipitation_sum),
             func.avg(WeatherDaily.temperature_2m_mean),
             func.count(),
-        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
+        ).where(WeatherDaily.land_id == land_id, WeatherDaily.date >= one_year_ago)
     )
     row = wd_result.one_or_none()
     if row and row[2] and row[2] > 180:  # need at least 6 months of data
@@ -462,16 +462,16 @@ async def get_carbon_estimate(
 
 
 @router.get(
-    "/fields/{field_id}/soil/weather-stress", response_model=SoilWeatherStressResponse
+    "/lands/{land_id}/soil/weather-stress", response_model=SoilWeatherStressResponse
 )
 async def get_soil_weather_stress(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return current root-zone moisture stress assessment."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
-    _profile, summary = await _get_profile_and_summary(field_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
+    _profile, summary = await _get_profile_and_summary(land_id, db)
 
     summary_dict = _summary_to_dict(summary)
 
@@ -480,7 +480,7 @@ async def get_soil_weather_stress(
     wd_result = await db.execute(
         select(WeatherDaily)
         .where(
-            WeatherDaily.field_id == field_id,
+            WeatherDaily.land_id == land_id,
             WeatherDaily.date >= now - timedelta(days=30),
         )
         .order_by(WeatherDaily.date.desc())
@@ -536,7 +536,6 @@ def _npk_row_to_out(
         if isinstance(i, dict)
     ]
     return SoilNpkOut(
-        field_id=row.field_id,
         land_id=row.land_id,
         source=row.source,
         tn_g_kg=row.tn_g_kg,
@@ -580,32 +579,38 @@ async def _load_agri_admin_and_boundary(db: AsyncSession, land_id: str) -> dict:
     return dict(row) if row else {}
 
 
-def _field_coords_string(field: Field) -> str:
+def _land_coords_string(land: LandParcel) -> str:
+    from app.core.cdfinance_soil import geojson_to_coords_string
+
+    if isinstance(land.boundary_geojson, dict):
+        try:
+            return geojson_to_coords_string(land.boundary_geojson)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 兼容历史导入的 geometry 列；新写入地块优先使用 boundary_geojson。
+    if land.geom is None:
+        raise HTTPException(status_code=400, detail="Land parcel has no geometry")
     from geoalchemy2.shape import to_shape
     from shapely.geometry import mapping
 
-    from app.core.cdfinance_soil import geojson_to_coords_string
-
-    if field.geom is None:
-        raise HTTPException(status_code=400, detail="Field has no geometry")
-    gj = mapping(to_shape(field.geom))
     try:
-        return geojson_to_coords_string(gj)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        return geojson_to_coords_string(mapping(to_shape(land.geom)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/fields/{field_id}/soil/npk", response_model=SoilNpkOut)
+@router.get("/lands/{land_id}/soil/npk", response_model=SoilNpkOut)
 async def get_soil_npk(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_payload: bool = False,
 ):
     """Return stored vendor NPK for a field (404 if never fetched)."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_land_or_404(land_id, ctx.org_id, db)
     result = await db.execute(
-        select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+        select(SoilNutrientNpk).where(SoilNutrientNpk.land_id == land_id)
     )
     row = result.scalar_one_or_none()
     if not row:
@@ -614,13 +619,13 @@ async def get_soil_npk(
 
 
 @router.post(
-    "/fields/{field_id}/soil/npk",
+    "/lands/{land_id}/soil/npk",
     response_model=SoilNpkFetchResponse,
 )
 @limiter.limit("10/minute")
 async def fetch_soil_npk(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     body: SoilNpkFetchRequest | None = None,
@@ -635,7 +640,6 @@ async def fetch_soil_npk(
 
     import httpx
 
-    from app.core.agri_tags import parse_agri_land_id
     from app.core.cdfinance_soil import (
         SOURCE_NAME,
         analyze_soil_v2,
@@ -645,16 +649,16 @@ async def fetch_soil_npk(
     )
 
     body = body or SoilNpkFetchRequest()
-    field = await _get_field_or_404(field_id, ctx.org_id, db)
+    land = await _get_land_or_404(land_id, ctx.org_id, db)
 
     existing = (
         await db.execute(
-            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+            select(SoilNutrientNpk).where(SoilNutrientNpk.land_id == land_id)
         )
     ).scalar_one_or_none()
     if existing and not body.force:
         return SoilNpkFetchResponse(
-            field_id=str(field_id),
+            land_id=str(land_id),
             status="cached",
             npk=_npk_row_to_out(existing),
             message="已有 NPK 缓存；传 force=true 可重新拉取。",
@@ -667,19 +671,16 @@ async def fetch_soil_npk(
             detail="需要中和农信 Bearer token（Authorization 头或 body.token）",
         )
 
-    land_id = parse_agri_land_id(field.tags_json)
-    admin: dict = {}
+    admin = await _load_agri_admin_and_boundary(db, land_id)
+    boundary = admin.get("boundary_geojson")
     coords: str | None = None
-    if land_id:
-        admin = await _load_agri_admin_and_boundary(db, land_id)
-        bj = admin.get("boundary_geojson")
-        if bj:
-            try:
-                coords = geojson_to_coords_string(bj if isinstance(bj, dict) else None)
-            except ValueError:
-                coords = None
+    if isinstance(boundary, dict):
+        try:
+            coords = geojson_to_coords_string(boundary)
+        except ValueError:
+            coords = None
     if not coords:
-        coords = _field_coords_string(field)
+        coords = _land_coords_string(land)
 
     req_body = build_analysis_body(
         coords=coords,
@@ -711,7 +712,7 @@ async def fetch_soil_npk(
             pass
         logger.warning(
             "cdfinance_soil_http_error",
-            field_id=str(field_id),
+            land_id=str(land_id),
             status=status,
         )
         raise HTTPException(status_code=502, detail=detail) from e
@@ -725,7 +726,7 @@ async def fetch_soil_npk(
     if existing:
         row = existing
     else:
-        row = SoilNutrientNpk(field_id=field_id)
+        row = SoilNutrientNpk(land_id=land_id)
         db.add(row)
 
     row.land_id = land_id
@@ -751,7 +752,6 @@ async def fetch_soil_npk(
 
     logger.info(
         "soil_npk_upserted",
-        field_id=str(field_id),
         land_id=land_id,
         tn=row.tn_g_kg,
         ap=row.ap_mg_kg,
@@ -759,7 +759,7 @@ async def fetch_soil_npk(
     )
 
     return SoilNpkFetchResponse(
-        field_id=str(field_id),
+        land_id=str(land_id),
         status="fetched",
         npk=_npk_row_to_out(row),
         message="已从中和农信拉取并保存 NPK。",
@@ -775,9 +775,8 @@ def _admission_row_to_out(
     summary = row.summary_json if isinstance(row.summary_json, dict) else {}
     return SiteAdmissionOut(
         id=row.id,
-        field_id=row.field_id,
-        group_id=row.group_id,
         land_id=row.land_id,
+        group_id=row.group_id,
         source=row.source,
         status=row.status,
         score=row.score,
@@ -798,92 +797,69 @@ def _admission_row_to_out(
     )
 
 
-async def _resolve_group_id_for_field(
-    db: AsyncSession, field: Field, explicit: str | int | None
-) -> tuple[str | None, str | None]:
-    """Return (group_id, land_id). Prefer explicit, then field tag, then agric_satellite.land_parcels."""
-    from app.core.agri_tags import parse_agri_land_id, parse_cdfinance_group_id
+async def _resolve_group_id_for_land(
+    db: AsyncSession, land: LandParcel, explicit: str | int | None
+) -> tuple[str | None, str]:
+    """读取当前规范地块的 group_id，不通过 tags 或其他表做地块映射。"""
     from sqlalchemy import text as sa_text
 
-    land_id = parse_agri_land_id(field.tags_json)
     if explicit is not None and str(explicit).strip():
-        return str(explicit).strip(), land_id
+        return str(explicit).strip(), land.land_id
 
-    tagged = parse_cdfinance_group_id(field.tags_json)
-    if tagged:
-        return tagged, land_id
-
-    if land_id:
-        result = await db.execute(
-            sa_text(
-                """
-                SELECT group_id::text AS group_id
-                FROM agric_satellite.land_parcels
-                WHERE land_id = :land_id
-                LIMIT 1
-                """
-            ),
-            {"land_id": land_id},
-        )
-        row = result.mappings().first()
-        if row and row.get("group_id"):
-            return str(row["group_id"]), land_id
-    return None, land_id
+    result = await db.execute(
+        sa_text(
+            """
+            SELECT group_id::text AS group_id
+            FROM agric_satellite.land_parcels
+            WHERE land_id = :land_id
+            LIMIT 1
+            """
+        ),
+        {"land_id": land.land_id},
+    )
+    row = result.mappings().first()
+    return (str(row["group_id"]) if row and row.get("group_id") else None, land.land_id)
 
 
 @router.get(
-    "/fields/{field_id}/site-admission",
+    "/lands/{land_id}/site-admission",
     response_model=SiteAdmissionOut,
 )
 async def get_site_admission(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_payload: bool = False,
 ):
-    """Return stored site-admission questionnaire for a field (404 if none)."""
-    field = await _get_field_or_404(field_id, ctx.org_id, db)
+    """Return the site-admission snapshot stored for this canonical land parcel."""
+    await _get_land_or_404(land_id, ctx.org_id, db)
     result = await db.execute(
-        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+        select(GroupSiteAdmission).where(GroupSiteAdmission.land_id == land_id)
     )
     row = result.scalar_one_or_none()
-    if not row:
-        # fallback: resolve group via agri and look up by group_id
-        gid, _ = await _resolve_group_id_for_field(db, field, None)
-        if gid:
-            result = await db.execute(
-                select(GroupSiteAdmission).where(GroupSiteAdmission.group_id == gid)
-            )
-            row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Site admission not yet available")
     return _admission_row_to_out(row, include_payload=include_payload)
 
 
 @router.post(
-    "/fields/{field_id}/site-admission",
+    "/lands/{land_id}/site-admission",
     response_model=SiteAdmissionFetchResponse,
 )
 @limiter.limit("10/minute")
 async def fetch_site_admission(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     body: SiteAdmissionFetchRequest | None = None,
     authorization: Annotated[str | None, Header()] = None,
 ):
-    """Fetch cdfinance groupSiteAdmission by groupId, upsert, return summary.
-
-    Auth: H5 Bearer in ``Authorization`` or body.token (same as NPK).
-    groupId: body.group_id, else field tag ``cdfinance_group:`` / ``group:``,
-    else ``agric_satellite.land_parcels.group_id`` via ``agri:<land_id>`` tag.
-    """
+    """Fetch and store the cdfinance site-admission snapshot for one land parcel."""
     from datetime import datetime, timezone
 
     import httpx
 
-    from app.core.agri_tags import ensure_cdfinance_group_tag
     from app.core.cdfinance_site_admission import (
         SOURCE_NAME,
         fetch_group_site_admission,
@@ -891,56 +867,28 @@ async def fetch_site_admission(
     )
 
     body = body or SiteAdmissionFetchRequest()
-    field = await _get_field_or_404(field_id, ctx.org_id, db)
-    group_id, land_id = await _resolve_group_id_for_field(db, field, body.group_id)
+    land = await _get_land_or_404(land_id, ctx.org_id, db)
+    group_id, _ = await _resolve_group_id_for_land(db, land, body.group_id)
     if not group_id:
         raise HTTPException(
             status_code=400,
-            detail="需要 groupId（body.group_id，或字段 tags 中 cdfinance_group:/group:，或 agric_satellite.land_parcels.group_id）",
+            detail="需要 groupId（body.group_id 或当前地块的 group_id）",
         )
 
     existing = (
         await db.execute(
-            select(GroupSiteAdmission).where(GroupSiteAdmission.group_id == group_id)
+            select(GroupSiteAdmission).where(
+                GroupSiteAdmission.land_id == land_id
+            )
         )
     ).scalar_one_or_none()
-    # Prefer field-linked row if present
-    field_row = (
-        await db.execute(
-            select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
-        )
-    ).scalar_one_or_none()
-    if field_row and not body.force:
+    if existing and not body.force:
         return SiteAdmissionFetchResponse(
-            field_id=str(field_id),
-            group_id=field_row.group_id,
-            status="cached",
-            admission=_admission_row_to_out(field_row),
-            message="已有现场问卷缓存；传 force=true 可重新拉取。",
-        )
-    if existing and not body.force and existing.field_id == field_id:
-        return SiteAdmissionFetchResponse(
-            field_id=str(field_id),
+            land_id=land_id,
             group_id=existing.group_id,
             status="cached",
             admission=_admission_row_to_out(existing),
             message="已有现场问卷缓存；传 force=true 可重新拉取。",
-        )
-    if existing and not body.force and existing.field_id is None:
-        # link cached group row to this field without refetch
-        existing.field_id = field_id
-        if land_id and not existing.land_id:
-            existing.land_id = land_id
-        if body.link_field_tag:
-            field.tags_json = ensure_cdfinance_group_tag(field.tags_json, group_id)
-        await db.commit()
-        await db.refresh(existing)
-        return SiteAdmissionFetchResponse(
-            field_id=str(field_id),
-            group_id=existing.group_id,
-            status="linked",
-            admission=_admission_row_to_out(existing),
-            message="已关联已有问卷缓存到本田块。",
         )
 
     token = body.token or authorization
@@ -957,70 +905,69 @@ async def fetch_site_admission(
             auth_query=body.auth_query,
             hr_base_id=body.hr_base_id,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code if e.response is not None else 502
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        upstream_status = (
+            exc.response.status_code if exc.response is not None else 502
+        )
         detail = "上游现场问卷 API 调用失败"
-        try:
-            detail = e.response.text[:300]
-        except Exception:
-            pass
+        if exc.response is not None:
+            try:
+                detail = exc.response.text[:300]
+            except Exception:
+                pass
         logger.warning(
             "cdfinance_site_admission_http_error",
-            field_id=str(field_id),
+            land_id=land_id,
             group_id=group_id,
-            status=status,
+            status=upstream_status,
         )
-        raise HTTPException(status_code=502, detail=detail) from e
-    except httpx.HTTPError as e:
-        logger.warning("cdfinance_site_admission_transport_error", error=str(e))
-        raise HTTPException(status_code=502, detail="上游现场问卷 API 网络错误") from e
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "cdfinance_site_admission_transport_error", error=str(exc)
+        )
+        raise HTTPException(status_code=502, detail="上游现场问卷 API 网络错误") from exc
 
     summary = normalize_admission_payload(record)
     now = datetime.now(timezone.utc)
     summary["fetched_at"] = now.isoformat()
 
-    row = existing or field_row
-    if row is None:
-        row = GroupSiteAdmission(group_id=group_id)
-        db.add(row)
+    if existing is None:
+        existing = GroupSiteAdmission(group_id=group_id, land_id=land_id)
+        db.add(existing)
 
-    row.field_id = field_id
-    row.group_id = str(summary.get("group_id") or group_id)
-    row.land_id = land_id
-    row.source = SOURCE_NAME
-    row.status = summary.get("status")
-    row.score = summary.get("score")
-    row.score_bank = summary.get("score_bank")
-    row.survey_id = summary.get("survey_id")
-    row.answer_id = summary.get("answer_id")
-    row.total_area_mu = summary.get("total_area_mu")
-    row.avg_yield = summary.get("avg_yield")
-    row.mu_profit = summary.get("mu_profit")
-    row.summary_json = summary
-    row.vendor_payload = record
-    row.fetched_at = now
-    row.updated_at = now
-
-    if body.link_field_tag:
-        field.tags_json = ensure_cdfinance_group_tag(field.tags_json, row.group_id)
+    existing.land_id = land_id
+    existing.group_id = str(summary.get("group_id") or group_id)
+    existing.source = SOURCE_NAME
+    existing.status = summary.get("status")
+    existing.score = summary.get("score")
+    existing.score_bank = summary.get("score_bank")
+    existing.survey_id = summary.get("survey_id")
+    existing.answer_id = summary.get("answer_id")
+    existing.total_area_mu = summary.get("total_area_mu")
+    existing.avg_yield = summary.get("avg_yield")
+    existing.mu_profit = summary.get("mu_profit")
+    existing.summary_json = summary
+    existing.vendor_payload = record
+    existing.fetched_at = now
+    existing.updated_at = now
 
     await db.commit()
-    await db.refresh(row)
+    await db.refresh(existing)
 
     logger.info(
         "site_admission_upserted",
-        field_id=str(field_id),
-        group_id=row.group_id,
         land_id=land_id,
-        score=row.score,
+        group_id=existing.group_id,
+        score=existing.score,
     )
 
     return SiteAdmissionFetchResponse(
-        field_id=str(field_id),
-        group_id=row.group_id,
+        land_id=land_id,
+        group_id=existing.group_id,
         status="fetched",
-        admission=_admission_row_to_out(row),
+        admission=_admission_row_to_out(existing),
         message="已从中和农信拉取并保存现场准入问卷。",
     )

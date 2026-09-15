@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.auth import OrgContext, get_org_context, require_roles
-from app.models.tables import Field, WeatherDaily
+from app.models.tables import LandParcel, WeatherDaily
 from app.schemas.weather import (
     WeatherBackfillRequest,
     WeatherBackfillResponse,
@@ -43,11 +43,11 @@ _FORECAST_VARIABLES = [
 
 
 async def _get_field_or_404(
-    field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession
-) -> Field:
-    field = await db.get(Field, field_id)
+    land_id: str, org_id: uuid.UUID, db: AsyncSession
+) -> LandParcel:
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="LandParcel not found")
     return field
 
 
@@ -112,9 +112,9 @@ def _safe_int(daily: dict, key: str, idx: int) -> int | None:
     return int(val) if val is not None else None
 
 
-@router.get("/fields/{field_id}/weather", response_model=WeatherResponse)
+@router.get("/lands/{land_id}/weather", response_model=WeatherResponse)
 async def get_field_weather(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     start_date: date = Query(..., description="Start date (ISO 8601)"),
@@ -122,7 +122,7 @@ async def get_field_weather(
     include_forecast: bool = Query(True, description="Include 7-day forecast"),
 ):
     """Get weather data for a field within a date range."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_field_or_404(land_id, ctx.org_id, db)
 
     # Validate date range (max 365 days)
     if (end_date - start_date).days > 365:
@@ -134,7 +134,7 @@ async def get_field_weather(
     result = await db.execute(
         select(WeatherDaily)
         .where(
-            WeatherDaily.field_id == field_id,
+            WeatherDaily.land_id == land_id,
             WeatherDaily.date >= start_date,
             WeatherDaily.date <= end_date,
         )
@@ -146,9 +146,9 @@ async def get_field_weather(
     # Get centroid for forecast + location
     centroid_result = await db.execute(
         select(
-            func.ST_Y(func.ST_Centroid(Field.geom)).label("lat"),
-            func.ST_X(func.ST_Centroid(Field.geom)).label("lon"),
-        ).where(Field.id == field_id)
+            func.ST_Y(func.ST_Centroid(LandParcel.geom)).label("lat"),
+            func.ST_X(func.ST_Centroid(LandParcel.geom)).label("lon"),
+        ).where(LandParcel.land_id == land_id)
     )
     centroid_row = centroid_result.one()
     lat, lon = float(centroid_row.lat), float(centroid_row.lon)
@@ -159,10 +159,10 @@ async def get_field_weather(
         forecast = await _fetch_forecast(lat, lon)
 
     # Compute summary from DB data
-    summary = await _compute_summary(db, field_id, start_date, end_date)
+    summary = await _compute_summary(db, land_id, start_date, end_date)
 
     return WeatherResponse(
-        field_id=field_id,
+        land_id=land_id,
         location=WeatherLocation(latitude=lat, longitude=lon),
         data=data,
         forecast=forecast,
@@ -170,34 +170,34 @@ async def get_field_weather(
     )
 
 
-@router.get("/fields/{field_id}/weather/summary", response_model=WeatherSummaryOut)
+@router.get("/lands/{land_id}/weather/summary", response_model=WeatherSummaryOut)
 async def get_field_weather_summary(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     days: int = Query(30, ge=1, le=365, description="Number of past days"),
 ):
     """Quick weather summary for dashboard cards."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_field_or_404(land_id, ctx.org_id, db)
 
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
-    return await _compute_summary(db, field_id, start_date, end_date)
+    return await _compute_summary(db, land_id, start_date, end_date)
 
 
 @router.post(
-    "/fields/{field_id}/weather/backfill",
+    "/lands/{land_id}/weather/backfill",
     response_model=WeatherBackfillResponse,
     status_code=202,
 )
 async def trigger_weather_backfill(
-    field_id: uuid.UUID,
+    land_id: str,
     body: WeatherBackfillRequest,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Trigger a manual weather backfill for a field."""
-    await _get_field_or_404(field_id, ctx.org_id, db)
+    await _get_field_or_404(land_id, ctx.org_id, db)
 
     if body.days < 1 or body.days > 365:
         raise HTTPException(status_code=400, detail="days must be between 1 and 365")
@@ -205,24 +205,24 @@ async def trigger_weather_backfill(
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
-        type="weather_backfill", field_id=str(field_id), extras={"days": body.days}
+        type="weather_backfill", land_id=str(land_id), extras={"days": body.days}
     )
 
     logger.info(
         "weather_backfill_triggered",
-        field_id=str(field_id),
+        land_id=str(land_id),
         days=body.days,
         mq_task_id=task_id,
     )
     return WeatherBackfillResponse(
-        field_id=field_id,
+        land_id=land_id,
         status="accepted",
         message=f"Weather backfill for {body.days} days queued.",
     )
 
 
 async def _compute_summary(
-    db: AsyncSession, field_id: uuid.UUID, start_date: date, end_date: date
+    db: AsyncSession, land_id: str, start_date: date, end_date: date
 ) -> WeatherSummaryOut:
     """Compute aggregated weather summary from stored records."""
     result = await db.execute(
@@ -242,7 +242,7 @@ async def _compute_summary(
             .label("heat_days"),
             func.max(WeatherDaily.updated_at).label("last_updated"),
         ).where(
-            WeatherDaily.field_id == field_id,
+            WeatherDaily.land_id == land_id,
             WeatherDaily.date >= start_date,
             WeatherDaily.date <= end_date,
         )
@@ -260,7 +260,7 @@ async def _compute_summary(
     latest_drought = await db.execute(
         select(WeatherDaily.drought_index)
         .where(
-            WeatherDaily.field_id == field_id, WeatherDaily.drought_index.isnot(None)
+            WeatherDaily.land_id == land_id, WeatherDaily.drought_index.isnot(None)
         )
         .order_by(WeatherDaily.date.desc())
         .limit(1)
@@ -268,7 +268,7 @@ async def _compute_summary(
     drought_row = latest_drought.scalar()
 
     return WeatherSummaryOut(
-        field_id=field_id,
+        land_id=land_id,
         period_start=start_date,
         period_end=end_date,
         avg_temperature=_round_opt(avg_temp, 1),

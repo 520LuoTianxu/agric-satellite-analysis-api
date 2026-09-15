@@ -1,0 +1,15 @@
+---
+description: 下载机不得直连 API Postgres 或 API Redis
+alwaysApply: true
+---
+
+# 下载机隔离
+
+下载侧服务（`ingest`、`storage`、`beat`、`decloud`、`mq_consumer`）不得连接 API Postgres（`DATABASE_URL` / `:5432`）或 API Redis（`:6379`）。
+
+- 地块、任务和「要下载什么」通过 Internal HTTP 发现（`API_BASE_URL` + `INTERNAL_API_TOKEN`）。
+- 用 `/v1/internal/work/claim` 领任务；结果走 complete / `results/apply`。
+- Beat 只往本机 Redis 发任务名。不要在下载机上 `SELECT` 或用 SyncSession 拉地块清单。
+- `ALLOW_LEGACY_DB=1` 和 `INGEST_PG_WRITES=1` 只是切流逃生口，不是新功能默认。
+
+详见 `AGENTS.md` 和 `docs/design/download-host-no-direct-pg-redis.md`。

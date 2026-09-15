@@ -19,17 +19,17 @@ See `docs/design/ingest-storage-split.md`.
 Index jobs (`process_ndvi`, vegetation `process_*`, S1 backfill, agri
 optical lonlat) search STAC once, then download and process scenes
 concurrently inside that Celery task. Inside each scene, windowed band
-reads also overlap (S2 agri optical typically 7 unique bands; classic
-indices 2-3; S1 VV+VH).
+reads also overlap (S2 optical typically 7 unique bands; index calculations
+2-3; S1 VV+VH).
 
 | Env | Default | Meaning |
 |---|---|---|
 | `INGEST_SCENE_MAX_WORKERS` | `16` | Thread pool size for per-scene download+process. Independent of Celery `--concurrency` (compose ingest default is 4). |
 | `INGEST_BAND_MAX_WORKERS` | `16` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 4 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
-| `WRITE_INDEX_COGS` | unset | Agri: skip index TIF/COG uploads. Classic fields: write COGs. `0` = never. `1` = always (storage-heavy). |
+| `WRITE_INDEX_COGS` | unset | Canonical optical path skips index TIF/COG uploads by default. `0` = never. `1` = always (storage-heavy). |
 | `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
 | `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window cloud removal after agri optical ingest. Off by default. See `docs/decloud-uncrtaints.md`. |
-| `DECLOUD_MODE` | `batch` | When enabled: buffer field windows, then decloud the job. `per_scene` only if neighbors are already cached. |
+| `DECLOUD_MODE` | `batch` | When enabled: buffer land windows, then decloud the job. `per_scene` only if neighbors are already cached. |
 
 Raising Celery concurrency alone still leaves each job looping scenes
 serially. Scene-level threads overlap HTTP/GDAL I/O across dates in one

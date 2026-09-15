@@ -86,7 +86,6 @@ S1_MATCH_DAYS = 6
 
 def enqueue_parcel_decloud(
     *,
-    field_id: str,
     land_id: str,
     date_str: str,
     mq_task_id: str | None = None,
@@ -110,7 +109,6 @@ def enqueue_parcel_decloud(
         return False
     process_parcel_decloud.apply_async(
         args=(
-            field_id,
             str(land_id),
             date_str,
             mq_task_id,
@@ -123,7 +121,6 @@ def enqueue_parcel_decloud(
     )
     logger.info(
         "decloud_enqueued",
-        field_id=field_id,
         land_id=str(land_id),
         date=date_str,
         stac_cloud=stac_cloud,
@@ -135,7 +132,6 @@ def enqueue_parcel_decloud(
 
 def enqueue_decloud_parcel_batch(
     *,
-    field_id: str,
     land_id: str,
     date_from: str,
     date_to: str,
@@ -148,7 +144,6 @@ def enqueue_decloud_parcel_batch(
         return False
     decloud_parcel_batch.apply_async(
         args=(
-            field_id,
             str(land_id),
             str(date_from)[:10],
             str(date_to)[:10],
@@ -160,7 +155,6 @@ def enqueue_decloud_parcel_batch(
     )
     logger.info(
         "decloud_batch_enqueued",
-        field_id=field_id,
         land_id=str(land_id),
         date_from=str(date_from)[:10],
         date_to=str(date_to)[:10],
@@ -206,7 +200,6 @@ def cache_optical_s2_window(
 
 def schedule_decloud_after_raw(
     *,
-    field_id: str,
     land_id: str,
     date_from: str,
     date_to: str,
@@ -244,7 +237,6 @@ def schedule_decloud_after_raw(
     for date_str in plan.per_scene_dates:
         row = by_date.get(date_str) or {}
         enqueue_parcel_decloud(
-            field_id=field_id,
             land_id=str(land_id),
             date_str=date_str,
             mq_task_id=mq_task_id,
@@ -255,7 +247,6 @@ def schedule_decloud_after_raw(
         )
     if plan.batch:
         enqueue_decloud_parcel_batch(
-            field_id=field_id,
             land_id=str(land_id),
             date_from=date_from,
             date_to=date_to,
@@ -265,7 +256,6 @@ def schedule_decloud_after_raw(
         )
     logger.info(
         "decloud_scheduled_after_raw",
-        field_id=field_id,
         land_id=str(land_id),
         mode=decloud_mode(),
         season_months=list(months),
@@ -287,7 +277,7 @@ def schedule_decloud_after_raw(
 
 
 def _search_s2_l2a_windows(
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     date_from: date,
     date_to: date,
     *,
@@ -303,7 +293,7 @@ def _search_s2_l2a_windows(
     catalog = STACClient.open(os.environ.get("STAC_API_URL", STAC_API_URL))
     search = catalog.search(
         collections=[STAC_COLLECTION],
-        intersects=field_geom_geojson,
+        intersects=land_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
         # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 includes 100.0% scenes
         query={"eo:cloud_cover": {"lte": max_cloud}},
@@ -352,7 +342,7 @@ def _pick_temporal_scenes(
 
 
 def _read_s1_for_dates(
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     dates: list[date],
     bounds: tuple,
     target_shape: tuple,
@@ -365,7 +355,7 @@ def _read_s1_for_dates(
         return []
     d0 = min(dates) - timedelta(days=S1_MATCH_DAYS)
     d1 = max(dates) + timedelta(days=S1_MATCH_DAYS)
-    s1_scenes = search_s1_scenes(field_geom_geojson, d0, d1)
+    s1_scenes = search_s1_scenes(land_geom_geojson, d0, d1)
     out: list[np.ndarray] = []
     h, w = target_shape
     for d in dates:
@@ -391,11 +381,11 @@ def _read_s1_for_dates(
 
 def _index_arrays_from_reflectance(
     rec_01: np.ndarray,
-    field_mask: np.ndarray | None,
+    land_mask: np.ndarray | None,
 ) -> dict[str, np.ndarray]:
     """Recompute agri optical indices from reconstructed 13-band S2 (DN).
 
-    ``field_mask`` is optional. Publishing samples the polygon itself; masking
+    ``land_mask`` is optional. Publishing samples the polygon itself; masking
     first can wipe every cell on a small parcel and yield ``no_pixels``.
     """
     name_to_idx = {
@@ -419,19 +409,19 @@ def _index_arrays_from_reflectance(
         needed = {b: bands[b] for b in index_def.bands if b in bands}
         arr = index_def.formula(needed)
         arr[~np.isfinite(arr)] = np.nan
-        if field_mask is not None:
-            arr[~field_mask] = np.nan
+        if land_mask is not None:
+            arr[~land_mask] = np.nan
         index_arrays[INDEX_KEY_TO_PIXEL[key]] = arr
     return index_arrays
 
 
 def _rgb_stats(
-    rec_01: np.ndarray, raw_dn: np.ndarray, field_mask: np.ndarray
+    rec_01: np.ndarray, raw_dn: np.ndarray, land_mask: np.ndarray
 ) -> tuple[float, float, float, float]:
     """Return (rgb_mean, rgb_mean_raw, rgb_std, rgb_std_raw) in 0-1 units."""
     rec_rgb = rec_01[[1, 2, 3]]  # B02, B03, B04
     raw_rgb = raw_dn[[1, 2, 3]] / 10000.0
-    mask = field_mask & np.isfinite(rec_rgb[0])
+    mask = land_mask & np.isfinite(rec_rgb[0])
     if not np.any(mask):
         mask = np.isfinite(rec_rgb[0])
     rec_vals = rec_rgb[:, mask]
@@ -477,7 +467,7 @@ def _publish_decloud_product(
     *,
     meta: dict[str, Any],
     date_str: str,
-    field_id_str: str,
+    land_id_str: str,
     index_arrays: dict[str, np.ndarray],
     transform,
     geom4326: dict,
@@ -589,7 +579,7 @@ def _publish_decloud_product(
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"
         ),
-        "pixel_data_url": f"decloud://field/{field_id_str}/{date_str}",
+        "pixel_data_url": f"decloud://land/{land_id_str}/{date_str}",
         "ndvi_avg": (
             float(quality_inputs.ndvi_mean)
             if quality_inputs is not None
@@ -626,7 +616,6 @@ def _publish_decloud_product(
     json_url = publish_optical_lonlat_to_oss_mq(
         row,
         mq_task_id=mq_task_id,
-        field_id=field_id_str,
         oss_sensor=decloud_oss_sensor(),
         extra_extras={
             "source": DECLOUD_SOURCE,
@@ -684,7 +673,7 @@ def _cache_s2_scene(
 def _buffer_s2_windows(
     *,
     land_id: str,
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     date_from: date,
     date_to: date,
     bounds: tuple,
@@ -693,7 +682,7 @@ def _buffer_s2_windows(
 ) -> list[dict[str, Any]]:
     """STAC-search the pad range once and window any missing parcel stacks."""
     scenes = _search_s2_l2a_windows(
-        field_geom_geojson, date_from, date_to, max_cloud=100.0
+        land_geom_geojson, date_from, date_to, max_cloud=100.0
     )
     buffered: list[dict[str, Any]] = []
     for sc in scenes:
@@ -740,7 +729,7 @@ def _buffer_s2_windows(
 def _buffer_s1_for_dates(
     *,
     land_id: str,
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     dates: list[date],
     bounds: tuple,
     target_shape: tuple,
@@ -760,7 +749,7 @@ def _buffer_s1_for_dates(
     if not need:
         return out
     loaded = _read_s1_for_dates(
-        field_geom_geojson, need, bounds, target_shape, target_transform
+        land_geom_geojson, need, bounds, target_shape, target_transform
     )
     for d, arr in zip(need, loaded):
         out[d] = arr
@@ -812,11 +801,10 @@ def _neighbor_ndvi_from_cache(land_id: str, target: date) -> float | None:
 def _decloud_one_from_buffer(
     *,
     session,
-    agri_meta: dict[str, Any],
-    field_id_str: str,
-    field_geom_geojson: dict,
+    land_meta: dict[str, Any],
+    land_geom_geojson: dict,
     target_transform,
-    field_mask: np.ndarray,
+    land_mask: np.ndarray,
     target: date,
     buffered_s2: list[dict[str, Any]],
     s1_by_date: dict[date, np.ndarray],
@@ -826,7 +814,7 @@ def _decloud_one_from_buffer(
     mq_task_id: str | None,
 ) -> dict[str, Any]:
     """Run UnCRtainTS on one cloudy date using already-buffered windows."""
-    land_id = str(agri_meta["land_id"])
+    land_id = str(land_meta["land_id"])
     input_t = decloud_input_t()
     if not batch_neighbors_ready(len(buffered_s2), input_t):
         logger.info(
@@ -893,12 +881,12 @@ def _decloud_one_from_buffer(
     # Sample/publish without pre-masking so weak reconstructions still store.
     index_arrays = _index_arrays_from_reflectance(rec_01 * 10000.0, None)
     rgb_mean, rgb_raw, rgb_std, rgb_std_raw = _rgb_stats(
-        rec_01, s2_stack[-1], field_mask
+        rec_01, s2_stack[-1], land_mask
     )
     ndvi_for_quality = index_arrays.get("NDVI")
     if ndvi_for_quality is not None:
         ndvi_q = np.array(ndvi_for_quality, copy=True)
-        ndvi_q[~field_mask] = np.nan
+        ndvi_q[~land_mask] = np.nan
     else:
         ndvi_q = rec_01[7]
     ndvi_stats = compute_zonal_stats(ndvi_q)
@@ -915,12 +903,12 @@ def _decloud_one_from_buffer(
     )
     quality = score_decloud(quality_inputs)
     published = _publish_decloud_product(
-        meta=agri_meta,
+        meta=land_meta,
         date_str=target.isoformat(),
-        field_id_str=field_id_str,
+        land_id_str=land_id,
         index_arrays=index_arrays,
         transform=target_transform,
-        geom4326=field_geom_geojson,
+        geom4326=land_geom_geojson,
         quality=quality,
         raw_scene_id=raw_scene_id,
         stac_cloud=stac_cloud,
@@ -948,26 +936,27 @@ def _decloud_one_from_buffer(
     }
 
 
-def _field_context(session, field_id: str):
-    from app.models.tables import Field
-    from app.tasks.agri_lonlat import _load_agri_meta
+def _land_context(session, land_id: str):
+    from app.models.tables import LandParcel
 
-    field = session.get(Field, field_id)
-    if field is None or field.geom is None:
+    land = session.get(LandParcel, str(land_id))
+    if land is None or land.geom is None:
         return None
-    agri_meta = _load_agri_meta(session, field)
-    field_geom = to_shape(field.geom)
-    field_geom_geojson = mapping(field_geom)
-    target_transform, target_shape, field_mask, bounds = compute_target_grid(
-        field_geom.bounds, field_geom
+    land_geom = to_shape(land.geom)
+    land_geom_geojson = mapping(land_geom)
+    target_transform, target_shape, land_mask, bounds = compute_target_grid(
+        land_geom.bounds, land_geom
     )
     return {
-        "field": field,
-        "agri_meta": agri_meta,
-        "field_geom_geojson": field_geom_geojson,
+        "land_meta": {
+            "land_id": land.land_id,
+            "tile_id": land.tile_id,
+            "land_name": land.land_name or land.land_id,
+        },
+        "land_geom_geojson": land_geom_geojson,
         "target_transform": target_transform,
         "target_shape": target_shape,
-        "field_mask": field_mask,
+        "land_mask": land_mask,
         "bounds": bounds,
     }
 
@@ -982,7 +971,6 @@ def _field_context(session, field_id: str):
 )
 def process_parcel_decloud(
     self,
-    field_id: str,
     land_id: str,
     date_str: str,
     mq_task_id: str | None = None,
@@ -1005,13 +993,13 @@ def process_parcel_decloud(
     target = date.fromisoformat(str(date_str)[:10])
     session = get_db_session()
     try:
-        ctx = _field_context(session, field_id)
+        ctx = _land_context(session, land_id)
         if ctx is None:
-            return {"status": "error", "detail": "field_missing"}
+            return {"status": "error", "detail": "land_missing"}
         window_from, window_to = neighbor_window(target)
         buffered = _buffer_s2_windows(
             land_id=str(land_id),
-            field_geom_geojson=ctx["field_geom_geojson"],
+            land_geom_geojson=ctx["land_geom_geojson"],
             date_from=window_from,
             date_to=window_to,
             bounds=ctx["bounds"],
@@ -1022,7 +1010,7 @@ def process_parcel_decloud(
         if decloud_use_sar():
             s1_by_date = _buffer_s1_for_dates(
                 land_id=str(land_id),
-                field_geom_geojson=ctx["field_geom_geojson"],
+                land_geom_geojson=ctx["land_geom_geojson"],
                 dates=[sc["date"] for sc in buffered],
                 bounds=ctx["bounds"],
                 target_shape=ctx["target_shape"],
@@ -1030,11 +1018,10 @@ def process_parcel_decloud(
             )
         return _decloud_one_from_buffer(
             session=session,
-            agri_meta=ctx["agri_meta"],
-            field_id_str=str(ctx["field"].id),
-            field_geom_geojson=ctx["field_geom_geojson"],
+            land_meta=ctx["land_meta"],
+            land_geom_geojson=ctx["land_geom_geojson"],
             target_transform=ctx["target_transform"],
-            field_mask=ctx["field_mask"],
+            land_mask=ctx["land_mask"],
             target=target,
             buffered_s2=buffered,
             s1_by_date=s1_by_date,
@@ -1063,7 +1050,6 @@ def process_parcel_decloud(
 )
 def decloud_parcel_batch(
     self,
-    field_id: str,
     land_id: str,
     date_from: str,
     date_to: str,
@@ -1104,13 +1090,13 @@ def decloud_parcel_batch(
     pad = decloud_lookback_days()
     session = get_db_session()
     try:
-        ctx = _field_context(session, field_id)
+        ctx = _land_context(session, land_id)
         if ctx is None:
-            return {"status": "error", "detail": "field_missing"}
+            return {"status": "error", "detail": "land_missing"}
 
         buffered = _buffer_s2_windows(
             land_id=str(land_id),
-            field_geom_geojson=ctx["field_geom_geojson"],
+            land_geom_geojson=ctx["land_geom_geojson"],
             date_from=start - timedelta(days=pad),
             date_to=end + timedelta(days=pad),
             bounds=ctx["bounds"],
@@ -1121,7 +1107,7 @@ def decloud_parcel_batch(
         if decloud_use_sar():
             s1_by_date = _buffer_s1_for_dates(
                 land_id=str(land_id),
-                field_geom_geojson=ctx["field_geom_geojson"],
+                land_geom_geojson=ctx["land_geom_geojson"],
                 dates=[sc["date"] for sc in buffered],
                 bounds=ctx["bounds"],
                 target_shape=ctx["target_shape"],
@@ -1167,11 +1153,10 @@ def decloud_parcel_batch(
                 continue
             one = _decloud_one_from_buffer(
                 session=session,
-                agri_meta=ctx["agri_meta"],
-                field_id_str=str(ctx["field"].id),
-                field_geom_geojson=ctx["field_geom_geojson"],
+                land_meta=ctx["land_meta"],
+                land_geom_geojson=ctx["land_geom_geojson"],
                 target_transform=ctx["target_transform"],
-                field_mask=ctx["field_mask"],
+                land_mask=ctx["land_mask"],
                 target=target,
                 buffered_s2=buffered,
                 s1_by_date=s1_by_date,

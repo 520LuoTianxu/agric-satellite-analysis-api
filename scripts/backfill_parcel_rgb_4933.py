@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backfill parcel true-color RGB for land_id=4933 (2025-08..10 raw S2).
 
-Uploads field_rgb.png to OSS, patches scene JSON, UPDATEs agric_satellite.parcel_scene_products
+Uploads land_rgb.png to OSS, patches scene JSON, UPDATEs agric_satellite.parcel_scene_products
 rgb_url / rgb_oss_key. Safe to re-run.
 """
 from __future__ import annotations
@@ -45,13 +45,13 @@ def db_url() -> str:
     )
 
 
-def field_rgb_oss_key(land_id: str, date_str: str) -> str:
+def land_rgb_oss_key(land_id: str, date_str: str) -> str:
     json_prefix = (settings.oss_prefix or "s1s2_parcel/json/").rstrip("/")
     if json_prefix.endswith("/json"):
         img_root = json_prefix[: -len("/json")] + "/img"
     else:
         img_root = "s1s2_parcel/img"
-    return f"{img_root}/{land_id}/{date_str}_S2/field_rgb.png"
+    return f"{img_root}/{land_id}/{date_str}_S2/land_rgb.png"
 
 
 def stretch(band: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -94,19 +94,19 @@ def main() -> int:
     )
     storage = get_storage()
     with eng.connect() as conn:
-        field = conn.execute(
+        land = conn.execute(
             text(
                 """
-                SELECT id::text, name, ST_AsGeoJSON(geom)::json AS geom
-                FROM fields
-                WHERE tags_json::text LIKE :pat OR name = :name
+                SELECT land_id, land_name, boundary_geojson
+                FROM agric_satellite.land_parcels
+                WHERE land_id = :lid OR land_name = :name
                 LIMIT 1
                 """
             ),
-            {"pat": f"%agri:{LAND_ID}%", "name": "贾河北村15号地块"},
+            {"lid": LAND_ID, "name": "贾河北村15号地块"},
         ).mappings().first()
-        if not field:
-            print("FIELD_NOT_FOUND")
+        if not land:
+            print("LAND_NOT_FOUND")
             return 1
         rows = conn.execute(
             text(
@@ -122,8 +122,8 @@ def main() -> int:
             {"lid": LAND_ID, "d0": DATE_FROM, "d1": DATE_TO},
         ).mappings().all()
 
-    geom = field["geom"]
-    print(f"field={field['id']} rows={len(rows)}")
+    geom = land["boundary_geojson"]
+    print(f"land_id={land['land_id']} rows={len(rows)}")
     catalog = Client.open(STAC_API)
     ok = 0
     fail = 0
@@ -159,7 +159,7 @@ def main() -> int:
 
             geom_shp = shape(geom)
             bounds = geom_shp.bounds
-            # reuse pipeline grid: need field_geom geojson
+            # 复用统一的地块栅格计算逻辑，几何直接来自主地块表。
             target_transform, target_shape, field_mask, _bounds = compute_target_grid(
                 bounds, geom
             )
@@ -177,7 +177,7 @@ def main() -> int:
                 fail += 1
                 continue
             png = render_png(b02, b03, b04, field_mask.astype(bool))
-            img_key = field_rgb_oss_key(LAND_ID, d)
+            img_key = land_rgb_oss_key(LAND_ID, d)
             storage.put_bytes(img_key, png, content_type="image/png")
             img_url = storage.presigned_get(img_key)
 

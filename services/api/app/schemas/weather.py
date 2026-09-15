@@ -55,7 +55,7 @@ class WeatherForecastDay(BaseModel):
 
 
 class WeatherSummaryOut(BaseModel):
-    field_id: uuid.UUID
+    land_id: str
     period_start: date
     period_end: date
     avg_temperature: float | None = None
@@ -82,7 +82,7 @@ class WeatherLocation(BaseModel):
 
 
 class WeatherResponse(BaseModel):
-    field_id: uuid.UUID
+    land_id: str
     location: WeatherLocation
     data: list[WeatherDailyOut]
     forecast: list[WeatherForecastDay] = []
@@ -94,6 +94,6 @@ class WeatherBackfillRequest(BaseModel):
 
 
 class WeatherBackfillResponse(BaseModel):
-    field_id: uuid.UUID
+    land_id: str
     status: str
     message: str

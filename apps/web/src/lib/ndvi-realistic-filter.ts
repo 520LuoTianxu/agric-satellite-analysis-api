@@ -1,4 +1,4 @@
-import type { FieldStat } from "@/lib/api";
+import type { LandStat } from "@/lib/api";
 
 export type NdviRealisticFilterOpts = {
     seasonMonths?: number[];
@@ -7,7 +7,7 @@ export type NdviRealisticFilterOpts = {
 
 /** Rules 1–2: flagged unreliable or parcel/STAC cloud cover above agri skip threshold. */
 export function isBasicUnreliableNdviPoint(
-    point: Pick<FieldStat, "may_be_unreliable" | "cloud_cover">,
+    point: Pick<LandStat, "may_be_unreliable" | "cloud_cover">,
 ): boolean {
     if (point.may_be_unreliable === true) return true;
     const cc = point.cloud_cover;
@@ -27,7 +27,7 @@ function median(values: number[]): number | null {
 }
 
 /** Up to 2 nearest reliable neighbors on each side (skip basic-unreliable points). */
-function neighborMeans(stats: FieldStat[], index: number): number[] {
+function neighborMeans(stats: LandStat[], index: number): number[] {
     const out: number[] = [];
     let taken = 0;
     for (let i = index - 1; i >= 0 && taken < 2; i--) {
@@ -63,12 +63,12 @@ function inSeasonOrPeakWindow(
 }
 
 /**
- * True when a FieldStat should be hidden by the "only valid observations" filter.
+ * True when a LandStat should be hidden by the "only valid observations" filter.
  * Cloud-hole spike (rule 3) only runs when seasonMonths and/or peakMonths are provided.
  */
 export function isUnrealisticNdviPoint(
-    point: FieldStat,
-    allStats: FieldStat[],
+    point: LandStat,
+    allStats: LandStat[],
     index: number,
     opts: NdviRealisticFilterOpts = {},
 ): boolean {
@@ -94,8 +94,8 @@ export function isUnrealisticNdviPoint(
 
 /** Drop unrealistic points; preserves order of `stats`. */
 export function filterRealisticNdviStats(
-    stats: FieldStat[],
+    stats: LandStat[],
     opts: NdviRealisticFilterOpts = {},
-): FieldStat[] {
+): LandStat[] {
     return stats.filter((point, index) => !isUnrealisticNdviPoint(point, stats, index, opts));
 }

@@ -13,17 +13,14 @@ def _utcnow() -> datetime:
 
 
 class TaskMessage(BaseModel):
-    """Inbound task published to CLOUDAMQP_DOWNLOAD_QUEUE (openfarm_download)."""
+    """Inbound task; parcel identity is always the agricultural ``land_id``."""
 
     task_id: str
     type: str = "satellite_analysis"
-# agric-satellite-analysis field UUID (preferred when known)
-    field_id: str | None = None
-    # agric_satellite.land_parcels.land_id — user sample field_id often means this
-    parcel_id: str | None = None
     land_id: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utcnow)
+    trace_id: str | None = None
 
 
 class ResultMessage(BaseModel):
@@ -37,10 +34,10 @@ class ResultMessage(BaseModel):
     status: Literal["success", "failed"]
     oss_urls: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
-    field_id: str | None = None
     land_id: str | None = None
     finished_at: datetime = Field(default_factory=_utcnow)
     extras: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
     # Inline result JSON (weather/soil). ``data`` is an accepted alias.
     payload: dict[str, Any] | None = None
     data: dict[str, Any] | None = None

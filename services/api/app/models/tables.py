@@ -32,7 +32,7 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema="agric_satellite")
 
 
-# ── Farms / Fields ───────────────────────────────────────────────────
+# ── Farms / Land parcels ─────────────────────────────────────────────
 
 
 class Farm(Base):
@@ -55,24 +55,71 @@ class Farm(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    fields: Mapped[list[Field]] = relationship(back_populates="farm", lazy="selectin")
-
-
-class Field(Base):
-    __tablename__ = "fields"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    land_parcels: Mapped[list["LandParcel"]] = relationship(
+        back_populates="farm", lazy="selectin"
     )
-    farm_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("farms.id"), nullable=False
+
+
+class LandParcel(Base):
+    """Canonical parcel master; every domain record points to ``land_id``.
+
+    ``boundary_geojson`` and the agricultural source attributes remain the
+    authoritative parcel data.  The former application fields are stored as
+    additional attributes on this same row; no UUID-to-land mapping exists.
+    """
+
+    __tablename__ = "land_parcels"
+
+    land_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_parcel_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tile_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    virtual_tile_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tile_assignment_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tile_anchor_land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    farm_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("farms.id", ondelete="SET NULL"), nullable=True
     )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    geom = mapped_column(Geometry("MULTIPOLYGON", srid=4326), nullable=False)
+    land_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    group_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    org_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    org_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    base_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    province_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    province_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    city_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    city_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    county_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    county_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    town_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    town_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    village_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    village_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    soil_property: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_batch: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    land_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_update_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+    boundary_geojson = mapped_column(JSONB, nullable=False)
+    boundary_srid: Mapped[int] = mapped_column(Integer, nullable=False, default=4326)
+    min_lon: Mapped[float] = mapped_column(Float, nullable=False)
+    min_lat: Mapped[float] = mapped_column(Float, nullable=False)
+    max_lon: Mapped[float] = mapped_column(Float, nullable=False)
+    max_lat: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # 这些列是历史字段模型并入主表后的业务属性，不是第二套地块身份。
+    geom = mapped_column(Geometry("MULTIPOLYGON", srid=4326), nullable=True)
     area_ha: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     crop_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     season: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json = mapped_column(JSONB, nullable=True)
+    source_properties = mapped_column(JSONB, nullable=False, default=dict)
+    source_file: Mapped[str] = mapped_column(Text, nullable=False)
+    source_feature_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_area_mu: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    land_area_mu: Mapped[float | None] = mapped_column(Numeric(18, 4))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -83,7 +130,7 @@ class Field(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    farm: Mapped[Farm] = relationship(back_populates="fields")
+    farm: Mapped[Farm | None] = relationship(back_populates="land_parcels")
 
 
 # ── Observations / Layers ────────────────────────────────────────────
@@ -93,15 +140,15 @@ class RasterLayer(Base):
     __tablename__ = "raster_layers"
     __table_args__ = (
         UniqueConstraint(
-            "field_id", "date", "layer_type", name="uq_raster_field_date_type"
+            "land_id", "date", "layer_type", name="uq_raster_land_date_type"
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+    land_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=False
     )
     layer_type: Mapped[str] = mapped_column(Text, nullable=False, default="NDVI")
     satellite: Mapped[str] = mapped_column(Text, nullable=False, default="S2")
@@ -122,8 +169,8 @@ class FieldStat(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+    land_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=False, index=True
     )
     layer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("raster_layers.id"), nullable=False, index=True
@@ -151,8 +198,8 @@ class Alert(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+    land_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=False, index=True
     )
     date: Mapped[_date] = mapped_column(Date, nullable=False)
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -179,8 +226,8 @@ class ScoutingObservation(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+    land_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=False, index=True
     )
     alert_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("alerts.id"), nullable=True
@@ -208,8 +255,8 @@ class Job(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=True, index=True
+    land_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=True, index=True
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
@@ -246,8 +293,8 @@ class ShareLink(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+    land_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id"), nullable=False
     )
     token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     scope: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -268,16 +315,16 @@ class ShareLink(Base):
 class WeatherDaily(Base):
     __tablename__ = "weather_daily"
     __table_args__ = (
-        UniqueConstraint("field_id", "date", name="uq_weather_field_date"),
-        Index("idx_weather_field_date", "field_id", "date"),
+        UniqueConstraint("land_id", "date", name="uq_weather_land_date"),
+        Index("idx_weather_land_date", "land_id", "date"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("fields.id", ondelete="CASCADE"),
+    land_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("land_parcels.land_id", ondelete="CASCADE"),
         nullable=False,
     )
     date: Mapped[_date] = mapped_column(Date, nullable=False)
@@ -327,14 +374,14 @@ class WeatherDaily(Base):
 
 class SoilProfile(Base):
     __tablename__ = "soil_profiles"
-    __table_args__ = (Index("idx_soil_profiles_field_id", "field_id"),)
+    __table_args__ = (Index("idx_soil_profiles_land_id", "land_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("fields.id", ondelete="CASCADE"),
+    land_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("land_parcels.land_id", ondelete="CASCADE"),
         nullable=False,
     )
     source: Mapped[str] = mapped_column(
@@ -421,14 +468,14 @@ class SoilLayer(Base):
 
 class SoilFieldSummary(Base):
     __tablename__ = "soil_field_summary"
-    __table_args__ = (UniqueConstraint("field_id", name="uq_soil_field_summary_field"),)
+    __table_args__ = (UniqueConstraint("land_id", name="uq_soil_land_summary_land"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("fields.id", ondelete="CASCADE"),
+    land_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("land_parcels.land_id", ondelete="CASCADE"),
         nullable=False,
     )
     profile_id: Mapped[uuid.UUID] = mapped_column(
@@ -473,20 +520,18 @@ class SoilNutrientNpk(Base):
 
     __tablename__ = "soil_nutrient_npk"
     __table_args__ = (
-        UniqueConstraint("field_id", name="uq_soil_nutrient_npk_field"),
-        Index("idx_soil_nutrient_npk_field_id", "field_id"),
+        UniqueConstraint("land_id", name="uq_soil_nutrient_npk_land"),
         Index("idx_soil_nutrient_npk_land_id", "land_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("fields.id", ondelete="CASCADE"),
+    land_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("land_parcels.land_id", ondelete="CASCADE"),
         nullable=False,
     )
-    land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str] = mapped_column(
         String(40), nullable=False, server_default="cdfinance_analyzeSoilV2"
     )
@@ -525,20 +570,16 @@ class GroupSiteAdmission(Base):
     __tablename__ = "group_site_admission"
     __table_args__ = (
         UniqueConstraint("group_id", name="uq_group_site_admission_group"),
-        Index("idx_group_site_admission_field_id", "field_id"),
         Index("idx_group_site_admission_land_id", "land_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
-    field_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("fields.id", ondelete="CASCADE"),
-        nullable=True,
-    )
     group_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    land_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("land_parcels.land_id", ondelete="SET NULL"), nullable=True
+    )
     source: Mapped[str] = mapped_column(
         String(40), nullable=False, server_default="cdfinance_groupSiteAdmission"
     )

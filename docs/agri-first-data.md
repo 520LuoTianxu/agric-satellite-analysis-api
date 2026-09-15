@@ -1,6 +1,6 @@
 # Agri-first data plane
 
-How agric-satellite-analysis field records relate to the `agric_satellite` schema after the lonlat_v1 / no-OSS work.
+How the canonical `land_parcels` records relate to the `agric_satellite` schema after the lonlat_v1 / OSS work.
 
 ## Object storage (uploads / COGs)
 
@@ -39,11 +39,11 @@ Env knobs (ingest worker):
 | Source | Role |
 | --- | --- |
 | **`agric_satellite.parcel_scene_products`** | **Primary** RS for agri parcels. Prefer `pixel_data.format = lonlat_v1` at insert/ingest time. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1`. |
-| `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Legacy COG + TiTiler path only. Not required for agri field detail / 色斑图 / growth curves. |
+| `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Optional legacy COG + TiTiler path. Canonical parcel detail, 色斑图, and growth curves read the same `land_id` from `land_parcels` / `parcel_scene_products`. |
 
 Rules:
 
-- Fields tagged `agri:<land_id>` use the lonlat-direct ingest path (not per-index COG backfill). Manual refresh still runs satellite jobs; they write lonlat, not TIFs.
+- Canonical parcels use the lonlat-direct ingest path (not per-index COG backfill). Manual refresh still runs satellite jobs; they write lonlat, not TIFs.
 - Dedup for agri uses dates already in `parcel_scene_products`, not `raster_layers` (old COG rows must not block lonlat).
 - Ingest / seed must write **lonlat_v1** pixels into `parcel_scene_products` at insert time when available.
 - Do **not** implement soil inside `parcel_scene_products`.
@@ -52,36 +52,42 @@ Rules:
 
 | Table | Key | Binding |
 | --- | --- | --- |
-| `soil_profiles` / `soil_layers` / `soil_field_summary` | `field_id` | Same `fields.id` as the UI field |
-| `weather_daily` | `field_id` | Same |
+| `soil_profiles` / `soil_layers` / `soil_field_summary` | `land_id` | Direct FK to `land_parcels.land_id` |
+| `weather_daily` | `land_id` | Direct FK to `land_parcels.land_id` |
 
-Agri parcels bind soil/weather by tagging the corresponding field record:
+Soil and weather bind directly to the canonical parcel row:
 
 ```text
-tags_json: ["agri:13691", "source:agric_satellite.land_parcels", ...]
+land_parcels.land_id = "13691"
+soil_field_summary.land_id = "13691"
+weather_daily.land_id = "13691"
 ```
 
-UI uses `parseAgriLandId(tags)` for RS (`/v1/agri/...`) and the field UUID for soil/weather (`/v1/fields/{id}/soil`, weather APIs). Drought and flood date classes plus NDVI tooltip cloud / de-cloud text are in `docs/agri-drought-flood.md`.
+The UI uses the same `land_id` for parcel detail, RS, soil, weather, alerts,
+and reports. There is no tag parser or UUID translation step. Drought and flood
+date classes plus NDVI tooltip cloud / de-cloud text are in
+`docs/agri-drought-flood.md`.
 
 On field create (including agri-tagged):
 
-- Always enqueue `backfill_weather_for_field` + `fetch_soil_for_field`
-- Skip `backfill_indices_for_field` when agri-tagged
+- Always enqueue `backfill_weather_for_land` + `fetch_soil_for_land`
+- Satellite index work is also dispatched with the same `land_id`
 
 Ops helper for existing demo rows:
 
 ```bash
-python3 scripts/agri_seed/ensure_agri_field_soil_weather.py          # dry-run 范莘·lonlat_v1样例
-python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply  # sync geom if needed + enqueue
-python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply --all
+python3 scripts/agri_seed/ensure_land_soil_weather.py          # dry-run default farm
+python3 scripts/agri_seed/ensure_land_soil_weather.py --apply  # enqueue missing tasks
+python3 scripts/agri_seed/ensure_land_soil_weather.py --apply --all
 ```
 
-Admin API: `POST /v1/admin/ensure-agri-soil-weather` (owner) — same enqueue for the org’s agri-tagged fields.
+Admin API: `POST /v1/admin/ensure-agri-soil-weather` (owner) — same enqueue
+for the org’s canonical land parcels.
 
 ## Product UI
 
-- NdviTab / monitoring: if `agri:<land_id>` present → **only** agri timeseries / 色斑 path (`AgriTimeseriesPanel`). No COG backfill CTA.
-- Soil / weather tabs keep using `field_id`.
+- NdviTab / monitoring: reads the canonical `land_id` timeseries / 色斑 path (`AgriTimeseriesPanel`).
+- Soil / weather tabs use that same `land_id`.
 
 ## Out of scope (this pass)
 

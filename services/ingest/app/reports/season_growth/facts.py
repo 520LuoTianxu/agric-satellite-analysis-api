@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -20,7 +19,6 @@ from app.core.agri_classify import (
     is_drought_day_class,
     is_official_optical_product,
 )
-from app.core.agri_tags import parse_agri_land_id
 from app.core.harvest_detect import detect_harvest
 from openfarm_common.growing_seasons import months_from_window
 
@@ -214,63 +212,6 @@ def load_agri_s1_rows(
     return out
 
 
-def _indices_to_ndvi_ndmi(
-    indices: list[dict[str, Any]], start: date, end: date
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    by_date: dict[str, dict[str, float]] = {}
-    for row in indices:
-        d = _iso(row.get("date"))
-        if not _in_window(d, start, end):
-            continue
-        layer = str(row.get("layer_type") or "").upper()
-        mean = _num(row.get("mean"))
-        if mean is None:
-            continue
-        by_date.setdefault(d, {})[layer] = mean
-    ndvi = [
-        {"date": d, "value": round(vals["NDVI"], 4)}
-        for d, vals in sorted(by_date.items())
-        if "NDVI" in vals
-    ]
-    ndmi = [
-        {"date": d, "value": round(vals["NDMI"], 4)}
-        for d, vals in sorted(by_date.items())
-        if "NDMI" in vals
-    ]
-    return ndvi, ndmi
-
-
-def load_classic_indices(
-    session: "Session", field_id: uuid.UUID, start: date, end: date
-) -> list[dict[str, Any]]:
-    from sqlalchemy import select
-    from app.models.tables import FieldStat, RasterLayer
-
-    rows = session.execute(
-        select(
-            FieldStat.date,
-            RasterLayer.layer_type,
-            FieldStat.mean,
-        )
-        .join(RasterLayer, RasterLayer.id == FieldStat.layer_id)
-        .where(
-            FieldStat.field_id == field_id,
-            FieldStat.date >= start,
-            FieldStat.date <= end,
-            RasterLayer.layer_type.in_(("NDVI", "NDMI", "EVI")),
-        )
-        .order_by(FieldStat.date)
-    ).all()
-    return [
-        {
-            "date": _iso(r.date),
-            "layer_type": r.layer_type,
-            "mean": _num(r.mean),
-        }
-        for r in rows
-    ]
-
-
 def _drought_summary(
     s2_rows: list[dict[str, Any]], season_months: tuple[int, ...] | list[int]
 ) -> dict[str, Any]:
@@ -390,11 +331,9 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _prior_year_comparison(
     session: "Session",
     *,
-    land_id: str | None,
-    field_id: uuid.UUID | None,
+    land_id: str,
     start: date,
     end: date,
-    is_agri: bool,
 ) -> dict[str, Any] | None:
     try:
         prior_start = date(start.year - 1, start.month, start.day)
@@ -404,23 +343,16 @@ def _prior_year_comparison(
         prior_start = start - timedelta(days=365)
         prior_end = end - timedelta(days=365)
 
-    if is_agri and land_id:
-        rows = load_agri_s2_rows(session, land_id, prior_start, prior_end)
-        ndvi = [
-            {"date": r["date"], "value": r["ndvi_avg"]}
-            for r in rows
-            if r.get("ndvi_avg") is not None
-        ]
-    elif field_id:
-        indices = load_classic_indices(session, field_id, prior_start, prior_end)
-        ndvi, _ = _indices_to_ndvi_ndmi(indices, prior_start, prior_end)
-    else:
-        return None
+    rows = load_agri_s2_rows(session, str(land_id), prior_start, prior_end)
+    ndvi = [
+        {"date": r["date"], "value": r["ndvi_avg"]}
+        for r in rows
+        if r.get("ndvi_avg") is not None
+    ]
     if len(ndvi) < 2:
         return None
     official_count = None
-    if is_agri and land_id:
-        official_count = sum(1 for r in rows if r.get("official"))
+    official_count = sum(1 for r in rows if r.get("official"))
     return {
         "start_date": prior_start.isoformat(),
         "end_date": prior_end.isoformat(),
@@ -1650,7 +1582,7 @@ def build_spatial_block(
 
 def build_season_facts(
     session: "Session | None",
-    field_id: uuid.UUID | str,
+    land_id: str,
     *,
     start_date: str,
     end_date: str,
@@ -1659,12 +1591,12 @@ def build_season_facts(
 ) -> dict[str, Any]:
     """Compute compact JSON facts for PDF + LLM (no invented metrics).
 
-    Prefers ``GET /v1/internal/fields/{id}/season-growth-inputs`` when the
+    Prefers ``GET /v1/internal/lands/{land_id}/season-growth-inputs`` when the
     download host has ``API_BASE_URL`` + token (no SyncSession required).
     """
-    from app.models.tables import Field
-
-    fid = uuid.UUID(str(field_id))
+    land_id = str(land_id).strip()
+    if not land_id:
+        raise ValueError("land_id required")
     start = _parse_date(start_date)
     end = _parse_date(end_date)
     if not start or not end:
@@ -1683,7 +1615,7 @@ def build_season_facts(
         if internal_api_enabled():
             try:
                 http_inputs = season_growth_inputs(
-                    str(fid),
+                    land_id,
                     date_from=start.isoformat(),
                     date_to=end.isoformat(),
                 )
@@ -1696,11 +1628,9 @@ def build_season_facts(
 
     prior_s2_http: list[dict[str, Any]] = []
     if http_inputs is not None:
-        field_meta = dict(http_inputs.get("field") or {})
-        land_id = field_meta.get("land_id") or http_inputs.get("land_id")
+        field_meta = dict(http_inputs.get("land") or {})
         s2 = list(http_inputs.get("s2_rows") or [])
         s1 = list(http_inputs.get("s1_rows") or [])
-        classic_preloaded = list(http_inputs.get("classic_indices") or [])
         prior_s2_http = list(http_inputs.get("prior_s2_rows") or [])
     else:
         if session is None:
@@ -1708,20 +1638,19 @@ def build_season_facts(
                 "session required for build_season_facts when internal HTTP "
                 "is disabled or failed"
             )
-        field = session.get(Field, fid)
-        if not field or getattr(field, "deleted_at", None) is not None:
-            raise ValueError("Field not found")
-        land_id = parse_agri_land_id(getattr(field, "tags_json", None))
+        from app.models.tables import LandParcel
+
+        land = session.get(LandParcel, land_id)
+        if not land or getattr(land, "deleted_at", None) is not None:
+            raise ValueError("Land parcel not found")
         field_meta = {
-            "field_id": str(fid),
-            "field_name": getattr(field, "name", None) or "地块",
+            "land_name": land.land_name or "地块",
             "land_id": land_id,
-            "crop_type": getattr(field, "crop_type", None),
-            "area_ha": float(field.area_ha) if getattr(field, "area_ha", None) else None,
+            "crop_type": land.crop_type,
+            "area_ha": float(land.area_ha) if land.area_ha is not None else None,
         }
-        s2 = load_agri_s2_rows(session, land_id, start, end) if land_id else []
-        s1 = load_agri_s1_rows(session, land_id, start, end) if land_id else []
-        classic_preloaded = []
+        s2 = load_agri_s2_rows(session, land_id, start, end)
+        s1 = load_agri_s1_rows(session, land_id, start, end)
 
     window = {
         "start_date": start.isoformat(),
@@ -1733,134 +1662,63 @@ def build_season_facts(
         range(start.month, end.month + 1) if start.year == end.year else [start.month]
     )
 
-    if land_id:
-        if not s2 and not s1:
-            raise ValueError(
-                f"窗口内无 agri 遥感数据 (land_id={land_id}, {start}~{end})"
-            )
-        ndvi_ts = [
-            {"date": r["date"], "value": round(r["ndvi_avg"], 4), "official": r["official"]}
-            for r in s2
-            if r.get("ndvi_avg") is not None
-        ]
-        ndmi_ts = [
-            {"date": r["date"], "value": round(r["ndmi_avg"], 4), "official": r["official"]}
-            for r in s2
-            if r.get("ndmi_avg") is not None
-        ]
-        official_s2 = [r for r in s2 if r.get("official")]
-        clear_s2 = [r for r in s2 if r.get("clear")]
-        harvest_pts = [
-            {
-                "date": r["date"],
-                "ndvi_avg": r["ndvi_avg"],
-                "scene_id": r.get("scene_id"),
-                "official": r.get("official"),
-                "decloud_quality": r.get("decloud_quality"),
-            }
-            for r in s2
-            if r.get("ndvi_avg") is not None
-        ]
-        harvest = detect_harvest(harvest_pts, window=window)
-        drought = _drought_summary(s2, season_months)
-        flood = _flood_summary(s1)
-        if prior_s2_http:
-            prior_ndvi = [
-                {"date": r["date"], "value": r["ndvi_avg"]}
-                for r in prior_s2_http
-                if r.get("ndvi_avg") is not None
-            ]
-            prior = {
-                "year": start.year - 1,
-                "start_date": (http_inputs or {})
-                .get("prior_window", {})
-                .get("start_date"),
-                "end_date": (http_inputs or {})
-                .get("prior_window", {})
-                .get("end_date"),
-                "ndvi_mean": round(_series_mean(prior_ndvi), 4)
-                if _series_mean(prior_ndvi) is not None
-                else None,
-                "ndvi_peak": _peak(prior_ndvi),
-                "point_count": len(prior_ndvi),
-                "scenes": {"s2_count": len(prior_s2_http)},
-            }
-        elif session is not None:
-            prior = _prior_year_comparison(
-                session,
-                land_id=land_id,
-                field_id=fid,
-                start=start,
-                end=end,
-                is_agri=True,
-            )
-        else:
-            prior = {}
-        data_source = "agric_satellite.parcel_scene_products"
-    else:
-        indices = (
-            classic_preloaded
-            if classic_preloaded
-            else load_classic_indices(session, fid, start, end)
+    if not s2 and not s1:
+        raise ValueError(
+            f"窗口内无地块遥感数据 (land_id={land_id}, {start}~{end})"
         )
-        ndvi_ts, ndmi_ts = _indices_to_ndvi_ndmi(indices, start, end)
-        if len(ndvi_ts) < 2:
-            raise ValueError(
-                "非 agri 地块窗口内 NDVI 数据不足，无法生成生育期长势报告"
-            )
-        s2 = []
-        s1 = []
-        official_s2 = []
-        clear_s2 = []
-        harvest_pts = [
-            {
-                "date": p["date"],
-                "ndvi_avg": p["value"],
-                "scene_id": f"classic-{p['date']}",
-                "official": True,
-                "decloud_quality": "good",
-            }
-            for p in ndvi_ts
-        ]
-        harvest = detect_harvest(harvest_pts, window=window)
-        # Approximate optical obs for drought from classic series
-        pseudo = [
-            {
-                "date": p["date"],
-                "ndvi_avg": p["value"],
-                "ndmi_avg": next(
-                    (m["value"] for m in ndmi_ts if m["date"] == p["date"]), None
-                ),
-                "official": True,
-                "scene_id": f"classic-{p['date']}",
-                "decloud_quality": "good",
-                "cloud_cover": 0.0,
-                "parcel_cloud_cover_pct": 0.0,
-                "clear": True,
-            }
-            for p in ndvi_ts
-        ]
-        drought = _drought_summary(pseudo, season_months)
-        flood = {
-            "status": "not_applicable",
-            "scene_count": 0,
-            "vv_median": None,
-            "counts": {},
-            "scenes": [],
-            "note": "经典地块无 S1 洪涝判定",
+    ndvi_ts = [
+        {"date": r["date"], "value": round(r["ndvi_avg"], 4), "official": r["official"]}
+        for r in s2
+        if r.get("ndvi_avg") is not None
+    ]
+    ndmi_ts = [
+        {"date": r["date"], "value": round(r["ndmi_avg"], 4), "official": r["official"]}
+        for r in s2
+        if r.get("ndmi_avg") is not None
+    ]
+    official_s2 = [r for r in s2 if r.get("official")]
+    clear_s2 = [r for r in s2 if r.get("clear")]
+    harvest_pts = [
+        {
+            "date": r["date"],
+            "ndvi_avg": r["ndvi_avg"],
+            "scene_id": r.get("scene_id"),
+            "official": r.get("official"),
+            "decloud_quality": r.get("decloud_quality"),
         }
-        if session is not None:
-            prior = _prior_year_comparison(
-                session,
-                land_id=None,
-                field_id=fid,
-                start=start,
-                end=end,
-                is_agri=False,
-            )
-        else:
-            prior = {}
-        data_source = "field_stats"
+        for r in s2
+        if r.get("ndvi_avg") is not None
+    ]
+    harvest = detect_harvest(harvest_pts, window=window)
+    drought = _drought_summary(s2, season_months)
+    flood = _flood_summary(s1)
+    if prior_s2_http:
+        prior_ndvi = [
+            {"date": r["date"], "value": r["ndvi_avg"]}
+            for r in prior_s2_http
+            if r.get("ndvi_avg") is not None
+        ]
+        prior = {
+            "year": start.year - 1,
+            "start_date": (http_inputs or {}).get("prior_window", {}).get("start_date"),
+            "end_date": (http_inputs or {}).get("prior_window", {}).get("end_date"),
+            "ndvi_mean": round(_series_mean(prior_ndvi), 4)
+            if _series_mean(prior_ndvi) is not None
+            else None,
+            "ndvi_peak": _peak(prior_ndvi),
+            "point_count": len(prior_ndvi),
+            "scenes": {"s2_count": len(prior_s2_http)},
+        }
+    elif session is not None:
+        prior = _prior_year_comparison(
+            session,
+            land_id=land_id,
+            start=start,
+            end=end,
+        )
+    else:
+        prior = {}
+    data_source = "agric_satellite.parcel_scene_products"
 
     peak = _peak(ndvi_ts)
     latest = ndvi_ts[-1] if ndvi_ts else None
@@ -1877,32 +1735,6 @@ def build_season_facts(
     }
 
     s2_appendix = _build_s2_appendix(s2 if s2 else [], drought)
-    # Classic path: rebuild appendix from pseudo-like ndvi if no agri s2
-    if not s2 and ndvi_ts:
-        s2_appendix = []
-        class_by_date: dict[str, str] = {}
-        for sc in drought.get("scene_classes") or []:
-            d = sc.get("date")
-            if d and d not in class_by_date:
-                class_by_date[str(d)] = str(sc.get("class") or "")
-        ndmi_by = {p["date"]: p.get("value") for p in ndmi_ts}
-        for p in ndvi_ts:
-            d = p["date"]
-            cls = class_by_date.get(d)
-            s2_appendix.append(
-                {
-                    "date": d,
-                    "cloud_pct": 0.0,
-                    "quality": "classic",
-                    "quality_cn": quality_cn("classic"),
-                    "drought_class": cls,
-                    "drought_class_cn": drought_class_cn(cls),
-                    "ndvi": p.get("value"),
-                    "ndmi": ndmi_by.get(d),
-                    "evi": None,
-                    "mndwi": None,
-                }
-            )
     s1_appendix = _build_s1_appendix(flood)
     peak_month = None
     if peak and peak.get("date"):

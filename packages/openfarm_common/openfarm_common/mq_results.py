@@ -14,6 +14,7 @@ from openfarm_common.mq import publish_result
 from openfarm_common.mq_schemas import ResultMessage
 from openfarm_common.settings import settings
 from openfarm_common.storage import get_storage
+from openfarm_common.trace import current_trace_id, extract_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def fit_inline_payload(
         stub = {
             "kind": kind,
             "oss_fallback": True,
-            "field_id": payload.get("field_id"),
+            "land_id": payload.get("land_id"),
             "rows_count": payload.get("rows_count")
             or (
                 len(payload["rows"]) if isinstance(payload.get("rows"), list) else None
@@ -121,7 +122,7 @@ def fit_inline_payload(
             {
                 "kind": kind,
                 "truncated": True,
-                "field_id": payload.get("field_id"),
+                "land_id": payload.get("land_id"),
                 "rows_count": payload.get("rows_count"),
                 "error": f"payload {size}B over {max_bytes}B and OSS fallback failed",
             },
@@ -156,7 +157,6 @@ def publish_task_result(
     task_id: str,
     status: str,
     land_id: str | None = None,
-    field_id: str | None = None,
     error: str | None = None,
     extras: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
@@ -194,7 +194,6 @@ def publish_task_result(
     summary = {
         "task_id": task_id,
         "status": status,
-        "field_id": field_id,
         "land_id": land_id,
         "error": publish_error,
         "extras": extras or {},
@@ -216,10 +215,10 @@ def publish_task_result(
         status="success" if status == "success" else "failed",
         oss_urls=urls,
         error=publish_error,
-        field_id=field_id,
         land_id=land_id,
         extras=extras or {},
         payload=inline,
+        trace_id=current_trace_id() or extract_trace_id(extras),
     )
     try:
         publish_result(msg)

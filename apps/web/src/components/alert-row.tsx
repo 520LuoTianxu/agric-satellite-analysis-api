@@ -269,7 +269,7 @@ export function AlertRow({
                     <div className="flex items-center gap-3 mt-1.5">
                         {fieldName && farmId && (
                             <Link
-                                href={`/farms/${farmId}/fields/${alert.field_id}`}
+                                href={`/farms/${farmId}/fields/${alert.land_id}`}
                                 className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:text-primary/80"
                             >
                                 {fieldName}

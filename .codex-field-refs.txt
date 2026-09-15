@@ -1,0 +1,1520 @@
+packages/openfarm_common/openfarm_common\result_apply.py:42:  id, field_id, date, latitude, longitude,
+packages/openfarm_common/openfarm_common\result_apply.py:54:  :id, CAST(:field_id AS uuid), CAST(:date AS date),
+packages/openfarm_common/openfarm_common\result_apply.py:67:ON CONFLICT (field_id, date) DO UPDATE SET
+packages/openfarm_common/openfarm_common\result_apply.py:289:                "field_id": row.get("field_id") or payload.get("field_id"),
+packages/openfarm_common/openfarm_common\result_apply.py:319:            if not params["field_id"] or not params["date"]:
+packages/openfarm_common/openfarm_common\result_apply.py:325:        field_ids = {
+packages/openfarm_common/openfarm_common\result_apply.py:326:            str(r.get("field_id") or payload.get("field_id"))
+packages/openfarm_common/openfarm_common\result_apply.py:328:            if isinstance(r, dict) and (r.get("field_id") or payload.get("field_id"))
+packages/openfarm_common/openfarm_common\result_apply.py:330:        for fid in field_ids:
+packages/openfarm_common/openfarm_common\result_apply.py:348:                                        PARTITION BY field_id
+packages/openfarm_common/openfarm_common\result_apply.py:354:                                        PARTITION BY field_id
+packages/openfarm_common/openfarm_common\result_apply.py:359:                            WHERE field_id = CAST(:field_id AS uuid)
+packages/openfarm_common/openfarm_common\result_apply.py:365:                    {"field_id": fid},
+packages/openfarm_common/openfarm_common\result_apply.py:380:    field_id = payload.get("field_id")
+packages/openfarm_common/openfarm_common\result_apply.py:384:    if not field_id:
+packages/openfarm_common/openfarm_common\result_apply.py:385:        raise ValueError("soil_profile payload missing field_id")
+packages/openfarm_common/openfarm_common\result_apply.py:393:                    "SELECT id FROM soil_profiles WHERE field_id = CAST(:fid AS uuid)"
+packages/openfarm_common/openfarm_common\result_apply.py:395:                {"fid": field_id},
+packages/openfarm_common/openfarm_common\result_apply.py:412:            text("DELETE FROM soil_field_summary WHERE field_id = CAST(:fid AS uuid)"),
+packages/openfarm_common/openfarm_common\result_apply.py:413:            {"fid": field_id},
+packages/openfarm_common/openfarm_common\result_apply.py:422:                  id, field_id, source, source_resolution_m,
+packages/openfarm_common/openfarm_common\result_apply.py:425:                  CAST(:id AS uuid), CAST(:field_id AS uuid),
+packages/openfarm_common/openfarm_common\result_apply.py:433:                "field_id": field_id,
+packages/openfarm_common/openfarm_common\result_apply.py:499:                  id, field_id, profile_id, dominant_texture, avg_ph,
+packages/openfarm_common/openfarm_common\result_apply.py:505:                  CAST(:id AS uuid), CAST(:field_id AS uuid), CAST(:profile_id AS uuid),
+packages/openfarm_common/openfarm_common\result_apply.py:516:                "field_id": field_id,
+packages/openfarm_common/openfarm_common\mq_schemas.py:8:from pydantic import BaseModel, Field, model_validator
+packages/openfarm_common/openfarm_common\mq_schemas.py:21:    field_id: str | None = None
+packages/openfarm_common/openfarm_common\mq_schemas.py:22:    # agric_satellite.land_parcels.land_id — user sample field_id often means this
+packages/openfarm_common/openfarm_common\mq_schemas.py:25:    extras: dict[str, Any] = Field(default_factory=dict)
+packages/openfarm_common/openfarm_common\mq_schemas.py:26:    created_at: datetime = Field(default_factory=_utcnow)
+packages/openfarm_common/openfarm_common\mq_schemas.py:38:    oss_urls: dict[str, str] = Field(default_factory=dict)
+packages/openfarm_common/openfarm_common\mq_schemas.py:40:    field_id: str | None = None
+packages/openfarm_common/openfarm_common\mq_schemas.py:42:    finished_at: datetime = Field(default_factory=_utcnow)
+packages/openfarm_common/openfarm_common\mq_schemas.py:43:    extras: dict[str, Any] = Field(default_factory=dict)
+packages/openfarm_common/openfarm_common\mq_results.py:107:            "field_id": payload.get("field_id"),
+packages/openfarm_common/openfarm_common\mq_results.py:124:                "field_id": payload.get("field_id"),
+packages/openfarm_common/openfarm_common\mq_results.py:159:    field_id: str | None = None,
+packages/openfarm_common/openfarm_common\mq_results.py:197:        "field_id": field_id,
+packages/openfarm_common/openfarm_common\mq_results.py:219:        field_id=field_id,
+packages/openfarm_common/openfarm_common\internal_api.py:158:    field_id: str | None = None,
+packages/openfarm_common/openfarm_common\internal_api.py:163:    """GET /v1/internal/fields/resolve → {field_id, land_id, tags?}."""
+packages/openfarm_common/openfarm_common\internal_api.py:165:    if field_id:
+packages/openfarm_common/openfarm_common\internal_api.py:166:        params["field_id"] = str(field_id)
+packages/openfarm_common/openfarm_common\internal_api.py:173:        r = c.get("/v1/internal/fields/resolve", params=params)
+packages/openfarm_common/openfarm_common\internal_api.py:301:    field_id: str,
+packages/openfarm_common/openfarm_common\internal_api.py:306:    """GET /v1/internal/fields/{id}/geom."""
+packages/openfarm_common/openfarm_common\internal_api.py:310:            f"/v1/internal/fields/{field_id}/geom",
+packages/openfarm_common/openfarm_common\internal_api.py:427:    field_id: str,
+packages/openfarm_common/openfarm_common\internal_api.py:434:    """GET /v1/internal/fields/{id}/assessment-bundle — full load_field_bundle JSON."""
+packages/openfarm_common/openfarm_common\internal_api.py:443:            f"/v1/internal/fields/{field_id}/assessment-bundle",
+packages/openfarm_common/openfarm_common\internal_api.py:459:    field_id: str,
+packages/openfarm_common/openfarm_common\internal_api.py:466:    """GET /v1/internal/fields/{id}/season-growth-inputs — field + S2/S1/indices rows."""
+packages/openfarm_common/openfarm_common\internal_api.py:471:            f"/v1/internal/fields/{field_id}/season-growth-inputs",
+packages/openfarm_common/openfarm_common\internal_api.py:487:    field_id: str,
+packages/openfarm_common/openfarm_common\internal_api.py:493:    """GET /v1/internal/fields/{id}/data-readiness — weather/soil/RS coverage counts."""
+packages/openfarm_common/openfarm_common\internal_api.py:502:            f"/v1/internal/fields/{field_id}/data-readiness",
+services/ingest/app\tasks\assessment_report.py:45:    field_id: str | None,
+services/ingest/app\tasks\assessment_report.py:59:            field_id=str(field_id) if field_id else None,
+services/ingest/app\tasks\assessment_report.py:92:    field_id: uuid.UUID,
+services/ingest/app\tasks\assessment_report.py:102:            str(field_id), date_from=date_from, date_to=date_to
+services/ingest/app\tasks\assessment_report.py:107:            field_id=str(field_id),
+services/ingest/app\tasks\assessment_report.py:145:def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -> int:
+services/ingest/app\tasks\assessment_report.py:151:            Job.field_id == field_id,
+services/ingest/app\tasks\assessment_report.py:174:    field_id: uuid.UUID,
+services/ingest/app\tasks\assessment_report.py:186:    from app.models.tables import Field
+services/ingest/app\tasks\assessment_report.py:202:    field = session.get(Field, field_id)
+services/ingest/app\tasks\assessment_report.py:245:    session, field_id: uuid.UUID, date_from: str | None, date_to: str | None
+services/ingest/app\tasks\assessment_report.py:250:        .where(WeatherDaily.field_id == field_id)
+services/ingest/app\tasks\assessment_report.py:269:def _soil_ready(session, field_id: uuid.UUID) -> bool:
+services/ingest/app\tasks\assessment_report.py:271:        select(SoilProfile.id).where(SoilProfile.field_id == field_id).limit(1)
+services/ingest/app\tasks\assessment_report.py:312:    field_id: uuid.UUID,
+services/ingest/app\tasks\assessment_report.py:331:    readiness = _data_readiness_http(field_id, date_from, date_to)
+services/ingest/app\tasks\assessment_report.py:339:                active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+services/ingest/app\tasks\assessment_report.py:366:        weather_rows = _weather_row_count(session, field_id, date_from, date_to)
+services/ingest/app\tasks\assessment_report.py:367:        soil_ok = _soil_ready(session, field_id)
+services/ingest/app\tasks\assessment_report.py:368:        active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+services/ingest/app\tasks\assessment_report.py:369:        coverage = _agri_rs_coverage_ok(session, field_id, date_from, date_to)
+services/ingest/app\tasks\assessment_report.py:432:    field_id: str | None = None,
+services/ingest/app\tasks\assessment_report.py:443:    Cross-host safe: ``field_id`` is the source of truth for PDF generation.
+services/ingest/app\tasks\assessment_report.py:454:    field_id_str: str | None = str(field_id) if field_id else None
+services/ingest/app\tasks\assessment_report.py:460:        if not field_id_str and job and job.field_id:
+services/ingest/app\tasks\assessment_report.py:461:            field_id_str = str(job.field_id)
+services/ingest/app\tasks\assessment_report.py:463:        if not field_id_str:
+services/ingest/app\tasks\assessment_report.py:465:                "assessment_field_id_missing",
+services/ingest/app\tasks\assessment_report.py:470:                _update_job(session, job, "failed", error="field_id required", job_id=job_id_str)
+services/ingest/app\tasks\assessment_report.py:474:                field_id=None,
+services/ingest/app\tasks\assessment_report.py:475:                error="field_id required",
+services/ingest/app\tasks\assessment_report.py:481:            return {"error": "field_id required"}
+services/ingest/app\tasks\assessment_report.py:488:                field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:513:                field_id=uuid.UUID(field_id_str),
+services/ingest/app\tasks\assessment_report.py:545:                        field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:563:                    field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:588:            session=session, field_id=uuid.UUID(field_id_str)
+services/ingest/app\tasks\assessment_report.py:597:                field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:620:        object_key = f"reports/default/{field_id_str}/assessment-{ts}.pdf"
+services/ingest/app\tasks\assessment_report.py:723:            field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:737:            "field_id": field_id_str,
+services/ingest/app\tasks\assessment_report.py:762:            field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:795:            field_id=field_id_str,
+services/ingest/app\tasks\assessment_report.py:802:                field_id_str = field_id_str or (
+services/ingest/app\tasks\assessment_report.py:803:                    str(job.field_id) if job.field_id else None
+services/ingest/app\tasks\assessment_report.py:813:            "field_id": field_id_str,
+services/ingest/app\tasks\assessment_report.py:820:            field_id=field_id_str,
+services/ingest/app\tasks\ndvi.py:45:    from app.models.tables import Job, Field, FieldStat
+services/ingest/app\tasks\ndvi.py:60:        field = session.get(Field, job.field_id)
+services/ingest/app\tasks\ndvi.py:63:            job.error = "Field not found"
+services/ingest/app\tasks\ndvi.py:68:        field_geom = to_shape(field.geom)
+services/ingest/app\tasks\ndvi.py:75:        field_id_str = str(job.field_id)
+services/ingest/app\tasks\ndvi.py:93:                field_id=field_id_str,
+services/ingest/app\tasks\ndvi.py:128:                .where(FieldStat.field_id == job.field_id)
+services/ingest/app\tasks\ndvi.py:152:            field_id_str=field_id_str,
+services/ingest/app\tasks\weather.py:103:def _resolve_field_lat_lon(field_id: str, session=None) -> tuple[float, float] | None:
+services/ingest/app\tasks\weather.py:104:    """Centroid (lat, lon) via internal geom API, else SyncSession Field.geom."""
+services/ingest/app\tasks\weather.py:109:            g = field_geom(field_id)
+services/ingest/app\tasks\weather.py:116:            field_id=field_id,
+services/ingest/app\tasks\weather.py:129:    from app.models.tables import Field
+services/ingest/app\tasks\weather.py:131:    field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\weather.py:134:    geom_shape = to_shape(field.geom)
+services/ingest/app\tasks\weather.py:139:def _rows_to_weather_payload(field_id: str, records: list[dict]) -> dict:
+services/ingest/app\tasks\weather.py:145:                "field_id": field_id,
+services/ingest/app\tasks\weather.py:178:    return {"kind": "weather_daily", "field_id": field_id, "rows": rows}
+services/ingest/app\tasks\weather.py:264:    field_id: str,
+services/ingest/app\tasks\weather.py:269:        field_id: UUID of the field.
+services/ingest/app\tasks\weather.py:274:        dict with field_id, rows_upserted, status.
+services/ingest/app\tasks\weather.py:281:        coords = _resolve_field_lat_lon(field_id, session=session)
+services/ingest/app\tasks\weather.py:283:            logger.warning("weather_field_not_found", field_id=field_id)
+services/ingest/app\tasks\weather.py:284:            return {"field_id": field_id, "rows_upserted": 0, "status": "skipped"}
+services/ingest/app\tasks\weather.py:299:            field_id=field_id,
+services/ingest/app\tasks\weather.py:312:            logger.warning("weather_no_daily_data", field_id=field_id)
+services/ingest/app\tasks\weather.py:313:            return {"field_id": field_id, "rows_upserted": 0, "status": "no_data"}
+services/ingest/app\tasks\weather.py:321:                    WeatherDaily.field_id == uuid.UUID(field_id),
+services/ingest/app\tasks\weather.py:338:                "field_id": uuid.UUID(field_id),
+services/ingest/app\tasks\weather.py:385:                        if k not in ("field_id", "date")
+services/ingest/app\tasks\weather.py:392:            _update_water_balance(session, field_id)
+services/ingest/app\tasks\weather.py:400:                        _rows_to_weather_payload(field_id, pending_records)
+services/ingest/app\tasks\weather.py:405:                    field_id=field_id,
+services/ingest/app\tasks\weather.py:409:                    "field_id": field_id,
+services/ingest/app\tasks\weather.py:417:            field_id=field_id,
+services/ingest/app\tasks\weather.py:421:            "field_id": field_id,
+services/ingest/app\tasks\weather.py:430:            field_id=field_id,
+services/ingest/app\tasks\weather.py:440:            field_id=field_id,
+services/ingest/app\tasks\weather.py:446:            "field_id": field_id,
+services/ingest/app\tasks\weather.py:456:def _update_water_balance(session, field_id: str) -> None:
+services/ingest/app\tasks\weather.py:458:    fid = uuid.UUID(field_id)
+services/ingest/app\tasks\weather.py:477:                            PARTITION BY field_id
+services/ingest/app\tasks\weather.py:483:                            PARTITION BY field_id
+services/ingest/app\tasks\weather.py:488:                WHERE field_id = :field_id AND date >= :cutoff
+services/ingest/app\tasks\weather.py:492:        {"field_id": fid, "cutoff": cutoff})
+services/ingest/app\tasks\weather.py:502:    from app.models.tables import Field
+services/ingest/app\tasks\weather.py:506:        field_ids = (
+services/ingest/app\tasks\weather.py:507:            session.execute(select(Field.id).where(Field.deleted_at.is_(None)))
+services/ingest/app\tasks\weather.py:512:        if not field_ids:
+services/ingest/app\tasks\weather.py:518:        for i in range(0, len(field_ids), batch_size):
+services/ingest/app\tasks\weather.py:519:            batch = field_ids[i : i + batch_size]
+services/ingest/app\tasks\weather.py:529:            fields=len(field_ids),
+services/ingest/app\tasks\weather.py:531:        return {"fields": len(field_ids), "batches": len(batches)}
+services/ingest/app\tasks\weather.py:541:def _weather_result_payload(field_id: str, *, days: int) -> dict:
+services/ingest/app\tasks\weather.py:553:                    WeatherDaily.field_id == uuid.UUID(field_id),
+services/ingest/app\tasks\weather.py:565:                    "field_id": str(r.field_id),
+services/ingest/app\tasks\weather.py:601:            "field_id": field_id,
+services/ingest/app\tasks\weather.py:612:    field_id: str,
+services/ingest/app\tasks\weather.py:623:        field_id=field_id,
+services/ingest/app\tasks\weather.py:627:        result = fetch_weather_for_field(field_id, backfill_days=backfill)
+services/ingest/app\tasks\weather.py:645:                        payload = _rows_to_weather_payload(field_id, pending)
+services/ingest/app\tasks\weather.py:649:                                field_id, days=backfill
+services/ingest/app\tasks\weather.py:671:                            field_id=field_id,
+services/ingest/app\tasks\weather.py:677:                    field_id=field_id,
+services/ingest/app\tasks\weather.py:698:                    field_id=field_id,
+services/ingest/app\tasks\weather.py:710:                    field_id=field_id,
+services/ingest/app\tasks\agri_lonlat.py:123:                "land_name": meta.get("land_name") or field.name,
+services/ingest/app\tasks\agri_lonlat.py:124:                "field_id": str(field.id),
+services/ingest/app\tasks\agri_lonlat.py:138:            "field_id": str(getattr(field, "id", "")),
+services/ingest/app\tasks\agri_lonlat.py:157:        "land_name": row["land_name"] or field.name,
+services/ingest/app\tasks\agri_lonlat.py:158:        "field_id": str(field.id),
+services/ingest/app\tasks\agri_lonlat.py:219:    field_id: str | None = None,
+services/ingest/app\tasks\agri_lonlat.py:310:        field_id=field_id,
+services/ingest/app\tasks\agri_lonlat.py:344:    field_id: str | None = None,
+services/ingest/app\tasks\agri_lonlat.py:347:        row, mq_task_id=mq_task_id, field_id=field_id
+services/ingest/app\tasks\agri_lonlat.py:355:    field_id_str: str,
+services/ingest/app\tasks\agri_lonlat.py:384:            field_id=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:455:        "pixel_data_url": f"stac-direct://field/{field_id_str}/{date_str}",
+services/ingest/app\tasks\agri_lonlat.py:482:        row, mq_task_id=mq_task_id, field_id=field_id_str
+services/ingest/app\tasks\agri_lonlat.py:520:    field_id_str: str,
+services/ingest/app\tasks\agri_lonlat.py:711:                    field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:748:            field_id_str=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:791:    field_id: str | None,
+services/ingest/app\tasks\agri_lonlat.py:813:    if job_id and (not field_id or not date_from or not date_to):
+services/ingest/app\tasks\agri_lonlat.py:816:        field_id = field_id or (
+services/ingest/app\tasks\agri_lonlat.py:817:            str(remote["field_id"]) if remote.get("field_id") else None
+services/ingest/app\tasks\agri_lonlat.py:827:    if not field_id or not date_from or not date_to:
+services/ingest/app\tasks\agri_lonlat.py:830:            "field_id": field_id,
+services/ingest/app\tasks\agri_lonlat.py:832:            "detail": "field_id/date_from/date_to required",
+services/ingest/app\tasks\agri_lonlat.py:836:    resolved = resolve_field_http(field_id)
+services/ingest/app\tasks\agri_lonlat.py:841:            "field_id": field_id,
+services/ingest/app\tasks\agri_lonlat.py:847:    geom_payload = field_geom_http(field_id, include_geojson=True)
+services/ingest/app\tasks\agri_lonlat.py:852:            "field_id": field_id,
+services/ingest/app\tasks\agri_lonlat.py:854:            "detail": "Field geom missing via HTTP",
+services/ingest/app\tasks\agri_lonlat.py:859:        id=uuid.UUID(str(field_id)),
+services/ingest/app\tasks\agri_lonlat.py:871:    field_id_str = str(field_id)
+services/ingest/app\tasks\agri_lonlat.py:873:    synthetic_job_id = job_id or f"http-opt-{field_id_str}-{d0}"
+services/ingest/app\tasks\agri_lonlat.py:878:        field_id=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:931:            field_id=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:953:            "field_id": field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:983:                field_id_str=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:1023:            field_id=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:1035:        "field_id": field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:1057:    field_id: str | None = None,
+services/ingest/app\tasks\agri_lonlat.py:1068:    HTTP-only hosts may pass ``field_id`` + date kwargs (no local Job row).
+services/ingest/app\tasks\agri_lonlat.py:1072:    if ingest_http_only() or (field_id and not job_id):
+services/ingest/app\tasks\agri_lonlat.py:1075:            field_id=field_id,
+services/ingest/app\tasks\agri_lonlat.py:1085:    from app.models.tables import Field, Job
+services/ingest/app\tasks\agri_lonlat.py:1088:        return {"status": "error", "detail": "job_id or field_id required"}
+services/ingest/app\tasks\agri_lonlat.py:1103:        field = session.get(Field, job.field_id)
+services/ingest/app\tasks\agri_lonlat.py:1104:        if not field or field.geom is None:
+services/ingest/app\tasks\agri_lonlat.py:1106:            job.error = "Field not found or missing geom"
+services/ingest/app\tasks\agri_lonlat.py:1111:        if not is_agri_tagged(field.tags_json):
+services/ingest/app\tasks\agri_lonlat.py:1119:        field_geom = to_shape(field.geom)
+services/ingest/app\tasks\agri_lonlat.py:1125:        field_id_str = str(job.field_id)
+services/ingest/app\tasks\agri_lonlat.py:1194:                field_id=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:1285:                    field_id_str=field_id_str,
+services/ingest/app\tasks\agri_lonlat.py:1348:                field_id=field_id_str,
+services/ingest/app\reports\season_growth\service.py:47:    field_id: uuid.UUID | str,
+services/ingest/app\reports\season_growth\service.py:58:        field_id,
+services/api/app\services\cdfinance_report_prefetch.py:20:from app.models.tables import Field, GroupSiteAdmission, SoilNutrientNpk
+services/api/app\services\cdfinance_report_prefetch.py:62:    db: AsyncSession, field: Field, explicit: str | None
+services/api/app\services\cdfinance_report_prefetch.py:66:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\services\cdfinance_report_prefetch.py:70:    tagged = parse_cdfinance_group_id(field.tags_json)
+services/api/app\services\cdfinance_report_prefetch.py:92:def _field_coords_string_soft(field: Field) -> str | None:
+services/api/app\services\cdfinance_report_prefetch.py:98:    if field.geom is None:
+services/api/app\services\cdfinance_report_prefetch.py:101:        gj = mapping(to_shape(field.geom))
+services/api/app\services\cdfinance_report_prefetch.py:128:    field: Field,
+services/api/app\services\cdfinance_report_prefetch.py:155:            select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field.id)
+services/api/app\services\cdfinance_report_prefetch.py:162:        if existing and existing.field_id == field.id:
+services/api/app\services\cdfinance_report_prefetch.py:164:        if existing and existing.field_id is None:
+services/api/app\services\cdfinance_report_prefetch.py:165:            existing.field_id = field.id
+services/api/app\services\cdfinance_report_prefetch.py:169:                field.tags_json = ensure_cdfinance_group_tag(field.tags_json, gid)
+services/api/app\services\cdfinance_report_prefetch.py:187:    row.field_id = field.id
+services/api/app\services\cdfinance_report_prefetch.py:205:        field.tags_json = ensure_cdfinance_group_tag(field.tags_json, row.group_id)
+services/api/app\services\cdfinance_report_prefetch.py:210:        field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:219:    field: Field,
+services/api/app\services\cdfinance_report_prefetch.py:237:            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field.id)
+services/api/app\services\cdfinance_report_prefetch.py:243:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\services\cdfinance_report_prefetch.py:276:    row = existing or SoilNutrientNpk(field_id=field.id)
+services/api/app\services\cdfinance_report_prefetch.py:301:        field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:310:    field: Field,
+services/api/app\services\cdfinance_report_prefetch.py:355:            field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:362:            field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:374:            field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:381:            field_id=str(field.id),
+services/api/app\services\cdfinance_report_prefetch.py:389:async def field_has_site_admission(db: AsyncSession, field_id: uuid.UUID) -> bool:
+services/api/app\services\cdfinance_report_prefetch.py:392:            select(GroupSiteAdmission.id).where(GroupSiteAdmission.field_id == field_id)
+services/ingest/app\tasks\decloud_uncrtaints.py:89:    field_id: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:113:            field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:126:        field_id=field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:138:    field_id: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:151:            field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:163:        field_id=field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:209:    field_id: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:247:            field_id=field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:258:            field_id=field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:268:        field_id=field_id,
+services/ingest/app\tasks\decloud_uncrtaints.py:480:    field_id_str: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:592:        "pixel_data_url": f"decloud://field/{field_id_str}/{date_str}",
+services/ingest/app\tasks\decloud_uncrtaints.py:629:        field_id=field_id_str,
+services/ingest/app\tasks\decloud_uncrtaints.py:816:    field_id_str: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:920:        field_id_str=field_id_str,
+services/ingest/app\tasks\decloud_uncrtaints.py:951:def _field_context(session, field_id: str):
+services/ingest/app\tasks\decloud_uncrtaints.py:952:    from app.models.tables import Field
+services/ingest/app\tasks\decloud_uncrtaints.py:955:    field = session.get(Field, field_id)
+services/ingest/app\tasks\decloud_uncrtaints.py:956:    if field is None or field.geom is None:
+services/ingest/app\tasks\decloud_uncrtaints.py:959:    field_geom = to_shape(field.geom)
+services/ingest/app\tasks\decloud_uncrtaints.py:985:    field_id: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:1008:        ctx = _field_context(session, field_id)
+services/ingest/app\tasks\decloud_uncrtaints.py:1034:            field_id_str=str(ctx["field"].id),
+services/ingest/app\tasks\decloud_uncrtaints.py:1066:    field_id: str,
+services/ingest/app\tasks\decloud_uncrtaints.py:1107:        ctx = _field_context(session, field_id)
+services/ingest/app\tasks\decloud_uncrtaints.py:1171:                field_id_str=str(ctx["field"].id),
+services/ingest/app\tasks\vegetation.py:41:    from app.models.tables import Job, Field, FieldStat
+services/ingest/app\tasks\vegetation.py:56:        field = session.get(Field, job.field_id)
+services/ingest/app\tasks\vegetation.py:59:            job.error = "Field not found"
+services/ingest/app\tasks\vegetation.py:64:        field_geom = to_shape(field.geom)
+services/ingest/app\tasks\vegetation.py:71:        field_id_str = str(job.field_id)
+services/ingest/app\tasks\vegetation.py:94:                field_id=field_id_str,
+services/ingest/app\tasks\vegetation.py:129:                .where(FieldStat.field_id == job.field_id)
+services/ingest/app\tasks\vegetation.py:153:            field_id_str=field_id_str,
+services/ingest/app\tasks\sentinel1.py:261:    data: np.ndarray, transform, org_id: str, field_id: str, scene_date: date, stem: str
+services/ingest/app\tasks\sentinel1.py:264:    object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{stem}.tif"
+services/ingest/app\tasks\sentinel1.py:339:    land_id = parse_agri_land_id(field.tags_json)
+services/ingest/app\tasks\sentinel1.py:355:                "land_name": meta.get("land_name") or field.name,
+services/ingest/app\tasks\sentinel1.py:386:        "land_name": row["land_name"] or field.name,
+services/ingest/app\tasks\sentinel1.py:395:    field_id: str,
+services/ingest/app\tasks\sentinel1.py:435:        "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
+services/ingest/app\tasks\sentinel1.py:466:        field_id=str(field_id) if field_id else None,
+services/ingest/app\tasks\sentinel1.py:538:    field_id_str: str,
+services/ingest/app\tasks\sentinel1.py:539:    field_id,
+services/ingest/app\tasks\sentinel1.py:626:                vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
+services/ingest/app\tasks\sentinel1.py:629:                vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
+services/ingest/app\tasks\sentinel1.py:634:                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+services/ingest/app\tasks\sentinel1.py:643:                    field_id=field_id,
+services/ingest/app\tasks\sentinel1.py:682:                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+services/ingest/app\tasks\sentinel1.py:690:                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+services/ingest/app\tasks\sentinel1.py:704:                    field_id=field_id_str,
+services/ingest/app\tasks\sentinel1.py:725:                    field_id_str,
+services/ingest/app\tasks\sentinel1.py:785:    field_id_str: str,
+services/ingest/app\tasks\sentinel1.py:786:    field_id,
+services/ingest/app\tasks\sentinel1.py:829:                field_id_str=field_id_str,
+services/ingest/app\tasks\sentinel1.py:830:                field_id=field_id,
+services/ingest/app\tasks\sentinel1.py:872:    field_id: str | None,
+services/ingest/app\tasks\sentinel1.py:887:    if job_id and (not field_id or not date_from or not date_to):
+services/ingest/app\tasks\sentinel1.py:890:        field_id = field_id or (
+services/ingest/app\tasks\sentinel1.py:891:            str(remote["field_id"]) if remote.get("field_id") else None
+services/ingest/app\tasks\sentinel1.py:899:    if not field_id or not date_from or not date_to:
+services/ingest/app\tasks\sentinel1.py:902:            "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:904:            "detail": "field_id/date_from/date_to required",
+services/ingest/app\tasks\sentinel1.py:908:    resolved = resolve_field_http(field_id)
+services/ingest/app\tasks\sentinel1.py:909:    geom_payload = field_geom_http(field_id, include_geojson=True)
+services/ingest/app\tasks\sentinel1.py:914:            "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:916:            "detail": "Field geom missing via HTTP",
+services/ingest/app\tasks\sentinel1.py:923:        id=uuid.UUID(str(field_id)),
+services/ingest/app\tasks\sentinel1.py:931:    field_id_str = str(field_id)
+services/ingest/app\tasks\sentinel1.py:932:    synthetic_job_id = job_id or f"http-s1-{field_id_str}-{d0}"
+services/ingest/app\tasks\sentinel1.py:936:        field_id=field_id_str,
+services/ingest/app\tasks\sentinel1.py:949:            field_id=field_id_str,
+services/ingest/app\tasks\sentinel1.py:950:            tags=field.tags_json,
+services/ingest/app\tasks\sentinel1.py:956:            scenes, existing, force=False, field_id=field_id_str, index="s1"
+services/ingest/app\tasks\sentinel1.py:976:            "field_id": field_id_str,
+services/ingest/app\tasks\sentinel1.py:1013:        field_id_str=field_id_str,
+services/ingest/app\tasks\sentinel1.py:1014:        field_id=uuid.UUID(str(field_id)),
+services/ingest/app\tasks\sentinel1.py:1024:        "field_id": field_id_str,
+services/ingest/app\tasks\sentinel1.py:1043:    field_id: str | None = None,
+services/ingest/app\tasks\sentinel1.py:1052:    HTTP-only download hosts may pass ``field_id`` + date kwargs instead of a
+services/ingest/app\tasks\sentinel1.py:1057:    if ingest_http_only() or (field_id and not job_id):
+services/ingest/app\tasks\sentinel1.py:1060:            field_id=field_id,
+services/ingest/app\tasks\sentinel1.py:1067:    from app.models.tables import Job, Field
+services/ingest/app\tasks\sentinel1.py:1070:        return {"status": "error", "detail": "job_id or field_id required"}
+services/ingest/app\tasks\sentinel1.py:1083:        field = session.get(Field, job.field_id)
+services/ingest/app\tasks\sentinel1.py:1084:        if not field or field.geom is None:
+services/ingest/app\tasks\sentinel1.py:1086:            job.error = "Field not found or missing geom"
+services/ingest/app\tasks\sentinel1.py:1091:        field_geom = to_shape(field.geom)
+services/ingest/app\tasks\sentinel1.py:1100:        field_id_str = str(job.field_id)
+services/ingest/app\tasks\sentinel1.py:1111:                field_id=field_id_str,
+services/ingest/app\tasks\sentinel1.py:1112:                tags=field.tags_json,
+services/ingest/app\tasks\sentinel1.py:1125:                scenes, existing, force=False, field_id=field_id_str, index="s1"
+services/ingest/app\tasks\sentinel1.py:1197:        field_id = job.field_id
+services/ingest/app\tasks\sentinel1.py:1210:            field_id_str=field_id_str,
+services/ingest/app\tasks\sentinel1.py:1211:            field_id=field_id,
+services/ingest/app\tasks\sentinel1.py:1297:    field_id: str,
+services/ingest/app\tasks\sentinel1.py:1330:            resolve_field_http(field_id)
+services/ingest/app\tasks\sentinel1.py:1332:            logger.error("s1_orchestration_failed", field_id=field_id, error=str(e))
+services/ingest/app\tasks\sentinel1.py:1340:                    "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:1352:            field_id=field_id,
+services/ingest/app\tasks\sentinel1.py:1357:            "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:1367:    from app.models.tables import Field, Job
+services/ingest/app\tasks\sentinel1.py:1371:        field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\sentinel1.py:1374:                "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:1376:                "detail": "Field not found",
+services/ingest/app\tasks\sentinel1.py:1385:                field_id=field.id,
+services/ingest/app\tasks\sentinel1.py:1410:            "field_id": field_id,
+services/ingest/app\tasks\sentinel1.py:1420:        logger.error("s1_orchestration_failed", field_id=field_id, error=str(e))
+services/ingest/app\tasks\agri_bridge.py:24:def _dispatch_agri_alerts(field_id: str, land_id: str | None = None) -> None:
+services/ingest/app\tasks\agri_bridge.py:30:            field_id, land_id=land_id, replace_open=True
+services/ingest/app\tasks\agri_bridge.py:33:        logger.warning("agri_alerts_dispatch_failed", field_id=field_id, error=str(e))
+services/ingest/app\tasks\agri_bridge.py:40:    field_id: str | None = None,
+services/ingest/app\tasks\agri_bridge.py:53:            field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:73:    self, field_id: str, land_id: str | None = None, mq_task_id: str | None = None
+services/ingest/app\tasks\agri_bridge.py:82:        result = bridge_field_stac_to_agri(field_id, land_id, quiet=True)
+services/ingest/app\tasks\agri_bridge.py:85:            field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:90:        _dispatch_agri_alerts(field_id, land_id=result.get("land_id") or land_id)
+services/ingest/app\tasks\agri_bridge.py:95:                field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:107:            "bridge_field_stac_to_agri_failed", field_id=field_id, error=str(e)
+services/ingest/app\tasks\agri_bridge.py:113:                field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:130:    field_id: str,
+services/ingest/app\tasks\agri_bridge.py:143:    from app.models.tables import Field, Job
+services/ingest/app\tasks\agri_bridge.py:164:                    Job.field_id == uuid.UUID(field_id),
+services/ingest/app\tasks\agri_bridge.py:177:                field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:183:        field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\agri_bridge.py:185:            parse_agri_land_id(field.tags_json) if field else None
+services/ingest/app\tasks\agri_bridge.py:192:            "field_id": field_id,
+services/ingest/app\tasks\agri_bridge.py:201:            field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:206:        _dispatch_agri_alerts(field_id, land_id=resolved_land)
+services/ingest/app\tasks\agri_bridge.py:224:                field_id=field_id,
+services/ingest/app\tasks\agri_bridge.py:254:                field_id=field_id,
+services/ingest/app\tasks\soil.py:28:    Field,
+services/ingest/app\tasks\soil.py:138:    field_id: str, session=None
+services/ingest/app\tasks\soil.py:140:    """Return (lat, lon) via internal geom API or SyncSession Field.geom."""
+services/ingest/app\tasks\soil.py:145:            g = field_geom(field_id)
+services/ingest/app\tasks\soil.py:151:            "soil_field_geom_http_failed", field_id=field_id, error=str(exc)
+services/ingest/app\tasks\soil.py:163:    field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\soil.py:166:    geom = to_shape(field.geom)
+services/ingest/app\tasks\soil.py:648:# ── Field Summary Computation ────────────────────────────────────────
+services/ingest/app\tasks\soil.py:1137:    field_id: str,
+services/ingest/app\tasks\soil.py:1163:                field_id=field_id,
+services/ingest/app\tasks\soil.py:1172:                field_id=field_id,
+services/ingest/app\tasks\soil.py:1200:            field_id, session=None if http_only else session
+services/ingest/app\tasks\soil.py:1203:            logger.error("soil_field_not_found", field_id=field_id)
+services/ingest/app\tasks\soil.py:1206:                job.error = "Field not found"
+services/ingest/app\tasks\soil.py:1209:            _publish_soil_mq("failed", error="Field not found")
+services/ingest/app\tasks\soil.py:1210:            return {"status": "error", "message": "Field not found"}
+services/ingest/app\tasks\soil.py:1212:        field = None if http_only else session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\soil.py:1220:            field_id=field_id,
+services/ingest/app\tasks\soil.py:1239:            logger.warning("soil_no_data", field_id=field_id, source=source)
+services/ingest/app\tasks\soil.py:1276:            "field_id": field_id,
+services/ingest/app\tasks\soil.py:1299:                    "soil_http_apply_failed", field_id=field_id, error=str(e)
+services/ingest/app\tasks\soil.py:1327:                field_id=field_id,
+services/ingest/app\tasks\soil.py:1335:                "field_id": field_id,
+services/ingest/app\tasks\soil.py:1345:                select(SoilProfile).where(SoilProfile.field_id == uuid.UUID(field_id))
+services/ingest/app\tasks\soil.py:1363:            field_id=uuid.UUID(field_id),
+services/ingest/app\tasks\soil.py:1410:            field_id=uuid.UUID(field_id),
+services/ingest/app\tasks\soil.py:1427:                SoilFieldSummary.field_id == uuid.UUID(field_id)
+services/ingest/app\tasks\soil.py:1438:                    "field_id": field_id,
+services/ingest/app\tasks\soil.py:1453:                    field_id=uuid.UUID(field_id),
+services/ingest/app\tasks\soil.py:1471:                    field_id=field_id,
+services/ingest/app\tasks\soil.py:1475:                "soil_alert_evaluation_failed", field_id=field_id, exc_info=True
+services/ingest/app\tasks\soil.py:1488:            field_id=field_id,
+services/ingest/app\tasks\soil.py:1495:            "field_id": field_id,
+services/ingest/app\tasks\soil.py:1519:            "field_id": field_id,
+services/ingest/app\tasks\soil.py:1527:        logger.exception("soil_fetch_error", field_id=field_id)
+services/ingest/app\reports\season_growth\facts.py:244:    session: "Session", field_id: uuid.UUID, start: date, end: date
+services/ingest/app\reports\season_growth\facts.py:257:            FieldStat.field_id == field_id,
+services/ingest/app\reports\season_growth\facts.py:394:    field_id: uuid.UUID | None,
+services/ingest/app\reports\season_growth\facts.py:414:    elif field_id:
+services/ingest/app\reports\season_growth\facts.py:415:        indices = load_classic_indices(session, field_id, prior_start, prior_end)
+services/ingest/app\reports\season_growth\facts.py:1653:    field_id: uuid.UUID | str,
+services/ingest/app\reports\season_growth\facts.py:1662:    Prefers ``GET /v1/internal/fields/{id}/season-growth-inputs`` when the
+services/ingest/app\reports\season_growth\facts.py:1665:    from app.models.tables import Field
+services/ingest/app\reports\season_growth\facts.py:1667:    fid = uuid.UUID(str(field_id))
+services/ingest/app\reports\season_growth\facts.py:1711:        field = session.get(Field, fid)
+services/ingest/app\reports\season_growth\facts.py:1713:            raise ValueError("Field not found")
+services/ingest/app\reports\season_growth\facts.py:1716:            "field_id": str(fid),
+services/ingest/app\reports\season_growth\facts.py:1792:                field_id=fid,
+services/ingest/app\reports\season_growth\facts.py:1856:                field_id=fid,
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:6:Use this module when you already have ``cogs/{org_id}/{field_id}/{date}/*.tif``
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:9:Discovers dates under ``cogs/{org_id}/{field_id}/`` on the **configured**
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:143:def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:147:            SELECT f.id::text AS field_id,
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:155:            (field_id,),  # (x,) required; (x) is a str and psycopg2 binds each char
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:159:            raise SystemExit(f"field not found: {field_id}")
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:161:            raise SystemExit(f"field {field_id} has no geom")
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:188:            "field_id": row["field_id"],
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:198:def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, float]]:
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:208:            WHERE fs.field_id = %s::uuid
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:210:            (field_id,),
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:245:def _list_dates_from_db(conn, field_id: str) -> list[str]:
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:252:            WHERE field_id = %s::uuid AND date IS NOT NULL
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:254:            (field_id,),
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:262:def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:274:            WHERE field_id = %s::uuid
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:278:            (field_id,),
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:564:        "pixel_data_url": f"stac-bridge://field/{meta['field_id']}/{date_str}",
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:598:    field_id: str,
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:605:    """Sample active-store STAC COGs for *field_id* and upsert agri lonlat_v1 rows.
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:625:        meta = _load_field(conn, field_id, land_id)
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:626:        fs_map = _field_stats_map(conn, meta["field_id"])
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:627:        prefix = f"cogs/default/{meta['field_id']}/"
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:630:            f"field={meta['field_id']} land={meta['land_id']} "
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:637:        date_set = set(_list_dates_from_db(conn, meta["field_id"]))
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:641:        candidates = _candidate_dates_from_jobs(conn, meta["field_id"])
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:743:            "field_id": meta["field_id"],
+services/ingest/app\tasks\bridge_stac_cogs_to_agri_lonlat.py:775:        args.field_id,
+services/ingest/app\tasks\agri_alerts.py:37:def _load_field_meta(session, field_id: str) -> dict[str, Any] | None:
+services/ingest/app\tasks\agri_alerts.py:39:    from app.models.tables import Field
+services/ingest/app\tasks\agri_alerts.py:41:    field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\agri_alerts.py:44:    land_id = parse_agri_land_id(field.tags_json)
+services/ingest/app\tasks\agri_alerts.py:46:        "field_id": field.id,
+services/ingest/app\tasks\agri_alerts.py:49:        "tags": field.tags_json,
+services/ingest/app\tasks\agri_alerts.py:110:def _delete_open_rs_alerts(session, field_id, index_keys: list[str]) -> int:
+services/ingest/app\tasks\agri_alerts.py:119:            Alert.field_id == field_id,
+services/ingest/app\tasks\agri_alerts.py:129:def _existing_alert_keys(session, field_id) -> set[tuple[date, str]]:
+services/ingest/app\tasks\agri_alerts.py:133:        select(Alert.date, Alert.rule_name).where(Alert.field_id == field_id)
+services/ingest/app\tasks\agri_alerts.py:141:    field_id,
+services/ingest/app\tasks\agri_alerts.py:161:                    field_id=field_id,
+services/ingest/app\tasks\agri_alerts.py:198:                            field_id=field_id,
+services/ingest/app\tasks\agri_alerts.py:222:    field_id: str,
+services/ingest/app\tasks\agri_alerts.py:238:        meta = _load_field_meta(session, field_id)
+services/ingest/app\tasks\agri_alerts.py:241:                "field_id": field_id,
+services/ingest/app\tasks\agri_alerts.py:243:                "detail": "Field not found",
+services/ingest/app\tasks\agri_alerts.py:248:                "field_id": field_id,
+services/ingest/app\tasks\agri_alerts.py:256:            return {"field_id": field_id, "status": "skipped", "reason": "no_indices"}
+services/ingest/app\tasks\agri_alerts.py:261:                "field_id": field_id,
+services/ingest/app\tasks\agri_alerts.py:277:            removed = _delete_open_rs_alerts(session, meta["field_id"], keys)
+services/ingest/app\tasks\agri_alerts.py:279:        existing = _existing_alert_keys(session, meta["field_id"])
+services/ingest/app\tasks\agri_alerts.py:300:            weather_ctx = _get_weather_context(session, meta["field_id"], sd)
+services/ingest/app\tasks\agri_alerts.py:304:                field_id=meta["field_id"],
+services/ingest/app\tasks\agri_alerts.py:323:            "field_id": field_id,
+services/ingest/app\tasks\agri_alerts.py:334:                k: result[k] for k in ("field_id", "land_id", "created", "removed_open")
+services/ingest/app\tasks\agri_alerts.py:352:    field_id: str,
+services/ingest/app\tasks\agri_alerts.py:359:            field_id,
+services/ingest/app\tasks\agri_alerts.py:366:            field_id=field_id,
+services/ingest/app\tasks\season_growth_report.py:58:    field_id: str | None,
+services/ingest/app\tasks\season_growth_report.py:72:            field_id=str(field_id) if field_id else None,
+services/ingest/app\tasks\season_growth_report.py:108:    field_id: str | None = None,
+services/ingest/app\tasks\season_growth_report.py:124:    field_id_str: str | None = str(field_id) if field_id else None
+services/ingest/app\tasks\season_growth_report.py:147:        if not field_id_str and job and job.field_id:
+services/ingest/app\tasks\season_growth_report.py:148:            field_id_str = str(job.field_id)
+services/ingest/app\tasks\season_growth_report.py:160:        if not field_id_str:
+services/ingest/app\tasks\season_growth_report.py:162:                _uj(job, "failed", error="field_id required")
+services/ingest/app\tasks\season_growth_report.py:166:                field_id=None,
+services/ingest/app\tasks\season_growth_report.py:167:                error="field_id required",
+services/ingest/app\tasks\season_growth_report.py:173:            return {"error": "field_id required"}
+services/ingest/app\tasks\season_growth_report.py:179:                field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:190:                field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:217:                field_id=uuid.UUID(field_id_str),
+services/ingest/app\tasks\season_growth_report.py:249:                        field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:267:                    field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:290:            field_id=uuid.UUID(field_id_str),
+services/ingest/app\tasks\season_growth_report.py:304:                field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:320:        object_key = f"reports/season_growth/{field_id_str}/season-growth-{ts}.pdf"
+services/ingest/app\tasks\season_growth_report.py:363:            field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:375:            "field_id": field_id_str,
+services/ingest/app\tasks\season_growth_report.py:397:            field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:429:            field_id=field_id_str,
+services/ingest/app\tasks\season_growth_report.py:436:                field_id_str = field_id_str or (
+services/ingest/app\tasks\season_growth_report.py:437:                    str(job.field_id) if job.field_id else None
+services/ingest/app\tasks\season_growth_report.py:447:            "field_id": field_id_str,
+services/ingest/app\tasks\season_growth_report.py:454:            field_id=field_id_str,
+services/api/app\models\tables.py:58:    fields: Mapped[list[Field]] = relationship(back_populates="farm", lazy="selectin")
+services/api/app\models\tables.py:61:class Field(Base):
+services/api/app\models\tables.py:96:            "field_id", "date", "layer_type", name="uq_raster_field_date_type"
+services/api/app\models\tables.py:103:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:104:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+services/api/app\models\tables.py:125:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:126:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/api/app\models\tables.py:154:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:155:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/api/app\models\tables.py:182:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:183:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/api/app\models\tables.py:211:    field_id: Mapped[uuid.UUID | None] = mapped_column(
+services/api/app\models\tables.py:212:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=True, index=True
+services/api/app\models\tables.py:249:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:250:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+services/api/app\models\tables.py:271:        UniqueConstraint("field_id", "date", name="uq_weather_field_date"),
+services/api/app\models\tables.py:272:        Index("idx_weather_field_date", "field_id", "date"),
+services/api/app\models\tables.py:278:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:280:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\models\tables.py:330:    __table_args__ = (Index("idx_soil_profiles_field_id", "field_id"),)
+services/api/app\models\tables.py:335:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:337:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\models\tables.py:424:    __table_args__ = (UniqueConstraint("field_id", name="uq_soil_field_summary_field"),)
+services/api/app\models\tables.py:429:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:431:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\models\tables.py:476:        UniqueConstraint("field_id", name="uq_soil_nutrient_npk_field"),
+services/api/app\models\tables.py:477:        Index("idx_soil_nutrient_npk_field_id", "field_id"),
+services/api/app\models\tables.py:484:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/api/app\models\tables.py:486:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\models\tables.py:528:        Index("idx_group_site_admission_field_id", "field_id"),
+services/api/app\models\tables.py:535:    field_id: Mapped[uuid.UUID | None] = mapped_column(
+services/api/app\models\tables.py:537:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\services\agri_land_parcels.py:142:    field_id: str | None = None,
+services/api/app\services\agri_land_parcels.py:164:    if field_id:
+services/api/app\services\agri_land_parcels.py:165:        source_properties["field_id"] = str(field_id)
+services/api/app\services\agri_land_parcels.py:212:            field_id=str(getattr(field, "id", "")),
+services/api/app\services\agri_land_parcels.py:229:        field_id=str(field.id) if getattr(field, "id", None) else None,
+services/api/app\services\agri_land_parcels.py:236:        field_id=str(getattr(field, "id", "") or ""),
+apps/web/src\lib\api.ts:182:export interface Field {
+apps/web/src\lib\api.ts:319:    field_id: string;
+apps/web/src\lib\api.ts:334:    field_id: string;
+apps/web/src\lib\api.ts:361:    field_id: string;
+apps/web/src\lib\api.ts:381:    field_id: string;
+apps/web/src\lib\api.ts:403:    field_id: string;
+apps/web/src\lib\api.ts:471:    field_id: string;
+apps/web/src\lib\api.ts:490:    field_id: string;
+apps/web/src\lib\api.ts:509:export const farmsApi = {
+apps/web/src\lib\api.ts:523:        apiFetch<Paginated<Field>>(`/farms/${farmId}/fields?limit=${limit}&offset=${offset}`),
+apps/web/src\lib\api.ts:531:    field_id: string;
+apps/web/src\lib\api.ts:543:export const fieldsApi = {
+apps/web/src\lib\api.ts:544:    get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
+apps/web/src\lib\api.ts:546:        apiFetch<Field>("/fields", { method: "POST", body: JSON.stringify(data) }),
+apps/web/src\lib\api.ts:548:        apiFetch<Field>(`/fields/${fieldId}`, { method: "PUT", body: JSON.stringify(data) }),
+apps/web/src\lib\api.ts:550:        apiFetch(`/fields/${fieldId}`, { method: "DELETE" }),
+apps/web/src\lib\api.ts:554:        return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
+apps/web/src\lib\api.ts:574:        return apiFetch<{ field_id: string; status: string; message: string }>(
+apps/web/src\lib\api.ts:575:            `/fields/${fieldId}/backfill-indices`,
+apps/web/src\lib\api.ts:581:            `/fields/${fieldId}/backfill-status`,
+apps/web/src\lib\api.ts:589:        apiFetch<Paginated<RasterLayer>>(`/fields/${fieldId}/layers?type=${type}&limit=${limit}`),
+apps/web/src\lib\api.ts:591:        apiFetch<Paginated<FieldStat>>(`/fields/${fieldId}/stats?type=${type}&limit=${limit}`),
+apps/web/src\lib\api.ts:593:        apiFetch<string[]>(`/fields/${fieldId}/layers/types`),
+apps/web/src\lib\api.ts:600:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/ndvi`, {
+apps/web/src\lib\api.ts:605:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/index`, {
+apps/web/src\lib\api.ts:695:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
+apps/web/src\lib\api.ts:700:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
+apps/web/src\lib\api.ts:703:            `/fields/${fieldId}/assessment-report/latest/scorecard`,
+apps/web/src\lib\api.ts:707:            `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
+apps/web/src\lib\api.ts:756:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report`, {
+apps/web/src\lib\api.ts:761:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report/latest/meta`),
+apps/web/src\lib\api.ts:766:            `/fields/${fieldId}/season-growth-report/materials`,
+apps/web/src\lib\api.ts:772:            `${getApiBase()}/fields/${fieldId}/season-growth-report/latest`,
+apps/web/src\lib\api.ts:807:    listForField: (fieldId: string, limit = 50, indexType?: string) => {
+apps/web/src\lib\api.ts:808:        const params = new URLSearchParams({ field_id: fieldId, limit: String(limit) });
+apps/web/src\lib\api.ts:823:            `/fields/${fieldId}/scouting?limit=${limit}&offset=${offset}`,
+apps/web/src\lib\api.ts:826:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting`, {
+apps/web/src\lib\api.ts:831:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting/${obsId}`, {
+apps/web/src\lib\api.ts:836:        apiFetch(`/fields/${fieldId}/scouting/${obsId}`, { method: "DELETE" }),
+apps/web/src\lib\api.ts:845:            `/fields/${fieldId}/weather?start_date=${startDate}&end_date=${endDate}&include_forecast=${includeForecast}`,
+apps/web/src\lib\api.ts:848:        apiFetch<WeatherSummary>(`/fields/${fieldId}/weather/summary?days=${days}`),
+apps/web/src\lib\api.ts:850:        apiFetch<{ field_id: string; status: string; message: string }>(
+apps/web/src\lib\api.ts:851:            `/fields/${fieldId}/weather/backfill`,
+apps/web/src\lib\api.ts:860:    field_id: string;
+apps/web/src\lib\api.ts:878:    field_id?: string | null;
+apps/web/src\lib\api.ts:1000:    field_id: string;
+apps/web/src\lib\api.ts:1009:    field_id: string;
+apps/web/src\lib\api.ts:1026:    field_id: string;
+apps/web/src\lib\api.ts:1101:    field_id: string;
+apps/web/src\lib\api.ts:1124:    field_id: string;
+apps/web/src\lib\api.ts:1133:    field_id?: string | null;
+apps/web/src\lib\api.ts:1155:    field_id?: string | null;
+apps/web/src\lib\api.ts:1164:        apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
+apps/web/src\lib\api.ts:1166:        apiFetch<SoilFieldSummary>(`/fields/${fieldId}/soil/summary`),
+apps/web/src\lib\api.ts:1168:        apiFetch<SoilRefreshResponse>(`/fields/${fieldId}/soil/refresh`, {
+apps/web/src\lib\api.ts:1172:        apiFetch<SamplingZonesResponse>(`/fields/${fieldId}/soil/sampling-zones`),
+apps/web/src\lib\api.ts:1174:        apiFetch<CropSuitabilityResponse>(`/fields/${fieldId}/soil/crop-suitability`),
+apps/web/src\lib\api.ts:1176:        apiFetch<NutrientContextResponse>(`/fields/${fieldId}/soil/nutrient-context`),
+apps/web/src\lib\api.ts:1178:        apiFetch<CarbonEstimateResponse>(`/fields/${fieldId}/soil/carbon`),
+apps/web/src\lib\api.ts:1180:        apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
+apps/web/src\lib\api.ts:1182:        apiFetch<SoilNpk>(`/fields/${fieldId}/soil/npk`),
+apps/web/src\lib\api.ts:1187:        apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
+apps/web/src\lib\api.ts:1195:        apiFetch<SiteAdmission>(`/fields/${fieldId}/site-admission`),
+apps/web/src\lib\api.ts:1207:        apiFetch<SiteAdmissionFetchResponse>(`/fields/${fieldId}/site-admission`, {
+apps/web/src\lib\api.ts:1643:        apiFetch<ShareLink[]>(`/fields/${fieldId}/share`),
+apps/web/src\lib\api.ts:1645:        apiFetch<ShareLink>(`/fields/${fieldId}/share`, {
+apps/web/src\lib\api.ts:1650:        apiFetch(`/fields/${fieldId}/share/${token}`, { method: "DELETE" }),
+services/ingest/app\tasks\backfill.py:45:    field_id: str,
+services/ingest/app\tasks\backfill.py:57:    """Backfill vegetation indices for *field_id* over *months*.
+services/ingest/app\tasks\backfill.py:75:            field_id=field_id,
+services/ingest/app\tasks\backfill.py:88:    from app.models.tables import Field, Job
+services/ingest/app\tasks\backfill.py:95:        field = session.get(Field, uuid.UUID(field_id))
+services/ingest/app\tasks\backfill.py:97:            logger.error("backfill_field_not_found", field_id=field_id)
+services/ingest/app\tasks\backfill.py:99:                "field_id": field_id,
+services/ingest/app\tasks\backfill.py:101:                "detail": "Field not found",
+services/ingest/app\tasks\backfill.py:108:            {"lock_key": f"backfill:{field_id}"},
+services/ingest/app\tasks\backfill.py:114:                    "field_id": field_id,
+services/ingest/app\tasks\backfill.py:121:        agri_field = is_agri_tagged(field.tags_json)
+services/ingest/app\tasks\backfill.py:123:            land_id = parse_agri_land_id(field.tags_json)
+services/ingest/app\tasks\backfill.py:126:                field_id=field_id,
+services/ingest/app\tasks\backfill.py:140:                "field_id": field_id,
+services/ingest/app\tasks\backfill.py:174:                    field_id=field.id,
+services/ingest/app\tasks\backfill.py:193:                    field_id=field_id,
+services/ingest/app\tasks\backfill.py:204:                        "field_id": field_id,
+services/ingest/app\tasks\backfill.py:228:                        field_id=field.id,
+services/ingest/app\tasks\backfill.py:243:                        field_id=field_id,
+services/ingest/app\tasks\backfill.py:266:                field_id,
+services/ingest/app\tasks\backfill.py:274:            logger.info("s1_backfill_dispatched", field_id=field_id, result=s1_result)
+services/ingest/app\tasks\backfill.py:277:                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+services/ingest/app\tasks\backfill.py:282:            field_id=field_id,
+services/ingest/app\tasks\backfill.py:291:            "field_id": field_id,
+services/ingest/app\tasks\backfill.py:302:        logger.error("backfill_orchestration_failed", field_id=field_id, error=str(e))
+services/ingest/app\tasks\backfill.py:311:    field_id: str,
+services/ingest/app\tasks\backfill.py:331:        resolved = resolve_field_http(field_id)
+services/ingest/app\tasks\backfill.py:335:            field_id=field_id,
+services/ingest/app\tasks\backfill.py:351:                    "field_id": field_id,
+services/ingest/app\tasks\backfill.py:362:            field_id=field_id,
+services/ingest/app\tasks\backfill.py:387:            "field_id": field_id,
+services/ingest/app\tasks\backfill.py:414:                        "field_id": field_id,
+services/ingest/app\tasks\backfill.py:428:                    field_id=field_id,
+services/ingest/app\tasks\backfill.py:439:                        "field_id": field_id,
+services/ingest/app\tasks\backfill.py:452:                field_id=field_id,
+services/ingest/app\tasks\backfill.py:459:                "field_id": field_id,
+services/ingest/app\tasks\backfill.py:483:                field_id,
+services/ingest/app\tasks\backfill.py:493:                field_id=field_id,
+services/ingest/app\tasks\backfill.py:499:                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+services/ingest/app\tasks\backfill.py:504:            field_id=field_id,
+services/ingest/app\tasks\backfill.py:514:            "field_id": field_id,
+services/ingest/app\tasks\backfill.py:525:        logger.error("backfill_orchestration_failed", field_id=field_id, error=str(e))
+services/ingest/app\tasks\backfill.py:546:    from app.models.tables import Field, Job, RasterLayer
+services/ingest/app\tasks\backfill.py:557:            select(Field.id, Field.tags_json).where(Field.deleted_at.is_(None))
+services/ingest/app\tasks\backfill.py:569:            for field_id, tags_json in batch:
+services/ingest/app\tasks\backfill.py:578:                        RasterLayer.field_id == field_id
+services/ingest/app\tasks\backfill.py:602:                        field_id=field_id,
+services/ingest/app\tasks\backfill.py:662:    from app.models.tables import Field
+services/ingest/app\tasks\backfill.py:672:            session.execute(select(Field).where(Field.deleted_at.is_(None)))
+services/ingest/app\tasks\backfill.py:680:            if is_agri_tagged(field.tags_json):
+services/ingest/app\tasks\backfill.py:684:                args=[str(field.id)],
+apps/web/src\lib\agri-heatmap.ts:6: * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
+apps/web/src\lib\agri-heatmap.ts:795: * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
+apps/web/src\lib\agri-heatmap.ts:909: * Rebuild / soft-clip continuous color-film dataUrl to field.geom.
+apps/web/src\lib\agri-heatmap.ts:915:export function clipHeatmapImageToField(
+apps/web/src\lib\agri-heatmap.ts:1020:export function clipHeatmapToField(
+apps/web/src\lib\agri-heatmap.ts:1092:export function filterHeatmapPointsInField(
+services/ingest/app\tasks\pipeline.py:124:    session, field_id, layer_type: str, satellite: str | None = None
+services/ingest/app\tasks\pipeline.py:130:        RasterLayer.field_id == field_id, RasterLayer.layer_type == layer_type
+services/ingest/app\tasks\pipeline.py:196:    existing = existing_layer_dates(session, field.id, layer_type, satellite=satellite)
+services/ingest/app\tasks\pipeline.py:222:    field_id: str | None = None,
+services/ingest/app\tasks\pipeline.py:239:            field_id=field_id,
+services/ingest/app\tasks\pipeline.py:488:    field_id: str,
+services/ingest/app\tasks\pipeline.py:493:    object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{index_key}.tif"
+services/ingest/app\tasks\pipeline.py:567:def _get_weather_context(session, field_id, alert_date: date) -> dict | None:
+services/ingest/app\tasks\pipeline.py:580:                WeatherDaily.field_id == field_id,
+services/ingest/app\tasks\pipeline.py:614:    field_id,
+services/ingest/app\tasks\pipeline.py:628:    weather_ctx = _get_weather_context(session, field_id, scene_date)
+services/ingest/app\tasks\pipeline.py:638:                field_id=field_id,
+services/ingest/app\tasks\pipeline.py:665:                        field_id=field_id,
+services/ingest/app\tasks\pipeline.py:729:    field_id_str: str,
+services/ingest/app\tasks\pipeline.py:747:    from app.models.tables import RasterLayer, FieldStat, Field
+services/ingest/app\tasks\pipeline.py:757:    field_row = session.get(Field, job.field_id)
+services/ingest/app\tasks\pipeline.py:794:            field_id_str,
+services/ingest/app\tasks\pipeline.py:802:            object_key=f"cogs/{org_id_str}/{field_id_str}/{scene_date.isoformat()}/{index_key}.tif",
+services/ingest/app\tasks\pipeline.py:815:        # -- upsert RasterLayer (field_id + date + layer_type) --
+services/ingest/app\tasks\pipeline.py:817:            field_id=job.field_id,
+services/ingest/app\tasks\pipeline.py:858:                FieldStat.field_id == job.field_id,
+services/ingest/app\tasks\pipeline.py:882:                field_id=job.field_id, layer_id=layer_id, date=scene_date, **stat_values
+services/ingest/app\tasks\pipeline.py:895:            session, job.field_id, scene_date, stats, historical_means, index_def
+services/ingest/app\tasks\pipeline.py:919:    field_id_str: str,
+services/ingest/app\tasks\pipeline.py:969:                field_id_str=field_id_str,
+services/api/app\schemas\agri.py:8:from pydantic import BaseModel, Field
+services/api/app\schemas\agri.py:120:    parcel_cloud_source: str | None = Field(
+services/api/app\schemas\agri.py:128:    source: str | None = Field(
+services/api/app\schemas\agri.py:135:    decloud_quality: str | None = Field(
+services/api/app\schemas\agri.py:143:    decloud_reasons: list[str] | None = Field(
+services/api/app\schemas\agri.py:147:    relative_orbit: int | None = Field(
+services/api/app\schemas\agri.py:182:    pixel_data: dict[str, Any] | None = Field(
+services/api/app\schemas\agri.py:190:    pixels_lonlat: list[dict[str, Any]] | None = Field(
+services/api/app\schemas\agri.py:198:    rgb_url: str | None = Field(
+services/api/app\schemas\agri.py:202:    large_rgb_url: str | None = Field(
+services/api/app\schemas\agri.py:206:    heatmap_url: str | None = Field(
+services/api/app\schemas\agri.py:213:    s2_heatmap_url: str | None = Field(
+services/api/app\schemas\agri.py:217:    pixels_source: Literal["db_lonlat", "oss", "db_grid"] | None = Field(
+services/api/app\schemas\agri.py:267:    from_date: date = Field(alias="from")
+services/api/app\schemas\agri.py:268:    to_date: date = Field(alias="to")
+services/api/app\schemas\agri.py:270:    phenology_months: list[int] = Field(default_factory=lambda: [6, 7, 8, 9])
+services/api/app\schemas\agri.py:287:    area_mu: dict[str, float] = Field(default_factory=dict)
+services/api/app\schemas\agri.py:300:    area_mu: dict[str, float] = Field(default_factory=dict)
+services/api/app\schemas\agri.py:371:    evidence: dict[str, Any] = Field(default_factory=dict)
+services/api/app\schemas\agri.py:372:    alternates: list[dict[str, Any]] = Field(default_factory=list)
+services/api/app\schemas\agri.py:373:    window: dict[str, Any] = Field(default_factory=dict)
+services/api/app\schemas\farm.py:9:from pydantic import BaseModel, field_validator, Field as PydanticField
+services/api/app\schemas\farm.py:42:# ── Field ────────────────────────────────────────────────────────────
+services/api/app\schemas\farm.py:71:    tags: list[str] | None = PydanticField(default=None, validation_alias="tags_json")
+services/api/app\schemas\farm.py:121:    crops: list[str] = PydanticField(default_factory=list)
+services/api/app\schemas\farm.py:123:    months: list[int] = PydanticField(default_factory=list)
+services/api/app\schemas\farm.py:157:    field_id: uuid.UUID
+services/api/app\schemas\farm.py:163:    field_id: uuid.UUID
+apps/web/src\components\create-farm-modal.tsx:5:import { farmsApi } from "@/lib/api";
+apps/web/src\components\create-farm-modal.tsx:51:            const farm = await farmsApi.create({
+services/api/app\schemas\monitoring.py:22:    field_id: uuid.UUID
+services/api/app\schemas\monitoring.py:37:# ── Field Stats ──────────────────────────────────────────────────────
+services/api/app\schemas\monitoring.py:42:    field_id: uuid.UUID
+services/api/app\schemas\monitoring.py:90:    field_id: uuid.UUID | None = None
+services/api/app\schemas\monitoring.py:121:    field_id: uuid.UUID
+services/api/app\schemas\monitoring.py:167:    field_id: uuid.UUID
+services/api/app\schemas\monitoring.py:191:    field_id: uuid.UUID
+services/api/app\schemas\monitoring.py:213:    field_id: uuid.UUID | None = None
+services/api/app\schemas\soil.py:53:    field_id: uuid.UUID
+services/api/app\schemas\soil.py:64:    field_id: uuid.UUID
+services/api/app\schemas\soil.py:88:    field_id: str
+services/api/app\schemas\soil.py:169:    field_id: uuid.UUID
+services/api/app\schemas\soil.py:208:    field_id: str
+services/api/app\schemas\soil.py:219:    field_id: uuid.UUID | None = None
+services/api/app\schemas\soil.py:251:    # Persist cdfinance_group:<id> onto field.tags_json when True (default).
+services/api/app\schemas\soil.py:256:    field_id: str | None = None
+services/api/app\schemas\weather.py:58:    field_id: uuid.UUID
+services/api/app\schemas\weather.py:85:    field_id: uuid.UUID
+services/api/app\schemas\weather.py:97:    field_id: uuid.UUID
+apps/web/src\components\marketing\scene.tsx:81:/** Field boundary alone, the way layer A stores it before any index runs. */
+services/ingest/app\reports\land_assessment\__main__.py:27:    if not args.field_id and not args.from_dir:
+services/ingest/app\reports\land_assessment\__main__.py:40:                session=session, field_id=args.field_id, out_path=args.out
+apps/web/src\components\marketing\og-card.tsx:3:import { IMAGERY, RDYLGN, insideField, rampColor, vigour } from "./imagery";
+apps/web/src\components\marketing\og-card.tsx:89:            if (!insideField(u * 100, v * 100)) continue;
+apps/web/src\components\marketing\og-card.tsx:180:                            {alert("cardField")}
+apps/web/src\components\marketing\imagery.ts:58: * Field outline shared by every raster on the page, in a 0-100 box.
+apps/web/src\components\marketing\imagery.ts:103:export function insideField(x: number, y: number): boolean {
+apps/web/src\components\sidebar.tsx:47:    const isMapScreen = /^\/farms\/[^/]+\/fields\//.test(pathname);
+services/ingest/app\reports\land_assessment\data_loader.py:19:    Field,
+services/ingest/app\reports\land_assessment\data_loader.py:52:def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list[dict]:
+services/ingest/app\reports\land_assessment\data_loader.py:67:        .where(FieldStat.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:288:def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
+services/ingest/app\reports\land_assessment\data_loader.py:290:        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:312:            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:341:def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
+services/ingest/app\reports\land_assessment\data_loader.py:349:                WeatherDaily.field_id == field_id,
+services/ingest/app\reports\land_assessment\data_loader.py:362:                .where(WeatherDaily.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:400:        "field_id": str(field_id),
+services/ingest/app\reports\land_assessment\data_loader.py:418:    soil = load_soil(session, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:450:    field_id: uuid.UUID,
+services/ingest/app\reports\land_assessment\data_loader.py:466:                WeatherDaily.field_id == field_id,
+services/ingest/app\reports\land_assessment\data_loader.py:478:                .where(WeatherDaily.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:585:    field_id: uuid.UUID,
+services/ingest/app\reports\land_assessment\data_loader.py:595:    summary = load_soil(session, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:600:        select(SoilProfile).where(SoilProfile.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:703:    session: Session, field_id: uuid.UUID, land_id: str | None = None
+services/ingest/app\reports\land_assessment\data_loader.py:711:    from app.models.tables import Field as FieldModel
+services/ingest/app\reports\land_assessment\data_loader.py:714:        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:733:        field = session.get(FieldModel, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:735:            tagged = parse_cdfinance_group_id(field.tags_json)
+services/ingest/app\reports\land_assessment\data_loader.py:767:    field_id: uuid.UUID,
+services/ingest/app\reports\land_assessment\data_loader.py:774:    ``GET /v1/internal/fields/{id}/assessment-bundle``. SyncSession is used only
+services/ingest/app\reports\land_assessment\data_loader.py:792:                return assessment_bundle(str(field_id))
+services/ingest/app\reports\land_assessment\data_loader.py:804:    field = session.get(Field, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:806:        raise ValueError(f"Field not found: {field_id}")
+services/ingest/app\reports\land_assessment\data_loader.py:808:    land_id = parse_agri_land_id(field.tags_json)
+services/ingest/app\reports\land_assessment\data_loader.py:809:    indices = load_indices_from_field_stats(session, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:817:    soil = load_soil(session, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:818:    wsum, wstress = load_weather(session, field_id)
+services/ingest/app\reports\land_assessment\data_loader.py:825:    crop_key = normalize_crop_key(field.crop_type) or "corn"
+services/ingest/app\reports\land_assessment\data_loader.py:829:        session, field_id, season.season_months, lookback_days=450
+services/ingest/app\reports\land_assessment\data_loader.py:832:    suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
+services/ingest/app\reports\land_assessment\data_loader.py:833:    site_admission = load_site_admission(session, field_id, land_id=land_id)
+services/ingest/app\reports\land_assessment\data_loader.py:835:    tags = field.tags_json or []
+services/ingest/app\reports\land_assessment\data_loader.py:845:            "id": str(field.id),
+services/ingest/app\reports\land_assessment\data_loader.py:846:            "name": field.name,
+services/ingest/app\reports\land_assessment\data_loader.py:847:            "crop_type": field.crop_type,
+services/ingest/app\reports\land_assessment\data_loader.py:848:            "season": field.season,
+services/ingest/app\reports\land_assessment\data_loader.py:851:            "location": _location_from_tags(tags, field.name),
+services/ingest/app\reports\land_assessment\data_loader.py:919:            "id": str(field.get("id") or field.get("field_id") or ""),
+services/ingest/app\reports\land_assessment\data_loader.py:1027:    field_id: uuid.UUID,
+services/ingest/app\reports\land_assessment\data_loader.py:1040:                WeatherDaily.field_id == field_id,
+services/ingest/app\reports\land_assessment\data_loader.py:1147:    field_id: uuid.UUID | str | None,
+services/ingest/app\reports\land_assessment\data_loader.py:1169:    if session is not None and field_id is not None:
+services/ingest/app\reports\land_assessment\data_loader.py:1170:        fid = uuid.UUID(str(field_id))
+apps/web/src\components\charts\ndvi-grade-shares-chart.tsx:95:    /** Field area in 亩 for donut center */
+services/ingest/app\reports\land_assessment\service.py:139:    field_id: uuid.UUID | str | None = None,
+services/ingest/app\reports\land_assessment\service.py:145:    Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
+services/ingest/app\reports\land_assessment\service.py:153:        if field_id is None:
+services/ingest/app\reports\land_assessment\service.py:154:            raise ValueError("field_id required when data_dir is omitted")
+services/ingest/app\reports\land_assessment\service.py:155:        fid = uuid.UUID(str(field_id))
+services/ingest/app\reports\land_assessment\service.py:164:                "session and field_id required when data_dir is omitted "
+services/ingest/app\reports\land_assessment\service.py:185:    fid_raw = field.get("id") or field_id
+services/ingest/app\reports\land_assessment\service.py:192:            field_id=fid_raw,
+services/ingest/app\reports\land_assessment\service.py:200:            field_id=None,
+services/ingest/app\reports\land_assessment\service.py:412:        "field_id": field.get("id"),
+services/ingest/app\models\tables.py:58:    fields: Mapped[list[Field]] = relationship(back_populates="farm", lazy="selectin")
+services/ingest/app\models\tables.py:61:class Field(Base):
+services/ingest/app\models\tables.py:96:            "field_id", "date", "layer_type", name="uq_raster_field_date_type"
+services/ingest/app\models\tables.py:103:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:104:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+services/ingest/app\models\tables.py:125:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:126:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/ingest/app\models\tables.py:154:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:155:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/ingest/app\models\tables.py:182:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:183:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False, index=True
+services/ingest/app\models\tables.py:211:    field_id: Mapped[uuid.UUID | None] = mapped_column(
+services/ingest/app\models\tables.py:212:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=True, index=True
+services/ingest/app\models\tables.py:249:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:250:        UUID(as_uuid=True), ForeignKey("fields.id"), nullable=False
+services/ingest/app\models\tables.py:271:        UniqueConstraint("field_id", "date", name="uq_weather_field_date"),
+services/ingest/app\models\tables.py:272:        Index("idx_weather_field_date", "field_id", "date"),
+services/ingest/app\models\tables.py:278:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:280:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/ingest/app\models\tables.py:331:        Index("idx_soil_profiles_field_id", "field_id"),
+services/ingest/app\models\tables.py:337:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:339:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/ingest/app\models\tables.py:426:    __table_args__ = (UniqueConstraint("field_id", name="uq_soil_field_summary_field"),)
+services/ingest/app\models\tables.py:431:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:433:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/ingest/app\models\tables.py:478:        UniqueConstraint("field_id", name="uq_soil_nutrient_npk_field"),
+services/ingest/app\models\tables.py:479:        Index("idx_soil_nutrient_npk_field_id", "field_id"),
+services/ingest/app\models\tables.py:486:    field_id: Mapped[uuid.UUID] = mapped_column(
+services/ingest/app\models\tables.py:488:        ForeignKey("fields.id", ondelete="CASCADE"),
+services/api/app\routers\internal_jobs.py:10:from pydantic import BaseModel, Field
+services/api/app\routers\internal_jobs.py:23:    field_id: uuid.UUID | None = None
+services/api/app\routers\internal_jobs.py:37:    status: str | None = Field(default=None, max_length=20)
+apps/web/src\components\alert-row.tsx:272:                                href={`/farms/${farmId}/fields/${alert.field_id}`}
+services/api/app\routers\mq_tasks.py:10:from pydantic import BaseModel, Field
+services/api/app\routers\mq_tasks.py:33:    field_id: str | None = None
+services/api/app\routers\mq_tasks.py:36:    extras: dict[str, Any] = Field(default_factory=dict)
+services/api/app\routers\mq_tasks.py:57:    if not body.field_id and not body.parcel_id and not body.land_id:
+services/api/app\routers\mq_tasks.py:59:            status_code=400, detail="Provide field_id and/or parcel_id (land_id)"
+services/api/app\routers\mq_tasks.py:68:        field_id=body.field_id,
+services/api/app\routers\mq_tasks.py:83:        field_id=body.field_id,
+services/api/app\routers\assessment.py:21:from app.models.tables import Field, Job
+services/api/app\routers\assessment.py:32:from pydantic import BaseModel, Field as PydanticField, field_validator, model_validator
+services/api/app\routers\assessment.py:38:    crop_type: str | None = PydanticField(
+services/api/app\routers\assessment.py:42:    date_from: str | None = PydanticField(
+services/api/app\routers\assessment.py:46:    years: int | None = PydanticField(
+services/api/app\routers\assessment.py:52:    pull_data: bool = PydanticField(
+services/api/app\routers\assessment.py:56:    cdfinance_token: str | None = PydanticField(
+services/api/app\routers\assessment.py:60:    token: str | None = PydanticField(
+services/api/app\routers\assessment.py:64:    group_id: str | int | None = PydanticField(
+services/api/app\routers\assessment.py:68:    hr_base_id: str | int | None = PydanticField(
+services/api/app\routers\assessment.py:135:async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -> Field:
+services/api/app\routers\assessment.py:136:    field = await db.get(Field, field_id)
+services/api/app\routers\assessment.py:138:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\assessment.py:146:    field_id: str,
+services/api/app\routers\assessment.py:155:        "field_id": field_id,
+services/api/app\routers\assessment.py:170:    "/fields/{field_id}/assessment-report",
+services/api/app\routers\assessment.py:177:    field_id: uuid.UUID,
+services/api/app\routers\assessment.py:188:    field = await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\assessment.py:193:    crop_key = normalize_crop_key(field.crop_type)
+services/api/app\routers\assessment.py:202:            field.crop_type = new_key
+services/api/app\routers\assessment.py:245:    elif not await field_has_site_admission(db, field_id):
+services/api/app\routers\assessment.py:249:            field_id=str(field_id),
+services/api/app\routers\assessment.py:259:                Job.field_id == field_id,
+services/api/app\routers\assessment.py:274:        field_id=field_id,
+services/api/app\routers\assessment.py:320:                field_id=str(field_id),
+services/api/app\routers\assessment.py:363:                field_id=str(field_id),
+services/api/app\routers\assessment.py:369:                field_id=str(field_id),
+services/api/app\routers\assessment.py:380:                field_id=str(field_id),
+services/api/app\routers\assessment.py:386:                field_id=str(field_id),
+services/api/app\routers\assessment.py:407:@router.get("/fields/{field_id}/assessment-report/latest")
+services/api/app\routers\assessment.py:409:    field_id: uuid.UUID,
+services/api/app\routers\assessment.py:414:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\assessment.py:421:                Job.field_id == field_id,
+services/api/app\routers\assessment.py:466:    field_id: uuid.UUID,
+services/api/app\routers\assessment.py:481:                Job.field_id == field_id,
+services/api/app\routers\assessment.py:498:                    Job.field_id == field_id,
+services/api/app\routers\assessment.py:513:@router.get("/fields/{field_id}/assessment-report/latest/meta", response_model=JobOut)
+services/api/app\routers\assessment.py:515:    field_id: uuid.UUID,
+services/api/app\routers\assessment.py:525:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\assessment.py:527:        db, ctx=ctx, field_id=field_id, job_type="assessment_report"
+services/api/app\routers\assessment.py:543:    "/fields/{field_id}/assessment-report/latest/scorecard",
+services/api/app\routers\assessment.py:547:    field_id: uuid.UUID,
+services/api/app\routers\assessment.py:557:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\assessment.py:563:                Job.field_id == field_id,
+services/api/app\routers\monitoring.py:64:        field_id=layer.field_id,
+services/api/app\routers\monitoring.py:79:    "/fields/{field_id}/layers", response_model=PaginatedResponse[RasterLayerOut]
+services/api/app\routers\monitoring.py:82:    field_id: uuid.UUID,
+services/api/app\routers\monitoring.py:90:        RasterLayer.field_id == field_id,
+services/api/app\routers\monitoring.py:109:@router.get("/fields/{field_id}/stats", response_model=PaginatedResponse[FieldStatOut])
+services/api/app\routers\monitoring.py:111:    field_id: uuid.UUID,
+services/api/app\routers\monitoring.py:122:            FieldStat.field_id == field_id,
+services/api/app\routers\monitoring.py:138:@router.get("/fields/{field_id}/layers/types", response_model=list[str])
+services/api/app\routers\monitoring.py:140:    field_id: uuid.UUID,
+services/api/app\routers\monitoring.py:147:            RasterLayer.field_id == field_id, org_scope(None, ctx)
+services/api/app\routers\alerts.py:15:from app.models.tables import Alert, Farm, Field
+services/api/app\routers\alerts.py:38:        Field, (Alert.field_id == Field.id) & Field.deleted_at.is_(None)
+services/api/app\routers\alerts.py:39:    ).outerjoin(Farm, (Field.farm_id == Farm.id) & Farm.deleted_at.is_(None))
+services/api/app\routers\alerts.py:62:    field_id: uuid.UUID | None = Query(None),
+services/api/app\routers\alerts.py:71:    if field_id:
+services/api/app\routers\alerts.py:72:        base = base.where(Alert.field_id == field_id)
+services/api/app\routers\alerts.py:80:        base = base.where(Field.farm_id == farm_id)
+services/api/app\routers\alerts.py:87:            base.add_columns(Field.name, Farm.id, Farm.name)
+services/api/app\routers\alerts.py:128:@router.get("/fields/{field_id}/alerts", response_model=PaginatedResponse[AlertOut])
+services/api/app\routers\alerts.py:130:    field_id: uuid.UUID,
+services/api/app\routers\alerts.py:137:        org_scope(None, ctx), Alert.field_id == field_id
+services/api/app\routers\alerts.py:144:            base.add_columns(Field.name, Farm.id, Farm.name)
+services/api/app\routers\internal_fields.py:17:from app.models.tables import Field as FieldModel
+services/api/app\routers\internal_fields.py:19:router = APIRouter(prefix="/internal/fields", tags=["internal-fields"])
+services/api/app\routers\internal_fields.py:23:    field_id: str | None = None
+services/api/app\routers\internal_fields.py:30:    field_id: str
+services/api/app\routers\internal_fields.py:54:        raise HTTPException(status_code=400, detail="invalid field_id") from e
+services/api/app\routers\internal_fields.py:61:    field_id: str | None = Query(default=None),
+services/api/app\routers\internal_fields.py:65:    """Map field_id ↔ agri land_id using fields.tags_json (exact ``agri:<land_id>``).
+services/api/app\routers\internal_fields.py:70:    fid = (field_id or "").strip() or None
+services/api/app\routers\internal_fields.py:86:            field_id=str(row.id),
+services/api/app\routers\internal_fields.py:136:            field_id=row[0],
+services/api/app\routers\internal_fields.py:157:            field_id=str(row.id),
+services/api/app\routers\internal_fields.py:163:    raise HTTPException(status_code=400, detail="Provide field_id and/or land_id")
+services/api/app\routers\internal_fields.py:166:@router.get("/{field_id}/geom", response_model=FieldGeomOut)
+services/api/app\routers\internal_fields.py:168:    field_id: str,
+services/api/app\routers\internal_fields.py:174:    fid_uuid = _parse_field_uuid(field_id)
+services/api/app\routers\internal_fields.py:176:        id::text AS field_id,
+services/api/app\routers\internal_fields.py:204:        field_id=row["field_id"],
+services/api/app\routers\internal_fields.py:222:@router.patch("/{field_id}/tags", response_model=FieldResolveOut)
+services/api/app\routers\internal_fields.py:224:    field_id: str,
+services/api/app\routers\internal_fields.py:242:    fid_uuid = _parse_field_uuid(field_id)
+services/api/app\routers\internal_fields.py:288:        field_id=str(row.id),
+services/api/app\routers\internal_fields.py:299:    field_id: str
+services/api/app\routers\internal_fields.py:308:def _sync_load_assessment_bundle(field_id: str) -> dict[str, Any]:
+services/api/app\routers\internal_fields.py:313:    fid = _parse_field_uuid(field_id)
+services/api/app\routers\internal_fields.py:325:@router.get("/{field_id}/assessment-bundle")
+services/api/app\routers\internal_fields.py:327:    field_id: str,
+services/api/app\routers\internal_fields.py:339:        bundle = await asyncio.to_thread(_sync_load_assessment_bundle, field_id)
+services/api/app\routers\internal_fields.py:349:@router.get("/{field_id}/data-readiness", response_model=DataReadinessOut)
+services/api/app\routers\internal_fields.py:351:    field_id: str,
+services/api/app\routers\internal_fields.py:359:    fid = _parse_field_uuid(field_id)
+services/api/app\routers\internal_fields.py:373:    weather_sql = "SELECT count(*)::int AS n FROM weather_daily WHERE field_id = CAST(:fid AS uuid)"
+services/api/app\routers\internal_fields.py:388:                    "SELECT 1 FROM soil_profiles WHERE field_id = CAST(:fid AS uuid) LIMIT 1"
+services/api/app\routers\internal_fields.py:431:        field_id=str(fid),
+services/api/app\routers\internal_fields.py:442:    field_id: str, date_from: str, date_to: str
+services/api/app\routers\internal_fields.py:444:    """Field meta + agri S2/S1 rows + classic indices for season-growth facts."""
+services/api/app\routers\internal_fields.py:457:    from app.models.tables import Field as FieldTbl
+services/api/app\routers\internal_fields.py:465:    fid = _parse_field_uuid(field_id)
+services/api/app\routers\internal_fields.py:470:            raise ValueError(f"Field not found: {field_id}")
+services/api/app\routers\internal_fields.py:471:        land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\internal_fields.py:473:            "field_id": str(fid),
+services/api/app\routers\internal_fields.py:474:            "field_name": field.name or "地块",
+services/api/app\routers\internal_fields.py:476:            "crop_type": field.crop_type,
+services/api/app\routers\internal_fields.py:478:            "tags": field.tags_json if isinstance(field.tags_json, list) else [],
+services/api/app\routers\internal_fields.py:618:                    FieldStat.field_id == fid,
+services/api/app\routers\internal_fields.py:709:@router.get("/{field_id}/season-growth-inputs")
+services/api/app\routers\internal_fields.py:711:    field_id: str,
+services/api/app\routers\internal_fields.py:719:            _sync_load_season_growth_inputs, field_id, date_from, date_to
+services/api/app\routers\jobs.py:15:from app.models.tables import Field, Job
+services/api/app\routers\jobs.py:29:    field_id: uuid.UUID,
+services/api/app\routers\jobs.py:40:    field = await db.get(Field, field_id)
+services/api/app\routers\jobs.py:42:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\jobs.py:57:        field_id=field_id, type=index_type, status="pending", params_json=params_json
+services/api/app\routers\jobs.py:72:            field_id=str(field_id),
+services/api/app\routers\jobs.py:89:@router.post("/fields/{field_id}/jobs/index", response_model=JobOut, status_code=201)
+services/api/app\routers\jobs.py:93:    field_id: uuid.UUID,
+services/api/app\routers\jobs.py:103:        field_id=field_id,
+services/api/app\routers\jobs.py:116:@router.post("/fields/{field_id}/jobs/ndvi", response_model=JobOut, status_code=201)
+services/api/app\routers\jobs.py:120:    field_id: uuid.UUID,
+services/api/app\routers\jobs.py:126:        field_id=field_id,
+services/api/app\routers\jobs.py:153:                field_id=job.field_id,
+services/api/app\routers\weather.py:18:from app.models.tables import Field, WeatherDaily
+services/api/app\routers\weather.py:46:    field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession
+services/api/app\routers\weather.py:47:) -> Field:
+services/api/app\routers\weather.py:48:    field = await db.get(Field, field_id)
+services/api/app\routers\weather.py:50:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\weather.py:115:@router.get("/fields/{field_id}/weather", response_model=WeatherResponse)
+services/api/app\routers\weather.py:117:    field_id: uuid.UUID,
+services/api/app\routers\weather.py:125:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\weather.py:137:            WeatherDaily.field_id == field_id,
+services/api/app\routers\weather.py:149:            func.ST_Y(func.ST_Centroid(Field.geom)).label("lat"),
+services/api/app\routers\weather.py:150:            func.ST_X(func.ST_Centroid(Field.geom)).label("lon"),
+services/api/app\routers\weather.py:151:        ).where(Field.id == field_id)
+services/api/app\routers\weather.py:162:    summary = await _compute_summary(db, field_id, start_date, end_date)
+services/api/app\routers\weather.py:165:        field_id=field_id,
+services/api/app\routers\weather.py:173:@router.get("/fields/{field_id}/weather/summary", response_model=WeatherSummaryOut)
+services/api/app\routers\weather.py:175:    field_id: uuid.UUID,
+services/api/app\routers\weather.py:181:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\weather.py:185:    return await _compute_summary(db, field_id, start_date, end_date)
+services/api/app\routers\weather.py:189:    "/fields/{field_id}/weather/backfill",
+services/api/app\routers\weather.py:194:    field_id: uuid.UUID,
+services/api/app\routers\weather.py:200:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\weather.py:208:        type="weather_backfill", field_id=str(field_id), extras={"days": body.days}
+services/api/app\routers\weather.py:213:        field_id=str(field_id),
+services/api/app\routers\weather.py:218:        field_id=field_id,
+services/api/app\routers\weather.py:225:    db: AsyncSession, field_id: uuid.UUID, start_date: date, end_date: date
+services/api/app\routers\weather.py:245:            WeatherDaily.field_id == field_id,
+services/api/app\routers\weather.py:263:            WeatherDaily.field_id == field_id, WeatherDaily.drought_index.isnot(None)
+services/api/app\routers\weather.py:271:        field_id=field_id,
+services/api/app\routers\internal_agri.py:9:from pydantic import BaseModel, Field
+services/api/app\routers\internal_agri.py:29:    dates: list[date] = Field(default_factory=list)
+services/api/app\routers\internal_agri.py:43:    sensors: list[AgriSensorSummary] = Field(default_factory=list)
+services/api/app\routers\internal_work.py:10:from pydantic import BaseModel, Field
+services/api/app\routers\internal_work.py:23:    worker_id: str = Field(..., min_length=1, max_length=256)
+services/api/app\routers\internal_work.py:25:    limit: int = Field(default=1, ge=1, le=50)
+services/api/app\routers\internal_work.py:26:    lease_seconds: int | None = Field(default=None, ge=30, le=3600)
+services/api/app\routers\internal_work.py:54:    lease_seconds: int | None = Field(default=None, ge=30, le=3600)
+services/api/app\routers\internal_work.py:59:    progress: dict[str, Any] = Field(default_factory=dict)
+services/api/app\routers\internal_work.py:64:    result: dict[str, Any] = Field(default_factory=dict)
+services/api/app\routers\internal_work.py:69:    error: str = Field(..., min_length=1)
+services/api/app\routers\agri.py:4:and `/v1/fields` endpoints remain available for compatibility.
+services/api/app\routers\agri.py:308:            "/v1/farms and /v1/fields are legacy in this fork."
+apps/web/src\components\landing-page.tsx:36:    { name: "Fields of The World", url: "https://fieldsofthe.world" },
+apps/web/src\components\landing-page.tsx:323:                                {t("cardField")}
+services/api/app\routers\internal_results.py:9:from pydantic import BaseModel, Field
+services/api/app\routers\internal_results.py:22:    result: dict[str, Any] = Field(default_factory=dict)
+services/api/app\routers\internal_results.py:35:    stats: dict[str, Any] = Field(default_factory=dict)
+services/api/app\routers\fields.py:35:from app.models.tables import AuditEvent, Farm, Field, Job
+services/api/app\routers\fields.py:64:def _field_to_out(field: Field) -> FieldOut:
+services/api/app\routers\fields.py:65:    """Convert ORM Field to FieldOut with GeoJSON geometry."""
+services/api/app\routers\fields.py:67:        id=field.id,
+services/api/app\routers\fields.py:68:        farm_id=field.farm_id,
+services/api/app\routers\fields.py:69:        name=field.name,
+services/api/app\routers\fields.py:70:        geom=wkb_to_geojson(field.geom),
+services/api/app\routers\fields.py:72:        crop_type=field.crop_type,
+services/api/app\routers\fields.py:73:        season=field.season,
+services/api/app\routers\fields.py:74:        tags=field.tags_json,
+services/api/app\routers\fields.py:80:@router.post("/fields", response_model=FieldOut, status_code=status.HTTP_201_CREATED)
+services/api/app\routers\fields.py:113:    field = Field(
+services/api/app\routers\fields.py:130:                "field_id": str(field.id),
+services/api/app\routers\fields.py:152:            field_id=field.id,
+services/api/app\routers\fields.py:162:        field_id=str(field.id),
+services/api/app\routers\fields.py:182:            field_id=str(field.id),
+services/api/app\routers\fields.py:191:        field_id=str(field.id),
+services/api/app\routers\fields.py:199:@router.get("/fields/{field_id}", response_model=FieldOut)
+services/api/app\routers\fields.py:201:    field_id: uuid.UUID,
+services/api/app\routers\fields.py:205:    field = await db.get(Field, field_id)
+services/api/app\routers\fields.py:207:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\fields.py:211:@router.put("/fields/{field_id}", response_model=FieldOut)
+services/api/app\routers\fields.py:213:    field_id: uuid.UUID,
+services/api/app\routers\fields.py:218:    field = await db.get(Field, field_id)
+services/api/app\routers\fields.py:220:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\fields.py:229:        field.name = body.name
+services/api/app\routers\fields.py:239:            field.crop_type = None
+services/api/app\routers\fields.py:242:                field.crop_type = require_crop_key(str(raw))
+services/api/app\routers\fields.py:246:        field.season = body.season
+services/api/app\routers\fields.py:248:        field.tags_json = body.tags
+services/api/app\routers\fields.py:254:        field.geom = from_shape(multi, srid=4326)
+services/api/app\routers\fields.py:268:    new_land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\fields.py:277:@router.delete("/fields/{field_id}", status_code=status.HTTP_204_NO_CONTENT)
+services/api/app\routers\fields.py:279:    field_id: uuid.UUID,
+services/api/app\routers\fields.py:283:    field = await db.get(Field, field_id)
+services/api/app\routers\fields.py:285:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\fields.py:290:@router.post("/fields/import", response_model=FieldImportResponse)
+services/api/app\routers\fields.py:319:            name = props.get("name", f"Field {i + 1}")
+services/api/app\routers\fields.py:332:            field = Field(
+services/api/app\routers\fields.py:385:async def _fail_stale_backfill_jobs(db: AsyncSession, field_id: uuid.UUID) -> int:
+services/api/app\routers\fields.py:393:            Job.field_id == field_id,
+services/api/app\routers\fields.py:407:async def _wave_start_for_field(db: AsyncSession, field_id: uuid.UUID):
+services/api/app\routers\fields.py:415:                Job.field_id == field_id,
+services/api/app\routers\fields.py:437:    "/fields/{field_id}/backfill-indices",
+services/api/app\routers\fields.py:444:    field_id: uuid.UUID,
+services/api/app\routers\fields.py:452:    field = await db.get(Field, field_id)
+services/api/app\routers\fields.py:454:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\fields.py:460:        {"lock_key": f"backfill:{field_id}"},
+services/api/app\routers\fields.py:465:    is_agri = is_agri_tagged(field.tags_json)
+services/api/app\routers\fields.py:466:    land_id = parse_agri_land_id(field.tags_json) if is_agri else None
+services/api/app\routers\fields.py:469:    await _fail_stale_backfill_jobs(db, field_id)
+services/api/app\routers\fields.py:470:    wave_start, _ = await _wave_start_for_field(db, field_id)
+services/api/app\routers\fields.py:475:                    Job.field_id == field_id,
+services/api/app\routers\fields.py:538:        field_id=field_id,
+services/api/app\routers\fields.py:574:            field_id=field_id,
+services/api/app\routers\fields.py:614:        field_id=str(field_id),
+services/api/app\routers\fields.py:620:        field_id=field_id, status="dispatched", message=message
+services/api/app\routers\fields.py:624:@router.get("/fields/{field_id}/backfill-status", response_model=BackfillStatusResponse)
+services/api/app\routers\fields.py:626:    field_id: uuid.UUID,
+services/api/app\routers\fields.py:637:    field = await db.get(Field, field_id)
+services/api/app\routers\fields.py:639:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\fields.py:641:    stale_n = await _fail_stale_backfill_jobs(db, field_id)
+services/api/app\routers\fields.py:645:    wave_start, sentinel = await _wave_start_for_field(db, field_id)
+services/api/app\routers\fields.py:656:                Job.field_id == field_id,
+services/api/app\routers\fields.py:674:                Job.field_id == field_id,
+services/api/app\routers\fields.py:739:        field_id=field_id,
+services/api/app\routers\fields.py:791:    q = sa_select(Field).where(org_scope(None, ctx), Field.deleted_at.is_(None))
+services/api/app\routers\fields.py:793:        q = q.where(Field.farm_id == farm_id)
+services/api/app\routers\fields.py:802:        if not is_agri_tagged(field.tags_json):
+services/api/app\routers\fields.py:805:        land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\fields.py:809:                    SoilFieldSummary.field_id == field.id
+services/api/app\routers\fields.py:821:                .where(WeatherDaily.field_id == field.id)
+services/api/app\routers\fields.py:828:            send_task("app.tasks.soil.fetch_soil_for_field", args=[str(field.id)])
+services/api/app\routers\fields.py:832:                "app.tasks.weather.backfill_weather_for_field", args=[str(field.id)]
+services/api/app\routers\fields.py:838:                "field_id": str(field.id),
+services/api/app\routers\fields.py:839:                "name": field.name,
+services/api/app\routers\storage.py:11:from pydantic import BaseModel, Field
+services/api/app\routers\storage.py:36:    keys: list[str] = Field(default_factory=list)
+services/api/app\routers\storage.py:37:    limit: int | None = Field(default=None, ge=1, le=5000)
+services/api/app\routers\season_growth.py:22:from pydantic import BaseModel, Field as PydanticField, field_validator
+services/api/app\routers\season_growth.py:31:from app.models.tables import Field, Job
+services/api/app\routers\season_growth.py:42:    start_date: str = PydanticField(..., description="YYYY-MM-DD")
+services/api/app\routers\season_growth.py:43:    end_date: str = PydanticField(..., description="YYYY-MM-DD")
+services/api/app\routers\season_growth.py:44:    crops: list[str] = PydanticField(default_factory=list)
+services/api/app\routers\season_growth.py:46:    material_keys: list[str] = PydanticField(default_factory=list)
+services/api/app\routers\season_growth.py:47:    pull_data: bool = PydanticField(
+services/api/app\routers\season_growth.py:51:    cdfinance_token: str | None = PydanticField(
+services/api/app\routers\season_growth.py:55:    token: str | None = PydanticField(
+services/api/app\routers\season_growth.py:59:    group_id: str | int | None = PydanticField(
+services/api/app\routers\season_growth.py:63:    hr_base_id: str | int | None = PydanticField(
+services/api/app\routers\season_growth.py:89:async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -> Field:
+services/api/app\routers\season_growth.py:90:    field = await db.get(Field, field_id)
+services/api/app\routers\season_growth.py:92:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\season_growth.py:107:    field_id: str,
+services/api/app\routers\season_growth.py:116:        "field_id": field_id,
+services/api/app\routers\season_growth.py:131:    "/fields/{field_id}/season-growth-report",
+services/api/app\routers\season_growth.py:138:    field_id: uuid.UUID,
+services/api/app\routers\season_growth.py:150:    field = await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\season_growth.py:185:                Job.field_id == field_id,
+services/api/app\routers\season_growth.py:213:        field_id=field_id,
+services/api/app\routers\season_growth.py:244:                field_id=str(field_id),
+services/api/app\routers\season_growth.py:286:                field_id=str(field_id),
+services/api/app\routers\season_growth.py:292:                field_id=str(field_id),
+services/api/app\routers\season_growth.py:303:                field_id=str(field_id),
+services/api/app\routers\season_growth.py:309:                field_id=str(field_id),
+services/api/app\routers\season_growth.py:328:    "/fields/{field_id}/season-growth-report/materials",
+services/api/app\routers\season_growth.py:334:    field_id: uuid.UUID,
+services/api/app\routers\season_growth.py:340:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\season_growth.py:349:    object_key = f"reports/season_growth/{field_id}/{ts}-{safe_name}"
+services/api/app\routers\season_growth.py:364:@router.get("/fields/{field_id}/season-growth-report/latest")
+services/api/app\routers\season_growth.py:366:    field_id: uuid.UUID,
+services/api/app\routers\season_growth.py:371:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\season_growth.py:378:                Job.field_id == field_id,
+services/api/app\routers\season_growth.py:420:    field_id: uuid.UUID,
+services/api/app\routers\season_growth.py:435:                Job.field_id == field_id,
+services/api/app\routers\season_growth.py:452:                    Job.field_id == field_id,
+services/api/app\routers\season_growth.py:468:    "/fields/{field_id}/season-growth-report/latest/meta",
+services/api/app\routers\season_growth.py:472:    field_id: uuid.UUID,
+services/api/app\routers\season_growth.py:482:    await _get_field(field_id, ctx.org_id, db)
+services/api/app\routers\season_growth.py:484:        db, ctx=ctx, field_id=field_id, job_type="season_growth_report"
+services/api/app\routers\farms.py:20:from app.models.tables import Farm, Field
+services/api/app\routers\farms.py:126:        update(Field)
+services/api/app\routers\farms.py:127:        .where(Field.farm_id == farm_id, Field.deleted_at.is_(None))
+services/api/app\routers\farms.py:134:@router.get("/farms/{farm_id}/fields", response_model=PaginatedResponse[FieldOut])
+services/api/app\routers\farms.py:147:    base = select(Field).where(Field.farm_id == farm_id, Field.deleted_at.is_(None))
+services/api/app\routers\farms.py:152:        base.order_by(Field.created_at.desc()).limit(limit).offset(offset)
+services/api/app\routers\scouting.py:19:from app.models.tables import Field, ScoutingObservation, WeatherDaily
+services/api/app\routers\scouting.py:29:async def _get_weather_snapshot(db: AsyncSession, field_id: uuid.UUID) -> dict | None:
+services/api/app\routers\scouting.py:36:            WeatherDaily.field_id == field_id,
+services/api/app\routers\scouting.py:72:        field_id=obs.field_id,
+services/api/app\routers\scouting.py:85:    "/fields/{field_id}/scouting", response_model=PaginatedResponse[ScoutingOut]
+services/api/app\routers\scouting.py:88:    field_id: uuid.UUID,
+services/api/app\routers\scouting.py:95:        ScoutingObservation.field_id == field_id, org_scope(None, ctx)
+services/api/app\routers\scouting.py:112:    "/fields/{field_id}/scouting",
+services/api/app\routers\scouting.py:117:    field_id: uuid.UUID,
+services/api/app\routers\scouting.py:122:    field = await db.get(Field, field_id)
+services/api/app\routers\scouting.py:124:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\scouting.py:134:    weather_snapshot = await _get_weather_snapshot(db, field_id)
+services/api/app\routers\scouting.py:137:        field_id=field_id,
+services/api/app\routers\scouting.py:148:    logger.info("scouting_created", obs_id=str(obs.id), field_id=str(field_id))
+services/api/app\routers\scouting.py:152:@router.patch("/fields/{field_id}/scouting/{obs_id}", response_model=ScoutingOut)
+services/api/app\routers\scouting.py:154:    field_id: uuid.UUID,
+services/api/app\routers\scouting.py:161:    if not obs or obs.field_id != field_id:
+services/api/app\routers\scouting.py:176:    "/fields/{field_id}/scouting/{obs_id}", status_code=status.HTTP_204_NO_CONTENT
+services/api/app\routers\scouting.py:179:    field_id: uuid.UUID,
+services/api/app\routers\scouting.py:185:    if not obs or obs.field_id != field_id:
+services/api/app\routers\soil.py:26:    Field,
+services/api/app\routers\soil.py:59:    field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession
+services/api/app\routers\soil.py:60:) -> Field:
+services/api/app\routers\soil.py:61:    field = await db.get(Field, field_id)
+services/api/app\routers\soil.py:63:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\soil.py:67:@router.get("/fields/{field_id}/soil", response_model=SoilProfileOut)
+services/api/app\routers\soil.py:69:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:74:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:79:        .where(SoilProfile.field_id == field_id)
+services/api/app\routers\soil.py:90:@router.get("/fields/{field_id}/soil/summary", response_model=SoilFieldSummaryOut)
+services/api/app\routers\soil.py:92:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:97:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:100:        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+services/api/app\routers\soil.py:110:    "/fields/{field_id}/soil/refresh",
+services/api/app\routers\soil.py:117:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:122:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:125:    job = Job(field_id=field_id, type="soil_fetch", status="pending")
+services/api/app\routers\soil.py:134:        type="soil_fetch", field_id=str(field_id), extras={"job_id": str(job.id)}
+services/api/app\routers\soil.py:139:        field_id=str(field_id),
+services/api/app\routers\soil.py:145:        field_id=str(field_id),
+services/api/app\routers\soil.py:156:    field_id: uuid.UUID, db: AsyncSession
+services/api/app\routers\soil.py:162:        .where(SoilProfile.field_id == field_id)
+services/api/app\routers\soil.py:171:        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+services/api/app\routers\soil.py:247:    "/fields/{field_id}/soil/sampling-zones", response_model=SamplingZonesResponse
+services/api/app\routers\soil.py:250:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:255:    field = await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:256:    profile, _summary = await _get_profile_and_summary(field_id, db)
+services/api/app\routers\soil.py:267:        geom = to_shape(field.geom)
+services/api/app\routers\soil.py:278:    "/fields/{field_id}/soil/crop-suitability", response_model=CropSuitabilityResponse
+services/api/app\routers\soil.py:281:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:286:    field = await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:287:    profile, summary = await _get_profile_and_summary(field_id, db)
+services/api/app\routers\soil.py:305:        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
+services/api/app\routers\soil.py:329:                WeatherDaily.field_id == field_id,
+services/api/app\routers\soil.py:354:            field_crop_type=field.crop_type,
+services/api/app\routers\soil.py:372:    field_crop = field.crop_type
+services/api/app\routers\soil.py:390:    "/fields/{field_id}/soil/nutrient-context", response_model=NutrientContextResponse
+services/api/app\routers\soil.py:393:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:398:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:399:    profile, summary = await _get_profile_and_summary(field_id, db)
+services/api/app\routers\soil.py:414:@router.get("/fields/{field_id}/soil/carbon", response_model=CarbonEstimateResponse)
+services/api/app\routers\soil.py:416:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:421:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:422:    profile, summary = await _get_profile_and_summary(field_id, db)
+services/api/app\routers\soil.py:436:        ).where(WeatherDaily.field_id == field_id, WeatherDaily.date >= one_year_ago)
+services/api/app\routers\soil.py:465:    "/fields/{field_id}/soil/weather-stress", response_model=SoilWeatherStressResponse
+services/api/app\routers\soil.py:468:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:473:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:474:    _profile, summary = await _get_profile_and_summary(field_id, db)
+services/api/app\routers\soil.py:483:            WeatherDaily.field_id == field_id,
+services/api/app\routers\soil.py:539:        field_id=row.field_id,
+services/api/app\routers\soil.py:583:def _field_coords_string(field: Field) -> str:
+services/api/app\routers\soil.py:589:    if field.geom is None:
+services/api/app\routers\soil.py:590:        raise HTTPException(status_code=400, detail="Field has no geometry")
+services/api/app\routers\soil.py:591:    gj = mapping(to_shape(field.geom))
+services/api/app\routers\soil.py:598:@router.get("/fields/{field_id}/soil/npk", response_model=SoilNpkOut)
+services/api/app\routers\soil.py:600:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:606:    await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:608:        select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+services/api/app\routers\soil.py:617:    "/fields/{field_id}/soil/npk",
+services/api/app\routers\soil.py:623:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:648:    field = await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:652:            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+services/api/app\routers\soil.py:657:            field_id=str(field_id),
+services/api/app\routers\soil.py:670:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\soil.py:714:            field_id=str(field_id),
+services/api/app\routers\soil.py:728:        row = SoilNutrientNpk(field_id=field_id)
+services/api/app\routers\soil.py:754:        field_id=str(field_id),
+services/api/app\routers\soil.py:762:        field_id=str(field_id),
+services/api/app\routers\soil.py:778:        field_id=row.field_id,
+services/api/app\routers\soil.py:802:    db: AsyncSession, field: Field, explicit: str | int | None
+services/api/app\routers\soil.py:808:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\soil.py:812:    tagged = parse_cdfinance_group_id(field.tags_json)
+services/api/app\routers\soil.py:835:    "/fields/{field_id}/site-admission",
+services/api/app\routers\soil.py:839:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:845:    field = await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:847:        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+services/api/app\routers\soil.py:864:    "/fields/{field_id}/site-admission",
+services/api/app\routers\soil.py:870:    field_id: uuid.UUID,
+services/api/app\routers\soil.py:894:    field = await _get_field_or_404(field_id, ctx.org_id, db)
+services/api/app\routers\soil.py:910:            select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+services/api/app\routers\soil.py:915:            field_id=str(field_id),
+services/api/app\routers\soil.py:921:    if existing and not body.force and existing.field_id == field_id:
+services/api/app\routers\soil.py:923:            field_id=str(field_id),
+services/api/app\routers\soil.py:929:    if existing and not body.force and existing.field_id is None:
+services/api/app\routers\soil.py:931:        existing.field_id = field_id
+services/api/app\routers\soil.py:935:            field.tags_json = ensure_cdfinance_group_tag(field.tags_json, group_id)
+services/api/app\routers\soil.py:939:            field_id=str(field_id),
+services/api/app\routers\soil.py:971:            field_id=str(field_id),
+services/api/app\routers\soil.py:989:    row.field_id = field_id
+services/api/app\routers\soil.py:1007:        field.tags_json = ensure_cdfinance_group_tag(field.tags_json, row.group_id)
+services/api/app\routers\soil.py:1014:        field_id=str(field_id),
+services/api/app\routers\soil.py:1021:        field_id=str(field_id),
+services/api/app\routers\crops.py:8:from pydantic import BaseModel, Field
+services/api/app\routers\crops.py:19:    season_months: list[int] = Field(default_factory=list)
+services/api/app\routers\crops.py:20:    peak_months: list[int] = Field(default_factory=list)
+services/api/app\routers\share.py:30:    Field,
+services/api/app\routers\share.py:121:    field_id: uuid.UUID,
+services/api/app\routers\share.py:142:    sid = uuid.uuid5(uuid.NAMESPACE_URL, f"agri-share:{field_id}:{idx}:{date_val}")
+services/api/app\routers\share.py:145:        field_id=field_id,
+services/api/app\routers\share.py:165:    db: AsyncSession, field_id: uuid.UUID, land_id: str
+services/api/app\routers\share.py:244:                field_id=field_id,
+services/api/app\routers\share.py:278:async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, Field]:
+services/api/app\routers\share.py:288:    field = await db.get(Field, link.field_id)
+services/api/app\routers\share.py:290:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\share.py:294:@router.get("/fields/{field_id}/share", response_model=list[ShareOut])
+services/api/app\routers\share.py:296:    field_id: uuid.UUID,
+services/api/app\routers\share.py:302:            ShareLink.field_id == field_id,
+services/api/app\routers\share.py:317:    "/fields/{field_id}/share",
+services/api/app\routers\share.py:322:    field_id: uuid.UUID,
+services/api/app\routers\share.py:327:    field = await db.get(Field, field_id)
+services/api/app\routers\share.py:329:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\share.py:336:        field_id=field_id,
+services/api/app\routers\share.py:348:                "field_id": str(field_id),
+services/api/app\routers\share.py:355:    logger.info("report_shared", field_id=str(field_id), scope=body.scope)
+services/api/app\routers\share.py:360:    "/fields/{field_id}/share/{token}", status_code=status.HTTP_204_NO_CONTENT
+services/api/app\routers\share.py:363:    field_id: uuid.UUID,
+services/api/app\routers\share.py:370:            ShareLink.field_id == field_id,
+services/api/app\routers\share.py:399:    field = await db.get(Field, link.field_id)
+services/api/app\routers\share.py:401:        raise HTTPException(status_code=404, detail="Field not found")
+services/api/app\routers\share.py:407:        "id": str(field.id),
+services/api/app\routers\share.py:408:        "name": field.name,
+services/api/app\routers\share.py:410:        "crop_type": field.crop_type,
+services/api/app\routers\share.py:411:        "geom": mapping(to_shape(field.geom)) if field.geom else None,
+services/api/app\routers\share.py:414:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\share.py:422:        .where(RasterLayer.field_id == field.id)
+services/api/app\routers\share.py:432:            .where(RasterLayer.field_id == field.id, RasterLayer.layer_type == idx_type)
+services/api/app\routers\share.py:450:            .where(FieldStat.field_id == field.id, RasterLayer.layer_type == idx_type)
+services/api/app\routers\share.py:469:        ) = await _load_agri_share_series(db, field.id, land_id)
+services/api/app\routers\share.py:485:        .where(Alert.field_id == field.id)
+services/api/app\routers\share.py:494:        .where(ScoutingObservation.field_id == field.id)
+services/api/app\routers\share.py:512:                field_id=obs.field_id,
+services/api/app\routers\share.py:529:            WeatherDaily.field_id == field.id,
+services/api/app\routers\share.py:563:            WeatherDaily.field_id == field.id,
+services/api/app\routers\share.py:593:        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field.id)
+services/api/app\routers\share.py:676:            RasterLayer.field_id == link.field_id, RasterLayer.layer_type == idx_upper
+services/api/app\routers\share.py:738:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\routers\share.py:740:        raise HTTPException(status_code=404, detail="Field is not agri-tagged")
+services/api/app\core\agri_tags.py:5:- Field records may carry tags like ``agri:<land_id>`` so soil/weather
+services/api/app\core\agri_tags.py:6:  (keyed by fields.id) bind to the same parcel the UI shows.
+services/api/app\core\soil_intelligence.py:1460:        summary: Field soil summary dict (avg_ph, rootzone_awc_mm, etc.)
+services/api/app\reports\land_assessment\__main__.py:27:    if not args.field_id and not args.from_dir:
+services/api/app\reports\land_assessment\__main__.py:40:                session=session, field_id=args.field_id, out_path=args.out
+apps/web/src\app\[locale]\share\[token]\page.tsx:10:    clipHeatmapImageToField,
+apps/web/src\app\[locale]\share\[token]\page.tsx:211:                        {report.field.name}
+apps/web/src\app\[locale]\share\[token]\page.tsx:212:                        {report.field.crop_type && ` · ${report.field.crop_type}`}
+apps/web/src\app\[locale]\share\[token]\page.tsx:216:                {/* Field Info + Map */}
+apps/web/src\app\[locale]\share\[token]\page.tsx:230:                                <dd className="mt-0.5">{report.field.crop_type || t("na")}</dd>
+apps/web/src\app\[locale]\share\[token]\page.tsx:244:                            geom={report.field.geom}
+apps/web/src\app\[locale]\share\[token]\page.tsx:418:                            report.field.geom && t("sourceBasemap"),
+apps/web/src\app\[locale]\share\[token]\page.tsx:503:                const clipped = clipHeatmapImageToField(hm, fieldGeom);
+services/api/app\reports\land_assessment\service.py:139:    field_id: uuid.UUID | str | None = None,
+services/api/app\reports\land_assessment\service.py:145:    Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
+services/api/app\reports\land_assessment\service.py:153:        if field_id is None:
+services/api/app\reports\land_assessment\service.py:154:            raise ValueError("field_id required when data_dir is omitted")
+services/api/app\reports\land_assessment\service.py:155:        fid = uuid.UUID(str(field_id))
+services/api/app\reports\land_assessment\service.py:164:                "session and field_id required when data_dir is omitted "
+services/api/app\reports\land_assessment\service.py:185:    fid_raw = field.get("id") or field_id
+services/api/app\reports\land_assessment\service.py:192:            field_id=fid_raw,
+services/api/app\reports\land_assessment\service.py:200:            field_id=None,
+services/api/app\reports\land_assessment\service.py:412:        "field_id": field.get("id"),
+apps/web/src\components\field\scouting-tab.tsx:128:            .listForField(fieldId, 200)
+apps/web/src\components\field\alerts-tab.tsx:33:            const res = await alertsApi.listForField(fieldId, 200);
+apps/web/src\components\field\ndvi-tab.tsx:8:    fieldsApi,
+apps/web/src\components\field\ndvi-tab.tsx:88:    /** Field crop_type for agri season calendar / grade shares */
+apps/web/src\components\field\ndvi-tab.tsx:90:    /** Field area (ha) — agri NDVI donut center shows 亩 */
+apps/web/src\components\field\ndvi-tab.tsx:92:    /** Field tags — used to detect agri:<land_id> for RS fallback */
+apps/web/src\components\field\ndvi-tab.tsx:114:    const isAgriField = !!agriLandId;
+apps/web/src\components\field\ndvi-tab.tsx:158:        if (isAgriField) {
+apps/web/src\components\field\ndvi-tab.tsx:196:    }, [fieldId, activeIndex, isAgriField, onDataLoaded]);
+apps/web/src\components\field\ndvi-tab.tsx:210:        if (isAgriField) return;
+apps/web/src\components\field\ndvi-tab.tsx:215:                const res = await fieldsApi.backfillStatus(fieldId);
+apps/web/src\components\field\ndvi-tab.tsx:236:    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
+apps/web/src\components\field\ndvi-tab.tsx:240:        if (isAgriField) return; // agri panel polls its own backfill status
+apps/web/src\components\field\ndvi-tab.tsx:242:        fieldsApi.backfillStatus(fieldId)
+apps/web/src\components\field\ndvi-tab.tsx:257:    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
+apps/web/src\components\field\ndvi-tab.tsx:275:        if (isAgriField) {
+apps/web/src\components\field\ndvi-tab.tsx:289:    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
+apps/web/src\components\field\ndvi-tab.tsx:382:            await fieldsApi.backfillIndices(fieldId);
+apps/web/src\components\field\ndvi-tab.tsx:462:            {!isAgriField && (
+apps/web/src\components\field\ndvi-tab.tsx:496:            {!isAgriField && showJobForm && (
+apps/web/src\components\field\ndvi-tab.tsx:592:            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
+apps/web/src\components\field\ndvi-tab.tsx:712:            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
+apps/web/src\components\field\ndvi-tab.tsx:744:            {!isAgriField && layers.length > 0 && (
+apps/web/src\components\field\ndvi-tab.tsx:818:            {!isAgriField && layers.length === 0 && !activeJob && (
+services/ingest/app\core\soil_intelligence.py:1460:        summary: Field soil summary dict (avg_ph, rootzone_awc_mm, etc.)
+apps/web/src\components\field\ndvi-legend.tsx:53:                {/* Field min marker */}
+apps/web/src\components\field\ndvi-legend.tsx:68:                {/* Field max marker */}
+apps/web/src\components\field\ndvi-legend.tsx:90:            {/* Field actual range */}
+apps/web/src\components\field\land-report-tab.tsx:6:    fieldsApi,
+apps/web/src\components\field\land-report-tab.tsx:420:            await fieldsApi.update(fieldId, { crop_type: key });
+apps/web/src\components\field\agri-timeseries-panel.tsx:8:    fieldsApi,
+apps/web/src\components\field\agri-timeseries-panel.tsx:228:            field_id: "",
+apps/web/src\components\field\agri-timeseries-panel.tsx:294:            field_id: "",
+apps/web/src\components\field\agri-timeseries-panel.tsx:409:    /** Field area in hectares — donut center shows 亩 (×15) */
+apps/web/src\components\field\agri-timeseries-panel.tsx:663:                const res = await fieldsApi.backfillStatus(fieldId);
+apps/web/src\components\field\agri-timeseries-panel.tsx:685:                const res = await fieldsApi.backfillStatus(fieldId);
+apps/web/src\components\field\agri-timeseries-panel.tsx:834:            await fieldsApi.backfillIndices(fieldId, {
+apps/web/src\components\field\agri-timeseries-panel.tsx:845:                          field_id: fieldId,
+services/ingest/app\core\http_mode.py:26:def resolve_field_http(field_id: str) -> dict[str, Any]:
+services/ingest/app\core\http_mode.py:27:    """GET /v1/internal/fields/resolve for tags / land_id."""
+services/ingest/app\core\http_mode.py:30:    data = resolve_field(field_id=str(field_id))
+services/ingest/app\core\http_mode.py:36:def field_geom_http(field_id: str, *, include_geojson: bool = True) -> dict[str, Any]:
+services/ingest/app\core\http_mode.py:39:    data = field_geom(str(field_id), include_geojson=include_geojson)
+services/ingest/app\core\agri_tags.py:5:- Field records may carry tags like ``agri:<land_id>`` so soil/weather
+services/ingest/app\core\agri_tags.py:6:  (keyed by fields.id) bind to the same parcel the UI shows.
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:5:import { farmsApi, alertsApi } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:6:import type { Farm, Alert, Field } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:32:/** Field count and total area per farm, so a row carries its own numbers. */
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:53:                    farmsApi.list(10, 0),
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:68:                            const r = await farmsApi.fields(f.id, 200, 0);
+apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:71:                            return { farm: f, total: 0, items: [] as Field[] };
+apps/web/src\app\[locale]\(authenticated)\farms\page.tsx:5:import { farmsApi } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\page.tsx:47:                const res = await farmsApi.list(PAGE_SIZE, offset, debouncedQ || undefined);
+services/api/app\mq_publish.py:30:    field_id: str | None,
+services/api/app\mq_publish.py:37:    fid = field_id
+services/api/app\mq_publish.py:41:            detail="MQ_FALLBACK_CELERY requires field_id",
+services/api/app\mq_publish.py:151:                    "field_id": fid,
+services/api/app\mq_publish.py:173:                    "field_id": fid,
+services/api/app\mq_publish.py:223:            "field_id": fid,
+services/api/app\mq_publish.py:247:    field_id: str | None = None,
+services/api/app\mq_publish.py:285:                "field_id": field_id,
+services/api/app\mq_publish.py:309:                    field_id=field_id,
+services/api/app\mq_publish.py:330:            field_id=field_id,
+services/api/app\mq_publish.py:344:                field_id=field_id,
+services/api/app\mq_publish.py:348:                type=type, field_id=field_id, land_id=land_id, extras=extras
+services/api/app\mq_publish.py:356:        logger.error("cloudamqp_url_missing", type=type, field_id=field_id)
+services/api/app\mq_publish.py:361:                field_id=field_id,
+services/api/app\mq_publish.py:365:                type=type, field_id=field_id, land_id=land_id, extras=extras
+services/api/app\mq_publish.py:376:        field_id=field_id,
+services/api/app\mq_publish.py:393:        field_id=field_id,
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:6:import { farmsApi, fieldsApi } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:7:import type { Farm, Field } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:44:    const [fields, setFields] = useState<Field[]>([]);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:61:            const f = await farmsApi.get(farmId);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:74:            const fieldsRes = await farmsApi.fields(farmId, 200, 0);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:91:            const updated = await farmsApi.update(farmId, {
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:116:            await farmsApi.delete(farmId);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:129:            const result = await fieldsApi.import(farmId, file);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:143:    const handleDeleteField = async (fieldId: string, fieldName: string) => {
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:145:            title: tFarms("deleteField"),
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:152:            await fieldsApi.delete(fieldId);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:156:            toast.error(err.detail || tFarms("failedDeleteField"));
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:273:                            <Link href={`/farms/${farmId}/fields/new`}>
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:275:                                Draw Field
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:297:                                    <Link href={`/farms/${farmId}/fields/new`}>
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:298:                                        <Plus className="h-4 w-4 mr-2" /> Draw Field
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:308:                                key={field.id}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:313:                                        href={`/farms/${farmId}/fields/${field.id}`}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:320:                                            <p className="text-sm font-medium">{field.name}</p>
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:325:                                                {field.crop_type && <Badge variant="secondary">{field.crop_type}</Badge>}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:326:                                                {field.season && <Badge variant="outline">{field.season}</Badge>}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:335:                                            onClick={() => handleDeleteField(field.id, field.name)}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:339:                                        <Link href={`/farms/${farmId}/fields/${field.id}`}>
+services/api/app\reports\land_assessment\data_loader.py:19:    Field,
+services/api/app\reports\land_assessment\data_loader.py:52:def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list[dict]:
+services/api/app\reports\land_assessment\data_loader.py:67:        .where(FieldStat.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:288:def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
+services/api/app\reports\land_assessment\data_loader.py:290:        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:312:            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:341:def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
+services/api/app\reports\land_assessment\data_loader.py:349:                WeatherDaily.field_id == field_id,
+services/api/app\reports\land_assessment\data_loader.py:362:                .where(WeatherDaily.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:400:        "field_id": str(field_id),
+services/api/app\reports\land_assessment\data_loader.py:418:    soil = load_soil(session, field_id)
+services/api/app\reports\land_assessment\data_loader.py:450:    field_id: uuid.UUID,
+services/api/app\reports\land_assessment\data_loader.py:466:                WeatherDaily.field_id == field_id,
+services/api/app\reports\land_assessment\data_loader.py:478:                .where(WeatherDaily.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:585:    field_id: uuid.UUID,
+services/api/app\reports\land_assessment\data_loader.py:595:    summary = load_soil(session, field_id)
+services/api/app\reports\land_assessment\data_loader.py:600:        select(SoilProfile).where(SoilProfile.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:703:    session: Session, field_id: uuid.UUID, land_id: str | None = None
+services/api/app\reports\land_assessment\data_loader.py:711:    from app.models.tables import Field as FieldModel
+services/api/app\reports\land_assessment\data_loader.py:714:        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+services/api/app\reports\land_assessment\data_loader.py:733:        field = session.get(FieldModel, field_id)
+services/api/app\reports\land_assessment\data_loader.py:735:            tagged = parse_cdfinance_group_id(field.tags_json)
+services/api/app\reports\land_assessment\data_loader.py:767:    field_id: uuid.UUID,
+services/api/app\reports\land_assessment\data_loader.py:774:    ``GET /v1/internal/fields/{id}/assessment-bundle``. SyncSession is used only
+services/api/app\reports\land_assessment\data_loader.py:792:                return assessment_bundle(str(field_id))
+services/api/app\reports\land_assessment\data_loader.py:804:    field = session.get(Field, field_id)
+services/api/app\reports\land_assessment\data_loader.py:806:        raise ValueError(f"Field not found: {field_id}")
+services/api/app\reports\land_assessment\data_loader.py:808:    land_id = parse_agri_land_id(field.tags_json)
+services/api/app\reports\land_assessment\data_loader.py:809:    indices = load_indices_from_field_stats(session, field_id)
+services/api/app\reports\land_assessment\data_loader.py:817:    soil = load_soil(session, field_id)
+services/api/app\reports\land_assessment\data_loader.py:818:    wsum, wstress = load_weather(session, field_id)
+services/api/app\reports\land_assessment\data_loader.py:825:    crop_key = normalize_crop_key(field.crop_type) or "corn"
+services/api/app\reports\land_assessment\data_loader.py:829:        session, field_id, season.season_months, lookback_days=450
+services/api/app\reports\land_assessment\data_loader.py:832:    suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
+services/api/app\reports\land_assessment\data_loader.py:833:    site_admission = load_site_admission(session, field_id, land_id=land_id)
+services/api/app\reports\land_assessment\data_loader.py:835:    tags = field.tags_json or []
+services/api/app\reports\land_assessment\data_loader.py:845:            "id": str(field.id),
+services/api/app\reports\land_assessment\data_loader.py:846:            "name": field.name,
+services/api/app\reports\land_assessment\data_loader.py:847:            "crop_type": field.crop_type,
+services/api/app\reports\land_assessment\data_loader.py:848:            "season": field.season,
+services/api/app\reports\land_assessment\data_loader.py:851:            "location": _location_from_tags(tags, field.name),
+services/api/app\reports\land_assessment\data_loader.py:917:            "id": str(field.get("id") or field.get("field_id") or ""),
+services/api/app\reports\land_assessment\data_loader.py:1025:    field_id: uuid.UUID,
+services/api/app\reports\land_assessment\data_loader.py:1038:                WeatherDaily.field_id == field_id,
+services/api/app\reports\land_assessment\data_loader.py:1145:    field_id: uuid.UUID | str | None,
+services/api/app\reports\land_assessment\data_loader.py:1167:    if session is not None and field_id is not None:
+services/api/app\reports\land_assessment\data_loader.py:1168:        fid = uuid.UUID(str(field_id))
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:7:import { fieldsApi, withAgriFieldTags } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:39:    const t = useTranslations("createField");
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:93:            const field = await fieldsApi.create({
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:101:            toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:102:            router.push(`/farms/${farmId}/fields/${field.id}`);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:104:            toast.error(err.detail || t("createField"));
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:228:                                    {t("createField")}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:8:import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId, parseCdfinanceGroupId, withAgriFieldTags } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:10:import type { Field, RasterLayer, IndexType } from "@/lib/api";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:12:import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:160:function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:162:    if (!layer.tile_url || !field.geom) return;
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:166:    const bounds = computeGeomBounds(field.geom);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:236:    const [field, setField] = useState<Field | null>(null);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:265:    const fieldRef = useRef<Field | null>(null);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:358:        alertsApi.listForField(fieldId, 200).then((res) => {
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:395:    const loadField = useCallback(async () => {
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:397:            const f = await fieldsApi.get(fieldId);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:398:            setField(f);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:414:        loadField();
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:415:    }, [loadField]);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:461:            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:630:        getAllCoords(field.geom).forEach(([lng, lat]) => bounds.extend([lng, lat]));
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:659:    // (handleMapReady often runs with field still null — race with loadField).
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:782:            const updated = await fieldsApi.update(fieldId, data);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:783:            setField(updated);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:802:            await fieldsApi.delete(fieldId);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:834:                        initialGeometry={field.geom}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1071:                                    <h3 className="text-sm font-semibold mb-3">{t("editField")}</h3>
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1162:                                        {/* Field header card */}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1164:                                            <h2 className="text-sm font-semibold">{field.name}</h2>
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1167:                                                {field.crop_type && field.crop_type !== "unknown" && ` · ${field.crop_type}`}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1168:                                                {field.season && ` · ${field.season}`}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1172:                                        {/* Field details card */}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1175:                                                <InfoRow label={t("name")} value={field.name} />
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1184:                                                    value={field.crop_type && field.crop_type !== "unknown" ? field.crop_type : t("cropUnset")}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1188:                                                    value={field.season || "-"}
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1223:                                                setEditName(field.name);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1224:                                                setEditCropType(field.crop_type || "");
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1225:                                                setEditSeason(field.season || "");
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1228:                                                setEditGeom(field.geom);
+apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1289:                                                setField((prev) => (prev ? { ...prev, crop_type: key } : prev));

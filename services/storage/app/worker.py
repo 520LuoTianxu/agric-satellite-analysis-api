@@ -6,6 +6,9 @@
 """
 
 from openfarm_common.celery_app import create_celery_app
+from openfarm_common.logging import setup_logging
+
+setup_logging()
 
 # default_queue=storage：本进程发出的任务也进同一条队列，避免误投 ingest。
 celery_app = create_celery_app(

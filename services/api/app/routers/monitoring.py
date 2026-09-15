@@ -61,7 +61,7 @@ def _layer_to_out(layer: RasterLayer) -> RasterLayerOut:
     )
     return RasterLayerOut(
         id=layer.id,
-        field_id=layer.field_id,
+        land_id=layer.land_id,
         layer_type=layer.layer_type,
         satellite=layer.satellite,
         date=layer.date,
@@ -76,10 +76,10 @@ def _layer_to_out(layer: RasterLayer) -> RasterLayerOut:
 
 
 @router.get(
-    "/fields/{field_id}/layers", response_model=PaginatedResponse[RasterLayerOut]
+    "/lands/{land_id}/layers", response_model=PaginatedResponse[RasterLayerOut]
 )
 async def list_layers(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     type: str = Query("NDVI"),
@@ -87,7 +87,7 @@ async def list_layers(
     offset: int = Query(0, ge=0),
 ):
     base = select(RasterLayer).where(
-        RasterLayer.field_id == field_id,
+        RasterLayer.land_id == land_id,
         org_scope(None, ctx),
         RasterLayer.layer_type == type,
     )
@@ -106,9 +106,9 @@ async def list_layers(
     )
 
 
-@router.get("/fields/{field_id}/stats", response_model=PaginatedResponse[FieldStatOut])
+@router.get("/lands/{land_id}/stats", response_model=PaginatedResponse[FieldStatOut])
 async def list_stats(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     type: str = Query("NDVI"),
@@ -119,7 +119,7 @@ async def list_stats(
         select(FieldStat)
         .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
         .where(
-            FieldStat.field_id == field_id,
+            FieldStat.land_id == land_id,
             org_scope(None, ctx),
             RasterLayer.layer_type == type,
         )
@@ -135,16 +135,16 @@ async def list_stats(
     )
 
 
-@router.get("/fields/{field_id}/layers/types", response_model=list[str])
+@router.get("/lands/{land_id}/layers/types", response_model=list[str])
 async def list_layer_types(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Return the distinct index types available for a field."""
     result = await db.execute(
         select(distinct(RasterLayer.layer_type)).where(
-            RasterLayer.field_id == field_id, org_scope(None, ctx)
+            RasterLayer.land_id == land_id, org_scope(None, ctx)
         )
     )
     return sorted(result.scalars().all())

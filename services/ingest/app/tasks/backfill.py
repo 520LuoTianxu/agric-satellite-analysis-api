@@ -1,8 +1,9 @@
-"""Historical index backfill - orchestration layer.
+"""Canonical land-parcel remote-sensing backfill orchestration.
 
-Chunks a multi-month date range into segments, creates one Job per
-(chunk × index) pair, and dispatches them with staggered countdowns
-to avoid overwhelming the STAC API.
+Each date chunk creates one optical job for the canonical land parcel.  The
+worker calculates all supported optical indices in memory and writes the
+result to ``parcel_scene_products``; there is no second parcel identity or
+identity-selection flag in this path.
 """
 
 from __future__ import annotations
@@ -15,11 +16,16 @@ from sqlalchemy import select, text
 import structlog
 
 from app.core.config import settings
-from app.tasks.indices import INDEX_REGISTRY, INDEX_TASK_MAP
-from app.tasks.pipeline import get_db_session
 from app.worker import celery_app
 
 logger = structlog.get_logger()
+
+
+def get_db_session():
+    """按需创建本地数据库会话，避免 HTTP-only 编排加载栅格依赖。"""
+    from app.core.database_sync import SyncSession
+
+    return SyncSession()
 
 
 def _date_chunks(start: date, end: date, chunk_days: int) -> list[tuple[date, date]]:
@@ -34,19 +40,17 @@ def _date_chunks(start: date, end: date, chunk_days: int) -> list[tuple[date, da
 
 
 @celery_app.task(
-    name="app.tasks.backfill.backfill_indices_for_field",
+    name="app.tasks.backfill.backfill_indices_for_land",
     bind=True,
     max_retries=1,
     time_limit=120,
     soft_time_limit=90,
 )
-def backfill_indices_for_field(
+def backfill_indices_for_land(
     self,
-    field_id: str,
+    land_id: str,
     months: int | None = None,
     sentinel_job_id: str | None = None,
-    allow_agri: bool = False,
-    indices: list[str] | None = None,
     force: bool = False,
     mq_task_id: str | None = None,
     date_from: str | None = None,
@@ -54,29 +58,23 @@ def backfill_indices_for_field(
     growing_seasons: list | None = None,
     season_months: list | None = None,
 ) -> dict:
-    """Backfill vegetation indices for *field_id* over *months*.
+    """Backfill vegetation indices for *land_id* over *months*.
 
-    Splits the date range into 90-day chunks and dispatches one
-    pipeline job per (chunk × index) with staggered countdowns.
-
-    ``allow_agri``: run even for agri-tagged fields. Agri uses the lonlat-direct
-    optical path (no index COG uploads) plus Sentinel-1 lonlat.
-    ``indices``: optional subset of registry keys (classic COG path only).
-    ``force``: passed to workers; when true they re-download/reprocess even if dates exist.
+    Splits the date range into chunks and dispatches one canonical optical job
+    per chunk plus the Sentinel-1 pull. ``force`` is passed to workers so a
+    caller can explicitly reprocess existing dates.
 
     When download-host HTTP-only mode is on (``INGEST_PG_WRITES=0`` / claim),
-    orchestration uses internal field resolve HTTP and fans out Celery kwargs
+    orchestration uses internal land resolve HTTP and fans out Celery kwargs
     without SyncSession or local Job rows (same idea as weather/soil http_only).
     """
     from app.core.http_mode import ingest_http_only
 
     if ingest_http_only():
         return _backfill_indices_http_only(
-            field_id=field_id,
+            land_id=land_id,
             months=months,
             sentinel_job_id=sentinel_job_id,
-            allow_agri=allow_agri,
-            indices=indices,
             force=force,
             mq_task_id=mq_task_id,
             date_from=date_from,
@@ -85,63 +83,36 @@ def backfill_indices_for_field(
             season_months=season_months,
         )
 
-    from app.models.tables import Field, Job
+    from app.models.tables import LandParcel, Job
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
 
     session = get_db_session()
     try:
-        field = session.get(Field, uuid.UUID(field_id))
-        if not field:
-            logger.error("backfill_field_not_found", field_id=field_id)
+        land = session.get(LandParcel, land_id)
+        if not land or land.deleted_at is not None:
+            logger.error("backfill_land_not_found", land_id=land_id)
             return {
-                "field_id": field_id,
+                "land_id": land_id,
                 "status": "error",
-                "detail": "Field not found",
+                "detail": "Land parcel not found",
             }
 
         # MQ 至少一次投递可能让同一地块同时启动两个编排任务；事务锁让
         # 重复消息在首个任务提交后再检查 sentinel，避免重复创建下载分片。
         session.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {"lock_key": f"backfill:{field_id}"},
+            {"lock_key": f"backfill:{land_id}"},
         )
         if sentinel_job_id:
             existing_sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
             if existing_sentinel and existing_sentinel.status in {"completed", "failed"}:
                 return {
-                    "field_id": field_id,
+                    "land_id": land_id,
                     "status": "already_handled",
                     "sentinel_job_id": sentinel_job_id,
                 }
-
-        from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
-
-        agri_field = is_agri_tagged(field.tags_json)
-        if agri_field and not allow_agri:
-            land_id = parse_agri_land_id(field.tags_json)
-            logger.info(
-                "backfill_indices_skipped_agri_field",
-                field_id=field_id,
-                land_id=land_id,
-                reason="RS from agric_satellite.parcel_scene_products (lonlat_v1), not COG backfill",
-            )
-            if sentinel_job_id:
-                sentinel = session.get(Job, uuid.UUID(sentinel_job_id))
-                if sentinel:
-                    sentinel.status = "completed"
-                    params = dict(sentinel.params_json or {})
-                    params["skipped"] = True
-                    params["reason"] = "agri_tagged"
-                    sentinel.params_json = params
-                    session.commit()
-            return {
-                "field_id": field_id,
-                "status": "skipped",
-                "reason": "agri_tagged",
-                "land_id": land_id,
-            }
 
         end_date = date.fromisoformat(date_to) if date_to else date.today()
         if date_from:
@@ -153,98 +124,44 @@ def backfill_indices_for_field(
         chunks = _date_chunks(start_date, end_date, chunk_days)
         jobs_dispatched = 0
         stagger_seconds = 30  # seconds between chunk groups
-        index_keys: list[str] = []
-
         pending_sends: list[tuple[str, str, int]] = []
-        if agri_field:
-            # One optical job per date chunk: bands -> indices -> lonlat_v1.
-            # Do not dispatch per-index COG workers for agri parcels.
-            for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-                params_json = {
-                    "date_from": chunk_start.isoformat(),
-                    "date_to": chunk_end.isoformat(),
-                    "is_backfill": True,
-                    "force": bool(force),
-                    "path": "agri_lonlat_direct",
-                    **({"mq_task_id": mq_task_id} if mq_task_id else {}),
-                    **({"growing_seasons": growing_seasons} if growing_seasons else {}),
-                    **({"season_months": season_months} if season_months else {}),
-                }
-                job = Job(
-                    field_id=field.id,
-                    type="agri_optical",
-                    status="pending",
-                    params_json=params_json,
+        # 一个分片对应一个规范光学任务；任务内部一次计算全部指数，避免
+        # 为同一地块再维护按指数拆分的旧任务链。
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+            params_json = {
+                "date_from": chunk_start.isoformat(),
+                "date_to": chunk_end.isoformat(),
+                "is_backfill": True,
+                "force": bool(force),
+                "path": "agri_lonlat_direct",
+                **({"mq_task_id": mq_task_id} if mq_task_id else {}),
+                **({"growing_seasons": growing_seasons} if growing_seasons else {}),
+                **({"season_months": season_months} if season_months else {}),
+            }
+            job = Job(
+                land_id=land.land_id,
+                type="agri_optical",
+                status="pending",
+                params_json=params_json,
+            )
+            session.add(job)
+            session.flush()
+            countdown = chunk_idx * stagger_seconds
+            pending_sends.append(
+                (
+                    "app.tasks.agri_lonlat.process_agri_optical_lonlat",
+                    str(job.id),
+                    countdown,
                 )
-                session.add(job)
-                session.flush()
-                countdown = chunk_idx * stagger_seconds
-                pending_sends.append(
-                    (
-                        "app.tasks.agri_lonlat.process_agri_optical_lonlat",
-                        str(job.id),
-                        countdown,
-                    )
-                )
-                jobs_dispatched += 1
-                logger.info(
-                    "backfill_agri_optical_dispatched",
-                    job_id=str(job.id),
-                    field_id=field_id,
-                    chunk=f"{chunk_start} → {chunk_end}",
-                    countdown=countdown,
-                )
-            index_keys = ["agri_optical"]
-        else:
-            if indices:
-                wanted = [k.lower() for k in indices]
-                unknown = [k for k in wanted if k not in INDEX_REGISTRY]
-                if unknown:
-                    return {
-                        "field_id": field_id,
-                        "status": "error",
-                        "detail": f"Unknown indices: {unknown}",
-                    }
-                index_keys = wanted
-            else:
-                index_keys = list(INDEX_REGISTRY.keys())
-
-            # Always dispatch chunk jobs; workers skip per-scene dates already present
-            # (force=True still reprocesses). Coarse chunk skip left gaps unfilled.
-            for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-                for idx_key in sorted(index_keys):
-                    task_name = INDEX_TASK_MAP.get(idx_key)
-                    if not task_name:
-                        continue
-
-                    params_json = {
-                        "date_from": chunk_start.isoformat(),
-                        "date_to": chunk_end.isoformat(),
-                        "is_backfill": True,
-                        "force": bool(force),
-                    }
-
-                    job = Job(
-                        field_id=field.id,
-                        type=idx_key,
-                        status="pending",
-                        params_json=params_json,
-                    )
-                    session.add(job)
-                    session.flush()
-
-                    countdown = chunk_idx * stagger_seconds
-                    pending_sends.append((task_name, str(job.id), countdown))
-                    jobs_dispatched += 1
-
-                    logger.info(
-                        "backfill_job_dispatched",
-                        job_id=str(job.id),
-                        field_id=field_id,
-                        index=idx_key,
-                        chunk=f"{chunk_start} → {chunk_end}",
-                        countdown=countdown,
-                    )
+            )
+            jobs_dispatched += 1
+            logger.info(
+                "backfill_agri_optical_dispatched",
+                job_id=str(job.id),
+                land_id=land_id,
+                chunk=f"{chunk_start} → {chunk_end}",
+                countdown=countdown,
+            )
 
         # Mark sentinel job as completed now that real jobs are created
         if sentinel_job_id:
@@ -260,10 +177,10 @@ def backfill_indices_for_field(
         # Sentinel-1 GRD: agri writes lonlat_v1 (no index TIFs unless opt-in)
         s1_result = None
         try:
-            from app.tasks.sentinel1 import backfill_s1_for_field
+            from app.tasks.sentinel1 import backfill_s1_for_land
 
-            async_result = backfill_s1_for_field.delay(
-                field_id,
+            async_result = backfill_s1_for_land.delay(
+                land_id,
                 months=months,
                 force=force,
                 mq_task_id=mq_task_id,
@@ -271,35 +188,32 @@ def backfill_indices_for_field(
                 date_to=end_date.isoformat(),
             )
             s1_result = {"task_id": async_result.id, "status": "queued"}
-            logger.info("s1_backfill_dispatched", field_id=field_id, result=s1_result)
+            logger.info("s1_backfill_dispatched", land_id=land_id, result=s1_result)
         except Exception as e:
             logger.warning(
-                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+                "s1_backfill_dispatch_failed", land_id=land_id, error=str(e)
             )
 
         logger.info(
             "backfill_orchestration_complete",
-            field_id=field_id,
+            land_id=land_id,
             chunks=len(chunks),
-            indices=len(index_keys),
             jobs_dispatched=jobs_dispatched,
-            allow_agri=allow_agri,
             force=force,
             s1=s1_result,
         )
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "dispatched",
             "jobs": jobs_dispatched,
             "chunks": len(chunks),
-            "indices": index_keys,
-            "allow_agri": allow_agri,
+            "indices": ["agri_optical"],
             "force": force,
             "s1": s1_result,
         }
 
     except Exception as e:
-        logger.error("backfill_orchestration_failed", field_id=field_id, error=str(e))
+        logger.error("backfill_orchestration_failed", land_id=land_id, error=str(e))
         session.rollback()
         raise
     finally:
@@ -308,11 +222,9 @@ def backfill_indices_for_field(
 
 def _backfill_indices_http_only(
     *,
-    field_id: str,
+    land_id: str,
     months: int | None,
     sentinel_job_id: str | None,
-    allow_agri: bool,
-    indices: list[str] | None,
     force: bool,
     mq_task_id: str | None,
     date_from: str | None,
@@ -320,27 +232,24 @@ def _backfill_indices_http_only(
     growing_seasons: list | None,
     season_months: list | None,
 ) -> dict:
-    """Orchestrate RS chunk fan-out without SyncSession / local Job rows."""
-    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
-    from app.core.http_mode import patch_job_http, resolve_field_http
+    """Orchestrate canonical optical chunks without a local database session."""
+    from app.core.http_mode import patch_job_http, resolve_land_http
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
 
     try:
-        resolved = resolve_field_http(field_id)
+        resolved = resolve_land_http(land_id)
     except Exception as e:
         logger.error(
             "backfill_orchestration_failed",
-            field_id=field_id,
-            error=f"fields/resolve failed: {e}",
+            land_id=land_id,
+            error=f"lands/resolve failed: {e}",
         )
         raise
 
-    tags = resolved.get("tags")
-    land_id = resolved.get("land_id") or parse_agri_land_id(tags)
-    agri_field = is_agri_tagged(tags) or bool(land_id)
-
+    if not resolved or not resolved.get("land_id"):
+        raise RuntimeError(f"land parcel not found: {land_id}")
     if sentinel_job_id:
         try:
             from app.core.http_mode import get_job_http
@@ -348,48 +257,13 @@ def _backfill_indices_http_only(
             existing = get_job_http(sentinel_job_id)
             if existing and existing.get("status") in {"completed", "failed"}:
                 return {
-                    "field_id": field_id,
+                    "land_id": land_id,
                     "status": "already_handled",
                     "sentinel_job_id": sentinel_job_id,
                     "http_only": True,
                 }
         except Exception:
             pass
-
-    if agri_field and not allow_agri:
-        logger.info(
-            "backfill_indices_skipped_agri_field",
-            field_id=field_id,
-            land_id=land_id,
-            reason="RS from agric_satellite.parcel_scene_products (lonlat_v1), not COG backfill",
-            http_only=True,
-        )
-        if sentinel_job_id:
-            try:
-                patch_job_http(
-                    sentinel_job_id,
-                    {
-                        "status": "completed",
-                        "progress_json": {
-                            "skipped": True,
-                            "reason": "agri_tagged",
-                        },
-                        "touch_finished": True,
-                    },
-                )
-            except Exception as e:
-                logger.warning(
-                    "backfill_sentinel_patch_failed",
-                    sentinel_job_id=sentinel_job_id,
-                    error=str(e),
-                )
-        return {
-            "field_id": field_id,
-            "status": "skipped",
-            "reason": "agri_tagged",
-            "land_id": land_id,
-            "http_only": True,
-        }
 
     end_date = date.fromisoformat(date_to) if date_to else date.today()
     if date_from:
@@ -401,66 +275,31 @@ def _backfill_indices_http_only(
     chunks = _date_chunks(start_date, end_date, chunk_days)
     stagger_seconds = 30
     jobs_dispatched = 0
-    index_keys: list[str] = []
-
     try:
-        if agri_field:
-            index_keys = ["agri_optical"]
-            for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
-                countdown = chunk_idx * stagger_seconds
-                celery_app.send_task(
-                    "app.tasks.agri_lonlat.process_agri_optical_lonlat",
-                    kwargs={
-                        "field_id": field_id,
-                        "date_from": chunk_start.isoformat(),
-                        "date_to": chunk_end.isoformat(),
-                        "force": bool(force),
-                        "mq_task_id": mq_task_id,
-                        "growing_seasons": growing_seasons,
-                        "season_months": season_months,
-                        "is_backfill": True,
-                    },
-                    countdown=countdown,
-                )
-                jobs_dispatched += 1
-                logger.info(
-                    "backfill_agri_optical_dispatched",
-                    field_id=field_id,
-                    chunk=f"{chunk_start} → {chunk_end}",
-                    countdown=countdown,
-                    http_only=True,
-                )
-        else:
-            if indices:
-                wanted = [k.lower() for k in indices]
-                unknown = [k for k in wanted if k not in INDEX_REGISTRY]
-                if unknown:
-                    return {
-                        "field_id": field_id,
-                        "status": "error",
-                        "detail": f"Unknown indices: {unknown}",
-                        "http_only": True,
-                    }
-                index_keys = wanted
-            else:
-                index_keys = list(INDEX_REGISTRY.keys())
-
-            # Classic COG path still needs Job rows on API DB — not supported
-            # without PG on download host. Prefer agri path under claim/HTTP.
-            logger.error(
-                "backfill_orchestration_failed",
-                field_id=field_id,
-                error=(
-                    "http_only classic COG index backfill requires Job rows; "
-                    "use agri-tagged field or enable PG writes"
-                ),
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+            countdown = chunk_idx * stagger_seconds
+            celery_app.send_task(
+                "app.tasks.agri_lonlat.process_agri_optical_lonlat",
+                kwargs={
+                    "land_id": land_id,
+                    "date_from": chunk_start.isoformat(),
+                    "date_to": chunk_end.isoformat(),
+                    "force": bool(force),
+                    "mq_task_id": mq_task_id,
+                    "growing_seasons": growing_seasons,
+                    "season_months": season_months,
+                    "is_backfill": True,
+                },
+                countdown=countdown,
             )
-            return {
-                "field_id": field_id,
-                "status": "error",
-                "detail": "http_only classic index backfill unsupported",
-                "http_only": True,
-            }
+            jobs_dispatched += 1
+            logger.info(
+                "backfill_agri_optical_dispatched",
+                land_id=land_id,
+                chunk=f"{chunk_start} → {chunk_end}",
+                countdown=countdown,
+                http_only=True,
+            )
 
         if sentinel_job_id:
             try:
@@ -477,10 +316,10 @@ def _backfill_indices_http_only(
 
         s1_result = None
         try:
-            from app.tasks.sentinel1 import backfill_s1_for_field
+            from app.tasks.sentinel1 import backfill_s1_for_land
 
-            async_result = backfill_s1_for_field.delay(
-                field_id,
+            async_result = backfill_s1_for_land.delay(
+                land_id,
                 months=months,
                 force=force,
                 mq_task_id=mq_task_id,
@@ -490,43 +329,79 @@ def _backfill_indices_http_only(
             s1_result = {"task_id": async_result.id, "status": "queued"}
             logger.info(
                 "s1_backfill_dispatched",
-                field_id=field_id,
+                land_id=land_id,
                 result=s1_result,
                 http_only=True,
             )
         except Exception as e:
             logger.warning(
-                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+                "s1_backfill_dispatch_failed", land_id=land_id, error=str(e)
             )
 
         logger.info(
             "backfill_orchestration_complete",
-            field_id=field_id,
+            land_id=land_id,
             chunks=len(chunks),
-            indices=len(index_keys),
             jobs_dispatched=jobs_dispatched,
-            allow_agri=allow_agri,
             force=force,
             s1=s1_result,
             http_only=True,
         )
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "dispatched",
             "jobs": jobs_dispatched,
             "chunks": len(chunks),
-            "indices": index_keys,
-            "allow_agri": allow_agri,
+            "indices": ["agri_optical"],
             "force": force,
             "s1": s1_result,
             "http_only": True,
         }
     except Exception as e:
-        logger.error("backfill_orchestration_failed", field_id=field_id, error=str(e))
+        logger.error("backfill_orchestration_failed", land_id=land_id, error=str(e))
         raise
 
 
-# ── Weekly auto-compute ──────────────────────────────────────────────
+# ── 每周自动补算指数 ──────────────────────────────────────────────
+
+
+def _schedule_via_http() -> bool:
+    """下载机已配置 Internal HTTP 时，地块清单必须向 API 要。"""
+    try:
+        from openfarm_common.internal_api import internal_api_enabled
+
+        return internal_api_enabled()
+    except ImportError:
+        return False
+
+
+def _dispatch_weekly_index_items(items: list) -> int:
+    """把 API 准备好的规范地块任务投到本机 Celery broker。"""
+    jobs_dispatched = 0
+    for item in items:
+        task_name = item.get("task_name") if isinstance(item, dict) else None
+        job_id = item.get("job_id") if isinstance(item, dict) else None
+        if not task_name or not job_id:
+            continue
+        countdown = int(item.get("countdown") or 0)
+        # 下载机没有 API 数据库连接，必须把规范 land_id 和日期窗口直接
+        # 传给 HTTP-only worker；不再把 API 端的 Job/旧身份当作地块键。
+        if task_name == "app.tasks.agri_lonlat.process_agri_optical_lonlat":
+            celery_app.send_task(
+                task_name,
+                kwargs={
+                    "job_id": str(job_id),
+                    "land_id": str(item["land_id"]),
+                    "date_from": item["date_from"],
+                    "date_to": item["date_to"],
+                    "is_backfill": True,
+                },
+                countdown=countdown,
+            )
+        else:
+            celery_app.send_task(task_name, args=[str(job_id)], countdown=countdown)
+        jobs_dispatched += 1
+    return jobs_dispatched
 
 
 @celery_app.task(
@@ -537,102 +412,107 @@ def _backfill_indices_http_only(
     soft_time_limit=240,
 )
 def schedule_weekly_index_compute(self) -> dict:
-    """Query all active fields, skip fresh ones, dispatch index jobs for stale ones.
+    """给过期的规范地块派发统一光学任务。"""
+    if _schedule_via_http():
+        # 下载机只拿清单并投递，Job 已在 API 建好
+        from openfarm_common.internal_api import weekly_index_prepare
 
-    A field is considered *stale* if its latest raster layer is older than 7 days.
-    """
-    from sqlalchemy import func as sqla_func
+        payload = weekly_index_prepare()
+        items = payload.get("items") or []
+        jobs_dispatched = _dispatch_weekly_index_items(items)
+        logger.info(
+            "weekly_index_compute_complete",
+            lands_checked=payload.get("lands_checked"),
+            lands_dispatched=payload.get("lands_dispatched"),
+            jobs_dispatched=jobs_dispatched,
+            http=True,
+        )
+        return {
+            "status": "completed",
+            "lands_checked": payload.get("lands_checked"),
+            "lands_dispatched": payload.get("lands_dispatched"),
+            "jobs_dispatched": jobs_dispatched,
+            "http": True,
+        }
 
-    from app.models.tables import Field, Job, RasterLayer
+    # 未配 Internal HTTP 时才查本机库，仅给本地单机 compose 用
+    from app.models.tables import Job, LandParcel
 
     session = get_db_session()
-    batch_size = settings.index_weekly_batch_size
     stale_threshold = date.today() - timedelta(days=7)
 
     try:
-        from app.core.agri_tags import is_agri_tagged
-
-        # Fetch all active fields (skip agri: they use lonlat-direct, not COGs)
-        field_rows = session.execute(
-            select(Field.id, Field.tags_json).where(Field.deleted_at.is_(None))
+        land_rows = session.execute(
+            select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
         ).all()
 
-        fields_checked = 0
-        fields_dispatched = 0
+        lands_checked = 0
+        lands_dispatched = 0
         jobs_dispatched = 0
-        skipped_agri = 0
         stagger_seconds = 15
 
-        for batch_start in range(0, len(field_rows), batch_size):
-            batch = field_rows[batch_start : batch_start + batch_size]
+        for (land_id,) in land_rows:
+            lands_checked += 1
 
-            for field_id, tags_json in batch:
-                fields_checked += 1
-                if is_agri_tagged(tags_json):
-                    skipped_agri += 1
-                    continue
+            latest_date = session.execute(
+                text(
+                    "SELECT max(date)::date FROM agric_satellite.parcel_scene_products "
+                    "WHERE land_id = :land_id"
+                ),
+                {"land_id": land_id},
+            ).scalar_one_or_none()
 
-                # Check staleness: latest raster layer date
-                latest_date = session.execute(
-                    select(sqla_func.max(RasterLayer.date)).where(
-                        RasterLayer.field_id == field_id
-                    )
-                ).scalar_one_or_none()
+            if latest_date is not None and latest_date > stale_threshold:
+                continue
 
-                if latest_date is not None and latest_date > stale_threshold:
-                    continue  # fresh - skip
+            date_from = (
+                (latest_date + timedelta(days=1))
+                if latest_date
+                else (date.today() - timedelta(days=7))
+            )
+            date_to = date.today()
+            if date_from >= date_to:
+                continue
 
-                # Determine date range: latest_date+1 → today (or 7 days back if none)
-                date_from = (
-                    (latest_date + timedelta(days=1))
-                    if latest_date
-                    else (date.today() - timedelta(days=7))
-                )
-                date_to = date.today()
-                if date_from >= date_to:
-                    continue
+            job = Job(
+                land_id=land_id,
+                type="agri_optical",
+                status="pending",
+                params_json={
+                    "date_from": date_from.isoformat(),
+                    "date_to": date_to.isoformat(),
+                    "is_backfill": True,
+                    "path": "agri_lonlat_direct",
+                },
+            )
+            session.add(job)
+            session.flush()
 
-                # Dispatch one job per index
-                for idx_key in sorted(INDEX_REGISTRY.keys()):
-                    task_name = INDEX_TASK_MAP.get(idx_key)
-                    if not task_name:
-                        continue
+            countdown = lands_dispatched * stagger_seconds
+            celery_app.send_task(
+                "app.tasks.agri_lonlat.process_agri_optical_lonlat",
+                args=[str(job.id)],
+                countdown=countdown,
+            )
+            jobs_dispatched += 1
 
-                    job = Job(
-                        field_id=field_id,
-                        type=idx_key,
-                        status="pending",
-                        params_json={
-                            "date_from": date_from.isoformat(),
-                            "date_to": date_to.isoformat(),
-                        },
-                    )
-                    session.add(job)
-                    session.flush()
-
-                    countdown = fields_dispatched * stagger_seconds
-                    celery_app.send_task(
-                        task_name, args=[str(job.id)], countdown=countdown
-                    )
-                    jobs_dispatched += 1
-
-                fields_dispatched += 1
+            lands_dispatched += 1
 
         session.commit()
 
         logger.info(
             "weekly_index_compute_complete",
-            fields_checked=fields_checked,
-            fields_dispatched=fields_dispatched,
+            lands_checked=lands_checked,
+            lands_dispatched=lands_dispatched,
             jobs_dispatched=jobs_dispatched,
-            skipped_agri=skipped_agri,
+            http=False,
         )
         return {
             "status": "completed",
-            "fields_checked": fields_checked,
-            "fields_dispatched": fields_dispatched,
+            "lands_checked": lands_checked,
+            "lands_dispatched": lands_dispatched,
             "jobs_dispatched": jobs_dispatched,
-            "skipped_agri": skipped_agri,
+            "http": False,
         }
 
     except Exception as e:
@@ -643,45 +523,39 @@ def schedule_weekly_index_compute(self) -> dict:
         session.close()
 
 
-# ── Bulk backfill (all existing fields) ──────────────────────────────
+# ── Bulk backfill (all existing lands) ───────────────────────────────
 
 
 @celery_app.task(
-    name="app.tasks.backfill.backfill_all_existing_fields",
+    name="app.tasks.backfill.backfill_all_existing_lands",
     bind=True,
     max_retries=1,
     time_limit=300,
     soft_time_limit=240,
 )
-def backfill_all_existing_fields(self, months: int | None = None) -> dict:
-    """Iterate all active fields and dispatch backfill for each one.
+def backfill_all_existing_lands(self, months: int | None = None) -> dict:
+    """Iterate all active land parcels and dispatch backfill for each one.
 
     Used as a one-time migration task for existing deployments that
     were set up before the auto-backfill feature.
     """
-    from app.models.tables import Field
+    from app.models.tables import LandParcel
 
     months = months or settings.index_backfill_months
-    stagger_seconds = 60  # 1 minute between fields to spread load
+    stagger_seconds = 60  # 1 minute between land parcels to spread load
 
     session = get_db_session()
     try:
-        from app.core.agri_tags import is_agri_tagged
-
-        fields = (
-            session.execute(select(Field).where(Field.deleted_at.is_(None)))
+        lands = (
+            session.execute(select(LandParcel).where(LandParcel.deleted_at.is_(None)))
             .scalars()
             .all()
         )
 
         dispatched = 0
-        skipped_agri = 0
-        for field in fields:
-            if is_agri_tagged(field.tags_json):
-                skipped_agri += 1
-                continue
-            backfill_indices_for_field.apply_async(
-                args=[str(field.id)],
+        for land in lands:
+            backfill_indices_for_land.apply_async(
+                args=[str(land.land_id)],
                 kwargs={"months": months},
                 countdown=dispatched * stagger_seconds,
             )
@@ -689,16 +563,14 @@ def backfill_all_existing_fields(self, months: int | None = None) -> dict:
 
         logger.info(
             "bulk_backfill_dispatched",
-            total_fields=len(fields),
+            total_lands=len(lands),
             dispatched=dispatched,
-            skipped_agri=skipped_agri,
             months=months,
         )
         return {
             "status": "dispatched",
-            "total_fields": len(fields),
+            "total_lands": len(lands),
             "dispatched": dispatched,
-            "skipped_agri": skipped_agri,
             "months": months,
         }
 

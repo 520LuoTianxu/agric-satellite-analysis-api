@@ -1,4 +1,4 @@
-"""Share links router - create, list, revoke, public read, tile proxy."""
+"""Canonical land-parcel share links and public report endpoints."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from app.core.agri_classify import (
     optical_tooltip_fields,
     pick_optical_for_ndvi,
 )
-from app.core.agri_tags import parse_agri_land_id
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
@@ -27,7 +26,7 @@ from app.middleware.auth import OrgContext, get_org_context, require_roles, org_
 from app.models.tables import (
     Alert,
     AuditEvent,
-    Field,
+    LandParcel,
     FieldStat,
     RasterLayer,
     ScoutingObservation,
@@ -118,7 +117,7 @@ def _quality_from_cloud(cloud: Any) -> float:
 
 def _stat_point(
     *,
-    field_id: uuid.UUID,
+    land_id: str,
     d: Any,
     mean: float,
     quality: float,
@@ -139,10 +138,10 @@ def _stat_point(
         date_obj = date_cls.fromisoformat(str(d)[:10])
     date_val = date_obj.isoformat()
     # Stable synthetic id so charts/keys stay consistent across refreshes
-    sid = uuid.uuid5(uuid.NAMESPACE_URL, f"agri-share:{field_id}:{idx}:{date_val}")
+    sid = uuid.uuid5(uuid.NAMESPACE_URL, f"agri-share:{land_id}:{idx}:{date_val}")
     return ShareStatPoint(
         id=sid,
-        field_id=field_id,
+        land_id=land_id,
         date=date_obj,
         mean=mean,
         median=mean,
@@ -162,7 +161,7 @@ def _stat_point(
 
 
 async def _load_agri_share_series(
-    db: AsyncSession, field_id: uuid.UUID, land_id: str
+    db: AsyncSession, land_id: str
 ) -> tuple[list[str], dict[str, list[ShareStatPoint]], list[ShareStatPoint], bool]:
     """Load S1/S2 means from agric_satellite.parcel_scene_products into share chart series.
 
@@ -241,7 +240,7 @@ async def _load_agri_share_series(
             except (TypeError, ValueError):
                 continue
             pt = _stat_point(
-                field_id=field_id,
+                land_id=land_id,
                 d=mapping["date"],
                 mean=mean,
                 quality=q,
@@ -275,7 +274,7 @@ async def _load_agri_share_series(
     return available, stats_by_type, all_stats, heatmap_available
 
 
-async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, Field]:
+async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, LandParcel]:
     result = await db.execute(select(ShareLink).where(ShareLink.token == token))
     link = result.scalar_one_or_none()
     if not link:
@@ -285,21 +284,21 @@ async def _resolve_share_link(db: AsyncSession, token: str) -> tuple[ShareLink, 
         raise HTTPException(status_code=410, detail="Share link has been revoked")
     if link.expires_at is not None and link.expires_at < now:
         raise HTTPException(status_code=410, detail="Share link has expired")
-    field = await db.get(Field, link.field_id)
+    field = await db.get(LandParcel, link.land_id)
     if not field:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="Land parcel not found")
     return link, field
 
 
-@router.get("/fields/{field_id}/share", response_model=list[ShareOut])
+@router.get("/lands/{land_id}/share", response_model=list[ShareOut])
 async def list_share_links(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(
         select(ShareLink).where(
-            ShareLink.field_id == field_id,
+            ShareLink.land_id == land_id,
             org_scope(None, ctx),
             ShareLink.revoked_at.is_(None),
         )
@@ -314,26 +313,26 @@ async def list_share_links(
 
 
 @router.post(
-    "/fields/{field_id}/share",
+    "/lands/{land_id}/share",
     response_model=ShareOut,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_share_link(
-    field_id: uuid.UUID,
+    land_id: str,
     body: ShareCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    field = await db.get(Field, field_id)
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="Land parcel not found")
 
     expires_at = None
     if body.expires_in_days is not None:
         expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days)
 
     link = ShareLink(
-        field_id=field_id,
+        land_id=land_id,
         token=secrets.token_urlsafe(32),
         scope=body.scope,
         expires_at=expires_at,
@@ -345,29 +344,29 @@ async def create_share_link(
         AuditEvent(
             event_type="report_shared",
             metadata_json={
-                "field_id": str(field_id),
+                "land_id": str(land_id),
                 "scope": body.scope,
                 "token": link.token,
             },
         )
     )
     await db.flush()
-    logger.info("report_shared", field_id=str(field_id), scope=body.scope)
+    logger.info("report_shared", land_id=str(land_id), scope=body.scope)
     return link
 
 
 @router.delete(
-    "/fields/{field_id}/share/{token}", status_code=status.HTTP_204_NO_CONTENT
+    "/lands/{land_id}/share/{token}", status_code=status.HTTP_204_NO_CONTENT
 )
 async def revoke_share_link(
-    field_id: uuid.UUID,
+    land_id: str,
     token: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(
         select(ShareLink).where(
-            ShareLink.field_id == field_id,
+            ShareLink.land_id == land_id,
             org_scope(None, ctx),
             ShareLink.token == token,
         )
@@ -395,31 +394,30 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     if link.expires_at is not None and link.expires_at < now:
         raise HTTPException(status_code=410, detail="Share link has expired")
 
-    # Load field
-    field = await db.get(Field, link.field_id)
+    # 分享链接只保存规范地块主键，公开报告直接读取同一条地块记录。
+    field = await db.get(LandParcel, link.land_id)
     if not field:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="Land parcel not found")
 
     from geoalchemy2.shape import to_shape
     from shapely.geometry import mapping
 
     field_data = {
-        "id": str(field.id),
-        "name": field.name,
+        "id": str(field.land_id),
+        "name": field.land_name,
         "area_ha": float(field.area_ha) if field.area_ha else None,
         "crop_type": field.crop_type,
         "geom": mapping(to_shape(field.geom)) if field.geom else None,
     }
 
-    land_id = parse_agri_land_id(field.tags_json)
-    agri_land_id: str | None = land_id
+    land_id = field.land_id
     agri_heatmap_available = False
     rs_source: str | None = None
 
-    # Available index types (distinct layer_type values) — legacy COG path
+    # 兼容历史栅格表中的图层，但关联键始终是同一张地块表的 land_id。
     types_result = await db.execute(
         select(RasterLayer.layer_type)
-        .where(RasterLayer.field_id == field.id)
+        .where(RasterLayer.land_id == field.land_id)
         .distinct()
     )
     available_index_types: list[str] = sorted(t for (t) in types_result.all())
@@ -429,7 +427,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     for idx_type in available_index_types:
         lyr_result = await db.execute(
             select(RasterLayer)
-            .where(RasterLayer.field_id == field.id, RasterLayer.layer_type == idx_type)
+            .where(RasterLayer.land_id == field.land_id, RasterLayer.layer_type == idx_type)
             .order_by(RasterLayer.date.desc())
             .limit(1)
         )
@@ -437,7 +435,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
         if lyr:
             layers_by_type[idx_type] = lyr
 
-    # Backward-compat: latest NDVI layer
+    # 最新 NDVI 图层
     latest_layer = layers_by_type.get("NDVI")
 
     # Stats (last 12 for each available index, merged & grouped)
@@ -447,7 +445,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
         stats_result = await db.execute(
             select(FieldStat)
             .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
-            .where(FieldStat.field_id == field.id, RasterLayer.layer_type == idx_type)
+            .where(FieldStat.land_id == field.land_id, RasterLayer.layer_type == idx_type)
             .order_by(FieldStat.date.desc())
             .limit(12)
         )
@@ -457,32 +455,25 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     # Sort descending by date
     all_stats.sort(key=lambda s: s.date, reverse=True)
 
-    # Agri-tagged fields: RS truth lives in parcel_scene_products (lonlat_v1).
-    # Prefer agri series for charts so outsiders see the same curves as the
-    # authenticated Agri 遥感时序 panel (classic FieldStat may be thin/empty).
-    if land_id:
-        (
-            agri_types,
-            agri_stats_by_type,
-            agri_all_stats,
-            agri_heatmap_available,
-        ) = await _load_agri_share_series(db, field.id, land_id)
-        if agri_types:
-            available_index_types = agri_types
-            stats_by_type = agri_stats_by_type
-            all_stats = agri_all_stats
-            rs_source = "agri" if not layers_by_type else "mixed"
-        elif layers_by_type:
-            rs_source = "classic"
-        else:
-            rs_source = "agri"
-    elif layers_by_type:
-        rs_source = "classic"
+    # 规范遥感时序直接读取 parcel_scene_products；不再按标签在两套地块
+    # 身份之间切换。历史 raster_layers/field_stats 仅作为同一 land_id 下
+    # 的已落库图层补充，不构成另一套地块主表。
+    (
+        agri_types,
+        agri_stats_by_type,
+        agri_all_stats,
+        agri_heatmap_available,
+    ) = await _load_agri_share_series(db, land_id)
+    if agri_types:
+        available_index_types = agri_types
+        stats_by_type = agri_stats_by_type
+        all_stats = agri_all_stats
+    rs_source = "agri"
 
     # Recent alerts (last 10)
     alerts_result = await db.execute(
         select(Alert)
-        .where(Alert.field_id == field.id)
+        .where(Alert.land_id == field.land_id)
         .order_by(Alert.created_at.desc())
         .limit(10)
     )
@@ -491,7 +482,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     # Recent scouting (last 10)
     scouting_result = await db.execute(
         select(ScoutingObservation)
-        .where(ScoutingObservation.field_id == field.id)
+        .where(ScoutingObservation.land_id == field.land_id)
         .order_by(ScoutingObservation.created_at.desc())
         .limit(10)
     )
@@ -509,7 +500,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
         scouting_out.append(
             ScoutingOut(
                 id=obs.id,
-                field_id=obs.field_id,
+                land_id=obs.land_id,
                 alert_id=obs.alert_id,
                 geom_point=geom_json,
                 title=obs.title,
@@ -526,7 +517,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     weather_result = await db.execute(
         select(WeatherDaily)
         .where(
-            WeatherDaily.field_id == field.id,
+            WeatherDaily.land_id == field.land_id,
             WeatherDaily.date >= (now.date() - timedelta(days=30)),
         )
         .order_by(WeatherDaily.date.desc())
@@ -560,7 +551,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     wd_result = await db.execute(
         select(WeatherDaily)
         .where(
-            WeatherDaily.field_id == field.id,
+            WeatherDaily.land_id == field.land_id,
             WeatherDaily.date >= (now.date() - timedelta(days=90)),
         )
         .order_by(WeatherDaily.date.asc())
@@ -590,7 +581,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     # Soil summary
     soil_summary_out: dict[str, Any] | None = None
     soil_result = await db.execute(
-        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field.id)
+        select(SoilFieldSummary).where(SoilFieldSummary.land_id == field.land_id)
     )
     soil_sum = soil_result.scalar_one_or_none()
     if soil_sum:
@@ -631,7 +622,6 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
         weather_data=weather_data_out,
         soil_summary=soil_summary_out,
         rs_source=rs_source,
-        agri_land_id=agri_land_id,
         agri_heatmap_available=agri_heatmap_available,
     )
 
@@ -673,7 +663,7 @@ async def proxy_share_tile(
     layer_result = await db.execute(
         select(RasterLayer)
         .where(
-            RasterLayer.field_id == link.field_id, RasterLayer.layer_type == idx_upper
+            RasterLayer.land_id == link.land_id, RasterLayer.layer_type == idx_upper
         )
         .order_by(RasterLayer.date.desc())
         .limit(1)
@@ -731,13 +721,13 @@ async def get_share_agri_pixels(
     index_type: str = "NDVI",
     scene_date: str | None = None,
 ):
-    """Public agri lonlat pixels for share map overlay (no auth; gated by token)."""
+    """Public parcel lon/lat pixels for the shared map overlay."""
     from app.routers.agri import _pixels_from_db_lonlat
 
     _link, field = await _resolve_share_link(db, token)
-    land_id = parse_agri_land_id(field.tags_json)
+    land_id = field.land_id
     if not land_id:
-        raise HTTPException(status_code=404, detail="Field is not agri-tagged")
+        raise HTTPException(status_code=404, detail="LandParcel is not agri-tagged")
 
     idx_upper = (index_type or "NDVI").upper()
     sensor = "S1" if idx_upper in ("VV", "VH") else "S2"

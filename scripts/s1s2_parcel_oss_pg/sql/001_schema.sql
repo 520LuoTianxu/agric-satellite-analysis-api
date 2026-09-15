@@ -1,92 +1,34 @@
--- S1/S2 地块场景产品：OSS JSON → PostgreSQL
--- 应用：psql "$PGDATABASE" -f sql/001_schema.sql
--- 或：python scripts/oss_to_pg.py --apply-schema ...
+-- OSS 场景产品导入工具的 schema 校验入口
+--
+-- 地块和场景产品的 DDL 只维护在 scripts/agri_seed/001_agri_schema.sql 以及
+-- Alembic 迁移中。本文件故意不再 CREATE parcel_scene_products，避免这个工具
+-- 重新创建一套旧场景产品结构，造成第二套地块身份和重复表设计。
 
-CREATE SCHEMA IF NOT EXISTS agric_satellite;
+DO $$
+BEGIN
+  IF to_regclass('agric_satellite.land_parcels') IS NULL THEN
+    RAISE EXCEPTION
+      'missing canonical table agric_satellite.land_parcels; apply the canonical schema first';
+  END IF;
 
-CREATE TABLE IF NOT EXISTS agric_satellite.parcel_scene_products (
-  parcel_id               text        NOT NULL,
-  tile_id                 text        NOT NULL,
-  date                    date        NOT NULL,
-  sensor                  text        NOT NULL,  -- S1 | S2
-  scene_id                text        NOT NULL DEFAULT '',
-  land_name               text,
-  cloud_cover             double precision,
-  cloud_cover_over_30     boolean,
-  parcel_cloud_cover_pct  double precision,
-  json_oss_key            text,
-  json_url                text,
-  rgb_url                 text,
-  large_rgb_url           text,
-  heatmap_url             text,
-  s2_heatmap_url          text,
-  vv_url                  text,
-  vh_url                  text,
-  pixel_count             integer,
-  clear_pixel_count       integer,
-  res_m                   double precision,
-  epsg                    integer,
-  payload                 jsonb       NOT NULL,  -- 完整 JSON（含 pixels）
-  generated_at_shanghai   text,                  -- 产品侧上海时区字符串；亦可存 timestamptz
-  ingested_at             timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (parcel_id, date, sensor, scene_id)
-);
+  IF to_regclass('agric_satellite.parcel_scene_products') IS NULL THEN
+    RAISE EXCEPTION
+      'missing canonical table agric_satellite.parcel_scene_products; apply the canonical schema first';
+  END IF;
 
-CREATE INDEX IF NOT EXISTS idx_psp_tile_date
-  ON agric_satellite.parcel_scene_products (tile_id, date);
-CREATE INDEX IF NOT EXISTS idx_psp_sensor
-  ON agric_satellite.parcel_scene_products (sensor);
-CREATE INDEX IF NOT EXISTS idx_psp_date
-  ON agric_satellite.parcel_scene_products (date);
-CREATE INDEX IF NOT EXISTS idx_psp_payload_gin
-  ON agric_satellite.parcel_scene_products USING gin (payload);
-
--- 轻量视图：去掉重型 pixels，便于列表/元数据查询
-CREATE OR REPLACE VIEW agric_satellite.v_parcel_scene_products_meta AS
-SELECT
-  parcel_id,
-  tile_id,
-  date,
-  sensor,
-  scene_id,
-  land_name,
-  cloud_cover,
-  cloud_cover_over_30,
-  parcel_cloud_cover_pct,
-  json_oss_key,
-  json_url,
-  rgb_url,
-  large_rgb_url,
-  heatmap_url,
-  s2_heatmap_url,
-  vv_url,
-  vh_url,
-  pixel_count,
-  clear_pixel_count,
-  res_m,
-  epsg,
-  payload - 'pixels' AS payload_meta,
-  generated_at_shanghai,
-  ingested_at
-FROM agric_satellite.parcel_scene_products;
-
--- 可选：入库运行日志
-CREATE TABLE IF NOT EXISTS agric_satellite.ingest_runs (
-  run_id        bigserial PRIMARY KEY,
-  started_at    timestamptz NOT NULL DEFAULT now(),
-  finished_at   timestamptz,
-  oss_prefix    text,
-  oss_bucket    text,
-  limit_n       integer,
-  listed_n      integer,
-  upserted_n    integer,
-  error_n       integer,
-  dry_run       boolean DEFAULT false,
-  notes         text,
-  status        text DEFAULT 'running'  -- running | ok | error
-);
-
-COMMENT ON TABLE agric_satellite.parcel_scene_products IS
-  'Sentinel-1/2 地块场景产品（自 Aliyun OSS JSON 入库）';
-COMMENT ON COLUMN agric_satellite.parcel_scene_products.payload IS
-  '完整产品 JSON，含 pixels 数组；列表查询请用 v_parcel_scene_products_meta';
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS a
+    JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'agric_satellite'
+      AND c.relname = 'parcel_scene_products'
+      AND a.attname = 'land_id'
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+  ) THEN
+    RAISE EXCEPTION
+      'canonical table agric_satellite.parcel_scene_products must use land_id';
+  END IF;
+END
+$$;

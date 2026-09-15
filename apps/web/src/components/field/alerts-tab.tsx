@@ -16,12 +16,12 @@ import { AlertRow } from "@/components/alert-row";
 /* ── Props ────────────────────────────────────────────────────── */
 
 interface AlertsTabProps {
-    fieldId: string;
+    landId: string;
     /** Called with the count of open alerts (for badge). */
     onOpenCountChange?: (count: number) => void;
 }
 
-export default function AlertsTab({ fieldId, onOpenCountChange }: AlertsTabProps) {
+export default function AlertsTab({ landId, onOpenCountChange }: AlertsTabProps) {
     const t = useTranslations("alertsTab");
     const [alerts, setAlerts] = useState<Alert[]>([]);
     const [loading, setLoading] = useState(true);
@@ -30,14 +30,14 @@ export default function AlertsTab({ fieldId, onOpenCountChange }: AlertsTabProps
 
     const loadAlerts = useCallback(async () => {
         try {
-            const res = await alertsApi.listForField(fieldId, 200);
+            const res = await alertsApi.listForLand(landId, 200);
             setAlerts(res.items);
         } catch {
             // silent
         } finally {
             setLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         loadAlerts();

@@ -62,7 +62,7 @@ Process host: mq_result_writer
 - **Process host（`mq_result_writer`）**：消费 `openfarm_process` 并 upsert 业务 DB。
 - **Weather / soil**：仍经 download 队列入队（页面点击）→ worker 拉取 → `ResultMessage`（inline payload）→ process 队列 → writer upsert。  
   **Follow-up**：ingest 天气/土壤任务目前可能仍直接写库（与 writer 双写）；以 result-writer 为单一真相源需另开小改，本轮不做大爆炸重写。
-- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report`（`field_id` + `extras.job_id`）→ download → ingest **以 `field_id` 生成 PDF**（本地无 Job 不失败）、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`，`payload.job_id` 带回）→ process → writer 写入 `agric_satellite.mq_task_results` **并回写 API 机 `jobs.progress_json`**。`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
+- **Assessment（选地报告）**：API 创建 Job 后发 `assessment_report`（`land_id` + `extras.job_id`）→ download → ingest **以 `land_id` 生成 PDF**（本地无 Job 不失败）、`upload_file_via_storage` → `ResultMessage`（`oss_urls.assessment_pdf` = storage `public_url`，`payload.job_id` 带回）→ process → writer 写入 `agric_satellite.mq_task_results` **并回写 API 机 `jobs.progress_json`**。`GET .../assessment-report/latest` 仍可经 API 代理读存储，也可直接用 `public_url` / 响应头 `X-Assessment-Public-Url`。
 
 ## 3. 消息约定
 
@@ -71,10 +71,8 @@ Process host: mq_result_writer
 ```json
 {
   "task_id": "uuid",
-  "type": "satellite_analysis|agri_bridge|weather_backfill|soil_fetch|field_bootstrap|assessment_report",
-  "field_id": "optional-agric-satellite-analysis-field-uuid",
-  "parcel_id": "optional-agri-land_id",
-  "land_id": "optional-same-as-parcel_id",
+  "type": "satellite_analysis|agri_bridge|weather_backfill|soil_fetch|land_bootstrap|assessment_report",
+  "land_id": "canonical-agric_satellite.land_parcels.land_id",
   "extras": {},
   "created_at": "ISO-8601"
 }
@@ -84,12 +82,12 @@ Process host: mq_result_writer
 
 | type | extras（常用） | Celery 派发 | ResultMessage |
 |------|----------------|-------------|---------------|
-| `satellite_analysis` | `months`（默认 **60**）、`force`（默认 **false**，补缺）、`allow_agri`, `sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | agri：`backfill_indices_for_field` → `agri_lonlat` + S1（无指数 TIF）；可选 wait 发布 | wait 完成后：`oss_urls`（scene JSON，若已上传） |
-| `agri_bridge` | `mode=bridge_only` | `bridge_field_stac_to_agri` | `oss_urls` |
-| `weather_backfill` | `days?: int` | `backfill_weather_for_field(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
-| `soil_fetch` | `job_id?` | `fetch_soil_for_field(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
-| `field_bootstrap` | `skip_indices?`, `sentinel_job_id?` | fan-out weather + soil +（可选）indices | consumer 轻量 `phase=bootstrap_dispatched`（子任务各自带结果） |
-| `assessment_report` | `job_id?`（API Job；download 机可无本地 row）、`crop_type?`、`crop_name_zh?`；**`field_id` 必填** | `generate_assessment_report(field_id=..., job_id?=..., mq_task_id=)` | **OSS** `oss_urls.assessment_pdf` + inline `payload.kind=assessment_report`（含 `job_id`/`public_url`/score/grade/filename；writer 回写 API Job） |
+| `satellite_analysis` | `months`（默认 **60**）、`force`（默认 **false**，补缺）、`sentinel_job_id`, `with_bridge`, `bridge_job_id`, … | `backfill_indices_for_land` → `agri_lonlat` + S1；可选 wait 发布 | wait 完成后：`oss_urls`（scene JSON，若已上传） |
+| `agri_bridge` | `mode=bridge_only` | `bridge_land_stac_to_agri`（一次性 COG 导入） | `oss_urls` |
+| `weather_backfill` | `days?: int` | `backfill_weather_for_land(..., mq_task_id=)` | **inline** `payload.kind=weather_daily` |
+| `soil_fetch` | `job_id?` | `fetch_soil_for_land(..., mq_task_id=)` | **inline** `payload.kind=soil_profile` |
+| `land_bootstrap` | `skip_indices?`, `sentinel_job_id?` | fan-out weather + soil +（可选）indices | consumer 轻量 `phase=bootstrap_dispatched`（子任务各自带结果） |
+| `assessment_report` | `job_id?`（API Job；download 机可无本地 row）、`crop_type?`、`crop_name_zh?`；**`land_id` 必填** | `generate_assessment_report(land_id=..., job_id?=..., mq_task_id=)` | **OSS** `oss_urls.assessment_pdf` + inline `payload.kind=assessment_report`（含 `job_id`/`public_url`/score/grade/filename；writer 回写 API Job） |
 
 ### ResultMessage → `CLOUDAMQP_PROCESS_QUEUE`（`openfarm_process`）
 
@@ -101,7 +99,6 @@ Process host: mq_result_writer
   "payload": { "kind": "weather_daily|soil_profile|assessment_report|...", "...": "..." },
   "data": null,
   "error": null,
-  "field_id": "...",
   "land_id": "...",
   "finished_at": "ISO-8601",
   "extras": {}
@@ -114,15 +111,15 @@ Process host: mq_result_writer
 - Inline 超限（默认 100KB）：上传 `mq_results/{kind}/{task_id}.json`，`oss_urls[kind]=url`，payload 变为 stub（`oss_fallback: true`）。
 - 选地报告：`oss_urls.assessment_pdf` 为 HTTPS 下载链（storage `public_url`）；`payload` 含摘要，writer **不**把 PDF 当 JSON 拉取。
 
-## 4. API → MQ 映射（UI 契约不变）
+## 4. API → MQ 调用契约
 
 | REST | MQ type | 仍由 API 创建的 Job 哨兵 |
 |------|---------|-------------------------|
-| `POST /fields`（首次开通） | `field_bootstrap` | 非 agri 时 backfill sentinel |
-| `POST /fields/{id}/backfill-indices` | `satellite_analysis` | backfill sentinel；agri 另建 `agri_bridge` Job |
-| `POST /fields/{id}/weather/backfill` | `weather_backfill` | — |
-| `POST /fields/{id}/soil/refresh` | `soil_fetch` | `soil_fetch` Job |
-| `POST /fields/{id}/assessment-report` | `assessment_report` | `assessment_report` Job（UI 轮询） |
+| `POST /v1/lands`（首次开通） | `land_bootstrap` | — |
+| `POST /v1/lands/{land_id}/backfill-indices` | `satellite_analysis` | backfill sentinel |
+| `POST /v1/lands/{land_id}/weather/backfill` | `weather_backfill` | — |
+| `POST /v1/lands/{land_id}/soil/refresh` | `soil_fetch` | `soil_fetch` Job |
+| `POST /v1/lands/{land_id}/assessment-report` | `assessment_report` | `assessment_report` Job（UI 轮询） |
 | `POST /v1/mq/tasks` | 上表类型白名单 | — |
 
 > 天气/土壤 **保持** MQ 入队（不要改回 API 直发 Celery）。Celery 任务仍可本地写库；process 侧 `mq_result_writer` 按 payload/OSS 再 upsert，便于跨库/对账。
@@ -187,7 +184,7 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 ## 8. 已知限制 / Follow-ups
 
 1. Full `satellite_analysis` 结果在光学/雷达 lonlat 任务完成后由 wait 任务发布，耗时仍可能很长（下载+计算），但不再做 OSS TIF exists 扫描。  
-2. `field_bootstrap` 仅保证「已入队」结果；子任务失败看 Celery / Job / 各自 Result。  
+2. `land_bootstrap` 仅保证「已入队」结果；子任务失败看 Celery / Job / 各自 Result。
 3. 365 天天气行可能超过 100KB → 自动 OSS fallback；短窗口（如 30 天）优先 inline。  
 4. Celery 与 writer 双写同一库时依赖 upsert 幂等（天气/土壤尤甚；长期应以 process writer 为源）。  
 5. S1 bridge 路径尚未统一上传 scene JSON（本 MVP 覆盖 STAC S2 lonlat bridge）。  

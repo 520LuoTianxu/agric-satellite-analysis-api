@@ -106,12 +106,12 @@ const PRIORITY_TOKEN_VARS: Record<number, string> = {
 /* ── Component ───────────────────────────────────────────── */
 
 interface SoilTabProps {
-    fieldId: string;
+    landId: string;
     mapInstance?: maplibregl.Map | null;
     activeTab?: string;
 }
 
-export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProps) {
+export default function SoilTab({ landId, mapInstance, activeTab }: SoilTabProps) {
     const t = useTranslations("soil");
 
     const [profile, setProfile] = useState<SoilProfile | null>(null);
@@ -143,7 +143,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         }
         setNpkLoading(true);
         try {
-            const res = await soilApi.fetchNpk(fieldId, {
+            const res = await soilApi.fetchNpk(landId, {
                 token,
                 force: npkForce || !!npk,
                 hr_base_id: npkHrBaseId.trim() || undefined,
@@ -156,7 +156,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         } finally {
             setNpkLoading(false);
         }
-    }, [fieldId, npkToken, npkHrBaseId, npkForce, npk, t]);
+    }, [landId, npkToken, npkHrBaseId, npkForce, npk, t]);
 
     const handleFetchSiteAdmission = useCallback(async () => {
         const token = siteToken.trim();
@@ -166,7 +166,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         }
         setSiteLoading(true);
         try {
-            const res = await soilApi.fetchSiteAdmission(fieldId, {
+            const res = await soilApi.fetchSiteAdmission(landId, {
                 token,
                 group_id: siteGroupId.trim() || undefined,
                 force: siteForce || !!siteAdmission,
@@ -183,7 +183,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         } finally {
             setSiteLoading(false);
         }
-    }, [fieldId, siteToken, siteGroupId, siteHrBaseId, siteForce, siteAdmission, t]);
+    }, [landId, siteToken, siteGroupId, siteHrBaseId, siteForce, siteAdmission, t]);
 
 
     /* ── Sampling zone map markers (target / bullseye style) ── */
@@ -344,21 +344,21 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         if (isInitial) setLoading(true);
         try {
             const [p, s] = await Promise.allSettled([
-                soilApi.get(fieldId),
-                soilApi.getSummary(fieldId),
+                soilApi.get(landId),
+                soilApi.getSummary(landId),
             ]);
             if (p.status === "fulfilled") setProfile(p.value);
             if (s.status === "fulfilled") setSummary(s.value);
 
             try {
-                const cachedNpk = await soilApi.getNpk(fieldId);
+                const cachedNpk = await soilApi.getNpk(landId);
                 setNpk(cachedNpk);
             } catch {
                 setNpk(null);
             }
 
             try {
-                const cachedSite = await soilApi.getSiteAdmission(fieldId);
+                const cachedSite = await soilApi.getSiteAdmission(landId);
                 setSiteAdmission(cachedSite);
                 if (cachedSite.group_id) setSiteGroupId(String(cachedSite.group_id));
             } catch {
@@ -368,11 +368,11 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
             // Load intelligence data (only if soil data exists)
             if (p.status === "fulfilled" && p.value) {
                 const [cs, nc, ce, ws, sz] = await Promise.allSettled([
-                    soilApi.getCropSuitability(fieldId),
-                    soilApi.getNutrientContext(fieldId),
-                    soilApi.getCarbon(fieldId),
-                    soilApi.getWeatherStress(fieldId),
-                    soilApi.getSamplingZones(fieldId),
+                    soilApi.getCropSuitability(landId),
+                    soilApi.getNutrientContext(landId),
+                    soilApi.getCarbon(landId),
+                    soilApi.getWeatherStress(landId),
+                    soilApi.getSamplingZones(landId),
                 ]);
                 if (cs.status === "fulfilled") setCropSuitability(cs.value);
                 if (nc.status === "fulfilled") setNutrientContext(nc.value);
@@ -385,7 +385,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         } finally {
             if (isInitial) setLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         loadData();
@@ -439,7 +439,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         }
         setRefreshing(true);
         try {
-            const res = await soilApi.refresh(fieldId);
+            const res = await soilApi.refresh(landId);
             toast.success(t("refreshStarted"));
             // Start polling the job
             if (pollRef.current) clearInterval(pollRef.current);

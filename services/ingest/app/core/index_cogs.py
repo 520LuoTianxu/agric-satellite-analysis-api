@@ -1,12 +1,11 @@
-"""Env knobs for index COG uploads vs agri lonlat-direct emit.
+"""Env knobs for optional index COG uploads.
 
 WRITE_INDEX_COGS (unset = safe default):
-  agri fields: off (do not upload index .tif / COG products)
-  legacy fields: on (TiTiler still needs COGs)
+  off (canonical scene products already contain the computed statistics/pixels)
 
 Explicit values:
   0 / false / off / no  -> never upload index TIFs
-  1 / true  / on  / yes -> always upload, including agri (opt-in)
+  1 / true  / on  / yes -> upload the optional COG copy (opt-in)
 
 UPLOAD_SCENE_JSON (default on): compact lonlat_v1 scene JSON to OSS_PREFIX.
 This is small JSON, not a raster. Set 0 to skip the JSON object.
@@ -31,12 +30,12 @@ def _parse_bool_env(name: str) -> bool | None:
     return None
 
 
-def write_index_cogs_enabled(*, is_agri: bool = False) -> bool:
-    """Whether to upload full index COG/TIF rasters to object storage."""
+def write_index_cogs_enabled() -> bool:
+    """Return the explicit COG switch; all land parcels use the same path."""
     explicit = _parse_bool_env("WRITE_INDEX_COGS")
     if explicit is not None:
         return explicit
-    return not is_agri
+    return False
 
 
 def upload_scene_json_enabled() -> bool:

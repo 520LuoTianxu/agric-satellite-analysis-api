@@ -20,7 +20,7 @@ router = APIRouter(prefix="/internal/jobs", tags=["internal-jobs"])
 
 class InternalJobOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID | None = None
+    land_id: str | None = None
     type: str
     status: str
     progress_json: dict[str, Any] | None = None

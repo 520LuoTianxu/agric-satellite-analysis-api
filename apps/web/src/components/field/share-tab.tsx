@@ -30,10 +30,10 @@ import { useLocale, useTranslations } from "next-intl";
 import { routing } from "@/i18n/routing";
 
 interface ShareTabProps {
-    fieldId: string;
+    landId: string;
 }
 
-export default function ShareTab({ fieldId }: ShareTabProps) {
+export default function ShareTab({ landId }: ShareTabProps) {
     const t = useTranslations("shareTab");
     const locale = useLocale();
     const confirm = useConfirm();
@@ -46,14 +46,14 @@ export default function ShareTab({ fieldId }: ShareTabProps) {
 
     const fetchLinks = useCallback(async () => {
         try {
-            const data = await shareApi.list(fieldId);
+            const data = await shareApi.list(landId);
             setLinks(data);
         } catch {
             // silent
         } finally {
             setLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         fetchLinks();
@@ -63,7 +63,7 @@ export default function ShareTab({ fieldId }: ShareTabProps) {
         setCreating(true);
         try {
             const days = expiryDays === "never" ? null : parseInt(expiryDays, 10);
-            await shareApi.create(fieldId, days);
+            await shareApi.create(landId, days);
             toast.success(t("linkCreated"));
             await fetchLinks();
         } catch {
@@ -82,7 +82,7 @@ export default function ShareTab({ fieldId }: ShareTabProps) {
         if (!ok) return;
 
         try {
-            await shareApi.revoke(fieldId, token);
+            await shareApi.revoke(landId, token);
             toast.success(t("linkRevoked"));
             await fetchLinks();
         } catch {

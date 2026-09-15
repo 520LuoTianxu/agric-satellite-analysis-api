@@ -4,7 +4,7 @@
 
 改进自 agri_s1s2_parcel_bundle/scripts/oss_json_to_postgres.py：
   - 独立业务 schema（agric_satellite.*）+ 元数据视图 + ingest_runs
-  - 更多列：land_name / parcel_cloud_cover_pct / clear_pixel_count / res_m / epsg / generated_at_shanghai
+  - 使用 canonical 场景产品列：land_id / pixel_data / 指标统计 / OSS key
   - --apply-schema / --dry-run / --limit / OSS_ENV 可配
   - --from-done-dir / --keys-file：无 ListObjects 时按 key GetObject
   - 兼容 psycopg3 与 psycopg2
@@ -56,38 +56,71 @@ COMMIT_EVERY = 50
 
 UPSERT_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
-  parcel_id, tile_id, date, sensor, scene_id, land_name,
+  land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
-  json_oss_key, json_url, rgb_url, large_rgb_url, heatmap_url, s2_heatmap_url,
-  vv_url, vh_url, pixel_count, clear_pixel_count, res_m, epsg,
-  payload, generated_at_shanghai
+  json_oss_key, pixel_count, generated_at_shanghai,
+  pixel_data_url, rgb_url, large_rgb_url, rgb_oss_key,
+  ndvi_avg, ndvi_min, ndvi_max,
+  evi_avg, evi_min, evi_max,
+  ndmi_avg, ndmi_min, ndmi_max,
+  ndre_avg, ndre_min, ndre_max,
+  cire_avg, cire_min, cire_max,
+  mndwi_avg, mndwi_min, mndwi_max,
+  vv_avg, vv_min, vv_max,
+  vh_avg, vh_min, vh_max,
+  pixel_data
 ) VALUES (
-  %(parcel_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
+  %(land_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
-  %(json_oss_key)s, %(json_url)s, %(rgb_url)s, %(large_rgb_url)s,
-  %(heatmap_url)s, %(s2_heatmap_url)s,
-  %(vv_url)s, %(vh_url)s, %(pixel_count)s, %(clear_pixel_count)s, %(res_m)s, %(epsg)s,
-  %(payload)s::jsonb, %(generated_at_shanghai)s
+  %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
+  %(pixel_data_url)s, %(rgb_url)s, %(large_rgb_url)s, %(rgb_oss_key)s,
+  %(ndvi_avg)s, %(ndvi_min)s, %(ndvi_max)s,
+  %(evi_avg)s, %(evi_min)s, %(evi_max)s,
+  %(ndmi_avg)s, %(ndmi_min)s, %(ndmi_max)s,
+  %(ndre_avg)s, %(ndre_min)s, %(ndre_max)s,
+  %(cire_avg)s, %(cire_min)s, %(cire_max)s,
+  %(mndwi_avg)s, %(mndwi_min)s, %(mndwi_max)s,
+  %(vv_avg)s, %(vv_min)s, %(vv_max)s,
+  %(vh_avg)s, %(vh_min)s, %(vh_max)s,
+  %(pixel_data)s::jsonb
 )
-ON CONFLICT (parcel_id, date, sensor, scene_id) DO UPDATE SET
+ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   tile_id = EXCLUDED.tile_id,
   land_name = EXCLUDED.land_name,
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
   json_oss_key = EXCLUDED.json_oss_key,
-  json_url = EXCLUDED.json_url,
+  pixel_data_url = EXCLUDED.pixel_data_url,
   rgb_url = EXCLUDED.rgb_url,
   large_rgb_url = EXCLUDED.large_rgb_url,
-  heatmap_url = EXCLUDED.heatmap_url,
-  s2_heatmap_url = EXCLUDED.s2_heatmap_url,
-  vv_url = EXCLUDED.vv_url,
-  vh_url = EXCLUDED.vh_url,
+  rgb_oss_key = EXCLUDED.rgb_oss_key,
+  ndvi_avg = EXCLUDED.ndvi_avg,
+  ndvi_min = EXCLUDED.ndvi_min,
+  ndvi_max = EXCLUDED.ndvi_max,
+  evi_avg = EXCLUDED.evi_avg,
+  evi_min = EXCLUDED.evi_min,
+  evi_max = EXCLUDED.evi_max,
+  ndmi_avg = EXCLUDED.ndmi_avg,
+  ndmi_min = EXCLUDED.ndmi_min,
+  ndmi_max = EXCLUDED.ndmi_max,
+  ndre_avg = EXCLUDED.ndre_avg,
+  ndre_min = EXCLUDED.ndre_min,
+  ndre_max = EXCLUDED.ndre_max,
+  cire_avg = EXCLUDED.cire_avg,
+  cire_min = EXCLUDED.cire_min,
+  cire_max = EXCLUDED.cire_max,
+  mndwi_avg = EXCLUDED.mndwi_avg,
+  mndwi_min = EXCLUDED.mndwi_min,
+  mndwi_max = EXCLUDED.mndwi_max,
+  vv_avg = EXCLUDED.vv_avg,
+  vv_min = EXCLUDED.vv_min,
+  vv_max = EXCLUDED.vv_max,
+  vh_avg = EXCLUDED.vh_avg,
+  vh_min = EXCLUDED.vh_min,
+  vh_max = EXCLUDED.vh_max,
   pixel_count = EXCLUDED.pixel_count,
-  clear_pixel_count = EXCLUDED.clear_pixel_count,
-  res_m = EXCLUDED.res_m,
-  epsg = EXCLUDED.epsg,
-  payload = EXCLUDED.payload,
+  pixel_data = EXCLUDED.pixel_data,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
   ingested_at = now()
 """
@@ -145,7 +178,7 @@ def apply_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
-    print(f"[schema] applied {SCHEMA_SQL}", flush=True)
+    print(f"[schema] canonical schema validated {SCHEMA_SQL}", flush=True)
 
 
 def iter_json_keys(bucket: oss2.Bucket, prefix: str, limit: int = 0) -> Iterator[str]:
@@ -210,13 +243,40 @@ def iter_keys_from_file(path: Path, limit: int = 0) -> Iterator[str]:
             return
 
 
-def row_from_product(obj: dict, key: str) -> dict:
-    """从产品 JSON 映射到表行；payload 存完整对象。"""
-    payload_str = json.dumps(obj, ensure_ascii=False)
-    # psycopg2: 用字符串 + ::jsonb；psycopg3 同样可用字符串
+def _pixel_data_from_product(obj: dict) -> dict:
+    """读取产品自身的像素对象，保持场景产品表的单一 JSONB 存储。"""
+    pixel_data = obj.get("pixel_data")
+    if isinstance(pixel_data, str):
+        try:
+            pixel_data = json.loads(pixel_data)
+        except json.JSONDecodeError as exc:
+            raise ValueError("pixel_data 不是合法 JSON") from exc
+    if isinstance(pixel_data, dict):
+        return pixel_data
+
+    pixels = obj.get("pixels")
+    if not isinstance(pixels, list):
+        pixels = []
+    # 历史 OSS JSON 可能直接把 pixels 放在根部；这里只做输入格式整理，
+    # 数据库仍只保存 canonical parcel_scene_products.pixel_data 一列。
+    return {"format": "oss_json_v1", "pixels": pixels}
+
+
+def row_from_product(obj: dict, key: str, bucket_name: str) -> dict:
+    """从 canonical 产品 JSON 生成一行 land_id 场景产品。"""
+    land_id = obj.get("land_id")
+    if land_id is None or not str(land_id).strip():
+        raise ValueError("产品 JSON 缺少必要字段 land_id")
+    json_key = str(obj.get("json_oss_key") or key)
+    pixel_data = _pixel_data_from_product(obj)
+    pixel_data_url = obj.get("pixel_data_url")
+    if not isinstance(pixel_data_url, str) or not pixel_data_url.strip():
+        # pixel_data_url 用稳定 oss:// 地址兜底，避免把短期签名 URL 写进主表。
+        pixel_data_url = f"oss://{bucket_name}/{json_key}"
+
     return {
-        "parcel_id": str(obj.get("parcel_id") if obj.get("parcel_id") is not None else ""),
-        "tile_id": obj.get("tile_id") or "",
+        "land_id": str(land_id),
+        "tile_id": str(obj.get("tile_id") or ""),
         "date": obj.get("date"),
         "sensor": obj.get("sensor") or "",
         "scene_id": obj.get("scene_id") or "",
@@ -224,19 +284,37 @@ def row_from_product(obj: dict, key: str) -> dict:
         "cloud_cover": obj.get("cloud_cover"),
         "cloud_cover_over_30": obj.get("cloud_cover_over_30"),
         "parcel_cloud_cover_pct": obj.get("parcel_cloud_cover_pct"),
-        "json_oss_key": obj.get("json_oss_key") or key,
-        "json_url": obj.get("json_url"),
+        "json_oss_key": json_key,
+        "pixel_data_url": pixel_data_url,
         "rgb_url": obj.get("rgb_url"),
         "large_rgb_url": obj.get("large_rgb_url"),
-        "heatmap_url": obj.get("heatmap_url"),
-        "s2_heatmap_url": obj.get("s2_heatmap_url"),
-        "vv_url": obj.get("vv_url"),
-        "vh_url": obj.get("vh_url"),
+        "rgb_oss_key": obj.get("rgb_oss_key"),
+        "ndvi_avg": obj.get("ndvi_avg"),
+        "ndvi_min": obj.get("ndvi_min"),
+        "ndvi_max": obj.get("ndvi_max"),
+        "evi_avg": obj.get("evi_avg"),
+        "evi_min": obj.get("evi_min"),
+        "evi_max": obj.get("evi_max"),
+        "ndmi_avg": obj.get("ndmi_avg"),
+        "ndmi_min": obj.get("ndmi_min"),
+        "ndmi_max": obj.get("ndmi_max"),
+        "ndre_avg": obj.get("ndre_avg"),
+        "ndre_min": obj.get("ndre_min"),
+        "ndre_max": obj.get("ndre_max"),
+        "cire_avg": obj.get("cire_avg"),
+        "cire_min": obj.get("cire_min"),
+        "cire_max": obj.get("cire_max"),
+        "mndwi_avg": obj.get("mndwi_avg"),
+        "mndwi_min": obj.get("mndwi_min"),
+        "mndwi_max": obj.get("mndwi_max"),
+        "vv_avg": obj.get("vv_avg"),
+        "vv_min": obj.get("vv_min"),
+        "vv_max": obj.get("vv_max"),
+        "vh_avg": obj.get("vh_avg"),
+        "vh_min": obj.get("vh_min"),
+        "vh_max": obj.get("vh_max"),
         "pixel_count": obj.get("pixel_count"),
-        "clear_pixel_count": obj.get("clear_pixel_count"),
-        "res_m": obj.get("res_m"),
-        "epsg": obj.get("epsg"),
-        "payload": payload_str,
+        "pixel_data": json.dumps(pixel_data, ensure_ascii=False, separators=(",", ":")),
         "generated_at_shanghai": obj.get("generated_at_shanghai"),
     }
 
@@ -418,11 +496,17 @@ def main(argv: Optional[list] = None) -> int:
                         data = json.loads(body)
                         if not isinstance(data, dict):
                             raise ValueError("JSON root 不是 object")
-                        row = row_from_product(data, key)
-                        if not row["parcel_id"] or not row["date"] or not row["sensor"]:
+                        row = row_from_product(data, key, cfg["OSS_BUCKET"])
+                        if (
+                            not row["land_id"]
+                            or not row["tile_id"]
+                            or not row["date"]
+                            or not row["sensor"]
+                        ):
                             raise ValueError(
-                                f"缺少必要字段 parcel_id/date/sensor: "
-                                f"{row['parcel_id']!r} {row['date']!r} {row['sensor']!r}"
+                                f"缺少必要字段 land_id/tile_id/date/sensor: "
+                                f"{row['land_id']!r} {row['tile_id']!r} "
+                                f"{row['date']!r} {row['sensor']!r}"
                             )
                         upsert_one(cur, row)
                         upserted += 1

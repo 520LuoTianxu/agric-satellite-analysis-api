@@ -5,13 +5,12 @@ import dynamic from "next/dynamic";
 import {
     agriApi,
     cropsApi,
-    fieldsApi,
-    parseAgriLandId,
+    landsApi,
     type AgriLandScenesSummary,
     type AgriSceneProduct,
     type BackfillStatusResponse,
     type CropOption,
-    type FieldStat,
+    type LandStat,
     type GrowingSeasonWindow,
     type HarvestDetectResult,
     type IndexType,
@@ -196,7 +195,7 @@ const BUTTON_ORDER: SeriesKey[] = [
     "vh",
 ];
 
-function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] {
+function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey, landId: string): LandStat[] {
     const meta = SERIES_META[key];
     const avgKey = meta.chartKey;
     if (!avgKey) return [];
@@ -208,7 +207,7 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
         arr.push(s);
         byDate.set(s.date, arr);
     }
-    const out: FieldStat[] = [];
+    const out: LandStat[] = [];
     const dates = [...byDate.keys()].sort((a, b) => a.localeCompare(b));
     dates.forEach((date, i) => {
         const group = byDate.get(date) ?? [];
@@ -225,7 +224,7 @@ function scenesToStats(scenes: AgriSceneProduct[], key: SeriesKey): FieldStat[] 
         const tip = opticalTooltipFields(picked);
         out.push({
             id: `agri-${key}-${date}-${i}`,
-            field_id: "",
+            land_id: landId,
             date,
             mean: v,
             median: v,
@@ -272,14 +271,15 @@ function decloudQualityChip(
 function collectDecloudAltStats(
     scenes: AgriSceneProduct[],
     key: SeriesKey,
-    mainStats: FieldStat[],
-): FieldStat[] {
+    mainStats: LandStat[],
+    landId: string,
+): LandStat[] {
     const meta = SERIES_META[key];
     if (key === "drought" || meta.sensor !== "S2") return [];
     const avgKey = meta.chartKey;
     if (!avgKey) return [];
     const pickedIds = new Set(mainStats.map((s) => s.scene_id).filter(Boolean));
-    const out: FieldStat[] = [];
+    const out: LandStat[] = [];
     for (const s of scenes) {
         if (s.sensor !== "S2" || !isDecloudProduct(s)) continue;
         if (s.scene_id && pickedIds.has(s.scene_id)) continue;
@@ -291,7 +291,7 @@ function collectDecloudAltStats(
         const tip = opticalTooltipFields(s);
         out.push({
             id: `agri-${key}-decloud-alt-${s.date}-${s.scene_id ?? out.length}`,
-            field_id: "",
+            land_id: landId,
             date: s.date,
             mean: v,
             median: v,
@@ -402,8 +402,7 @@ const UNCROPPED_NDVI = 0.25;
 /** Default maize-like stage bands (month ranges) — overridden by crop season when available */
 
 export interface AgriTimeseriesPanelProps {
-    fieldId: string;
-    fieldTags: string[] | null | undefined;
+    landId: string;
     /** Bound crop key / label for season calendar */
     cropType?: string | null;
     /** Field area in hectares — donut center shows 亩 (×15) */
@@ -455,8 +454,7 @@ function distinctCropsInWindows(windows: SeasonWindowDraft[]): string[] {
 }
 
 export default function AgriTimeseriesPanel({
-    fieldId,
-    fieldTags,
+    landId,
     cropType,
     areaHa = null,
     hasMonitoringData = false,
@@ -466,7 +464,6 @@ export default function AgriTimeseriesPanel({
     enabled = true,
 }: AgriTimeseriesPanelProps) {
     const t = useTranslations("agriPanel");
-    const landId = useMemo(() => parseAgriLandId(fieldTags), [fieldTags]);
     const [backfilling, setBackfilling] = useState(false);
     const [backfillActive, setBackfillActive] = useState(false);
     const [refreshDateOpen, setRefreshDateOpen] = useState(false);
@@ -655,12 +652,12 @@ export default function AgriTimeseriesPanel({
     );
 
     const startBackfillPoll = useCallback(() => {
-        if (!fieldId) return;
+        if (!landId) return;
         stopBackfillPoll();
         let wasActive = true;
         const tick = async () => {
             try {
-                const res = await fieldsApi.backfillStatus(fieldId);
+                const res = await landsApi.backfillStatus(landId);
                 const stillActive = applyBackfillStatus(res, { wasActive });
                 if (stillActive) {
                     wasActive = true;
@@ -674,15 +671,15 @@ export default function AgriTimeseriesPanel({
         };
         void tick();
         backfillPollRef.current = setInterval(tick, 5000);
-    }, [fieldId, applyBackfillStatus, stopBackfillPoll]);
+    }, [landId, applyBackfillStatus, stopBackfillPoll]);
 
     // One-shot on mount: resume polling only if a current-wave job is truly active
     useEffect(() => {
-        if (!fieldId) return;
+        if (!landId) return;
         let cancelled = false;
         (async () => {
             try {
-                const res = await fieldsApi.backfillStatus(fieldId);
+                const res = await landsApi.backfillStatus(landId);
                 if (cancelled) return;
                 const active = applyBackfillStatus(res);
                 if (active) startBackfillPoll();
@@ -694,7 +691,7 @@ export default function AgriTimeseriesPanel({
             cancelled = true;
             stopBackfillPoll();
         };
-    }, [fieldId]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [landId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const openRefreshRsDialog = () => {
         setRefreshDateFrom(defaultRsDateFrom());
@@ -831,7 +828,7 @@ export default function AgriTimeseriesPanel({
                     end_date: w.end_date,
                     ...(w.label.trim() ? { label: w.label.trim() } : {}),
                 }));
-            await fieldsApi.backfillIndices(fieldId, {
+            await landsApi.backfillIndices(landId, {
                 force: true,
                 date_from: refreshDateFrom,
                 date_to: today,
@@ -842,7 +839,7 @@ export default function AgriTimeseriesPanel({
                 prev
                     ? { ...prev, has_active_backfill: true, phase: "stac", message: t("refreshInProgress") }
                     : {
-                          field_id: fieldId,
+                          land_id: landId,
                           has_active_backfill: true,
                           pending_jobs: 0,
                           running_jobs: 0,
@@ -1110,10 +1107,10 @@ export default function AgriTimeseriesPanel({
         void loadHeatmap(selectedDate, series);
     }, [enabled, heatmapVisible, selectedDate, series, loadHeatmap, onHeatmapChange]);
 
-    const stats = useMemo(() => scenesToStats(scenes, series), [scenes, series]);
+    const stats = useMemo(() => scenesToStats(scenes, series, landId), [scenes, series, landId]);
     const decloudAltStats = useMemo(
-        () => collectDecloudAltStats(scenes, series, stats),
-        [scenes, series, stats],
+        () => collectDecloudAltStats(scenes, series, stats, landId),
+        [scenes, series, stats, landId],
     );
 
     const availableKeys = useMemo(

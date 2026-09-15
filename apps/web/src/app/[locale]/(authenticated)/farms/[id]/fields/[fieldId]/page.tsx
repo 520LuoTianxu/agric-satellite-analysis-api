@@ -5,9 +5,9 @@ import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
 import maplibregl from "maplibre-gl";
-import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId, parseCdfinanceGroupId, withAgriFieldTags } from "@/lib/api";
+import { landsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi } from "@/lib/api";
 import CropSelect from "@/components/field/crop-select";
-import type { Field, RasterLayer, IndexType } from "@/lib/api";
+import type { LandParcel, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
 import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
 import { cn } from "@/lib/utils";
@@ -157,13 +157,13 @@ function removeAllIndexOverlays(map: maplibregl.Map) {
     for (const t of types) removeIndexOverlay(map, t);
 }
 
-function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
+function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, land: LandParcel, indexType: IndexType) {
     // Fake agri:// placeholder COGs 500 on TiTiler — never add as raster tiles.
-    if (!layer.tile_url || !field.geom) return;
+    if (!layer.tile_url || !land.boundary_geojson) return;
     if ((layer.cog_uri || "").startsWith("agri://") || layer.tile_url.includes("agri://")) return;
     const sourceId = indexSourceId(indexType);
     const layerId = indexLayerId(indexType);
-    const bounds = computeGeomBounds(field.geom);
+    const bounds = computeGeomBounds(land.boundary_geojson);
     if (!map.getSource(sourceId)) {
         map.addSource(sourceId, {
             type: "raster",
@@ -231,9 +231,9 @@ export default function FieldDetailPage() {
     const params = useParams();
     const router = useRouter();
     const farmId = params.id as string;
-    const fieldId = params.fieldId as string;
+    const landId = params.fieldId as string;
 
-    const [field, setField] = useState<Field | null>(null);
+    const [land, setLand] = useState<LandParcel | null>(null);
     const [loading, setLoading] = useState(true);
 
     // Edit mode
@@ -241,8 +241,7 @@ export default function FieldDetailPage() {
     const [editName, setEditName] = useState("");
     const [editCropType, setEditCropType] = useState("");
     const [editSeason, setEditSeason] = useState("");
-    const [editAgriLandId, setEditAgriLandId] = useState("");
-    const [editCdfinanceGroupId, setEditCdfinanceGroupId] = useState("");
+    const [editGroupId, setEditGroupId] = useState("");
     const [editGeom, setEditGeom] = useState<GeoJSON.Geometry | null>(null);
     const [saving, setSaving] = useState(false);
 
@@ -262,7 +261,7 @@ export default function FieldDetailPage() {
     const [activeIndexType, setActiveIndexType] = useState<IndexType>("NDVI");
     const indexLayerRef = useRef<RasterLayer | null>(null);
     const activeIndexTypeRef = useRef<IndexType>("NDVI");
-    const fieldRef = useRef<Field | null>(null);
+    const landRef = useRef<LandParcel | null>(null);
     const agriHeatmapRef = useRef<AgriHeatmapImage | null>(null);
     /** blob: URL currently fed to MapLibre ImageSource — revoke on clear/replace. */
     const agriHeatmapBlobUrlRef = useRef<string | null>(null);
@@ -353,25 +352,25 @@ export default function FieldDetailPage() {
 
     // Fetch alert count independently (so badge shows without opening alerts tab)
     useEffect(() => {
-        if (!fieldId) return;
+        if (!landId) return;
         let cancelled = false;
-        alertsApi.listForField(fieldId, 200).then((res) => {
+        alertsApi.listForLand(landId, 200).then((res) => {
             if (!cancelled) {
                 setOpenAlertCount(res.items.filter((a) => a.status === "open").length);
             }
         }).catch(() => { });
         return () => { cancelled = true; };
-    }, [fieldId]);
+    }, [landId]);
 
     // Fetch which index types have computed layers
     const refreshAvailableTypes = useCallback(() => {
-        if (!fieldId) return;
-        monitoringApi.layerTypes(fieldId).then((types) => {
+        if (!landId) return;
+        monitoringApi.layerTypes(landId).then((types) => {
             const upper = new Set(types.map((t) => t.toUpperCase() as IndexType));
             const sorted = ALL_INDEX_TYPES.filter((t) => upper.has(t));
             setAvailableTypes(sorted);
         }).catch(() => { });
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         refreshAvailableTypes();
@@ -385,8 +384,8 @@ export default function FieldDetailPage() {
         activeIndexTypeRef.current = activeIndexType;
     }, [activeIndexType]);
     useEffect(() => {
-        fieldRef.current = field;
-    }, [field]);
+        landRef.current = land;
+    }, [land]);
     useEffect(() => {
         agriHeatmapRef.current = agriHeatmap;
     }, [agriHeatmap]);
@@ -394,21 +393,20 @@ export default function FieldDetailPage() {
 
     const loadField = useCallback(async () => {
         try {
-            const f = await fieldsApi.get(fieldId);
-            setField(f);
-            setEditName(f.name);
+            const f = await landsApi.get(landId);
+            setLand(f);
+            setEditName(f.land_name || f.land_id);
             setEditCropType(f.crop_type || "");
             setEditSeason(f.season || "");
-            setEditAgriLandId(parseAgriLandId(f.tags) || "");
-            setEditCdfinanceGroupId(parseCdfinanceGroupId(f.tags) || "");
-            setEditGeom(f.geom);
+            setEditGroupId(f.group_id || "");
+            setEditGeom(f.boundary_geojson || f.geom);
         } catch {
             toast.error(t("fieldNotFound"));
             router.push(`/farms/${farmId}`);
         } finally {
             setLoading(false);
         }
-    }, [fieldId, farmId, router, t]);
+    }, [landId, farmId, router, t]);
 
     useEffect(() => {
         loadField();
@@ -574,8 +572,8 @@ export default function FieldDetailPage() {
     // Add field polygon (and NDVI if active) to map.
     // When agri 色斑图 is active: field fill opacity 0; continuous image film sits above fill, below outline.
     const setupMapLayers = useCallback((map: maplibregl.Map) => {
-        const f = fieldRef.current;
-        if (!f?.geom) return;
+        const f = landRef.current;
+        if (!f?.boundary_geojson) return;
 
         const hm = agriHeatmapRef.current;
         // Remove existing layers/source first to avoid stale state / wrong z-order
@@ -588,7 +586,7 @@ export default function FieldDetailPage() {
 
         map.addSource("field-polygon", {
             type: "geojson",
-            data: { type: "Feature", properties: {}, geometry: f.geom },
+            data: { type: "Feature", properties: {}, geometry: f.boundary_geojson },
         });
         // Transparent fill while heatmap is on — outline stays for boundary.
         map.addLayer({
@@ -618,16 +616,16 @@ export default function FieldDetailPage() {
         }
 
         if (hm) {
-            const fieldGeom = f.geom as GeoJSON.Polygon | GeoJSON.MultiPolygon;
-            applyAgriHeatmapToMap(map, hm, fieldGeom, "field-outline");
+            const landGeom = f.boundary_geojson as GeoJSON.Polygon | GeoJSON.MultiPolygon;
+            applyAgriHeatmapToMap(map, hm, landGeom, "field-outline");
         }
     }, [applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
     // 地块应位于可见地图中，右侧分析面板占用的区域不参与居中计算。
     const fitFieldInView = useCallback((map: maplibregl.Map) => {
-        if (!field?.geom) return;
+        if (!land?.boundary_geojson) return;
         const bounds = new maplibregl.LngLatBounds();
-        getAllCoords(field.geom).forEach(([lng, lat]) => bounds.extend([lng, lat]));
+        getAllCoords(land.boundary_geojson).forEach(([lng, lat]) => bounds.extend([lng, lat]));
         if (bounds.isEmpty()) return;
         const width = map.getContainer().clientWidth;
         const height = map.getContainer().clientHeight;
@@ -642,7 +640,7 @@ export default function FieldDetailPage() {
             maxZoom: 17,
             duration: 0,
         });
-    }, [field, sidebarOpen, panelWidthPx]);
+    }, [land, sidebarOpen, panelWidthPx]);
 
     // Callback from BaseMap when ready
     const handleMapReady = useCallback(
@@ -658,7 +656,7 @@ export default function FieldDetailPage() {
     // When field arrives after the map is already ready, draw/fit the boundary
     // (handleMapReady often runs with field still null — race with loadField).
     useEffect(() => {
-        if (!mapInstance || !field?.geom) return;
+        if (!mapInstance || !land?.boundary_geojson) return;
         if (!mapInstance.isStyleLoaded()) return;
         setupMapLayers(mapInstance);
         fitFieldInView(mapInstance);
@@ -669,7 +667,7 @@ export default function FieldDetailPage() {
         });
         observer.observe(mapInstance.getContainer());
         return () => observer.disconnect();
-    }, [field, mapInstance, setupMapLayers, fitFieldInView]);
+    }, [land, mapInstance, setupMapLayers, fitFieldInView]);
 
     // Location search
     const handleLocationSelect = useCallback(
@@ -712,10 +710,10 @@ export default function FieldDetailPage() {
         const map = mapInstance;
         if (!map || !map.isStyleLoaded()) return;
         removeAllIndexOverlays(map);
-        if (indexLayer?.tile_url && field) {
-            addIndexOverlay(map, indexLayer, field, activeIndexType);
+        if (indexLayer?.tile_url && land) {
+            addIndexOverlay(map, indexLayer, land, activeIndexType);
         }
-    }, [indexLayer, field, mapInstance, activeIndexType]);
+    }, [indexLayer, land, mapInstance, activeIndexType]);
 
     // Agri 色斑图 — canvas image film ONLY (blob:/data:); never GeoJSON fill (white seams)
     useEffect(() => {
@@ -734,12 +732,12 @@ export default function FieldDetailPage() {
 
         if (!agriHeatmap) return;
 
-        const fieldGeom = fieldRef.current?.geom as
+        const landGeom = landRef.current?.boundary_geojson as
             | GeoJSON.Polygon
             | GeoJSON.MultiPolygon
             | undefined;
         const beforeId = map.getLayer("field-outline") ? "field-outline" : undefined;
-        applyAgriHeatmapToMap(map, agriHeatmap, fieldGeom, beforeId);
+        applyAgriHeatmapToMap(map, agriHeatmap, landGeom, beforeId);
 
         return () => {
             try {
@@ -749,7 +747,7 @@ export default function FieldDetailPage() {
                 }
             } catch { /* ignore */ }
         };
-    }, [agriHeatmap, mapInstance, field, applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
+    }, [agriHeatmap, mapInstance, land, applyAgriHeatmapToMap, clearAgriHeatmapLayers]);
 
     const handleShowLayer = useCallback((layer: RasterLayer | null, indexType: IndexType) => {
         setIndexLayer(layer);
@@ -760,27 +758,18 @@ export default function FieldDetailPage() {
         setSaving(true);
         try {
             const data: any = {};
-            if (editName.trim() !== field?.name) data.name = editName.trim();
-            if (editCropType.trim() !== (field?.crop_type || ""))
+            if (editName.trim() !== (land?.land_name || land?.land_id)) data.land_name = editName.trim();
+            if (editCropType.trim() !== (land?.crop_type || ""))
                 data.crop_type = editCropType.trim() || null;
-            if (editSeason.trim() !== (field?.season || ""))
+            if (editSeason.trim() !== (land?.season || ""))
                 data.season = editSeason.trim() || null;
-            if (editGeom && JSON.stringify(editGeom) !== JSON.stringify(field?.geom))
-                data.geom = editGeom;
+            if (editGeom && JSON.stringify(editGeom) !== JSON.stringify(land?.boundary_geojson))
+                data.boundary_geojson = editGeom;
+            if (editGroupId.trim() !== (land?.group_id || ""))
+                data.group_id = editGroupId.trim() || null;
 
-            const prevLand = parseAgriLandId(field?.tags) || "";
-            const prevGroup = parseCdfinanceGroupId(field?.tags) || "";
-            const nextLand = editAgriLandId.trim();
-            const nextGroup = editCdfinanceGroupId.trim();
-            if (nextLand !== prevLand || nextGroup !== prevGroup) {
-                data.tags = withAgriFieldTags(field?.tags, {
-                    landId: nextLand,
-                    groupId: nextGroup,
-                });
-            }
-
-            const updated = await fieldsApi.update(fieldId, data);
-            setField(updated);
+            const updated = await landsApi.update(landId, data);
+            setLand(updated);
             setEditing(false);
             toast.success(t("fieldUpdated"));
         } catch (err: any) {
@@ -799,7 +788,7 @@ export default function FieldDetailPage() {
         });
         if (!ok) return;
         try {
-            await fieldsApi.delete(fieldId);
+            await landsApi.delete(landId);
             toast.success(t("fieldDeleted"));
             router.push(`/farms/${farmId}`);
         } catch (err: any) {
@@ -820,7 +809,7 @@ export default function FieldDetailPage() {
         );
     }
 
-    if (!field) return null;
+    if (!land) return null;
 
     return (
         <div
@@ -831,7 +820,7 @@ export default function FieldDetailPage() {
             <div className="absolute inset-0">
                 {editing ? (
                     <DrawMap
-                        initialGeometry={field.geom}
+                        initialGeometry={land.boundary_geojson}
                         onGeometryChange={(g) => setEditGeom(g)}
                         onMapReady={(m) => setMapInstance(m)}
                     />
@@ -874,7 +863,7 @@ export default function FieldDetailPage() {
                     transform: "translateX(-50%)",
                 }}
             >
-                {activeTab === "ndvi" && parseAgriLandId(field.tags) && (
+                {activeTab === "ndvi" && (
                     <div className={cn("flex gap-1 rounded-lg p-1", MAP_CHROME)}>
                         {AGRI_PRIMARY_MODES.map((mode) => (
                             <Button
@@ -897,7 +886,7 @@ export default function FieldDetailPage() {
                     </div>
                 )}
 
-                {activeTab === "ndvi" && !parseAgriLandId(field.tags) && availableTypes.length > 0 && (
+                {activeTab === "ndvi" && availableTypes.length > 0 && (
                     <div className={cn("flex gap-1 rounded-lg p-1", MAP_CHROME)}>
                         {availableTypes.map((idx) => (
                             <Button
@@ -1104,18 +1093,12 @@ export default function FieldDetailPage() {
                                             />
                                         </div>
                                         <div className="space-y-1.5">
-                                            <Label htmlFor="edit-agri-land-id" className="text-xs">
-                                                {t("agriLandId")}
-                                            </Label>
-                                            <Input
-                                                id="edit-agri-land-id"
-                                                value={editAgriLandId}
-                                                onChange={(e) => setEditAgriLandId(e.target.value)}
-                                                placeholder={t("placeholderAgriLandId")}
-                                                className="h-9"
-                                            />
+                                            <Label className="text-xs">地块 ID</Label>
+                                            <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm font-mono">
+                                                {land.land_id}
+                                            </p>
                                             <p className="text-[11px] text-muted-foreground">
-                                                {t("agriLandIdHint")}
+                                                地块主键不可修改，所有遥感、土壤和气象数据均直接使用此 ID。
                                             </p>
                                         </div>
                                         <div className="space-y-1.5">
@@ -1124,8 +1107,8 @@ export default function FieldDetailPage() {
                                             </Label>
                                             <Input
                                                 id="edit-cdfinance-group-id"
-                                                value={editCdfinanceGroupId}
-                                                onChange={(e) => setEditCdfinanceGroupId(e.target.value)}
+                                                value={editGroupId}
+                                                onChange={(e) => setEditGroupId(e.target.value)}
                                                 placeholder={t("placeholderCdfinanceGroupId")}
                                                 className="h-9"
                                             />
@@ -1161,54 +1144,54 @@ export default function FieldDetailPage() {
                                     <TabsContent value="info" className="mt-0 p-3 space-y-3">
                                         {/* Field header card */}
                                         <div className="rounded-lg bg-card p-3">
-                                            <h2 className="text-sm font-semibold">{field.name}</h2>
+                                            <h2 className="text-sm font-semibold">{land.land_name || land.land_id}</h2>
                                             <p className="text-xs text-muted-foreground mt-0.5">
-                                                {field.area_ha != null ? formatAreaMu(field.area_ha) : ""}
-                                                {field.crop_type && field.crop_type !== "unknown" && ` · ${field.crop_type}`}
-                                                {field.season && ` · ${field.season}`}
+                                                {land.area_ha != null ? formatAreaMu(land.area_ha) : ""}
+                                                {land.crop_type && land.crop_type !== "unknown" && ` · ${land.crop_type}`}
+                                                {land.season && ` · ${land.season}`}
                                             </p>
                                         </div>
 
                                         {/* Field details card */}
                                         <div className="rounded-lg bg-card p-3">
                                             <dl className="grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-3">
-                                                <InfoRow label={t("name")} value={field.name} />
+                                                <InfoRow label={t("name")} value={land.land_name || land.land_id} />
                                                 <InfoRow
                                                     label={t("area")}
                                                     value={
-                                                        formatAreaMu(field.area_ha)
+                                                        formatAreaMu(land.area_ha)
                                                     }
                                                 />
                                                 <InfoRow
                                                     label={t("cropType")}
-                                                    value={field.crop_type && field.crop_type !== "unknown" ? field.crop_type : t("cropUnset")}
+                                                    value={land.crop_type && land.crop_type !== "unknown" ? land.crop_type : t("cropUnset")}
                                                 />
                                                 <InfoRow
                                                     label={t("season")}
-                                                    value={field.season || "-"}
+                                                    value={land.season || "-"}
                                                 />
                                                 <InfoRow
                                                     label={t("agriLandId")}
-                                                    value={parseAgriLandId(field.tags) || "-"}
+                                                    value={land.land_id}
                                                 />
                                                 <InfoRow
                                                     label={t("cdfinanceGroupId")}
-                                                    value={parseCdfinanceGroupId(field.tags) || "-"}
+                                                    value={land.group_id || "-"}
                                                 />
                                                 <InfoRow
                                                     label={t("tags")}
-                                                    value={field.tags?.join(", ") || "-"}
+                                                    value={land.tags_json?.join(", ") || "-"}
                                                 />
                                                 <InfoRow
                                                     label={t("created")}
                                                     value={new Date(
-                                                        field.created_at,
+                                                        land.created_at,
                                                     ).toLocaleDateString()}
                                                 />
                                                 <InfoRow
                                                     label={t("updated")}
                                                     value={new Date(
-                                                        field.updated_at,
+                                                        land.updated_at,
                                                     ).toLocaleDateString()}
                                                 />
                                             </dl>
@@ -1220,12 +1203,11 @@ export default function FieldDetailPage() {
                                             size="sm"
                                             className="w-full"
                                             onClick={() => {
-                                                setEditName(field.name);
-                                                setEditCropType(field.crop_type || "");
-                                                setEditSeason(field.season || "");
-                                                setEditAgriLandId(parseAgriLandId(field.tags) || "");
-                                                setEditCdfinanceGroupId(parseCdfinanceGroupId(field.tags) || "");
-                                                setEditGeom(field.geom);
+                                                setEditName(land.land_name || land.land_id);
+                                                setEditCropType(land.crop_type || "");
+                                                setEditSeason(land.season || "");
+                                                setEditGroupId(land.group_id || "");
+                                                setEditGeom(land.boundary_geojson);
                                                 setEditing(true);
                                             }}
                                         >
@@ -1262,10 +1244,9 @@ export default function FieldDetailPage() {
                                         className="mt-0 p-3 data-[state=inactive]:hidden data-[state=inactive]:!hidden"
                                     >
                                         <NdviTab
-                                            fieldId={fieldId}
-                                            fieldTags={field?.tags ?? null}
-                                            cropType={field?.crop_type}
-                                            areaHa={field?.area_ha}
+                                            landId={landId}
+                                            cropType={land.crop_type}
+                                            areaHa={land.area_ha}
                                             onShowLayer={handleShowLayer}
                                             activeIndexOverride={activeIndexType}
                                             onActiveIndexChange={setActiveIndexType}
@@ -1278,33 +1259,33 @@ export default function FieldDetailPage() {
                                     </TabsContent>
 
                                     <TabsContent value="alerts" className="mt-0 p-3">
-                                        <AlertsTab fieldId={fieldId} onOpenCountChange={setOpenAlertCount} />
+                                        <AlertsTab landId={landId} onOpenCountChange={setOpenAlertCount} />
                                     </TabsContent>
 
                                     <TabsContent value="land-report" className="mt-0">
                                         <LandReportTab
-                                            fieldId={fieldId}
-                                            cropType={field?.crop_type}
+                                            landId={landId}
+                                            cropType={land.crop_type}
                                             onCropBound={(key) => {
-                                                setField((prev) => (prev ? { ...prev, crop_type: key } : prev));
+                                                setLand((prev) => (prev ? { ...prev, crop_type: key } : prev));
                                             }}
                                         />
                                     </TabsContent>
 
                                     <TabsContent value="scouting" className="mt-0">
-                                        <ScoutingTab fieldId={fieldId} mapInstance={mapInstance} activeTab={activeTab} />
+                                        <ScoutingTab landId={landId} mapInstance={mapInstance} activeTab={activeTab} />
                                     </TabsContent>
 
                                     <TabsContent value="weather" className="mt-0 p-3">
-                                        <WeatherTab fieldId={fieldId} />
+                                        <WeatherTab landId={landId} />
                                     </TabsContent>
 
                                     <TabsContent value="soil" className="mt-0 p-3">
-                                        <SoilTab fieldId={fieldId} mapInstance={mapInstance} activeTab={activeTab} />
+                                        <SoilTab landId={landId} mapInstance={mapInstance} activeTab={activeTab} />
                                     </TabsContent>
 
                                     <TabsContent value="share" className="mt-0">
-                                        <ShareTab fieldId={fieldId} />
+                                        <ShareTab landId={landId} />
                                     </TabsContent>
                                 </>
                             )}

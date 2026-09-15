@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "@/i18n/navigation";
 import { farmsApi, alertsApi } from "@/lib/api";
-import type { Farm, Alert, Field } from "@/lib/api";
+import type { Farm, Alert, LandParcel } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -65,10 +65,10 @@ export default function DashboardPage() {
                 const perFarm = await Promise.all(
                     farmRes.items.map(async (f) => {
                         try {
-                            const r = await farmsApi.fields(f.id, 200, 0);
+                            const r = await farmsApi.lands(f.id, 200, 0);
                             return { farm: f, total: r.total, items: r.items };
                         } catch {
-                            return { farm: f, total: 0, items: [] as Field[] };
+                            return { farm: f, total: 0, items: [] as LandParcel[] };
                         }
                     }),
                 );
@@ -254,7 +254,7 @@ export default function DashboardPage() {
                                     <AlertRow
                                         key={alert.id}
                                         alert={alert}
-                                        fieldName={alert.field_name ?? undefined}
+                                        fieldName={alert.land_name ?? undefined}
                                         farmId={alert.farm_id ?? undefined}
                                         farmName={alert.farm_name ?? undefined}
                                     />

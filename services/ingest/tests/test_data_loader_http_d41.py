@@ -1,20 +1,19 @@
-"""D4.1: load_field_bundle prefers internal HTTP when configured."""
+"""D4.1: load_land_bundle prefers internal HTTP when configured."""
 
 from __future__ import annotations
 
 import os
 import unittest
-import uuid
 from unittest.mock import patch
 
 from app.reports.land_assessment import data_loader as dl
 
 
-class LoadFieldBundleHttpTests(unittest.TestCase):
+class LoadLandBundleHttpTests(unittest.TestCase):
     def test_http_path_used_when_enabled(self) -> None:
-        fid = uuid.uuid4()
+        land_id = "L1"
         fake = {
-            "field": {"id": str(fid), "name": "西叩"},
+            "land": {"land_id": land_id, "land_name": "西叩"},
             "indices": [],
             "soil": {},
             "weather_summary": {},
@@ -38,12 +37,12 @@ class LoadFieldBundleHttpTests(unittest.TestCase):
                 return_value=fake,
             ) as ab,
         ):
-            out = dl.load_field_bundle(None, fid)
-            self.assertEqual(out["field"]["name"], "西叩")
-            ab.assert_called_once_with(str(fid))
+            out = dl.load_land_bundle(None, land_id)
+            self.assertEqual(out["land"]["land_name"], "西叩")
+            ab.assert_called_once_with(land_id)
 
     def test_http_failure_raises_when_pg_reads_disallowed(self) -> None:
-        fid = uuid.uuid4()
+        land_id = "L1"
         with (
             patch.dict(
                 os.environ,
@@ -60,7 +59,7 @@ class LoadFieldBundleHttpTests(unittest.TestCase):
             ),
         ):
             with self.assertRaises(RuntimeError):
-                dl.load_field_bundle(None, fid)
+                dl.load_land_bundle(None, land_id)
 
 
 if __name__ == "__main__":

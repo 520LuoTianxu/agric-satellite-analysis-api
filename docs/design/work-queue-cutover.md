@@ -50,14 +50,14 @@ Do **not** skip to step 3/4 on production without the checklists in §3–§4.
 |------|------------------|----------------------|
 | `assessment_report` | assessment router | Celery assessment PDF |
 | `season_growth_report` | season_growth router | Celery season-growth PDF |
-| `field_bootstrap` | field create / one-click pull | weather + soil + agri optical/S1 backfill (+ optional followup report) |
-| `satellite_analysis` | field backfill / mq tasks | agri optical + S1 chunk wave (`backfill_indices_for_field` + bridge) |
+| `land_bootstrap` | land create / one-click pull | weather + soil + agri optical/S1 backfill (+ optional followup report) |
+| `satellite_analysis` | land backfill / mq tasks | agri optical + S1 chunk wave (`backfill_indices_for_land` + bridge) |
 | `agri_bridge` | mq tasks | bridge-only |
 | `weather_backfill` | weather refresh | weather Celery |
 | `soil_fetch` | soil refresh | soil Celery |
 
 Optical / S1 “chunks” are **not** separate `work_items` rows; they are Celery fan-out
-under `satellite_analysis` / `field_bootstrap` (same as MQ handler).
+under `satellite_analysis` / `land_bootstrap` (same as MQ handler).
 
 ### Steps
 
@@ -123,7 +123,7 @@ for Celery only.
 
 - Pending not growing unbounded while workers idle.
 - No duplicate Celery task storms for same `idempotency_key` / job_id.
-- Assessment one-click (`pull_data`): `field_bootstrap` work item with
+- Assessment one-click (`pull_data`): `land_bootstrap` work item with
   `followup_assessment` (not a parallel naked `assessment_report` race).
 
 ### Rollback
@@ -163,11 +163,11 @@ for Celery only.
 
 | Endpoint / path | Purpose |
 |-----------------|---------|
-| `GET /v1/internal/fields/{id}/assessment-bundle` | Full `load_field_bundle` JSON for scoring/PDF |
-| `GET /v1/internal/fields/{id}/season-growth-inputs` | Field + S2/S1/indices rows for `build_season_facts` |
-| `GET /v1/internal/fields/{id}/data-readiness` | Weather/soil/RS counts for bootstrap wait |
+| `GET /v1/internal/lands/{land_id}/assessment-bundle` | Full canonical land bundle JSON for scoring/PDF |
+| `GET /v1/internal/lands/{land_id}/season-growth-inputs` | Land + S2/S1/indices rows for `build_season_facts` |
+| `GET /v1/internal/lands/{land_id}/data-readiness` | Weather/soil/RS counts for bootstrap wait |
 | ingest `data_loader` / season `facts` | Prefer HTTP when `API_BASE_URL`+token; PG only if `INGEST_PG_READS` allows |
-| weather / soil tasks | Field centroid via `fields/{id}/geom`; HTTP-only upsert via `results/apply` when `INGEST_PG_WRITES=0` |
+| weather / soil tasks | Canonical land centroid via `lands/{land_id}`; HTTP-only upsert via `results/apply` when `INGEST_PG_WRITES=0` |
 
 **Still deferred (heavy):** high-volume `raster_layers` / `field_stats` scene upserts; `pg_advisory_*` backfill locks; per-chunk optical work_items.
 

@@ -1,7 +1,7 @@
-"""Farms router - CRUD with soft-delete.
+"""Farm container API.
 
-Legacy in this fork: prefer /v1/agri/project-areas and /v1/agri/lands
-(agric_satellite.virtual_project_areas / agric_satellite.land_parcels) as the primary product model.
+Farms are optional grouping metadata.  Parcel identity and all parcel data
+remain in agric_satellite.land_parcels and are never translated elsewhere.
 """
 
 from __future__ import annotations
@@ -16,42 +16,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import logger
-from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
-from app.models.tables import Farm, Field
+from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.models.tables import Farm, LandParcel
+from app.routers.lands import _land_to_out
 from app.schemas.common import PaginatedResponse
-from app.schemas.farm import FarmCreate, FarmOut, FarmUpdate, FieldOut
+from app.schemas.farm import FarmCreate, FarmOut, FarmUpdate, LandParcelOut
 
 router = APIRouter()
-
-# Dependency: restrict write operations to owner/admin/member (viewers are read-only)
+_reader = require_roles("owner", "admin", "member", "viewer")
 _writer = require_roles("owner", "admin", "member")
-
-
-def _not_deleted():
-    return Farm.deleted_at.is_(None)
 
 
 @router.get("/farms", response_model=PaginatedResponse[FarmOut])
 async def list_farms(
-    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    q: str | None = Query(None, description="ILIKE search on farm name"),
+    q: str | None = Query(None),
 ):
-    filters = [org_scope(None, ctx), _not_deleted()]
+    filters = [Farm.deleted_at.is_(None)]
     if q and q.strip():
         filters.append(Farm.name.ilike(f"%{q.strip()}%"))
     base = select(Farm).where(*filters)
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
-    result = await db.execute(
-        base.order_by(Farm.created_at.desc()).limit(limit).offset(offset)
-    )
-    return PaginatedResponse(
-        items=result.scalars().all(), total=total, limit=limit, offset=offset
-    )
+    rows = (
+        await db.execute(
+            base.order_by(Farm.created_at.desc()).limit(limit).offset(offset)
+        )
+    ).scalars().all()
+    return PaginatedResponse(items=rows, total=int(total), limit=limit, offset=offset)
 
 
 @router.post("/farms", response_model=FarmOut, status_code=status.HTTP_201_CREATED)
@@ -61,20 +57,21 @@ async def create_farm(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     farm = Farm(
-        name=body.name, country=body.country, region=body.region, timezone=body.timezone
+        name=body.name,
+        country=body.country,
+        region=body.region,
+        timezone=body.timezone,
     )
     db.add(farm)
     await db.flush()
-    logger.info(
-        "farm_created", farm_id=str(farm.id), name=body.name, org_id=str(ctx.org_id)
-    )
+    logger.info("farm_created", farm_id=str(farm.id), name=body.name)
     return farm
 
 
 @router.get("/farms/{farm_id}", response_model=FarmOut)
 async def get_farm(
     farm_id: uuid.UUID,
-    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     farm = await db.get(Farm, farm_id)
@@ -93,16 +90,11 @@ async def update_farm(
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
-
-    if body.name is not None:
-        farm.name = body.name
-    if body.country is not None:
-        farm.country = body.country
-    if body.region is not None:
-        farm.region = body.region
-    if body.timezone is not None:
-        farm.timezone = body.timezone
-
+    for name in ("name", "country", "region", "timezone"):
+        value = getattr(body, name)
+        if value is not None:
+            setattr(farm, name, value)
+    farm.updated_at = datetime.now(timezone.utc)
     await db.flush()
     return farm
 
@@ -113,44 +105,49 @@ async def delete_farm(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Soft-delete farm and cascade soft-delete all its fields."""
+    """Soft-delete the container and all of its canonical parcel rows."""
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
-
     now = datetime.now(timezone.utc)
     farm.deleted_at = now
-
-    # Cascade soft-delete fields (atomic bulk update)
     await db.execute(
-        update(Field)
-        .where(Field.farm_id == farm_id, Field.deleted_at.is_(None))
-        .values(deleted_at=now)
+        update(LandParcel)
+        .where(LandParcel.farm_id == farm_id, LandParcel.deleted_at.is_(None))
+        .values(deleted_at=now, updated_at=now)
     )
+    await db.commit()
 
-    await db.flush()
 
-
-@router.get("/farms/{farm_id}/fields", response_model=PaginatedResponse[FieldOut])
-async def list_farm_fields(
+@router.get(
+    "/farms/{farm_id}/lands", response_model=PaginatedResponse[LandParcelOut]
+)
+async def list_farm_lands(
     farm_id: uuid.UUID,
-    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    # Verify farm access
     farm = await db.get(Farm, farm_id)
     if not farm or farm.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Farm not found")
-
-    base = select(Field).where(Field.farm_id == farm_id, Field.deleted_at.is_(None))
+    base = select(LandParcel).where(
+        LandParcel.farm_id == farm_id, LandParcel.deleted_at.is_(None)
+    )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
-    result = await db.execute(
-        base.order_by(Field.created_at.desc()).limit(limit).offset(offset)
-    )
+    rows = (
+        await db.execute(
+            base.order_by(LandParcel.created_at.desc(), LandParcel.land_id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
     return PaginatedResponse(
-        items=result.scalars().all(), total=total, limit=limit, offset=offset
+        items=[_land_to_out(row) for row in rows],
+        total=int(total),
+        limit=limit,
+        offset=offset,
     )

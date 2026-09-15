@@ -5,11 +5,10 @@ import dynamic from "next/dynamic";
 import {
     monitoringApi,
     jobsApi,
-    fieldsApi,
+    landsApi,
     weatherApi,
-    parseAgriLandId,
     type RasterLayer,
-    type FieldStat,
+    type LandStat,
     type NdviJob,
     type IndexType,
     type WeatherDaily,
@@ -84,13 +83,11 @@ function getStepLabels(
 /* ── Props ────────────────────────────────────────────────────── */
 
 interface NdviTabProps {
-    fieldId: string;
-    /** Field crop_type for agri season calendar / grade shares */
+    landId: string;
+    /** Canonical parcel crop_type for season calendar / grade shares */
     cropType?: string | null;
-    /** Field area (ha) — agri NDVI donut center shows 亩 */
+    /** Parcel area (ha) — NDVI donut center shows 亩 */
     areaHa?: number | null;
-    /** Field tags — used to detect agri:<land_id> for RS fallback */
-    fieldTags?: string[] | null;
     /** Called when a tile layer should be shown on the map */
     onShowLayer?: (layer: RasterLayer | null, indexType: IndexType) => void;
     /** Called when the active index changes - parent renders the selector */
@@ -108,17 +105,15 @@ interface NdviTabProps {
     agriHeatmapEnabled?: boolean;
 }
 
-export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
+export default function NdviTab({ landId, cropType, areaHa = null, onShowLayer, onActiveIndexChange, activeIndexOverride, onDataLoaded, onAgriHeatmapChange, agriHeatMode, onAgriHeatModeChange, agriHeatmapEnabled = true }: NdviTabProps) {
     const tMon = useTranslations("monitoring");
-    const agriLandId = parseAgriLandId(fieldTags);
-    const isAgriField = !!agriLandId;
     // ── Index selector ───────────────────────────────
     const [activeIndex, setActiveIndex] = useState<IndexType>("NDVI");
     const config = INDEX_CONFIG[activeIndex];
 
     // ── Data ─────────────────────────────────────────
     const [layers, setLayers] = useState<RasterLayer[]>([]);
-    const [stats, setStats] = useState<FieldStat[]>([]);
+    const [stats, setStats] = useState<LandStat[]>([]);
     const [loading, setLoading] = useState(true);
 
     // ── Selected date ────────────────────────────────
@@ -151,27 +146,18 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
     const loadGenRef = useRef(0); // prevents stale fetch results
 
     // ── Load layers + stats for active index ─────────
-    // Agri fields: RS comes only from agric_satellite.parcel_scene_products — skip
-    // classic monitoring/COG path so AgriTimeseriesPanel mounts immediately.
+    // 监测表和 parcel_scene_products 都属于同一地块主表的下游数据，统一按 land_id 读取。
     const loadData = useCallback(async () => {
         const gen = ++loadGenRef.current;
-        if (isAgriField) {
-            setLayers([]);
-            setStats([]);
-            setSelectedDate(null);
-            setLoading(false);
-            onDataLoaded?.();
-            return;
-        }
         setLoading(true);
         try {
             const [layersRes, statsRes] = await Promise.all([
-                monitoringApi.layers(fieldId, activeIndex),
-                monitoringApi.stats(fieldId, activeIndex),
+                monitoringApi.layers(landId, activeIndex),
+                monitoringApi.stats(landId, activeIndex),
             ]);
             if (gen !== loadGenRef.current) return; // stale - discard
-            // Placeholder agri:// COGs from sync_agri_scenes_to_field_stats poison TiTiler —
-            // never expose tile_url for those; agri 色斑 uses pixel_data continuous image film.
+            // 旧监控表中的 agri:// 占位 COG 会污染 TiTiler；不暴露其瓦片地址。
+            // 遥感主链路仍直接读取同一 land_id 的 parcel_scene_products。
             const sanitized = layersRes.items.map((layer) => {
                 const cog = layer.cog_uri || "";
                 if (cog.startsWith("agri://")) {
@@ -193,7 +179,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
         } finally {
             if (gen === loadGenRef.current) setLoading(false);
         }
-    }, [fieldId, activeIndex, isAgriField, onDataLoaded]);
+    }, [landId, activeIndex, onDataLoaded]);
 
     useEffect(() => {
         loadData();
@@ -207,12 +193,11 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
     }, []);
 
     const startBackfillPoll = useCallback(() => {
-        if (isAgriField) return;
         stopBackfillPoll();
         let wasActive = true;
         const tick = async () => {
             try {
-                const res = await fieldsApi.backfillStatus(fieldId);
+                const res = await landsApi.backfillStatus(landId);
                 setBackfillProgress(res);
                 setBackfillActive(res.has_active_backfill);
                 if (res.has_active_backfill) {
@@ -233,13 +218,12 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
         };
         void tick();
         backfillPollRef.current = setInterval(tick, 5000);
-    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
+    }, [landId, loadData, onDataLoaded, stopBackfillPoll]);
 
     // One-shot on mount — resume interval only if current wave is active
     useEffect(() => {
-        if (isAgriField) return; // agri panel polls its own backfill status
         let cancelled = false;
-        fieldsApi.backfillStatus(fieldId)
+        landsApi.backfillStatus(landId)
             .then((res) => {
                 if (cancelled) return;
                 setBackfillProgress(res);
@@ -254,7 +238,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
             cancelled = true;
             stopBackfillPoll();
         };
-    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [landId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // ── Fetch weather data when overlay is toggled on ──
     useEffect(() => {
@@ -263,19 +247,14 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
         const start = dates[0];
         const end = dates[dates.length - 1];
         weatherApi
-            .get(fieldId, start, end, false)
+            .get(landId, start, end, false)
             .then((res) => setWeatherData(res.data))
             .catch(() => setWeatherData([]));
-    }, [showWeatherOverlay, fieldId, stats]);
+    }, [showWeatherOverlay, landId, stats]);
 
     // ── Show layer on map when selectedDate or visibility changes ──
-    // Agri fields: skip COG/TiTiler overlay entirely — only pixel_data continuous 色斑 film.
     useEffect(() => {
         if (!onShowLayer) return;
-        if (isAgriField) {
-            onShowLayer(null, activeIndex);
-            return;
-        }
         if (!layerVisible || !selectedDate) {
             onShowLayer(null, activeIndex);
             return;
@@ -286,7 +265,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
             return;
         }
         onShowLayer(layer, activeIndex);
-    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
+    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex]);
 
     // ── Job polling ─────────────────────────────────
     const pollJob = useCallback(
@@ -343,7 +322,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
 
             for (const idx of indices) {
                 const params = idx === "SAVI" ? { savi_l: saviL } : undefined;
-                const job = await jobsApi.createIndex(fieldId, idx, dateFrom, dateTo, params);
+                const job = await jobsApi.createIndex(landId, idx, dateFrom, dateTo, params);
                 lastJob = job;
             }
 
@@ -379,7 +358,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
     const handleBackfill = async () => {
         setBackfilling(true);
         try {
-            await fieldsApi.backfillIndices(fieldId);
+            await landsApi.backfillIndices(landId);
             setBackfillTriggered(true);
             setBackfillActive(true);
             toast.success(tMon("backfill.started"));
@@ -457,9 +436,8 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
 
     return (
         <div className="space-y-4">
-            {/* ── Section: Run Analysis + Backfill (legacy COG path only) ─────── */}
-            {/* agri 地块遥感直接读 agric_satellite.parcel_scene_products，不走 Celery NDVI / backfill-indices */}
-            {!isAgriField && (
+            {/* ── Section: Run Analysis + Backfill for the canonical land ───── */}
+            {/* 这些任务和场景产品都直接以 land_id 关联同一条地块主表记录。 */}
             <div className="flex gap-2">
                 <Button
                     variant="outline"
@@ -491,9 +469,8 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
                     <span className="hidden sm:inline">{tMon("backfill.buttonLabel")}</span>
                 </Button>
             </div>
-            )}
 
-            {!isAgriField && showJobForm && (
+            {showJobForm && (
                 <Card className="mt-2">
                     <CardContent className="space-y-3 pt-4">
                         {/* Index checkboxes */}
@@ -589,7 +566,7 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
             )}
 
             {/* ── Backfill in-progress banner ──────────── */}
-            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
+            {(backfillActive || backfillTriggered) && !loading && !activeJob && (
                 <Card className="bg-info-subtle">
                     <CardContent className="p-3 space-y-2">
                         <div className="flex items-start gap-2">
@@ -692,24 +669,20 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
                 </Card>
             )}
 
-            {/* ── Agri S1/S2 fallback (when field tagged agri:*) ── */}
-            {/* Mount immediately (don't wait for monitoring load) so 指数 tab can fetch include_pixels=1 */}
-            {parseAgriLandId(fieldTags) && (
-                <AgriTimeseriesPanel
-                    fieldId={fieldId}
-                    fieldTags={fieldTags}
-                    cropType={cropType}
-                    areaHa={areaHa}
-                    hasMonitoringData={layers.length > 0 || stats.length > 0}
-                    onHeatmapChange={onAgriHeatmapChange}
-                    mode={agriHeatMode}
-                    onModeChange={onAgriHeatModeChange}
-                    enabled={agriHeatmapEnabled}
-                />
-            )}
+            {/* ── Canonical S1/S2 scene products ── */}
+            <AgriTimeseriesPanel
+                landId={landId}
+                cropType={cropType}
+                areaHa={areaHa}
+                hasMonitoringData={layers.length > 0 || stats.length > 0}
+                onHeatmapChange={onAgriHeatmapChange}
+                mode={agriHeatMode}
+                onModeChange={onAgriHeatModeChange}
+                enabled={agriHeatmapEnabled}
+            />
 
-            {/* ── Section: Chart (classic monitoring only) ────────────────────────── */}
-            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
+            {/* ── Section: Chart for this canonical land ─────────────────────────── */}
+            {(layers.length > 0 || stats.length > 0) && (
             <Card>
                 <CardHeader className="pb-2 pt-3 px-3">
                     <div className="flex items-center justify-between">
@@ -740,8 +713,8 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
             </Card>
             )}
 
-            {/* ── Section: Layer Selector (classic COG only) ───────────────── */}
-            {!isAgriField && layers.length > 0 && (
+            {/* ── Section: Layer Selector ───────────────── */}
+            {layers.length > 0 && (
                 <Card>
                     <CardHeader className="pb-2 pt-3 px-3">
                         <div className="flex items-center justify-between">
@@ -814,8 +787,8 @@ export default function NdviTab({ fieldId, fieldTags, cropType, areaHa = null, o
                 </Card>
             )}
 
-            {/* ── No data message (legacy COG path only; agri uses AgriTimeseriesPanel) ── */}
-            {!isAgriField && layers.length === 0 && !activeJob && (
+            {/* ── No COG layer message; S1/S2 panels use the same land_id ── */}
+            {layers.length === 0 && !activeJob && (
                 <Card>
                     <CardContent className="flex flex-col items-center justify-center py-6 text-center">
                         <p className="text-sm text-muted-foreground mb-2">{tMon("noDataTitle")}</p>

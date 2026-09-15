@@ -168,7 +168,7 @@ class ClaimAgentGuardTests(unittest.TestCase):
 
     def test_claimable_types_include_data_pulls(self) -> None:
         for t in (
-            "field_bootstrap",
+            "land_bootstrap",
             "satellite_analysis",
             "agri_bridge",
             "weather_backfill",
@@ -177,7 +177,7 @@ class ClaimAgentGuardTests(unittest.TestCase):
             "season_growth_report",
         ):
             self.assertIn(t, wi.CLAIMABLE_TYPES)
-        self.assertIn("field_bootstrap", wi.COMPLETE_ON_DISPATCH_TYPES)
+        self.assertIn("land_bootstrap", wi.COMPLETE_ON_DISPATCH_TYPES)
         self.assertNotIn("assessment_report", wi.COMPLETE_ON_DISPATCH_TYPES)
 
     def test_idempotency_key_prefers_job_id(self) -> None:

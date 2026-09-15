@@ -176,7 +176,7 @@ export default function ShareReportPage() {
     const alerts = report.alerts ?? [];
     const scouting = report.scouting ?? [];
     const preferAgriHeatmap = Boolean(
-        report.agri_heatmap_available || report.rs_source === "agri" || report.rs_source === "mixed",
+        report.agri_heatmap_available || report.rs_source === "agri",
     );
 
     return (

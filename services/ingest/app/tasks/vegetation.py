@@ -37,8 +37,8 @@ logger = structlog.get_logger()
 
 
 def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
-    """Shared entry-point logic for any vegetation-index Celery task."""
-    from app.models.tables import Job, Field, FieldStat
+    """Shared entry-point logic for any vegetation-index task."""
+    from app.models.tables import Job, LandParcel, FieldStat
 
     index_def = get_index(index_key)
     session = get_db_session()
@@ -53,22 +53,22 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
         job.progress_json = {"current_step": "scene_search", "steps": {}}
         session.commit()
 
-        field = session.get(Field, job.field_id)
-        if not field:
+        land = session.get(LandParcel, job.land_id)
+        if not land or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Field not found"
+            job.error = "Land parcel not found"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        field_geom = to_shape(field.geom)
-        field_geom_geojson = mapping(field_geom)
+        land_geom = to_shape(land.geom)
+        land_geom_geojson = mapping(land_geom)
 
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
         org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
-        field_id_str = str(job.field_id)
+        land_id_str = str(job.land_id)
 
         # Extra params (e.g. savi_l)
         extra_params = {
@@ -77,12 +77,12 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
 
         # Step 1: Scene Search
         update_job_progress(session, job, "scene_search")
-        scenes = search_scenes(field_geom_geojson, date_from, date_to, index_def)
+        scenes = search_scenes(land_geom_geojson, date_from, date_to, index_def)
         force = bool(params.get("force") or False)
         if not force:
             existing = collect_existing_scene_dates(
                 session,
-                field,
+                land_id_str,
                 layer_type=index_def.label,
                 satellite="S2",
                 agri_sensor="S2")
@@ -91,7 +91,7 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
                 scenes,
                 existing,
                 force=False,
-                field_id=field_id_str,
+                land_id=land_id_str,
                 index=index_def.key)
             complete_step(
                 session,
@@ -119,14 +119,14 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
 
         # Compute target grid
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
-            field_geom.bounds, field_geom
+            land_geom.bounds, land_geom
         )
 
         # Historical means for alerts
         existing_stats = (
             session.execute(
                 select(FieldStat.mean)
-                .where(FieldStat.field_id == job.field_id)
+                .where(FieldStat.land_id == job.land_id)
                 .order_by(FieldStat.date.asc())
             )
             .scalars()
@@ -150,7 +150,7 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             field_mask=field_mask,
             bounds=bounds,
             org_id_str=org_id_str,
-            field_id_str=field_id_str,
+            land_id_str=land_id_str,
             date_from=date_from,
             date_to=date_to,
             historical_means=historical_means,
@@ -222,7 +222,7 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_evi(self, job_id: str) -> dict:
-    """Process EVI for a field."""
+    """Process EVI for one land parcel."""
     return _run_index_pipeline(self, job_id, "evi")
 
 
@@ -236,7 +236,7 @@ def process_evi(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_savi(self, job_id: str) -> dict:
-    """Process SAVI for a field."""
+    """Process SAVI for one land parcel."""
     return _run_index_pipeline(self, job_id, "savi")
 
 
@@ -250,7 +250,7 @@ def process_savi(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_ndwi(self, job_id: str) -> dict:
-    """Process NDWI for a field."""
+    """Process NDWI for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndwi")
 
 
@@ -264,7 +264,7 @@ def process_ndwi(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_ndmi(self, job_id: str) -> dict:
-    """Process NDMI for a field."""
+    """Process NDMI for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndmi")
 
 
@@ -278,7 +278,7 @@ def process_ndmi(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_ndre(self, job_id: str) -> dict:
-    """Process NDRE for a field."""
+    """Process NDRE for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndre")
 
 
@@ -292,7 +292,7 @@ def process_ndre(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_cire(self, job_id: str) -> dict:
-    """Process CIre (chlorophyll index red-edge) for a field."""
+    """Process CIre (chlorophyll index red-edge) for one land parcel."""
     return _run_index_pipeline(self, job_id, "cire")
 
 
@@ -306,5 +306,5 @@ def process_cire(self, job_id: str) -> dict:
     time_limit=1800,
     soft_time_limit=1500)
 def process_mndwi(self, job_id: str) -> dict:
-    """Process MNDWI for a field."""
+    """Process MNDWI for one land parcel."""
     return _run_index_pipeline(self, job_id, "mndwi")

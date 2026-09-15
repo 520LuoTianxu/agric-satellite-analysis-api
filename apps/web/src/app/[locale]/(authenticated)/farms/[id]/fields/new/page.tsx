@@ -4,7 +4,7 @@ import React, { useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
-import { fieldsApi, withAgriFieldTags } from "@/lib/api";
+import { landsApi } from "@/lib/api";
 import CropSelect from "@/components/field/crop-select";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2, Plus, ChevronDown, ChevronUp, Check, TriangleAlert } from "lucide-react";
@@ -44,7 +44,8 @@ export default function NewFieldPage() {
     const [name, setName] = useState("");
     const [cropType, setCropType] = useState("");
     const [season, setSeason] = useState("");
-    const [agriLandId, setAgriLandId] = useState("");
+    // land_id 是唯一地块主键，创建时直接写入地块主表，不再通过标签绑定。
+    const [landId, setLandId] = useState("");
     const [cdfinanceGroupId, setCdfinanceGroupId] = useState("");
     const [geometry, setGeometry] = useState<GeoJSON.Geometry | null>(null);
     const [saving, setSaving] = useState(false);
@@ -75,6 +76,10 @@ export default function NewFieldPage() {
             toast.error(t("nameRequired"));
             return;
         }
+        if (!landId.trim()) {
+            toast.error("地块 ID 不能为空");
+            return;
+        }
         if (!geometry) {
             toast.error(t("drawFirst"));
             return;
@@ -86,20 +91,17 @@ export default function NewFieldPage() {
 
         setSaving(true);
         try {
-            const tags = withAgriFieldTags([], {
-                landId: agriLandId.trim() || undefined,
-                groupId: cdfinanceGroupId.trim() || undefined,
-            });
-            const field = await fieldsApi.create({
+            const land = await landsApi.create({
+                land_id: landId.trim(),
                 farm_id: farmId,
-                name: name.trim(),
-                geom: geometry,
+                land_name: name.trim(),
+                boundary_geojson: geometry,
                 crop_type: cropType.trim(),
                 season: season.trim() || undefined,
-                tags: tags.length ? tags : undefined,
+                group_id: cdfinanceGroupId.trim() || undefined,
             });
-            toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
-            router.push(`/farms/${farmId}/fields/${field.id}`);
+            toast.success(`Land parcel "${land.land_name || land.land_id}" created (${land.area_ha != null ? formatAreaMu(land.area_ha) : "?"})`);
+            router.push(`/farms/${farmId}/fields/${land.land_id}`);
         } catch (err: any) {
             toast.error(err.detail || t("createField"));
         } finally {
@@ -189,16 +191,16 @@ export default function NewFieldPage() {
                                 </div>
 
                                 <div className="space-y-1.5">
-                                    <Label htmlFor="agri-land-id" className="text-xs">{t("agriLandId")}</Label>
+                                    <Label htmlFor="land-id" className="text-xs">地块 ID <span className="text-destructive">*</span></Label>
                                     <Input
-                                        id="agri-land-id"
+                                        id="land-id"
                                         type="text"
-                                        value={agriLandId}
-                                        onChange={(e) => setAgriLandId(e.target.value)}
+                                        value={landId}
+                                        onChange={(e) => setLandId(e.target.value)}
                                         placeholder={t("placeholderAgriLandId")}
                                         className="h-9"
                                     />
-                                    <p className="text-[11px] text-muted-foreground">{t("agriLandIdHint")}</p>
+                                    <p className="text-[11px] text-muted-foreground">直接使用地块主表中的 land_id。</p>
                                 </div>
 
                                 <div className="space-y-1.5">
@@ -221,7 +223,7 @@ export default function NewFieldPage() {
 
                                 <Button
                                     type="submit"
-                                    disabled={saving || !geometry || !name.trim()}
+                                    disabled={saving || !geometry || !name.trim() || !landId.trim()}
                                     className="w-full h-9"
                                 >
                                     {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}

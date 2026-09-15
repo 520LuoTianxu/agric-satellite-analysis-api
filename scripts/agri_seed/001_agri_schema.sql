@@ -840,6 +840,9 @@ CREATE TABLE agric_satellite.parcel_scene_products (
     generated_at_shanghai text,
     ingested_at timestamp with time zone DEFAULT now() NOT NULL,
     pixel_data_url text NOT NULL,
+    rgb_url text,
+    large_rgb_url text,
+    rgb_oss_key text,
     evi_avg double precision,
     evi_min double precision,
     evi_max double precision,
@@ -958,6 +961,24 @@ COMMENT ON COLUMN agric_satellite.parcel_scene_products.ingested_at IS '本次�
 --
 
 COMMENT ON COLUMN agric_satellite.parcel_scene_products.pixel_data_url IS '原始 JSON 在 OSS 中的稳定 oss:// 地址；不保存短期签名 URL';
+
+--
+-- Name: COLUMN parcel_scene_products.rgb_url; Type: COMMENT; Schema: agric_satellite; Owner: -
+--
+
+COMMENT ON COLUMN agric_satellite.parcel_scene_products.rgb_url IS '地块真彩预览地址（可为 OSS 签名地址）';
+
+--
+-- Name: COLUMN parcel_scene_products.large_rgb_url; Type: COMMENT; Schema: agric_satellite; Owner: -
+--
+
+COMMENT ON COLUMN agric_satellite.parcel_scene_products.large_rgb_url IS '地块大尺寸真彩预览地址';
+
+--
+-- Name: COLUMN parcel_scene_products.rgb_oss_key; Type: COMMENT; Schema: agric_satellite; Owner: -
+--
+
+COMMENT ON COLUMN agric_satellite.parcel_scene_products.rgb_oss_key IS '地块真彩 PNG 的稳定 OSS object key';
 
 --
 -- Name: COLUMN parcel_scene_products.evi_avg; Type: COMMENT; Schema: agric_satellite; Owner: -
@@ -1178,6 +1199,9 @@ CREATE VIEW agric_satellite.v_parcel_scene_products_meta AS
     parcel_scene_products.parcel_cloud_cover_pct,
     parcel_scene_products.json_oss_key,
     parcel_scene_products.pixel_data_url,
+    parcel_scene_products.rgb_url,
+    parcel_scene_products.large_rgb_url,
+    parcel_scene_products.rgb_oss_key,
     parcel_scene_products.pixel_count,
     parcel_scene_products.evi_avg,
     parcel_scene_products.evi_min,

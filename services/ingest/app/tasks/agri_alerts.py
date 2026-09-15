@@ -1,13 +1,12 @@
 """Evaluate RS alerts from agric_satellite.parcel_scene_products (lonlat_v1).
 
-Classic COG pipeline calls ``run_alerts`` after FieldStat. Agri-tagged fields
-skip that path, so we re-run threshold/drop rules from S2 scene averages here —
-after lonlat upsert (bridge) and on explicit refresh.
+All alert evaluation reads the canonical ``land_parcels`` identity and the
+directly keyed scene products. No legacy field UUID or tag-derived identity is
+consulted.
 """
 
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -34,20 +33,13 @@ AGRI_AVG_COLUMNS: dict[str, str] = {
 DEFAULT_INDEX_KEYS: tuple[str, ...] = ("ndvi", "evi", "ndmi")
 
 
-def _load_field_meta(session, field_id: str) -> dict[str, Any] | None:
-    from app.core.agri_tags import parse_agri_land_id
-    from app.models.tables import Field
+def _load_land_meta(session, land_id: str) -> dict[str, Any] | None:
+    from app.models.tables import LandParcel
 
-    field = session.get(Field, uuid.UUID(field_id))
-    if not field or field.deleted_at is not None:
+    land = session.get(LandParcel, str(land_id))
+    if not land or land.deleted_at is not None:
         return None
-    land_id = parse_agri_land_id(field.tags_json)
-    return {
-        "field_id": field.id,
-
-        "land_id": land_id,
-        "tags": field.tags_json,
-    }
+    return {"land_id": land.land_id}
 
 
 def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
@@ -107,7 +99,7 @@ def _pick_eval_scene(
     return (clear or usable)[-1]
 
 
-def _delete_open_rs_alerts(session, field_id, index_keys: list[str]) -> int:
+def _delete_open_rs_alerts(session, land_id: str, index_keys: list[str]) -> int:
     from app.models.tables import Alert
 
     rule_names: list[str] = []
@@ -116,7 +108,7 @@ def _delete_open_rs_alerts(session, field_id, index_keys: list[str]) -> int:
         rule_names.append(f"{key}_drop")
     result = session.execute(
         select(Alert).where(
-            Alert.field_id == field_id,
+            Alert.land_id == str(land_id),
             Alert.status == "open",
             Alert.rule_name.in_(rule_names))
     )
@@ -126,11 +118,11 @@ def _delete_open_rs_alerts(session, field_id, index_keys: list[str]) -> int:
     return len(rows)
 
 
-def _existing_alert_keys(session, field_id) -> set[tuple[date, str]]:
+def _existing_alert_keys(session, land_id: str) -> set[tuple[date, str]]:
     from app.models.tables import Alert
 
     rows = session.execute(
-        select(Alert.date, Alert.rule_name).where(Alert.field_id == field_id)
+        select(Alert.date, Alert.rule_name).where(Alert.land_id == str(land_id))
     ).all()
     return {(r[0], r[1]) for r in rows}
 
@@ -138,7 +130,7 @@ def _existing_alert_keys(session, field_id) -> set[tuple[date, str]]:
 def _emit_rules(
     session,
     *,
-    field_id,
+    land_id: str,
     scene_date: date,
     current_mean: float,
     historical_means: list[float],
@@ -158,7 +150,7 @@ def _emit_rules(
             session.add(
                 Alert(
 
-                    field_id=field_id,
+                    land_id=land_id,
                     date=scene_date,
                     severity=severity,
                     rule_name=rule,
@@ -195,7 +187,7 @@ def _emit_rules(
                     session.add(
                         Alert(
 
-                            field_id=field_id,
+                            land_id=land_id,
                             date=scene_date,
                             severity=severity,
                             rule_name=rule,
@@ -218,47 +210,41 @@ def _emit_rules(
     return created
 
 
-def evaluate_agri_rs_alerts_for_field(
-    field_id: str,
+def evaluate_agri_rs_alerts_for_land(
+    land_id: str,
     *,
-    land_id: str | None = None,
     scene_date: date | str | None = None,
     index_keys: list[str] | None = None,
     replace_open: bool = True) -> dict[str, Any]:
     """Evaluate threshold/drop alerts from agri S2 averages.
 
-    Default behaviour (refresh / post-bridge): replace open optical RS alerts and
+    Default behaviour (refresh / post-ingest): replace open optical RS alerts and
     evaluate the latest clear scene per index against full history.
 
     When ``scene_date`` is set (single-date ingest), only that date is evaluated
     and existing alerts for other dates are left alone unless ``replace_open``.
     """
+    land_id = str(land_id).strip()
     session = get_db_session()
     try:
-        meta = _load_field_meta(session, field_id)
+        meta = _load_land_meta(session, land_id)
         if not meta:
             return {
-                "field_id": field_id,
+                "land_id": land_id,
                 "status": "error",
-                "detail": "Field not found",
+                "detail": "Land parcel not found",
             }
-        lid = land_id or meta["land_id"]
-        if not lid:
-            return {
-                "field_id": field_id,
-                "status": "skipped",
-                "reason": "not_agri_tagged",
-            }
+        lid = meta["land_id"]
 
         keys = list(index_keys or DEFAULT_INDEX_KEYS)
         keys = [k for k in keys if k in AGRI_AVG_COLUMNS and k in INDEX_REGISTRY]
         if not keys:
-            return {"field_id": field_id, "status": "skipped", "reason": "no_indices"}
+            return {"land_id": lid, "status": "skipped", "reason": "no_indices"}
 
         series = _load_s2_series(session, lid)
         if not series:
             return {
-                "field_id": field_id,
+                "land_id": lid,
                 "land_id": lid,
                 "status": "skipped",
                 "reason": "no_s2_scenes",
@@ -274,9 +260,9 @@ def evaluate_agri_rs_alerts_for_field(
 
         removed = 0
         if replace_open:
-            removed = _delete_open_rs_alerts(session, meta["field_id"], keys)
+            removed = _delete_open_rs_alerts(session, lid, keys)
 
-        existing = _existing_alert_keys(session, meta["field_id"])
+        existing = _existing_alert_keys(session, lid)
         created = 0
         evaluated: list[dict[str, Any]] = []
 
@@ -297,11 +283,11 @@ def evaluate_agri_rs_alerts_for_field(
             ]
             mean = float(scene[avg_col])
             hist.append(mean)
-            weather_ctx = _get_weather_context(session, meta["field_id"], sd)
+            weather_ctx = _get_weather_context(session, lid, sd)
             n = _emit_rules(
                 session,
 
-                field_id=meta["field_id"],
+                land_id=lid,
                 scene_date=sd,
                 current_mean=mean,
                 historical_means=hist,
@@ -320,7 +306,7 @@ def evaluate_agri_rs_alerts_for_field(
 
         session.commit()
         result = {
-            "field_id": field_id,
+            "land_id": lid,
             "land_id": lid,
             "status": "ok",
             "removed_open": removed,
@@ -331,7 +317,7 @@ def evaluate_agri_rs_alerts_for_field(
         logger.info(
             "agri_rs_alerts_evaluated",
             **{
-                k: result[k] for k in ("field_id", "land_id", "created", "removed_open")
+                k: result[k] for k in ("land_id", "created", "removed_open")
             })
         return result
     except Exception:
@@ -342,27 +328,25 @@ def evaluate_agri_rs_alerts_for_field(
 
 
 @celery_app.task(
-    name="app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
+    name="app.tasks.agri_alerts.evaluate_agri_alerts_for_land",
     bind=True,
     max_retries=2,
     time_limit=300,
     soft_time_limit=240)
-def evaluate_agri_alerts_for_field(
+def evaluate_agri_alerts_for_land(
     self,
-    field_id: str,
-    land_id: str | None = None,
+    land_id: str,
     scene_date: str | None = None,
     replace_open: bool = True) -> dict:
     """Celery entry: agri lonlat → agric-satellite-analysis alerts."""
     try:
-        return evaluate_agri_rs_alerts_for_field(
-            field_id,
-            land_id=land_id,
+        return evaluate_agri_rs_alerts_for_land(
+            land_id,
             scene_date=scene_date,
             replace_open=replace_open)
     except Exception as e:
         logger.error(
             "agri_rs_alerts_failed",
-            field_id=field_id,
+            land_id=land_id,
             error=str(e))
         raise

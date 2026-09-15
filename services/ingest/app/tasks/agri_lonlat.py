@@ -101,61 +101,32 @@ def agri_optical_index_defs():
     return [get_index(k) for k in AGRI_OPTICAL_INDEX_KEYS]
 
 
-def _load_agri_meta(session, field) -> dict[str, Any]:
-    from app.core.agri_tags import parse_agri_land_id
-
-    land_id = parse_agri_land_id(getattr(field, "tags_json", None))
-    if not land_id:
-        raise RuntimeError("field is not agri-tagged (need agri:<land_id>)")
-
-    try:
-        from openfarm_common.internal_api import agri_land_meta, internal_api_enabled
-    except ImportError:
-        internal_api_enabled = lambda: False  # noqa: E731
-        agri_land_meta = None  # type: ignore
-
-    if agri_land_meta is not None and internal_api_enabled():
-        try:
-            meta = agri_land_meta(str(land_id))
-            return {
-                "land_id": meta.get("land_id") or land_id,
-                "tile_id": meta.get("tile_id"),
-                "land_name": meta.get("land_name") or field.name,
-                "field_id": str(field.id),
-            }
-        except Exception as e:
-            logger.warning(
-                "agri_land_meta_http_failed falling_back_db",
-                land_id=land_id,
-                error=str(e),
-            )
-
-    if session is None:
+def _load_land_meta(
+    session,
+    land_id: str,
+    remote: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load metadata from the canonical land_parcels row directly."""
+    if remote is not None:
+        if str(remote.get("land_id") or "") != str(land_id):
+            raise RuntimeError("internal land response does not match requested land_id")
         return {
-            "land_id": land_id,
-            "tile_id": None,
-            "land_name": getattr(field, "name", None),
-            "field_id": str(getattr(field, "id", "")),
+            "land_id": str(land_id),
+            "tile_id": remote.get("tile_id"),
+            "land_name": remote.get("land_name") or str(land_id),
         }
 
-    row = (
-        session.execute(
-            text(
-                "SELECT land_id, tile_id, land_name "
-                "FROM agric_satellite.land_parcels WHERE land_id = :lid"
-            ),
-            {"lid": str(land_id)},
-        )
-        .mappings()
-        .first()
-    )
-    if not row:
+    if session is None:
+        raise RuntimeError("land metadata requires a database session or remote response")
+    from app.models.tables import LandParcel
+
+    land = session.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
         raise RuntimeError(f"agric_satellite.land_parcels missing land_id={land_id}")
     return {
-        "land_id": row["land_id"],
-        "tile_id": row["tile_id"],
-        "land_name": row["land_name"] or field.name,
-        "field_id": str(field.id),
+        "land_id": land.land_id,
+        "tile_id": land.tile_id,
+        "land_name": land.land_name or land.land_id,
     }
 
 
@@ -216,7 +187,6 @@ def publish_optical_lonlat_to_oss_mq(
     row: dict[str, Any],
     *,
     mq_task_id: str | None = None,
-    field_id: str | None = None,
     oss_sensor: str = "S2",
     extra_extras: dict[str, Any] | None = None,
 ) -> str | None:
@@ -307,7 +277,6 @@ def publish_optical_lonlat_to_oss_mq(
         task_id=result_task_id,
         status="success",
         land_id=str(row["land_id"]),
-        field_id=field_id,
         oss_urls={label: json_url},
         collect_parcel_urls=False,
         upload_summary_if_empty=False,
@@ -336,15 +305,13 @@ def publish_optical_lonlat_to_oss_mq(
     return json_url
 
 
-# Back-compat alias (tests / call sites may still import the old name).
 def upsert_optical_lonlat_row(
     row: dict[str, Any],
     *,
     mq_task_id: str | None = None,
-    field_id: str | None = None,
 ) -> str | None:
     return publish_optical_lonlat_to_oss_mq(
-        row, mq_task_id=mq_task_id, field_id=field_id
+        row, mq_task_id=mq_task_id
     )
 
 
@@ -352,7 +319,7 @@ def emit_optical_lonlat(
     *,
     meta: dict[str, Any],
     geom4326: dict,
-    field_id_str: str,
+    land_id_str: str,
     scene: dict,
     index_arrays: dict[str, np.ndarray],
     transform,
@@ -381,7 +348,7 @@ def emit_optical_lonlat(
     if not pixels:
         logger.info(
             "agri_lonlat_no_pixels",
-            field_id=field_id_str,
+            land_id=land_id_str,
             date=str(scene["date"]),
             scene_id=scene.get("id"),
         )
@@ -452,7 +419,7 @@ def emit_optical_lonlat(
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"
         ),
-        "pixel_data_url": f"stac-direct://field/{field_id_str}/{date_str}",
+        "pixel_data_url": f"stac-direct://land/{land_id_str}/{date_str}",
         "rgb_url": rgb_url,
         "large_rgb_url": large_rgb_url,
         "rgb_oss_key": rgb_oss_key,
@@ -478,9 +445,7 @@ def emit_optical_lonlat(
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
     }
-    json_url = publish_optical_lonlat_to_oss_mq(
-        row, mq_task_id=mq_task_id, field_id=field_id_str
-    )
+    json_url = publish_optical_lonlat_to_oss_mq(row, mq_task_id=mq_task_id)
     logger.info(
         "lonlat_upserted",
         land_id=meta["land_id"],
@@ -517,9 +482,9 @@ def _process_one_optical_scene(
     field_mask: np.ndarray,
     bounds: tuple,
     org_id_str: str,
-    field_id_str: str,
+    land_id_str: str,
     agri_meta: dict[str, Any],
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     write_cogs: bool,
     scene_workers: int = 1,
     mq_task_id: str | None = None,
@@ -566,7 +531,7 @@ def _process_one_optical_scene(
             from rasterio.features import geometry_mask
             from shapely.geometry import shape as shapely_shape
 
-            # Use unbuffered field extent (bounds already include ~0.001° parcel pad).
+            # Use unbuffered parcel extent (bounds already include ~0.001° padding).
             field_extent = (
                 bounds[0] + 0.001,
                 bounds[1] + 0.001,
@@ -577,7 +542,7 @@ def _process_one_optical_scene(
                 field_extent
             )
             try:
-                geom = shapely_shape(field_geom_geojson)
+                geom = shapely_shape(land_geom_geojson)
                 scene_field_mask = geometry_mask(
                     [geom],
                     out_shape=scene_shape,
@@ -708,7 +673,7 @@ def _process_one_optical_scene(
                     target_transform,
                     "EPSG:4326",
                     org_id_str,
-                    field_id_str,
+                    land_id_str,
                     scene["date"],
                     index_def.key,
                 )
@@ -744,8 +709,8 @@ def _process_one_optical_scene(
         t0 = time.perf_counter()
         result = emit_optical_lonlat(
             meta=agri_meta,
-            geom4326=field_geom_geojson,
-            field_id_str=field_id_str,
+            geom4326=land_geom_geojson,
+            land_id_str=land_id_str,
             scene=scene,
             index_arrays=index_arrays,
             transform=target_transform,
@@ -788,7 +753,7 @@ def _process_one_optical_scene(
 def _process_agri_optical_http_only(
     *,
     job_id: str | None,
-    field_id: str | None,
+    land_id: str | None,
     date_from: str | None,
     date_to: str | None,
     force: bool,
@@ -797,12 +762,9 @@ def _process_agri_optical_http_only(
     season_months: list | None,
 ) -> dict:
     """Optical chunk worker without SyncSession (OSS + MQ path)."""
-    from types import SimpleNamespace
-
     from shapely.geometry import shape as shapely_shape
 
-    from app.core.agri_tags import is_agri_tagged
-    from app.core.http_mode import field_geom_http, get_job_http, resolve_field_http
+    from app.core.http_mode import land_geom_http, get_job_http, resolve_land_http
     from app.tasks.pipeline import (
         existing_agri_scene_dates,
         filter_scenes_skip_existing,
@@ -810,11 +772,11 @@ def _process_agri_optical_http_only(
     )
 
     params: dict[str, Any] = {}
-    if job_id and (not field_id or not date_from or not date_to):
+    if job_id and (not land_id or not date_from or not date_to):
         remote = get_job_http(job_id) or {}
         params = dict(remote.get("params_json") or {})
-        field_id = field_id or (
-            str(remote["field_id"]) if remote.get("field_id") else None
+        land_id = land_id or (
+            str(remote["land_id"]) if remote.get("land_id") else None
         )
         date_from = date_from or params.get("date_from")
         date_to = date_to or params.get("date_to")
@@ -824,58 +786,41 @@ def _process_agri_optical_http_only(
         growing_seasons = growing_seasons or params.get("growing_seasons")
         season_months = season_months or params.get("season_months")
 
-    if not field_id or not date_from or not date_to:
+    if not land_id or not date_from or not date_to:
         return {
             "job_id": job_id,
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "error",
-            "detail": "field_id/date_from/date_to required",
+            "detail": "land_id/date_from/date_to required",
             "http_only": True,
         }
 
-    resolved = resolve_field_http(field_id)
-    tags = resolved.get("tags")
-    if not is_agri_tagged(tags):
-        return {
-            "job_id": job_id,
-            "field_id": field_id,
-            "status": "failed",
-            "reason": "not_agri",
-            "http_only": True,
-        }
-
-    geom_payload = field_geom_http(field_id, include_geojson=True)
+    resolved = resolve_land_http(land_id)
+    geom_payload = land_geom_http(land_id, include_geojson=True)
     geojson = geom_payload.get("geojson")
     if not geojson:
         return {
             "job_id": job_id,
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "failed",
-            "detail": "Field geom missing via HTTP",
+            "detail": "Land parcel geometry missing via HTTP",
             "http_only": True,
         }
 
-    field = SimpleNamespace(
-        id=uuid.UUID(str(field_id)),
-        name=resolved.get("name") or geom_payload.get("name"),
-        tags_json=tags,
-        crop_type=None,
-        geom=None,
-    )
-    agri_meta = _load_agri_meta(None, field)
-    field_geom = shapely_shape(geojson)
-    field_geom_geojson = mapping(field_geom)
+    agri_meta = _load_land_meta(None, land_id, remote=resolved)
+    land_geom = shapely_shape(geojson)
+    land_geom_geojson = mapping(land_geom)
     d0 = date.fromisoformat(str(date_from)[:10])
     d1 = date.fromisoformat(str(date_to)[:10])
     org_id_str = "default"
-    field_id_str = str(field_id)
-    write_cogs = write_index_cogs_enabled(is_agri=True)
-    synthetic_job_id = job_id or f"http-opt-{field_id_str}-{d0}"
+    land_id_str = str(land_id)
+    write_cogs = write_index_cogs_enabled()
+    synthetic_job_id = job_id or f"http-opt-{land_id_str}-{d0}"
     index_defs = agri_optical_index_defs()
 
     logger.info(
         "agri_optical_http_only_start",
-        field_id=field_id_str,
+        land_id=land_id_str,
         job_id=job_id,
         date_from=str(d0),
         date_to=str(d1),
@@ -895,7 +840,7 @@ def _process_agri_optical_http_only(
 
     t_search = time.perf_counter()
     scenes = search_scenes_for_defs(
-        field_geom_geojson,
+        land_geom_geojson,
         d0,
         d1,
         index_defs,
@@ -914,7 +859,7 @@ def _process_agri_optical_http_only(
     season_months_norm = normalize_season_months(
         season_months=season_months,
         growing_seasons=growing_seasons,
-        crop_type=getattr(field, "crop_type", None),
+        crop_type=None,
     )
     scenes, skipped_offseason_cloudy = filter_scenes_outside_season_high_cloud(
         scenes,
@@ -928,7 +873,7 @@ def _process_agri_optical_http_only(
             scenes,
             existing,
             force=False,
-            field_id=field_id_str,
+            land_id=land_id_str,
             index="agri_optical",
         )
         skipped_existing = before - len(scenes)
@@ -950,7 +895,7 @@ def _process_agri_optical_http_only(
     if not scenes:
         return {
             "job_id": job_id,
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "status": "completed",
             "scenes": 0,
             "skipped_existing": skipped_existing,
@@ -958,7 +903,7 @@ def _process_agri_optical_http_only(
         }
 
     target_transform, target_shape, field_mask, bounds = compute_target_grid(
-        field_geom.bounds, field_geom
+        land_geom.bounds, land_geom
     )
     workers = min(scene_max_workers(), len(scenes))
     set_total(synthetic_job_id, len(scenes), workers=workers)
@@ -980,9 +925,9 @@ def _process_agri_optical_http_only(
                 field_mask=field_mask,
                 bounds=bounds,
                 org_id_str=org_id_str,
-                field_id_str=field_id_str,
+                land_id_str=land_id_str,
                 agri_meta=agri_meta,
-                field_geom_geojson=field_geom_geojson,
+                land_geom_geojson=land_geom_geojson,
                 write_cogs=write_cogs,
                 scene_workers=workers,
                 mq_task_id=mq_task_id,
@@ -1020,19 +965,18 @@ def _process_agri_optical_http_only(
         from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
 
         decloud_schedule = schedule_decloud_after_raw(
-            field_id=field_id_str,
             land_id=str(agri_meta["land_id"]),
             date_from=d0.isoformat(),
             date_to=d1.isoformat(),
             raw_results=raw_results,
             mq_task_id=mq_task_id,
             season_months=season_months_norm,
-            crop_type=getattr(field, "crop_type", None),
+            crop_type=None,
         )
 
     out = {
         "job_id": job_id,
-        "field_id": field_id_str,
+        "land_id": land_id_str,
         "status": "completed",
         "scenes_upserted": upserted,
         "skipped_existing": skipped_existing,
@@ -1054,7 +998,7 @@ def _process_agri_optical_http_only(
 def process_agri_optical_lonlat(
     self,
     job_id: str | None = None,
-    field_id: str | None = None,
+    land_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     force: bool = False,
@@ -1065,14 +1009,14 @@ def process_agri_optical_lonlat(
 ) -> dict:
     """Search S2, compute agri optical indices in memory, upsert lonlat_v1.
 
-    HTTP-only hosts may pass ``field_id`` + date kwargs (no local Job row).
+    HTTP-only hosts may pass ``land_id`` + date kwargs (no local Job row).
     """
     from app.core.http_mode import ingest_http_only
 
-    if ingest_http_only() or (field_id and not job_id):
+    if ingest_http_only() or (land_id and not job_id):
         return _process_agri_optical_http_only(
             job_id=job_id,
-            field_id=field_id,
+            land_id=land_id,
             date_from=date_from,
             date_to=date_to,
             force=force,
@@ -1081,11 +1025,10 @@ def process_agri_optical_lonlat(
             season_months=season_months,
         )
 
-    from app.core.agri_tags import is_agri_tagged
-    from app.models.tables import Field, Job
+    from app.models.tables import LandParcel, Job
 
     if not job_id:
-        return {"status": "error", "detail": "job_id or field_id required"}
+        return {"status": "error", "detail": "job_id or land_id required"}
 
     index_defs = agri_optical_index_defs()
     session = get_db_session()
@@ -1100,30 +1043,23 @@ def process_agri_optical_lonlat(
         job.progress_json = {"current_step": "scene_search", "steps": {}}
         session.commit()
 
-        field = session.get(Field, job.field_id)
-        if not field or field.geom is None:
+        land = session.get(LandParcel, job.land_id)
+        if not land or land.geom is None or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Field not found or missing geom"
+            job.error = "Land parcel not found or missing geometry"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        if not is_agri_tagged(field.tags_json):
-            job.status = "failed"
-            job.error = "agri_optical requires an agri-tagged field"
-            job.finished_at = datetime.now(timezone.utc)
-            session.commit()
-            return {"job_id": job_id, "status": "failed", "reason": "not_agri"}
-
-        agri_meta = _load_agri_meta(session, field)
-        field_geom = to_shape(field.geom)
-        field_geom_geojson = mapping(field_geom)
+        agri_meta = _load_land_meta(session, land.land_id)
+        land_geom = to_shape(land.geom)
+        land_geom_geojson = mapping(land_geom)
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
         org_id_str = "default"
-        field_id_str = str(job.field_id)
-        write_cogs = write_index_cogs_enabled(is_agri=True)
+        land_id_str = str(job.land_id)
+        write_cogs = write_index_cogs_enabled()
         force = bool(params.get("force") or False)
         mq_task_id = (params.get("mq_task_id") or None)
         if mq_task_id is not None:
@@ -1147,7 +1083,7 @@ def process_agri_optical_lonlat(
         # Agri needs the full Element84 series (not weekly lowest-cloud):
         # weekly dedupe dropped the high-cloud days users compare in STAC.
         scenes = search_scenes_for_defs(
-            field_geom_geojson,
+            land_geom_geojson,
             date_from,
             date_to,
             index_defs,
@@ -1164,7 +1100,7 @@ def process_agri_optical_lonlat(
             normalize_season_months,
         )
 
-        crop_type = getattr(field, "crop_type", None)
+        crop_type = land.crop_type
         # User-selected rotation windows (from backfill) beat crop default.
         season_months = normalize_season_months(
             season_months=params.get("season_months"),
@@ -1191,7 +1127,7 @@ def process_agri_optical_lonlat(
                 scenes,
                 existing,
                 force=False,
-                field_id=field_id_str,
+                land_id=land_id_str,
                 index="agri_optical",
             )
             skipped_existing = before - len(scenes)
@@ -1238,7 +1174,7 @@ def process_agri_optical_lonlat(
             }
 
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
-            field_geom.bounds, field_geom
+            land_geom.bounds, land_geom
         )
         workers = min(scene_max_workers(), len(scenes))
         logger.info(
@@ -1282,9 +1218,9 @@ def process_agri_optical_lonlat(
                     field_mask=field_mask,
                     bounds=bounds,
                     org_id_str=org_id_str,
-                    field_id_str=field_id_str,
+                    land_id_str=land_id_str,
                     agri_meta=agri_meta,
-                    field_geom_geojson=field_geom_geojson,
+                    land_geom_geojson=land_geom_geojson,
                     write_cogs=write_cogs,
                     scene_workers=workers,
                     mq_task_id=mq_task_id,
@@ -1345,7 +1281,6 @@ def process_agri_optical_lonlat(
             from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
 
             decloud_schedule = schedule_decloud_after_raw(
-                field_id=field_id_str,
                 land_id=str(agri_meta["land_id"]),
                 date_from=date_from.isoformat(),
                 date_to=date_to.isoformat(),

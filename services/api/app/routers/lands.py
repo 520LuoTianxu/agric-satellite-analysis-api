@@ -1,0 +1,672 @@
+"""Canonical land-parcel API.
+
+The application has one parcel master only: agric_satellite.land_parcels.
+Every downstream table and message uses its land_id directly; this module
+does not translate to a legacy UUID or consult a second parcel table.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from geoalchemy2.shape import from_shape
+from shapely.geometry import MultiPolygon, mapping, shape
+from shapely.ops import transform
+from shapely.validation import explain_validity
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.crops import normalize_crop_key
+from app.core.database import get_db
+from app.core.geo import wkb_to_geojson
+from app.core.logging import logger
+from app.core.rate_limit import limiter
+from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.models.tables import (
+    AuditEvent,
+    Farm,
+    LandParcel,
+    Job,
+    SoilFieldSummary,
+    WeatherDaily,
+)
+from app.schemas.common import PaginatedResponse
+from app.schemas.farm import (
+    BackfillIndicesRequest,
+    BackfillIndicesResponse,
+    BackfillStatusResponse,
+    LandParcelCreate,
+    LandParcelImportResponse,
+    LandParcelOut,
+    LandParcelUpdate,
+)
+
+router = APIRouter()
+
+_reader = require_roles("owner", "admin", "member", "viewer")
+_writer = require_roles("owner", "admin", "member")
+_admin = require_roles("owner", "admin")
+
+_BACKFILL_STALE_HOURS = 6
+_BACKFILL_WAVE_FALLBACK_HOURS = 48
+
+
+def _geojson_to_multi(geojson: dict[str, Any]) -> MultiPolygon:
+    """Validate a GeoJSON polygon and normalize it to MultiPolygon."""
+    geom = shape(geojson)
+    if geom.geom_type == "Polygon":
+        geom = MultiPolygon([geom])
+    elif geom.geom_type != "MultiPolygon":
+        raise ValueError(f"Expected Polygon or MultiPolygon, got {geom.geom_type}")
+    if not geom.is_valid:
+        raise ValueError(f"Invalid geometry: {explain_validity(geom)}")
+    return geom
+
+
+def _geometry_values(
+    geom: MultiPolygon,
+) -> tuple[dict[str, Any], float, tuple[float, ...]]:
+    """Return canonical boundary JSON, area in hectares, and WGS84 bounds."""
+    import pyproj
+
+    to_equal_area = pyproj.Transformer.from_crs(
+        "EPSG:4326", "EPSG:6933", always_xy=True
+    ).transform
+    area_ha = transform(to_equal_area, geom).area / 10_000
+    return mapping(geom), round(area_ha, 4), geom.bounds
+
+
+def _land_to_out(land: LandParcel) -> LandParcelOut:
+    """Serialize the canonical parcel row without manufacturing another ID."""
+    boundary = land.boundary_geojson
+    if not isinstance(boundary, dict):
+        boundary = wkb_to_geojson(land.geom) or {}
+    return LandParcelOut(
+        land_id=land.land_id,
+        source_parcel_id=land.source_parcel_id,
+        tile_id=land.tile_id,
+        virtual_tile_id=land.virtual_tile_id,
+        project_key=land.project_key,
+        tile_assignment_type=land.tile_assignment_type,
+        tile_anchor_land_id=land.tile_anchor_land_id,
+        farm_id=land.farm_id,
+        land_name=land.land_name,
+        group_id=land.group_id,
+        group_name=land.group_name,
+        org_code=land.org_code,
+        org_name=land.org_name,
+        base_id=land.base_id,
+        province_code=land.province_code,
+        province_name=land.province_name,
+        city_code=land.city_code,
+        city_name=land.city_name,
+        county_code=land.county_code,
+        county_name=land.county_name,
+        town_code=land.town_code,
+        town_name=land.town_name,
+        village_code=land.village_code,
+        village_name=land.village_name,
+        boundary_geojson=boundary,
+        boundary_srid=land.boundary_srid,
+        min_lon=land.min_lon,
+        min_lat=land.min_lat,
+        max_lon=land.max_lon,
+        max_lat=land.max_lat,
+        geom=wkb_to_geojson(land.geom),
+        area_ha=float(land.area_ha) if land.area_ha is not None else None,
+        crop_type=land.crop_type,
+        season=land.season,
+        tags_json=land.tags_json,
+        soil_property=land.soil_property,
+        current_batch=land.current_batch,
+        land_status=land.land_status,
+        source_properties=land.source_properties,
+        source_file=land.source_file,
+        source_feature_index=land.source_feature_index,
+        source_update_time=land.source_update_time,
+        created_at=land.created_at,
+        updated_at=land.updated_at,
+    )
+
+
+async def _get_land_or_404(land_id: str, db: AsyncSession) -> LandParcel:
+    """Load one active parcel by its only public identity."""
+    land = await db.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Land parcel not found")
+    return land
+
+
+def _normalized_crop(value: str | None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return normalize_crop_key(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/lands", response_model=PaginatedResponse[LandParcelOut])
+async def list_lands(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    farm_id: uuid.UUID | None = Query(None),
+    q: str | None = Query(None, description="Search land_id or land_name"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List active canonical parcels."""
+    filters = [LandParcel.deleted_at.is_(None)]
+    if farm_id is not None:
+        filters.append(LandParcel.farm_id == farm_id)
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        filters.append(
+            (LandParcel.land_id.ilike(needle) | LandParcel.land_name.ilike(needle))
+        )
+    base = select(LandParcel).where(*filters)
+    total = (
+        await db.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar() or 0
+    rows = (
+        await db.execute(
+            base.order_by(LandParcel.created_at.desc(), LandParcel.land_id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return PaginatedResponse(
+        items=[_land_to_out(row) for row in rows],
+        total=int(total),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/lands", response_model=LandParcelOut, status_code=status.HTTP_201_CREATED)
+async def create_land(
+    body: LandParcelCreate,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a parcel row and optionally start its data bootstrap."""
+    land_id = body.land_id.strip()
+    if not land_id:
+        raise HTTPException(status_code=422, detail="land_id is required")
+    if body.farm_id is not None:
+        farm = await db.get(Farm, body.farm_id)
+        if not farm or farm.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Farm not found")
+    try:
+        multi = _geojson_to_multi(body.boundary_geojson)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid boundary: {exc}") from exc
+    boundary, area_ha, bounds = _geometry_values(multi)
+    min_lon, min_lat, max_lon, max_lat = bounds
+    land = LandParcel(
+        land_id=land_id,
+        source_parcel_id=land_id,
+        tile_id=body.tile_id or f"manual_{land_id}",
+        farm_id=body.farm_id,
+        land_name=body.land_name,
+        group_id=body.group_id,
+        group_name=body.group_name,
+        province_code=body.province_code,
+        province_name=body.province_name,
+        city_code=body.city_code,
+        city_name=body.city_name,
+        county_code=body.county_code,
+        county_name=body.county_name,
+        town_code=body.town_code,
+        town_name=body.town_name,
+        village_code=body.village_code,
+        village_name=body.village_name,
+        boundary_geojson=boundary,
+        boundary_srid=4326,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        geom=from_shape(multi, srid=4326),
+        area_ha=area_ha,
+        crop_type=_normalized_crop(body.crop_type),
+        season=body.season,
+        tags_json=body.tags_json,
+        source_properties={"source": "api"},
+        source_file="api",
+        source_feature_index=0,
+    )
+    db.add(land)
+    db.add(
+        AuditEvent(
+            event_type="land_created",
+            metadata_json={"land_id": land_id, "farm_id": str(body.farm_id or "")},
+        )
+    )
+    await db.flush()
+    await db.commit()
+
+    from app.mq_publish import publish_api_task
+
+    publish_api_task(type="land_bootstrap", land_id=land_id, extras={})
+    logger.info("land_created", land_id=land_id, farm_id=str(body.farm_id or ""))
+    return _land_to_out(land)
+
+
+@router.get("/lands/{land_id}", response_model=LandParcelOut)
+async def get_land(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    return _land_to_out(await _get_land_or_404(land_id, db))
+
+
+@router.put("/lands/{land_id}", response_model=LandParcelOut)
+async def update_land(
+    land_id: str,
+    body: LandParcelUpdate,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    land = await _get_land_or_404(land_id, db)
+    if body.farm_id is not None:
+        farm = await db.get(Farm, body.farm_id)
+        if not farm or farm.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Farm not found")
+        land.farm_id = body.farm_id
+    if body.land_name is not None:
+        land.land_name = body.land_name
+    if body.tile_id is not None:
+        land.tile_id = body.tile_id
+    for attr in (
+        "group_id",
+        "group_name",
+        "province_code",
+        "province_name",
+        "city_code",
+        "city_name",
+        "county_code",
+        "county_name",
+        "town_code",
+        "town_name",
+        "village_code",
+        "village_name",
+    ):
+        value = getattr(body, attr)
+        if value is not None:
+            setattr(land, attr, value)
+    if body.crop_type is not None:
+        land.crop_type = _normalized_crop(body.crop_type)
+    if body.season is not None:
+        land.season = body.season
+    if body.tags_json is not None:
+        land.tags_json = body.tags_json
+    if body.boundary_geojson is not None:
+        try:
+            multi = _geojson_to_multi(body.boundary_geojson)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid boundary: {exc}") from exc
+        boundary, area_ha, bounds = _geometry_values(multi)
+        land.boundary_geojson = boundary
+        land.boundary_srid = 4326
+        land.min_lon, land.min_lat, land.max_lon, land.max_lat = bounds
+        land.geom = from_shape(multi, srid=4326)
+        land.area_ha = area_ha
+    land.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(land)
+    return _land_to_out(land)
+
+
+@router.delete("/lands/{land_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_land(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    land = await _get_land_or_404(land_id, db)
+    land.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+@router.post("/lands/import", response_model=LandParcelImportResponse)
+async def import_lands(
+    file: UploadFile,
+    farm_id: uuid.UUID | None = Query(None),
+    ctx: Annotated[OrgContext, Depends(_writer)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Import GeoJSON features; every feature must provide a stable land_id."""
+    if farm_id is not None:
+        farm = await db.get(Farm, farm_id)
+        if not farm or farm.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Farm not found")
+    try:
+        geojson = json.loads(await file.read())
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+    features = geojson.get("features", []) if isinstance(geojson, dict) else []
+    if not features:
+        raise HTTPException(status_code=400, detail="No features found in GeoJSON")
+
+    imported = 0
+    errors: list[str] = []
+    for index, feature in enumerate(features):
+        try:
+            props = feature.get("properties") or {}
+            land_id = str(props.get("land_id") or "").strip()
+            if not land_id:
+                raise ValueError("properties.land_id is required")
+            multi = _geojson_to_multi(feature.get("geometry"))
+            boundary, area_ha, bounds = _geometry_values(multi)
+            existing = await db.get(LandParcel, land_id)
+            land = existing or LandParcel(
+                land_id=land_id,
+                source_parcel_id=land_id,
+                tile_id=str(props.get("tile_id") or f"manual_{land_id}"),
+                source_file=file.filename or "geojson_import",
+                source_feature_index=index,
+            )
+            land.farm_id = farm_id
+            land.land_name = str(props.get("land_name") or props.get("name") or land_id)
+            for attr in (
+                "group_id",
+                "group_name",
+                "province_code",
+                "province_name",
+                "city_code",
+                "city_name",
+                "county_code",
+                "county_name",
+                "town_code",
+                "town_name",
+                "village_code",
+                "village_name",
+            ):
+                if props.get(attr) is not None:
+                    setattr(land, attr, props[attr])
+            land.boundary_geojson = boundary
+            land.boundary_srid = 4326
+            land.min_lon, land.min_lat, land.max_lon, land.max_lat = bounds
+            land.geom = from_shape(multi, srid=4326)
+            land.area_ha = area_ha
+            land.crop_type = _normalized_crop(props.get("crop_type"))
+            land.season = props.get("season")
+            land.tags_json = props.get("tags_json") or props.get("tags")
+            land.source_properties = {"source": "geojson_import", "feature_index": index}
+            land.source_file = file.filename or "geojson_import"
+            land.source_feature_index = index
+            if existing is None:
+                db.add(land)
+            imported += 1
+        except (TypeError, ValueError, AttributeError) as exc:
+            errors.append(f"Feature {index}: {exc}")
+    if imported:
+        await db.commit()
+    return LandParcelImportResponse(imported=imported, errors=errors)
+
+
+def _backfill_wave_message(
+    *,
+    phase: str,
+    pending: int,
+    running: int,
+    completed: int,
+    failed: int,
+    total: int,
+    percent: float,
+) -> str:
+    if phase == "idle":
+        return "当前无进行中的遥感回填"
+    if phase == "bridge":
+        return "正在写入遥感结果"
+    if phase == "done":
+        return f"遥感回填已完成（分片任务 {completed}/{total}）"
+    return (
+        f"正在拉取遥感数据… 分片任务 {completed}/{max(total, completed + pending + running)}"
+        f"（进行中 {running}，排队 {pending}"
+        + (f"，失败 {failed}" if failed else "")
+        + f"，约 {percent:.0f}%）"
+    )
+
+
+async def _fail_stale_backfill_jobs(db: AsyncSession, land_id: str) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_BACKFILL_STALE_HOURS)
+    result = await db.execute(
+        Job.__table__.update()
+        .where(
+            Job.land_id == land_id,
+            Job.status.in_(["pending", "running"]),
+            Job.params_json["is_backfill"].as_boolean().is_(True),
+            Job.created_at < cutoff,
+        )
+        .values(
+            status="failed",
+            error=f"Stale backfill auto-cancelled after {_BACKFILL_STALE_HOURS}h",
+            finished_at=datetime.now(timezone.utc),
+        )
+    )
+    return result.rowcount or 0
+
+
+async def _wave_start_for_land(db: AsyncSession, land_id: str):
+    sentinel = (
+        await db.execute(
+            select(Job)
+            .where(
+                Job.land_id == land_id,
+                Job.type == "backfill",
+                Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.params_json["sentinel"].as_boolean().is_(True),
+            )
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if sentinel is not None:
+        return sentinel.created_at, sentinel
+    return datetime.now(timezone.utc) - timedelta(hours=_BACKFILL_WAVE_FALLBACK_HOURS), None
+
+
+@router.post(
+    "/lands/{land_id}/backfill-indices",
+    response_model=BackfillIndicesResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@limiter.limit("5/minute")
+async def backfill_land_indices(
+    request: Request,
+    land_id: str,
+    body: BackfillIndicesRequest | None = None,
+    ctx: Annotated[OrgContext, Depends(_admin)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Start a direct land-id backfill wave."""
+    await _get_land_or_404(land_id, db)
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"backfill:{land_id}"},
+    )
+    await _fail_stale_backfill_jobs(db, land_id)
+    wave_start, _ = await _wave_start_for_land(db, land_id)
+    active = (
+        await db.execute(
+            select(Job.id).where(
+                Job.land_id == land_id,
+                Job.status.in_(["pending", "running"]),
+                Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.created_at >= wave_start,
+            )
+        )
+    ).scalars().all()
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Backfill already in progress ({len(active)} jobs pending/running).",
+        )
+
+    months = body.months if body else 24
+    extras: dict[str, Any] = {
+        "months": months,
+        "force": bool(body.force) if body else False,
+        "with_bridge": False,
+        "dispatch_alerts": True,
+    }
+    if body:
+        if body.date_from:
+            extras["date_from"] = str(body.date_from)[:10]
+        if body.date_to:
+            extras["date_to"] = str(body.date_to)[:10]
+        if body.growing_seasons:
+            extras["growing_seasons"] = [
+                item.model_dump(exclude_none=True) for item in body.growing_seasons
+            ]
+        if body.season_months:
+            extras["season_months"] = body.season_months
+
+    sentinel = Job(
+        land_id=land_id,
+        type="backfill",
+        status="pending",
+        params_json={"is_backfill": True, "sentinel": True, **extras},
+    )
+    db.add(sentinel)
+    await db.flush()
+    extras["sentinel_job_id"] = str(sentinel.id)
+    await db.commit()
+
+    from app.mq_publish import publish_api_task
+
+    publish_api_task(type="satellite_analysis", land_id=land_id, extras=extras)
+    return BackfillIndicesResponse(
+        land_id=land_id,
+        status="dispatched",
+        message=f"已启动 {land_id} 的遥感回填。",
+    )
+
+
+@router.get(
+    "/lands/{land_id}/backfill-status", response_model=BackfillStatusResponse
+)
+async def get_backfill_status(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await _get_land_or_404(land_id, db)
+    await _fail_stale_backfill_jobs(db, land_id)
+    wave_start, sentinel = await _wave_start_for_land(db, land_id)
+    row = (
+        await db.execute(
+            select(
+                func.count().filter(Job.status == "pending").label("pending"),
+                func.count().filter(Job.status == "running").label("running"),
+                func.count().filter(Job.status == "completed").label("completed"),
+                func.count().filter(Job.status == "failed").label("failed"),
+            ).where(
+                Job.land_id == land_id,
+                Job.params_json["is_backfill"].as_boolean().is_(True),
+                Job.created_at >= wave_start,
+                Job.type.notin_(["backfill", "agri_bridge"]),
+            )
+        )
+    ).one()
+    pending, running = int(row.pending or 0), int(row.running or 0)
+    completed, failed = int(row.completed or 0), int(row.failed or 0)
+    denom = pending + running + completed
+    sentinel_active = bool(sentinel and sentinel.status in ("pending", "running"))
+    active = sentinel_active or pending > 0 or running > 0
+    phase = "stac" if active else ("done" if denom else "idle")
+    percent = 100.0 * completed / denom if denom else (0.0 if active else 100.0)
+    return BackfillStatusResponse(
+        land_id=land_id,
+        has_active_backfill=active,
+        pending_jobs=pending,
+        running_jobs=running,
+        completed_jobs=completed,
+        failed_jobs=failed,
+        total_jobs=denom + failed,
+        percent=round(percent, 1),
+        phase=phase,
+        message=_backfill_wave_message(
+            phase=phase,
+            pending=pending,
+            running=running,
+            completed=completed,
+            failed=failed,
+            total=denom + failed,
+            percent=percent,
+        ),
+    )
+
+
+@router.post("/admin/backfill-all-lands", status_code=status.HTTP_202_ACCEPTED)
+async def backfill_all_lands(
+    body: BackfillIndicesRequest | None = None,
+    ctx: Annotated[OrgContext, Depends(require_roles("owner"))] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    from app.celery_client import send_task
+
+    send_task(
+        "app.tasks.backfill.backfill_all_existing_lands",
+        kwargs={"months": body.months if body else 60},
+    )
+    return {"status": "dispatched", "message": "已为所有地块提交遥感回填。"}
+
+
+@router.post("/admin/ensure-soil-weather", status_code=status.HTTP_202_ACCEPTED)
+async def ensure_soil_weather(
+    farm_id: uuid.UUID | None = Query(None),
+    ctx: Annotated[OrgContext, Depends(require_roles("owner"))] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    """Ensure soil/weather data for every canonical parcel; tags are not required."""
+    from app.celery_client import send_task
+
+    query = select(LandParcel).where(LandParcel.deleted_at.is_(None))
+    if farm_id is not None:
+        query = query.where(LandParcel.farm_id == farm_id)
+    lands = (await db.execute(query)).scalars().all()
+    items: list[dict[str, Any]] = []
+    for land in lands:
+        soil_exists = (
+            await db.execute(
+                select(SoilFieldSummary.id)
+                .where(SoilFieldSummary.land_id == land.land_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        weather_exists = (
+            await db.execute(
+                select(WeatherDaily.id)
+                .where(WeatherDaily.land_id == land.land_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if soil_exists is None:
+            send_task("app.tasks.soil.fetch_soil_for_land", args=[land.land_id])
+        if weather_exists is None:
+            send_task("app.tasks.weather.backfill_weather_for_land", args=[land.land_id])
+        items.append(
+            {
+                "land_id": land.land_id,
+                "land_name": land.land_name,
+                "soil_enqueued": soil_exists is None,
+                "weather_enqueued": weather_exists is None,
+            }
+        )
+    return {"status": "dispatched", "scanned": len(lands), "items": items}

@@ -156,6 +156,8 @@ services:
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
       CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
       OPENFARM_SCRATCH_DIR: /data/scratch
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
       BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
@@ -214,18 +216,17 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── Celery Beat (schedules → ingest queue) ────────────────────────
+  # ── Celery Beat（ingest 镜像，定时任务投到 ingest 队列）──────────
+  # 单实例：只在下载机跑，禁止和第二套 beat 同时存在。
   beat:
     build:
       context: .
-      dockerfile: services/api/Dockerfile
+      dockerfile: services/ingest/Dockerfile
     command: >
-      celery -A app.worker beat
+      celery -A app.beat beat
       --loglevel=info
     environment:
       <<: *celery-redis-env
-      DATABASE_URL: ${DATABASE_URL}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
       REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:

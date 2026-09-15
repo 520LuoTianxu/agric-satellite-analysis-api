@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-from app.core.agri_tags import (
-    ensure_agri_land_tag,
-    ensure_cdfinance_group_tag,
-    parse_cdfinance_group_id,
-)
 from app.core.cdfinance_site_admission import (
     facts_for_assessment,
     normalize_admission_payload,
@@ -92,29 +87,6 @@ class CdfinanceSiteAdmissionHelpersTests(unittest.TestCase):
         self.assertIsNotNone(facts)
         assert facts is not None
         self.assertEqual(facts["现场问卷_地块条件"]["soil_type"], "沙壤")
-
-    def test_group_tags(self):
-        self.assertEqual(
-            parse_cdfinance_group_id(["agri:1", "cdfinance_group:3232"]), "3232"
-        )
-        self.assertEqual(parse_cdfinance_group_id(["group:99"]), "99")
-        tags = ensure_cdfinance_group_tag(["agri:1"], 3232)
-        self.assertIn("cdfinance_group:3232", tags)
-        self.assertEqual(
-            ensure_cdfinance_group_tag(tags, 3232).count("cdfinance_group:3232"), 1
-        )
-
-    def test_ensure_agri_land_tag(self):
-        self.assertEqual(
-            ensure_agri_land_tag(["crop:wheat", "agri:OLD"], "25107"),
-            ["crop:wheat", "agri:25107"],
-        )
-        self.assertEqual(
-            ensure_agri_land_tag(["agri:OLD", "cdfinance_group:1"], ""),
-            ["cdfinance_group:1"],
-        )
-        self.assertEqual(ensure_agri_land_tag(None, "9"), ["agri:9"])
-
 
 if __name__ == "__main__":
     unittest.main()

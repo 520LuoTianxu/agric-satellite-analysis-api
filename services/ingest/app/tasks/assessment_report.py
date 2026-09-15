@@ -42,7 +42,7 @@ def _publish_mq_result(
     *,
     mq_task_id: str | None,
     status: str,
-    field_id: str | None,
+    land_id: str | None,
     error: str | None = None,
     payload: dict | None = None,
     oss_urls: dict[str, str] | None = None,
@@ -56,7 +56,7 @@ def _publish_mq_result(
         publish_task_result(
             task_id=mq_task_id,
             status=status,
-            field_id=str(field_id) if field_id else None,
+            land_id=str(land_id) if land_id else None,
             error=error,
             payload=payload,
             oss_urls=oss_urls or {},
@@ -89,7 +89,7 @@ def _maybe_sync_session():
 
 
 def _data_readiness_http(
-    field_id: uuid.UUID,
+    land_id: str,
     date_from: str | None,
     date_to: str | None,
 ) -> dict | None:
@@ -99,12 +99,12 @@ def _data_readiness_http(
         if not internal_api_enabled():
             return None
         return data_readiness(
-            str(field_id), date_from=date_from, date_to=date_to
+            str(land_id), date_from=date_from, date_to=date_to
         )
     except Exception as exc:
         logger.warning(
             "assessment_data_readiness_http_failed",
-            field_id=str(field_id),
+            land_id=str(land_id),
             error=str(exc),
         )
         return None
@@ -142,13 +142,13 @@ def _celery_ids_ready(wait_celery_ids: list[str] | None) -> tuple[bool, list[str
     return (len(pending) == 0), pending
 
 
-def _active_backfill_jobs(session, field_id: uuid.UUID, wave_cutoff: datetime) -> int:
+def _active_backfill_jobs(session, land_id: str, wave_cutoff: datetime) -> int:
     """Count in-flight index / agri-optical / S1 backfill child jobs."""
     rows = session.execute(
         select(func.count())
         .select_from(Job)
         .where(
-            Job.field_id == field_id,
+            Job.land_id == str(land_id),
             Job.status.in_(("pending", "running")),
             Job.params_json["is_backfill"].as_boolean().is_(True),
             Job.type.notin_(
@@ -171,7 +171,7 @@ def _parse_iso_date(value: str | None):
 
 def _agri_rs_coverage_ok(
     session,
-    field_id: uuid.UUID,
+    land_id: str,
     date_from: str | None,
     date_to: str | None,
 ) -> dict:
@@ -181,9 +181,6 @@ def _agri_rs_coverage_ok(
     (90-day shards with 30s countdown) when S2/S1 lonlat rows already exist.
     """
     from sqlalchemy import text as sa_text
-
-    from app.core.agri_tags import parse_agri_land_id
-    from app.models.tables import Field
 
     out = {
         "ok": False,
@@ -199,10 +196,7 @@ def _agri_rs_coverage_ok(
     if not start or not end or end < start:
         return out
 
-    field = session.get(Field, field_id)
-    land_id = parse_agri_land_id(getattr(field, "tags_json", None) if field else None)
-    if not land_id:
-        return out
+    land_id = str(land_id)
     out["land_id"] = land_id
 
     span_days = (end - start).days + 1
@@ -242,12 +236,12 @@ def _agri_rs_coverage_ok(
 
 
 def _weather_row_count(
-    session, field_id: uuid.UUID, date_from: str | None, date_to: str | None
+    session, land_id: str, date_from: str | None, date_to: str | None
 ) -> int:
     q = (
         select(func.count())
         .select_from(WeatherDaily)
-        .where(WeatherDaily.field_id == field_id)
+        .where(WeatherDaily.land_id == str(land_id))
     )
     if date_from:
         try:
@@ -266,9 +260,9 @@ def _weather_row_count(
     return int(session.execute(q).scalar() or 0)
 
 
-def _soil_ready(session, field_id: uuid.UUID) -> bool:
+def _soil_ready(session, land_id: str) -> bool:
     row = session.execute(
-        select(SoilProfile.id).where(SoilProfile.field_id == field_id).limit(1)
+        select(SoilProfile.id).where(SoilProfile.land_id == str(land_id)).limit(1)
     ).first()
     return bool(row)
 
@@ -309,7 +303,7 @@ def _resolve_wait_started_at(job, job_id_str: str | None) -> datetime:
 def bootstrap_pulls_ready(
     session,
     *,
-    field_id: uuid.UUID,
+    land_id: str,
     date_from: str | None,
     date_to: str | None,
     wait_celery_ids: list[str] | None,
@@ -328,7 +322,7 @@ def bootstrap_pulls_ready(
     look ready in the first seconds.
     """
     celery_ready, pending_ids = _celery_ids_ready(wait_celery_ids)
-    readiness = _data_readiness_http(field_id, date_from, date_to)
+    readiness = _data_readiness_http(land_id, date_from, date_to)
     if readiness is not None:
         weather_rows = int(readiness.get("weather_rows") or 0)
         soil_ok = bool(readiness.get("soil_ok"))
@@ -336,7 +330,7 @@ def bootstrap_pulls_ready(
         active_rs = 0
         if session is not None:
             try:
-                active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
+                active_rs = _active_backfill_jobs(session, land_id, wave_cutoff)
             except Exception:
                 active_rs = 0
         span = readiness.get("span_days")
@@ -363,10 +357,10 @@ def bootstrap_pulls_ready(
             raise RuntimeError(
                 "bootstrap_pulls_ready needs SyncSession or internal data-readiness"
             )
-        weather_rows = _weather_row_count(session, field_id, date_from, date_to)
-        soil_ok = _soil_ready(session, field_id)
-        active_rs = _active_backfill_jobs(session, field_id, wave_cutoff)
-        coverage = _agri_rs_coverage_ok(session, field_id, date_from, date_to)
+        weather_rows = _weather_row_count(session, land_id, date_from, date_to)
+        soil_ok = _soil_ready(session, land_id)
+        active_rs = _active_backfill_jobs(session, land_id, wave_cutoff)
+        coverage = _agri_rs_coverage_ok(session, land_id, date_from, date_to)
 
     weather_ok = weather_rows >= weather_min_rows
     # After top-level weather/soil/indices orchestration finishes, wait until
@@ -429,7 +423,7 @@ def generate_assessment_report(
     job_id: str | None = None,
     mq_task_id: str | None = None,
     work_item_id: str | None = None,
-    field_id: str | None = None,
+    land_id: str | None = None,
     crop_type: str | None = None,
     crop_name_zh: str | None = None,
     date_from: str | None = None,
@@ -438,9 +432,9 @@ def generate_assessment_report(
     pull_data: bool = False,
     wait_celery_ids: list | None = None,
 ) -> dict:
-    """Generate land assessment PDF for a field.
+    """Generate land assessment PDF for one canonical land parcel.
 
-    Cross-host safe: ``field_id`` is the source of truth for PDF generation.
+    Cross-host safe: ``land_id`` is the source of truth for PDF generation.
     When ``job_id`` is present *and* a Job row exists in *this* DB, update
     progress as before. Missing local Job is not a hard failure — still
     generate/upload/publish ResultMessage (with ``job_id`` in payload) so the
@@ -451,41 +445,41 @@ def generate_assessment_report(
     report. After max retries, proceed with whatever data is available.
     """
     session = _maybe_sync_session()
-    field_id_str: str | None = str(field_id) if field_id else None
+    land_id_str: str | None = str(land_id) if land_id else None
     job_id_str: str | None = str(job_id) if job_id else None
     job: Job | None = None
     try:
         job = _resolve_job(session, job_id_str)
 
-        if not field_id_str and job and job.field_id:
-            field_id_str = str(job.field_id)
+        if not land_id_str and job and job.land_id:
+            land_id_str = str(job.land_id)
 
-        if not field_id_str:
+        if not land_id_str:
             logger.error(
-                "assessment_field_id_missing",
+                "assessment_land_id_missing",
                 job_id=job_id_str,
                 mq_task_id=mq_task_id,
             )
             if job or job_id_str:
-                _update_job(session, job, "failed", error="field_id required", job_id=job_id_str)
+                _update_job(session, job, "failed", error="land_id required", job_id=job_id_str)
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
-                field_id=None,
-                error="field_id required",
+                land_id=None,
+                error="land_id required",
                 extras={
                     "source": "assessment_report",
                     **({"job_id": job_id_str} if job_id_str else {}),
                 },
             )
-            return {"error": "field_id required"}
+            return {"error": "land_id required"}
 
         if job_id_str and not job:
             # Cross-host: Job lives on API DB; download host has none.
             logger.info(
                 "assessment_job_absent_local",
                 job_id=job_id_str,
-                field_id=field_id_str,
+                land_id=land_id_str,
                 mq_task_id=mq_task_id,
             )
 
@@ -510,7 +504,7 @@ def generate_assessment_report(
             started_at = _resolve_wait_started_at(job, job_id_str)
             status = bootstrap_pulls_ready(
                 session,
-                field_id=uuid.UUID(field_id_str),
+                land_id=land_id_str,
                 date_from=date_from,
                 date_to=date_to,
                 wait_celery_ids=[str(x) for x in (wait_celery_ids or []) if x],
@@ -542,7 +536,7 @@ def generate_assessment_report(
                 if retries < max_r:
                     logger.info(
                         "assessment_waiting_for_bootstrap",
-                        field_id=field_id_str,
+                        land_id=land_id_str,
                         job_id=job_id_str,
                         retry=retries,
                         **{
@@ -560,7 +554,7 @@ def generate_assessment_report(
                     raise self.retry(countdown=30)
                 logger.warning(
                     "assessment_bootstrap_wait_timeout",
-                    field_id=field_id_str,
+                    land_id=land_id_str,
                     job_id=job_id_str,
                     **{
                         k: status[k]
@@ -585,7 +579,7 @@ def generate_assessment_report(
             )
 
         result = generate_assessment_pdf(
-            session=session, field_id=uuid.UUID(field_id_str)
+            session=session, land_id=land_id_str
         )
         pdf_path = Path(result["out_path"])
         if not pdf_path.exists():
@@ -594,7 +588,7 @@ def generate_assessment_report(
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
-                field_id=field_id_str,
+                land_id=land_id_str,
                 error="PDF not produced",
                 extras={
                     "source": "assessment_report",
@@ -617,7 +611,7 @@ def generate_assessment_report(
             )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        object_key = f"reports/default/{field_id_str}/assessment-{ts}.pdf"
+        object_key = f"reports/default/{land_id_str}/assessment-{ts}.pdf"
         upload_result = upload_file_via_storage(
             object_key, str(pdf_path), content_type="application/pdf"
         )
@@ -720,7 +714,7 @@ def generate_assessment_report(
         logger.info(
             "assessment_report_done",
             job_id=job_id_str,
-            field_id=field_id_str,
+            land_id=land_id_str,
             object_key=object_key,
             public_url=public_url,
             score=result["score"],
@@ -734,7 +728,7 @@ def generate_assessment_report(
             oss_urls["assessment_pdf"] = public_url
         mq_payload = {
             "kind": "assessment_report",
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "object_key": object_key,
             "public_url": public_url,
             "filename": progress["filename"],
@@ -759,7 +753,7 @@ def generate_assessment_report(
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="success",
-            field_id=field_id_str,
+            land_id=land_id_str,
             payload=mq_payload,
             oss_urls=oss_urls,
             extras=extras_out,
@@ -792,15 +786,15 @@ def generate_assessment_report(
         logger.exception(
             "assessment_report_failed",
             job_id=job_id_str,
-            field_id=field_id_str,
+            land_id=land_id_str,
             error=str(exc),
         )
         try:
             if job is None and job_id_str:
                 job = _resolve_job(session, job_id_str)
             if job:
-                field_id_str = field_id_str or (
-                    str(job.field_id) if job.field_id else None
+                land_id_str = land_id_str or (
+                    str(job.land_id) if job.land_id else None
                 )
                 _update_job(session, job, "failed", error=str(exc)[:2000])
         except Exception:
@@ -810,14 +804,14 @@ def generate_assessment_report(
             extras_fail["job_id"] = job_id_str
         fail_payload = {
             "kind": "assessment_report",
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "error": str(exc)[:2000],
             **({"job_id": job_id_str} if job_id_str else {}),
         }
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="failed",
-            field_id=field_id_str,
+            land_id=land_id_str,
             error=str(exc)[:500],
             extras=extras_fail,
             payload=fail_payload,

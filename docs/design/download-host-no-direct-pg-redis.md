@@ -31,7 +31,7 @@
 |------|---------|------------|----------|----------|
 | **ingest** | 是 | 是 | API 机 `:5432` / `:6379` | 读字段/景、upsert、改 jobs；Celery broker；进度 |
 | **decloud** | 是 | 是 | 同上 | 去云队列 |
-| **mq_consumer** | 是 | 是 | 同上 | field↔land SQL；`celery send_task` |
+| **mq_consumer** | 是 | 是 | 同上 | canonical land_id；`celery send_task` |
 | **tiler** | 通常无 | 无 | — | 出图 |
 | **本地 db/redis** | 本机 | 本机 | 与远程库不是一套 | 易混淆；PostGIS 应停，Redis 可留作 Celery |
 
@@ -68,7 +68,7 @@
                  │  Internal HTTP:                                   │
                  │    POST /v1/internal/work/claim                   │
                  │    POST /v1/internal/work/{id}/progress|complete  │
-                 │    GET  /v1/internal/fields/resolve …             │
+                 │    GET  /v1/internal/lands/resolve …              │
                  └──────────────────────▲────────────────────────────┘
                                         │ 出站 HTTPS/HTTP
                                         │ （下载机可无公网 IP）
@@ -142,7 +142,7 @@
 ### 3.3 入队来源
 
 业务 REST（选地/长势/拉数等）在 API 侧 **写 `work_items`**（替代或并行于发 CloudAMQP）。  
-前端无感：仍调现有 `/v1/fields/.../assessment-report` 等。
+前端无感：仍调现有 `/v1/lands/.../assessment-report` 等。
 
 ### 3.4 回收
 
@@ -154,12 +154,12 @@
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
-| GET | `/v1/internal/fields/resolve` | field↔land |
-| GET | `/v1/internal/fields/{id}/geom` | 边界等 |
+| GET | `/v1/internal/lands/resolve` | canonical land metadata |
+| GET | `/v1/internal/lands/{land_id}/geom` | 边界等 |
 | GET | `/v1/internal/jobs/{id}` | 读 job |
 | PATCH | `/v1/internal/jobs/{id}` | 兼容旧进度（可与 work progress 合并） |
 | GET | `/v1/internal/agri/lands/{id}/scenes` | skip-existing / 报告 |
-| GET | `/v1/internal/fields/{id}/soil` 等 | 按需 |
+| GET | `/v1/internal/lands/{land_id}/soil` 等 | 按需 |
 
 Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 
@@ -288,19 +288,19 @@ CloudAMQP 为可选兼容。开发按 **D0 → D4** 推进。
 
 **已落地（代码）**
 
-- Claimable types：`assessment_report` / `season_growth_report` / `field_bootstrap` / `satellite_analysis` / `agri_bridge` / `weather_backfill` / `soil_fetch`（光学/S1 chunk 仍为 Celery 子任务，挂在 satellite/bootstrap 下）。
+- Claimable types：`assessment_report` / `season_growth_report` / `land_bootstrap` / `satellite_analysis` / `agri_bridge` / `weather_backfill` / `soil_fetch`（光学/S1 chunk 仍为 Celery 子任务，挂在 satellite/bootstrap 下）。
 - `publish_api_task` 在 `dual|claim` 时同步入队 `work_items`（idempotent）；`claim` 跳过 MQ。
-- 一键 `pull_data`：只入队/发布 `field_bootstrap`(+followup)，避免 claim 下裸 PDF 抢跑。
+- 一键 `pull_data`：只入队/发布 `land_bootstrap`(+followup)，避免 claim 下裸 PDF 抢跑。
 - 双发防护：`should_run_claim_agent()` 仅 `claim`；`dual` 下载机只跑 MQ。
 - mq_consumer：`WORK_QUEUE_MODE=claim` 时仅 claim agent。
 
 **D4.1（本阶段）** — assessment / season-growth / 关键 ingest 读：
 
-- `GET /v1/internal/fields/{id}/assessment-bundle`
-- `GET /v1/internal/fields/{id}/season-growth-inputs`
-- `GET /v1/internal/fields/{id}/data-readiness`
-- ingest `load_field_bundle` / season `build_season_facts` 优先 Internal HTTP；`INGEST_PG_READS` 跟随 `INGEST_PG_WRITES`（可显式覆盖）
-- weather/soil：centroid 走 `fields/{id}/geom`；`INGEST_PG_WRITES=0` 时结果 `results/apply`
+- `GET /v1/internal/lands/{land_id}/assessment-bundle`
+- `GET /v1/internal/lands/{land_id}/season-growth-inputs`
+- `GET /v1/internal/lands/{land_id}/data-readiness`
+- ingest `load_land_bundle` / season `build_season_facts` 优先 Internal HTTP；`INGEST_PG_READS` 跟随 `INGEST_PG_WRITES`（可显式覆盖）
+- weather/soil：centroid 直接读取 canonical land；`INGEST_PG_WRITES=0` 时结果 `results/apply`
 
 **仍延期**
 

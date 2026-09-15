@@ -110,10 +110,15 @@ services:
       -n storage@%h
       --loglevel=info
       --concurrency=2
+  # 单实例调度（ingest 镜像，celery -A app.beat）。多台下载机不要同时起 beat，
+  # 否则周任务和日任务会重复投递。
   beat:
     network_mode: host
     depends_on: !reset []
     restart: unless-stopped
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+
   mq_consumer:
     network_mode: host
     depends_on: !reset []

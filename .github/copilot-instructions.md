@@ -17,6 +17,8 @@ agric-satellite-analysis is an open, modular field intelligence platform built o
 
 **Critical rule:** Next.js talks to Postgres **only** for user upsert during NextAuth auth callback (`src/lib/db.ts`). All other data flows through the FastAPI API via `src/lib/api.ts`.
 
+**Download host:** `ingest` / `storage` / `beat` / `decloud` / `mq_consumer` must not connect to API Postgres (`DATABASE_URL`, `:5432`) or API Redis (`:6379`). Discover lands and work through Internal HTTP (`API_BASE_URL` + `INTERNAL_API_TOKEN`). Beat only publishes task names to local Redis; "which lands to download" must be listed by the API, not by a download-host SQL query. See `AGENTS.md` and `docs/design/download-host-no-direct-pg-redis.md`.
+
 ## Auth Flow
 
 1. User signs in via Google OAuth (NextAuth) → `upsertUser()` in `lib/db.ts` creates user + default org directly in Postgres

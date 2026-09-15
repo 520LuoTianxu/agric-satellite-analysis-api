@@ -1,7 +1,8 @@
 """Agri-first APIs: 项目区 (virtual_project_areas), 地块 (land_parcels), S1/S2 scenes.
 
-Primary product surface for agric-satellite-analysis. The legacy `/v1/farms`
-and `/v1/fields` endpoints remain available for compatibility.
+Primary product surface for agric-satellite-analysis. Scene data is keyed
+directly by ``agric_satellite.land_parcels.land_id``; no parcel mapping is
+performed here.
 """
 
 from __future__ import annotations
@@ -305,7 +306,7 @@ async def agri_stats(
         note=(
             "parcel_scene_products seed dump is a 1000-row sample; "
             "other tables are full export. Primary APIs are under /v1/agri/*; "
-            "/v1/farms and /v1/fields are legacy in this fork."
+            "/v1/lands is the canonical parcel API in this fork."
         ),
     )
 

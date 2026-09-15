@@ -23,22 +23,22 @@ def ingest_http_only() -> bool:
     return False
 
 
-def resolve_field_http(field_id: str) -> dict[str, Any]:
-    """GET /v1/internal/fields/resolve for tags / land_id."""
-    from openfarm_common.internal_api import resolve_field
+def resolve_land_http(land_id: str) -> dict[str, Any]:
+    """GET the canonical land parcel metadata without identity translation."""
+    from openfarm_common.internal_api import resolve_land
 
-    data = resolve_field(field_id=str(field_id))
+    data = resolve_land(land_id=str(land_id))
     if not isinstance(data, dict):
-        raise RuntimeError("fields/resolve returned non-object")
+        raise RuntimeError("lands/resolve returned non-object")
     return data
 
 
-def field_geom_http(field_id: str, *, include_geojson: bool = True) -> dict[str, Any]:
-    from openfarm_common.internal_api import field_geom
+def land_geom_http(land_id: str, *, include_geojson: bool = True) -> dict[str, Any]:
+    from openfarm_common.internal_api import land_geom
 
-    data = field_geom(str(field_id), include_geojson=include_geojson)
+    data = land_geom(str(land_id), include_geojson=include_geojson)
     if not isinstance(data, dict):
-        raise RuntimeError("fields/geom returned non-object")
+        raise RuntimeError("lands/geom returned non-object")
     return data
 
 
