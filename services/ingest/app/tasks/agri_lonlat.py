@@ -130,6 +130,14 @@ def _load_agri_meta(session, field) -> dict[str, Any]:
                 error=str(e),
             )
 
+    if session is None:
+        return {
+            "land_id": land_id,
+            "tile_id": None,
+            "land_name": getattr(field, "name", None),
+            "field_id": str(getattr(field, "id", "")),
+        }
+
     row = (
         session.execute(
             text(
@@ -776,6 +784,266 @@ def _process_one_optical_scene(
         return None
 
 
+
+def _process_agri_optical_http_only(
+    *,
+    job_id: str | None,
+    field_id: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    force: bool,
+    mq_task_id: str | None,
+    growing_seasons: list | None,
+    season_months: list | None,
+) -> dict:
+    """Optical chunk worker without SyncSession (OSS + MQ path)."""
+    from types import SimpleNamespace
+
+    from shapely.geometry import shape as shapely_shape
+
+    from app.core.agri_tags import is_agri_tagged
+    from app.core.http_mode import field_geom_http, get_job_http, resolve_field_http
+    from app.tasks.pipeline import (
+        existing_agri_scene_dates,
+        filter_scenes_skip_existing,
+        search_scenes_for_defs,
+    )
+
+    params: dict[str, Any] = {}
+    if job_id and (not field_id or not date_from or not date_to):
+        remote = get_job_http(job_id) or {}
+        params = dict(remote.get("params_json") or {})
+        field_id = field_id or (
+            str(remote["field_id"]) if remote.get("field_id") else None
+        )
+        date_from = date_from or params.get("date_from")
+        date_to = date_to or params.get("date_to")
+        force = bool(force or params.get("force"))
+        if mq_task_id is None and params.get("mq_task_id"):
+            mq_task_id = str(params["mq_task_id"])
+        growing_seasons = growing_seasons or params.get("growing_seasons")
+        season_months = season_months or params.get("season_months")
+
+    if not field_id or not date_from or not date_to:
+        return {
+            "job_id": job_id,
+            "field_id": field_id,
+            "status": "error",
+            "detail": "field_id/date_from/date_to required",
+            "http_only": True,
+        }
+
+    resolved = resolve_field_http(field_id)
+    tags = resolved.get("tags")
+    if not is_agri_tagged(tags):
+        return {
+            "job_id": job_id,
+            "field_id": field_id,
+            "status": "failed",
+            "reason": "not_agri",
+            "http_only": True,
+        }
+
+    geom_payload = field_geom_http(field_id, include_geojson=True)
+    geojson = geom_payload.get("geojson")
+    if not geojson:
+        return {
+            "job_id": job_id,
+            "field_id": field_id,
+            "status": "failed",
+            "detail": "Field geom missing via HTTP",
+            "http_only": True,
+        }
+
+    field = SimpleNamespace(
+        id=uuid.UUID(str(field_id)),
+        name=resolved.get("name") or geom_payload.get("name"),
+        tags_json=tags,
+        crop_type=None,
+        geom=None,
+    )
+    agri_meta = _load_agri_meta(None, field)
+    field_geom = shapely_shape(geojson)
+    field_geom_geojson = mapping(field_geom)
+    d0 = date.fromisoformat(str(date_from)[:10])
+    d1 = date.fromisoformat(str(date_to)[:10])
+    org_id_str = "default"
+    field_id_str = str(field_id)
+    write_cogs = write_index_cogs_enabled(is_agri=True)
+    synthetic_job_id = job_id or f"http-opt-{field_id_str}-{d0}"
+    index_defs = agri_optical_index_defs()
+
+    logger.info(
+        "agri_optical_http_only_start",
+        field_id=field_id_str,
+        job_id=job_id,
+        date_from=str(d0),
+        date_to=str(d1),
+    )
+
+    from app.core.decloud import decloud_enabled, decloud_stac_cloud_max_pct
+
+    extra_cloud = decloud_stac_cloud_max_pct() if decloud_enabled() else None
+    extra_assets: dict[str, tuple[str, ...]] = {
+        "SCL": SCL_STAC_ASSETS,
+        "visual": ("visual", "true_color", "TCI"),
+    }
+    if decloud_enabled():
+        from app.core.decloud import decloud_s2_extra_assets
+
+        extra_assets.update(decloud_s2_extra_assets())
+
+    t_search = time.perf_counter()
+    scenes = search_scenes_for_defs(
+        field_geom_geojson,
+        d0,
+        d1,
+        index_defs,
+        index_label="agri_optical",
+        max_cloud_cover=extra_cloud,
+        extra_assets=extra_assets,
+        cloud_dedupe="none",
+        max_items=2000,
+    )
+
+    from app.core.decloud import (
+        filter_scenes_outside_season_high_cloud,
+        normalize_season_months,
+    )
+
+    season_months_norm = normalize_season_months(
+        season_months=season_months,
+        growing_seasons=growing_seasons,
+        crop_type=getattr(field, "crop_type", None),
+    )
+    scenes, skipped_offseason_cloudy = filter_scenes_outside_season_high_cloud(
+        scenes,
+        season_months=season_months_norm,
+    )
+    skipped_existing = 0
+    if not force:
+        existing = existing_agri_scene_dates(None, agri_meta["land_id"], "S2")
+        before = len(scenes)
+        scenes = filter_scenes_skip_existing(
+            scenes,
+            existing,
+            force=False,
+            field_id=field_id_str,
+            index="agri_optical",
+        )
+        skipped_existing = before - len(scenes)
+
+    logger.info(
+        "job_phase_timing",
+        phase="scene_search",
+        sensor="S2",
+        job_id=job_id,
+        elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+        scenes=len(scenes),
+        skipped_existing=skipped_existing,
+        skipped_offseason_cloudy=skipped_offseason_cloudy,
+        date_from=str(d0),
+        date_to=str(d1),
+        http_only=True,
+    )
+
+    if not scenes:
+        return {
+            "job_id": job_id,
+            "field_id": field_id_str,
+            "status": "completed",
+            "scenes": 0,
+            "skipped_existing": skipped_existing,
+            "http_only": True,
+        }
+
+    target_transform, target_shape, field_mask, bounds = compute_target_grid(
+        field_geom.bounds, field_geom
+    )
+    workers = min(scene_max_workers(), len(scenes))
+    set_total(synthetic_job_id, len(scenes), workers=workers)
+
+    upserted = 0
+    raw_results: list[dict[str, Any]] = []
+    t_process = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _process_one_optical_scene,
+                job_id=synthetic_job_id,
+                scene=scene,
+                idx=idx,
+                total_scenes=len(scenes),
+                index_defs=index_defs,
+                target_transform=target_transform,
+                target_shape=target_shape,
+                field_mask=field_mask,
+                bounds=bounds,
+                org_id_str=org_id_str,
+                field_id_str=field_id_str,
+                agri_meta=agri_meta,
+                field_geom_geojson=field_geom_geojson,
+                write_cogs=write_cogs,
+                scene_workers=workers,
+                mq_task_id=mq_task_id,
+            ): scene
+            for idx, scene in enumerate(scenes)
+        }
+        for fut in as_completed(futures):
+            scene = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                logger.error(
+                    "agri_optical_scene_failed",
+                    scene_id=scene.get("id"),
+                    error=str(e),
+                )
+                continue
+            if result is not None:
+                upserted += 1
+                raw_results.append(result)
+
+    logger.info(
+        "scene_parallel_done",
+        job_id=job_id,
+        index="agri_optical",
+        layers_created=upserted,
+        total_scenes=len(scenes),
+        workers=workers,
+        wall_ms=int((time.perf_counter() - t_process) * 1000),
+        http_only=True,
+    )
+
+    decloud_schedule = None
+    if decloud_enabled() and raw_results:
+        from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
+
+        decloud_schedule = schedule_decloud_after_raw(
+            field_id=field_id_str,
+            land_id=str(agri_meta["land_id"]),
+            date_from=d0.isoformat(),
+            date_to=d1.isoformat(),
+            raw_results=raw_results,
+            mq_task_id=mq_task_id,
+            season_months=season_months_norm,
+            crop_type=getattr(field, "crop_type", None),
+        )
+
+    out = {
+        "job_id": job_id,
+        "field_id": field_id_str,
+        "status": "completed",
+        "scenes_upserted": upserted,
+        "skipped_existing": skipped_existing,
+        "write_cogs": write_cogs,
+        "http_only": True,
+    }
+    if decloud_schedule:
+        out["decloud"] = decloud_schedule
+    return out
+
+
 @celery_app.task(
     name="app.tasks.agri_lonlat.process_agri_optical_lonlat",
     bind=True,
@@ -783,10 +1051,41 @@ def _process_one_optical_scene(
     time_limit=1800,
     soft_time_limit=1500,
 )
-def process_agri_optical_lonlat(self, job_id: str) -> dict:
-    """Search S2, compute agri optical indices in memory, upsert lonlat_v1."""
+def process_agri_optical_lonlat(
+    self,
+    job_id: str | None = None,
+    field_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    force: bool = False,
+    mq_task_id: str | None = None,
+    growing_seasons: list | None = None,
+    season_months: list | None = None,
+    is_backfill: bool = True,
+) -> dict:
+    """Search S2, compute agri optical indices in memory, upsert lonlat_v1.
+
+    HTTP-only hosts may pass ``field_id`` + date kwargs (no local Job row).
+    """
+    from app.core.http_mode import ingest_http_only
+
+    if ingest_http_only() or (field_id and not job_id):
+        return _process_agri_optical_http_only(
+            job_id=job_id,
+            field_id=field_id,
+            date_from=date_from,
+            date_to=date_to,
+            force=force,
+            mq_task_id=mq_task_id,
+            growing_seasons=growing_seasons,
+            season_months=season_months,
+        )
+
     from app.core.agri_tags import is_agri_tagged
     from app.models.tables import Field, Job
+
+    if not job_id:
+        return {"status": "error", "detail": "job_id or field_id required"}
 
     index_defs = agri_optical_index_defs()
     session = get_db_session()

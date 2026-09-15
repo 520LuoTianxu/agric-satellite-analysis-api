@@ -144,5 +144,41 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         self.assertEqual(status["active_rs_jobs"], 26)
 
 
+    def test_require_rs_coverage_blocks_empty_coverage(self) -> None:
+        session = MagicMock()
+        with (
+            patch.object(ar, "_celery_ids_ready", return_value=(True, [])),
+            patch.object(ar, "_weather_row_count", return_value=30),
+            patch.object(ar, "_soil_ready", return_value=True),
+            patch.object(ar, "_active_backfill_jobs", return_value=0),
+            patch.object(ar, "_agri_rs_coverage_ok", return_value={"ok": False}),
+            patch.object(ar, "_data_readiness_http", return_value=None),
+        ):
+            status = ar.bootstrap_pulls_ready(
+                session,
+                field_id=uuid.uuid4(),
+                date_from="2024-01-01",
+                date_to="2024-12-31",
+                wait_celery_ids=["c1"],
+                wave_cutoff=datetime.now(timezone.utc),
+                started_at=datetime.now(timezone.utc) - __import__("datetime").timedelta(seconds=60),
+                min_wait_seconds=45,
+                require_rs_coverage=True,
+            )
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["rs_ok"])
+
+    def test_resolve_wait_started_at_uses_remote_created_at(self) -> None:
+        remote = {"created_at": "2026-09-15T03:00:00+00:00", "started_at": None}
+        fake = SimpleNamespace(
+            internal_api_enabled=lambda: True,
+            get_job=lambda *_a, **_k: remote,
+        )
+        with patch.dict(sys.modules, {"openfarm_common.internal_api": fake}):
+            started = ar._resolve_wait_started_at(None, "job-1")
+        self.assertEqual(started.year, 2026)
+        self.assertEqual(started.hour, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

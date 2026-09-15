@@ -361,6 +361,13 @@ def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
                 error=str(e),
             )
 
+    if session is None:
+        return {
+            "land_id": land_id,
+            "tile_id": None,
+            "land_name": getattr(field, "name", None),
+        }
+
     row = (
         session.execute(
             text(
@@ -546,7 +553,10 @@ def _process_one_s1_scene(
     from app.models.tables import RasterLayer
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    session = get_db_session()
+    from app.core.http_mode import ingest_http_only
+
+    http_only = ingest_http_only()
+    session = None if http_only else get_db_session()
     scene_id = scene.get("id")
     published = False
     try:
@@ -603,7 +613,7 @@ def _process_one_s1_scene(
         stats_ms = int((time.perf_counter() - t0) * 1000)
 
         write_cog_ms = 0
-        if write_cogs:
+        if write_cogs and session is not None:
             _maybe_s1_progress(
                 job_id,
                 "write_cog",
@@ -666,6 +676,14 @@ def _process_one_s1_scene(
                 session.execute(stmt)
             session.commit()
             published = True
+        elif write_cogs and session is None:
+            logger.info(
+                "cog_upload_skipped",
+                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+                index="s1",
+                is_agri=is_agri,
+                reason="http_only_no_pg",
+            )
         else:
             logger.info(
                 "cog_upload_skipped",
@@ -751,7 +769,8 @@ def _process_one_s1_scene(
             pass
         return False
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _process_s1_scenes_parallel(
@@ -846,6 +865,171 @@ def _process_s1_scenes_parallel(
     return processed
 
 
+
+def _process_s1_http_only(
+    *,
+    job_id: str | None,
+    field_id: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    force: bool,
+    mq_task_id: str | None,
+) -> dict:
+    """S1 chunk worker without SyncSession (OSS + MQ path)."""
+    from types import SimpleNamespace
+
+    from shapely.geometry import shape as shapely_shape
+
+    from app.core.http_mode import field_geom_http, get_job_http, resolve_field_http
+    from app.tasks.pipeline import existing_agri_scene_dates, filter_scenes_skip_existing
+
+    params: dict[str, Any] = {}
+    if job_id and (not field_id or not date_from or not date_to):
+        remote = get_job_http(job_id) or {}
+        params = dict(remote.get("params_json") or {})
+        field_id = field_id or (
+            str(remote["field_id"]) if remote.get("field_id") else None
+        )
+        date_from = date_from or params.get("date_from")
+        date_to = date_to or params.get("date_to")
+        force = bool(force or params.get("force"))
+        if mq_task_id is None and params.get("mq_task_id"):
+            mq_task_id = str(params["mq_task_id"])
+
+    if not field_id or not date_from or not date_to:
+        return {
+            "job_id": job_id,
+            "field_id": field_id,
+            "status": "error",
+            "detail": "field_id/date_from/date_to required",
+            "http_only": True,
+        }
+
+    resolved = resolve_field_http(field_id)
+    geom_payload = field_geom_http(field_id, include_geojson=True)
+    geojson = geom_payload.get("geojson")
+    if not geojson:
+        return {
+            "job_id": job_id,
+            "field_id": field_id,
+            "status": "failed",
+            "detail": "Field geom missing via HTTP",
+            "http_only": True,
+        }
+
+    field_geom = shapely_shape(geojson)
+    field_geom_geojson = mapping(field_geom)
+    field = SimpleNamespace(
+        id=uuid.UUID(str(field_id)),
+        name=resolved.get("name") or geom_payload.get("name"),
+        tags_json=resolved.get("tags"),
+        geom=None,
+    )
+    d0 = date.fromisoformat(str(date_from)[:10])
+    d1 = date.fromisoformat(str(date_to)[:10])
+    org_id_str = "default"
+    field_id_str = str(field_id)
+    synthetic_job_id = job_id or f"http-s1-{field_id_str}-{d0}"
+
+    logger.info(
+        "s1_http_only_start",
+        field_id=field_id_str,
+        job_id=job_id,
+        date_from=str(d0),
+        date_to=str(d1),
+    )
+
+    t_search = time.perf_counter()
+    scenes = search_s1_scenes(field_geom_geojson, d0, d1)
+    skipped_existing = 0
+    agri_meta = _resolve_agri_meta(None, field)
+    if agri_meta is None:
+        logger.warning(
+            "s1_agri_meta_unresolved",
+            field_id=field_id_str,
+            tags=field.tags_json,
+        )
+    if not force and agri_meta is not None:
+        existing = existing_agri_scene_dates(None, agri_meta["land_id"], "S1")
+        before = len(scenes)
+        scenes = filter_scenes_skip_existing(
+            scenes, existing, force=False, field_id=field_id_str, index="s1"
+        )
+        skipped_existing = before - len(scenes)
+
+    logger.info(
+        "job_phase_timing",
+        phase="scene_search",
+        sensor="S1",
+        job_id=job_id,
+        elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+        scenes=len(scenes),
+        skipped_existing=skipped_existing,
+        date_from=str(d0),
+        date_to=str(d1),
+        http_only=True,
+    )
+
+    if not scenes:
+        return {
+            "job_id": job_id,
+            "field_id": field_id_str,
+            "status": "completed",
+            "scenes": 0,
+            "skipped_existing": skipped_existing,
+            "http_only": True,
+        }
+
+    minx, miny, maxx, maxy = field_geom.bounds
+    buf = 0.001
+    bounds = (minx - buf, miny - buf, maxx + buf, maxy + buf)
+    pixel_size = 0.0001
+    width = max(int((bounds[2] - bounds[0]) / pixel_size), 1)
+    height = max(int((bounds[3] - bounds[1]) / pixel_size), 1)
+    max_dim = 2000
+    if width > max_dim or height > max_dim:
+        scale = max_dim / max(width, height)
+        width = max(int(width * scale), 1)
+        height = max(int(height * scale), 1)
+    target_transform = from_bounds(*bounds, width, height)
+    target_shape = (height, width)
+    field_mask = geometry_mask(
+        [mapping(field_geom)],
+        out_shape=target_shape,
+        transform=target_transform,
+        invert=True,
+    )
+
+    workers = min(scene_max_workers(), len(scenes))
+    set_total(synthetic_job_id, len(scenes), workers=workers)
+    processed = _process_s1_scenes_parallel(
+        job_id=synthetic_job_id,
+        scenes=scenes,
+        bounds=bounds,
+        target_shape=target_shape,
+        target_transform=target_transform,
+        field_mask=field_mask,
+        org_id_str=org_id_str,
+        field_id_str=field_id_str,
+        field_id=uuid.UUID(str(field_id)),
+        date_from=d0,
+        date_to=d1,
+        agri_meta=agri_meta,
+        field_geom_geojson=field_geom_geojson,
+        mq_task_id=mq_task_id,
+        on_chunk=None,
+    )
+    return {
+        "job_id": job_id,
+        "field_id": field_id_str,
+        "status": "completed",
+        "scenes": len(scenes),
+        "processed": processed,
+        "skipped_existing": skipped_existing,
+        "http_only": True,
+    }
+
+
 @celery_app.task(
     name="app.tasks.sentinel1.process_s1_backfill",
     bind=True,
@@ -853,9 +1037,37 @@ def _process_s1_scenes_parallel(
     time_limit=1800,
     soft_time_limit=1500,
 )
-def process_s1_backfill(self, job_id: str) -> dict:
-    """Celery entry: search S1 GRD, upsert agri lonlat_v1 (COGs only if enabled)."""
+def process_s1_backfill(
+    self,
+    job_id: str | None = None,
+    field_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    force: bool = False,
+    mq_task_id: str | None = None,
+    is_backfill: bool = True,
+) -> dict:
+    """Celery entry: search S1 GRD, upsert agri lonlat_v1 (COGs only if enabled).
+
+    HTTP-only download hosts may pass ``field_id`` + date kwargs instead of a
+    local Job id (orchestration fans out without SyncSession Job rows).
+    """
+    from app.core.http_mode import ingest_http_only
+
+    if ingest_http_only() or (field_id and not job_id):
+        return _process_s1_http_only(
+            job_id=job_id,
+            field_id=field_id,
+            date_from=date_from,
+            date_to=date_to,
+            force=force,
+            mq_task_id=mq_task_id,
+        )
+
     from app.models.tables import Job, Field
+
+    if not job_id:
+        return {"status": "error", "detail": "job_id or field_id required"}
 
     session = get_db_session()
     try:
@@ -1090,10 +1302,70 @@ def backfill_s1_for_field(
     date_to: str | None = None,
 ) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
-    from app.models.tables import Field, Job
+    from app.core.http_mode import ingest_http_only
 
     months = months or settings.index_backfill_months
     chunk_days = settings.index_backfill_chunk_days
+
+    end_date = date.fromisoformat(date_to) if date_to else date.today()
+    if date_from:
+        start_date = date.fromisoformat(date_from)
+    else:
+        start_date = end_date - timedelta(days=months * 30)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    chunks: list[tuple[date, date]] = []
+    cursor = start_date
+    while cursor < end_date:
+        chunk_end = min(cursor + timedelta(days=chunk_days - 1), end_date)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+
+    if ingest_http_only():
+        # Fan-out Celery kwargs — no SyncSession / Job rows on download host.
+        try:
+            from app.core.http_mode import resolve_field_http
+
+            resolve_field_http(field_id)
+        except Exception as e:
+            logger.error("s1_orchestration_failed", field_id=field_id, error=str(e))
+            raise
+
+        dispatched = 0
+        for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+            celery_app.send_task(
+                "app.tasks.sentinel1.process_s1_backfill",
+                kwargs={
+                    "field_id": field_id,
+                    "date_from": chunk_start.isoformat(),
+                    "date_to": chunk_end.isoformat(),
+                    "force": bool(force),
+                    "mq_task_id": mq_task_id,
+                    "is_backfill": True,
+                },
+                countdown=chunk_idx * 30,
+            )
+            dispatched += 1
+        logger.info(
+            "s1_orchestration_complete",
+            field_id=field_id,
+            jobs=dispatched,
+            http_only=True,
+        )
+        return {
+            "field_id": field_id,
+            "status": "dispatched",
+            "jobs": dispatched,
+            "months": months,
+            "force": force,
+            "date_from": start_date.isoformat(),
+            "date_to": end_date.isoformat(),
+            "http_only": True,
+        }
+
+    from app.models.tables import Field, Job
+
     session = get_db_session()
     try:
         field = session.get(Field, uuid.UUID(field_id))
@@ -1104,23 +1376,8 @@ def backfill_s1_for_field(
                 "detail": "Field not found",
             }
 
-        end_date = date.fromisoformat(date_to) if date_to else date.today()
-        if date_from:
-            start_date = date.fromisoformat(date_from)
-        else:
-            start_date = end_date - timedelta(days=months * 30)
-        if start_date > end_date:
-            start_date, end_date = end_date, start_date
-
         # Always dispatch chunks; process_s1_backfill skips dates already present
         # unless force=True (coarse chunk skip left gaps unfilled).
-        chunks: list[tuple[date, date]] = []
-        cursor = start_date
-        while cursor < end_date:
-            chunk_end = min(cursor + timedelta(days=chunk_days - 1), end_date)
-            chunks.append((cursor, chunk_end))
-            cursor = chunk_end + timedelta(days=1)
-
         pending_sends: list[tuple[str, int]] = []
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):

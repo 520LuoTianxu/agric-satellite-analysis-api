@@ -209,13 +209,9 @@ def generate_season_growth_report(
                 weather_min_rows = max(1, min(7, span))
             except ValueError:
                 pass
-            started_at = None
-            if job and job.created_at:
-                started_at = job.created_at
-            elif job and job.started_at:
-                started_at = job.started_at
-            else:
-                started_at = datetime.now(timezone.utc)
+            from app.tasks.assessment_report import _resolve_wait_started_at
+
+            started_at = _resolve_wait_started_at(job, job_id_str)
             status = bootstrap_pulls_ready(
                 session,
                 field_id=uuid.UUID(field_id_str),
@@ -226,6 +222,7 @@ def generate_season_growth_report(
                 weather_min_rows=weather_min_rows,
                 started_at=started_at,
                 min_wait_seconds=45,
+                require_rs_coverage=True,
             )
             if not status["ready"]:
                 retries = int(getattr(self.request, "retries", 0) or 0)

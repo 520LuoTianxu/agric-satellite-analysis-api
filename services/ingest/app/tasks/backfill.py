@@ -63,7 +63,28 @@ def backfill_indices_for_field(
     optical path (no index COG uploads) plus Sentinel-1 lonlat.
     ``indices``: optional subset of registry keys (classic COG path only).
     ``force``: passed to workers; when true they re-download/reprocess even if dates exist.
+
+    When download-host HTTP-only mode is on (``INGEST_PG_WRITES=0`` / claim),
+    orchestration uses internal field resolve HTTP and fans out Celery kwargs
+    without SyncSession or local Job rows (same idea as weather/soil http_only).
     """
+    from app.core.http_mode import ingest_http_only
+
+    if ingest_http_only():
+        return _backfill_indices_http_only(
+            field_id=field_id,
+            months=months,
+            sentinel_job_id=sentinel_job_id,
+            allow_agri=allow_agri,
+            indices=indices,
+            force=force,
+            mq_task_id=mq_task_id,
+            date_from=date_from,
+            date_to=date_to,
+            growing_seasons=growing_seasons,
+            season_months=season_months,
+        )
+
     from app.models.tables import Field, Job
 
     months = months or settings.index_backfill_months
@@ -283,6 +304,226 @@ def backfill_indices_for_field(
         raise
     finally:
         session.close()
+
+
+def _backfill_indices_http_only(
+    *,
+    field_id: str,
+    months: int | None,
+    sentinel_job_id: str | None,
+    allow_agri: bool,
+    indices: list[str] | None,
+    force: bool,
+    mq_task_id: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    growing_seasons: list | None,
+    season_months: list | None,
+) -> dict:
+    """Orchestrate RS chunk fan-out without SyncSession / local Job rows."""
+    from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+    from app.core.http_mode import patch_job_http, resolve_field_http
+
+    months = months or settings.index_backfill_months
+    chunk_days = settings.index_backfill_chunk_days
+
+    try:
+        resolved = resolve_field_http(field_id)
+    except Exception as e:
+        logger.error(
+            "backfill_orchestration_failed",
+            field_id=field_id,
+            error=f"fields/resolve failed: {e}",
+        )
+        raise
+
+    tags = resolved.get("tags")
+    land_id = resolved.get("land_id") or parse_agri_land_id(tags)
+    agri_field = is_agri_tagged(tags) or bool(land_id)
+
+    if sentinel_job_id:
+        try:
+            from app.core.http_mode import get_job_http
+
+            existing = get_job_http(sentinel_job_id)
+            if existing and existing.get("status") in {"completed", "failed"}:
+                return {
+                    "field_id": field_id,
+                    "status": "already_handled",
+                    "sentinel_job_id": sentinel_job_id,
+                    "http_only": True,
+                }
+        except Exception:
+            pass
+
+    if agri_field and not allow_agri:
+        logger.info(
+            "backfill_indices_skipped_agri_field",
+            field_id=field_id,
+            land_id=land_id,
+            reason="RS from agri.parcel_scene_products (lonlat_v1), not COG backfill",
+            http_only=True,
+        )
+        if sentinel_job_id:
+            try:
+                patch_job_http(
+                    sentinel_job_id,
+                    {
+                        "status": "completed",
+                        "progress_json": {
+                            "skipped": True,
+                            "reason": "agri_tagged",
+                        },
+                        "touch_finished": True,
+                    },
+                )
+            except Exception as e:
+                logger.warning(
+                    "backfill_sentinel_patch_failed",
+                    sentinel_job_id=sentinel_job_id,
+                    error=str(e),
+                )
+        return {
+            "field_id": field_id,
+            "status": "skipped",
+            "reason": "agri_tagged",
+            "land_id": land_id,
+            "http_only": True,
+        }
+
+    end_date = date.fromisoformat(date_to) if date_to else date.today()
+    if date_from:
+        start_date = date.fromisoformat(date_from)
+    else:
+        start_date = end_date - timedelta(days=months * 30)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    chunks = _date_chunks(start_date, end_date, chunk_days)
+    stagger_seconds = 30
+    jobs_dispatched = 0
+    index_keys: list[str] = []
+
+    try:
+        if agri_field:
+            index_keys = ["agri_optical"]
+            for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+                countdown = chunk_idx * stagger_seconds
+                celery_app.send_task(
+                    "app.tasks.agri_lonlat.process_agri_optical_lonlat",
+                    kwargs={
+                        "field_id": field_id,
+                        "date_from": chunk_start.isoformat(),
+                        "date_to": chunk_end.isoformat(),
+                        "force": bool(force),
+                        "mq_task_id": mq_task_id,
+                        "growing_seasons": growing_seasons,
+                        "season_months": season_months,
+                        "is_backfill": True,
+                    },
+                    countdown=countdown,
+                )
+                jobs_dispatched += 1
+                logger.info(
+                    "backfill_agri_optical_dispatched",
+                    field_id=field_id,
+                    chunk=f"{chunk_start} → {chunk_end}",
+                    countdown=countdown,
+                    http_only=True,
+                )
+        else:
+            if indices:
+                wanted = [k.lower() for k in indices]
+                unknown = [k for k in wanted if k not in INDEX_REGISTRY]
+                if unknown:
+                    return {
+                        "field_id": field_id,
+                        "status": "error",
+                        "detail": f"Unknown indices: {unknown}",
+                        "http_only": True,
+                    }
+                index_keys = wanted
+            else:
+                index_keys = list(INDEX_REGISTRY.keys())
+
+            # Classic COG path still needs Job rows on API DB — not supported
+            # without PG on download host. Prefer agri path under claim/HTTP.
+            logger.error(
+                "backfill_orchestration_failed",
+                field_id=field_id,
+                error=(
+                    "http_only classic COG index backfill requires Job rows; "
+                    "use agri-tagged field or enable PG writes"
+                ),
+            )
+            return {
+                "field_id": field_id,
+                "status": "error",
+                "detail": "http_only classic index backfill unsupported",
+                "http_only": True,
+            }
+
+        if sentinel_job_id:
+            try:
+                patch_job_http(
+                    sentinel_job_id,
+                    {"status": "completed", "touch_finished": True},
+                )
+            except Exception as e:
+                logger.warning(
+                    "backfill_sentinel_patch_failed",
+                    sentinel_job_id=sentinel_job_id,
+                    error=str(e),
+                )
+
+        s1_result = None
+        try:
+            from app.tasks.sentinel1 import backfill_s1_for_field
+
+            async_result = backfill_s1_for_field.delay(
+                field_id,
+                months=months,
+                force=force,
+                mq_task_id=mq_task_id,
+                date_from=start_date.isoformat(),
+                date_to=end_date.isoformat(),
+            )
+            s1_result = {"task_id": async_result.id, "status": "queued"}
+            logger.info(
+                "s1_backfill_dispatched",
+                field_id=field_id,
+                result=s1_result,
+                http_only=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "s1_backfill_dispatch_failed", field_id=field_id, error=str(e)
+            )
+
+        logger.info(
+            "backfill_orchestration_complete",
+            field_id=field_id,
+            chunks=len(chunks),
+            indices=len(index_keys),
+            jobs_dispatched=jobs_dispatched,
+            allow_agri=allow_agri,
+            force=force,
+            s1=s1_result,
+            http_only=True,
+        )
+        return {
+            "field_id": field_id,
+            "status": "dispatched",
+            "jobs": jobs_dispatched,
+            "chunks": len(chunks),
+            "indices": index_keys,
+            "allow_agri": allow_agri,
+            "force": force,
+            "s1": s1_result,
+            "http_only": True,
+        }
+    except Exception as e:
+        logger.error("backfill_orchestration_failed", field_id=field_id, error=str(e))
+        raise
 
 
 # ── Weekly auto-compute ──────────────────────────────────────────────

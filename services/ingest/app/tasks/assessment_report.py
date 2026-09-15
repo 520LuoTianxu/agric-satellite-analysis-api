@@ -273,6 +273,39 @@ def _soil_ready(session, field_id: uuid.UUID) -> bool:
     return bool(row)
 
 
+
+def _resolve_wait_started_at(job, job_id_str: str | None) -> datetime:
+    """Stable wait clock across retries when local Job row is absent.
+
+    Prefer local created_at/started_at; else GET /internal/jobs/{id} so each
+    30s retry does not reset started_at=now (which would stall min_wait_seconds).
+    """
+    if job is not None:
+        if getattr(job, "created_at", None):
+            return job.created_at
+        if getattr(job, "started_at", None):
+            return job.started_at
+    if job_id_str:
+        try:
+            from openfarm_common.internal_api import get_job, internal_api_enabled
+
+            if internal_api_enabled():
+                remote = get_job(str(job_id_str))
+                for key in ("created_at", "started_at"):
+                    raw = remote.get(key) if isinstance(remote, dict) else None
+                    if not raw:
+                        continue
+                    s = str(raw).replace("Z", "+00:00")
+                    return datetime.fromisoformat(s)
+        except Exception as exc:
+            logger.warning(
+                "assessment_wait_started_at_http_failed",
+                job_id=job_id_str,
+                error=str(exc),
+            )
+    return datetime.now(timezone.utc)
+
+
 def bootstrap_pulls_ready(
     session,
     *,
@@ -284,6 +317,7 @@ def bootstrap_pulls_ready(
     weather_min_rows: int = 7,
     started_at: datetime | None = None,
     min_wait_seconds: int = 45,
+    require_rs_coverage: bool = False,
 ) -> dict:
     """Check whether weather + soil + RS wave are ready for assessment PDF.
 
@@ -340,6 +374,10 @@ def bootstrap_pulls_ready(
     # coverage for the window is already sufficient, do not block on staggered
     # skip-noop backfill chunks still sitting in the ingest queue.
     rs_ok = celery_ready and (active_rs == 0 or bool(coverage.get("ok")))
+    # pull_data waits: empty coverage must not look RS-ready forever when the
+    # backfill wave never started (active_rs==0 on HTTP-only download host).
+    if require_rs_coverage:
+        rs_ok = rs_ok and bool(coverage.get("ok"))
 
     elapsed_ok = True
     if started_at is not None and min_wait_seconds > 0:
@@ -469,13 +507,7 @@ def generate_assessment_report(
             # Do not wait on bridge_after_backfill id itself forever via AsyncResult
             # alone — it retries up to ~90min; we still list top-level pull ids and
             # use active_rs_jobs for the RS wave.
-            started_at = None
-            if job and job.created_at:
-                started_at = job.created_at
-            elif job and job.started_at:
-                started_at = job.started_at
-            else:
-                started_at = datetime.now(timezone.utc)
+            started_at = _resolve_wait_started_at(job, job_id_str)
             status = bootstrap_pulls_ready(
                 session,
                 field_id=uuid.UUID(field_id_str),
@@ -486,6 +518,7 @@ def generate_assessment_report(
                 weather_min_rows=weather_min_rows,
                 started_at=started_at,
                 min_wait_seconds=45,
+                require_rs_coverage=True,
             )
             if not status["ready"]:
                 retries = int(getattr(self.request, "retries", 0) or 0)
