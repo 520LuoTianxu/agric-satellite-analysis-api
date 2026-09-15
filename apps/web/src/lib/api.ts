@@ -1318,6 +1318,43 @@ export function parseAgriLandId(tags: string[] | null | undefined): string | nul
     return null;
 }
 
+/** Parse cdfinance_group:<id> / group:<id> from field.tags */
+export function parseCdfinanceGroupId(tags: string[] | null | undefined): string | null {
+    if (!tags?.length) return null;
+    for (const tag of tags) {
+        if (typeof tag !== "string") continue;
+        for (const prefix of ["cdfinance_group:", "group:"] as const) {
+            if (tag.startsWith(prefix)) {
+                const id = tag.slice(prefix.length).trim();
+                if (id) return id;
+            }
+        }
+    }
+    return null;
+}
+
+/** Merge agri / optional cdfinance group tags into an existing tag list. */
+export function withAgriFieldTags(
+    existing: string[] | null | undefined,
+    opts: { landId?: string | null; groupId?: string | null },
+): string[] {
+    const landId = (opts.landId ?? "").trim();
+    const groupId = (opts.groupId ?? "").trim();
+    let out = (existing ?? []).filter((t) => typeof t === "string");
+    // Replace any agri:* when landId provided; drop agri:* when cleared.
+    if (opts.landId !== undefined) {
+        out = out.filter((t) => !t.startsWith("agri:"));
+        if (landId) out.push(`agri:${landId}`);
+    }
+    if (opts.groupId !== undefined) {
+        out = out.filter(
+            (t) => !t.startsWith("cdfinance_group:") && !t.startsWith("group:"),
+        );
+        if (groupId) out.push(`cdfinance_group:${groupId}`);
+    }
+    return out;
+}
+
 export const agriApi = {
     overviewStats: (opts: {
         level?: OverviewLevel;

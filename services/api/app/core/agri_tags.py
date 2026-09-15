@@ -65,3 +65,18 @@ def ensure_cdfinance_group_tag(tags: Any, group_id: str | int) -> list[str]:
     if marker not in out and f"group:{gid}" not in out:
         out.append(marker)
     return out
+
+
+def ensure_agri_land_tag(tags: Any, land_id: str | int | None) -> list[str]:
+    """Replace any ``agri:*`` tag with ``agri:<land_id>``, or drop agri tags if empty.
+
+    Idempotent for the same land_id. Does not require ``agri.land_parcels`` to exist.
+    """
+    out = [t for t in iter_tag_strings(tags) if not t.startswith("agri:")]
+    if land_id is None:
+        return out
+    lid = str(land_id).strip()
+    if not lid:
+        return out
+    out.append(f"agri:{lid}")
+    return out

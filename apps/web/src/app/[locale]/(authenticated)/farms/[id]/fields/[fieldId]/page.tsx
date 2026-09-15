@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
 import maplibregl from "maplibre-gl";
-import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId } from "@/lib/api";
+import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId, parseCdfinanceGroupId, withAgriFieldTags } from "@/lib/api";
 import CropSelect from "@/components/field/crop-select";
 import type { Field, RasterLayer, IndexType } from "@/lib/api";
 import type { AgriHeatIndex, AgriHeatmapImage } from "@/lib/agri-heatmap";
@@ -241,6 +241,8 @@ export default function FieldDetailPage() {
     const [editName, setEditName] = useState("");
     const [editCropType, setEditCropType] = useState("");
     const [editSeason, setEditSeason] = useState("");
+    const [editAgriLandId, setEditAgriLandId] = useState("");
+    const [editCdfinanceGroupId, setEditCdfinanceGroupId] = useState("");
     const [editGeom, setEditGeom] = useState<GeoJSON.Geometry | null>(null);
     const [saving, setSaving] = useState(false);
 
@@ -397,6 +399,8 @@ export default function FieldDetailPage() {
             setEditName(f.name);
             setEditCropType(f.crop_type || "");
             setEditSeason(f.season || "");
+            setEditAgriLandId(parseAgriLandId(f.tags) || "");
+            setEditCdfinanceGroupId(parseCdfinanceGroupId(f.tags) || "");
             setEditGeom(f.geom);
         } catch {
             toast.error(t("fieldNotFound"));
@@ -764,6 +768,17 @@ export default function FieldDetailPage() {
             if (editGeom && JSON.stringify(editGeom) !== JSON.stringify(field?.geom))
                 data.geom = editGeom;
 
+            const prevLand = parseAgriLandId(field?.tags) || "";
+            const prevGroup = parseCdfinanceGroupId(field?.tags) || "";
+            const nextLand = editAgriLandId.trim();
+            const nextGroup = editCdfinanceGroupId.trim();
+            if (nextLand !== prevLand || nextGroup !== prevGroup) {
+                data.tags = withAgriFieldTags(field?.tags, {
+                    landId: nextLand,
+                    groupId: nextGroup,
+                });
+            }
+
             const updated = await fieldsApi.update(fieldId, data);
             setField(updated);
             setEditing(false);
@@ -1088,6 +1103,33 @@ export default function FieldDetailPage() {
                                                 className="h-9"
                                             />
                                         </div>
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="edit-agri-land-id" className="text-xs">
+                                                {t("agriLandId")}
+                                            </Label>
+                                            <Input
+                                                id="edit-agri-land-id"
+                                                value={editAgriLandId}
+                                                onChange={(e) => setEditAgriLandId(e.target.value)}
+                                                placeholder={t("placeholderAgriLandId")}
+                                                className="h-9"
+                                            />
+                                            <p className="text-[11px] text-muted-foreground">
+                                                {t("agriLandIdHint")}
+                                            </p>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="edit-cdfinance-group-id" className="text-xs">
+                                                {t("cdfinanceGroupId")}
+                                            </Label>
+                                            <Input
+                                                id="edit-cdfinance-group-id"
+                                                value={editCdfinanceGroupId}
+                                                onChange={(e) => setEditCdfinanceGroupId(e.target.value)}
+                                                placeholder={t("placeholderCdfinanceGroupId")}
+                                                className="h-9"
+                                            />
+                                        </div>
                                         <p className="text-xs text-muted-foreground">
                                             {t("editHint")}
                                         </p>
@@ -1146,6 +1188,14 @@ export default function FieldDetailPage() {
                                                     value={field.season || "-"}
                                                 />
                                                 <InfoRow
+                                                    label={t("agriLandId")}
+                                                    value={parseAgriLandId(field.tags) || "-"}
+                                                />
+                                                <InfoRow
+                                                    label={t("cdfinanceGroupId")}
+                                                    value={parseCdfinanceGroupId(field.tags) || "-"}
+                                                />
+                                                <InfoRow
                                                     label={t("tags")}
                                                     value={field.tags?.join(", ") || "-"}
                                                 />
@@ -1169,7 +1219,15 @@ export default function FieldDetailPage() {
                                             variant="outline"
                                             size="sm"
                                             className="w-full"
-                                            onClick={() => setEditing(true)}
+                                            onClick={() => {
+                                                setEditName(field.name);
+                                                setEditCropType(field.crop_type || "");
+                                                setEditSeason(field.season || "");
+                                                setEditAgriLandId(parseAgriLandId(field.tags) || "");
+                                                setEditCdfinanceGroupId(parseCdfinanceGroupId(field.tags) || "");
+                                                setEditGeom(field.geom);
+                                                setEditing(true);
+                                            }}
                                         >
                                             <Edit2 className="h-4 w-4 mr-2" />
                                             {t("edit")}

@@ -310,7 +310,12 @@
     "placeholderName": "ej. Bloque A1",
     "placeholderCrop": "Elija un cultivo del catálogo",
     "placeholderSeason": "ej. Kharif 2025, Rabi 2026",
-    "cropRequired": "Seleccione un cultivo"
+    "cropRequired": "Seleccione un cultivo",
+    "agriLandId": "ID de parcela agri",
+    "placeholderAgriLandId": "ej. 25107",
+    "agriLandIdHint": "Se guarda como etiqueta agri:<id>; habilita relleno RS HTTP",
+    "cdfinanceGroupId": "ID de grupo CDFinance (opcional)",
+    "placeholderCdfinanceGroupId": "ej. 7694"
   },
   "fieldDetail": {
     "backToFarm": "Volver a finca",
@@ -349,7 +354,12 @@
     "parcelCloudCover": "nubes parcela {percent}%",
     "sceneCloudCover": "nubes escena {percent}%",
     "tabLandReport": "Informe de tierra",
-    "cropUnset": "Sin definir"
+    "cropUnset": "Sin definir",
+    "agriLandId": "ID de parcela agri",
+    "placeholderAgriLandId": "ej. 25107",
+    "agriLandIdHint": "Se guarda como etiqueta agri:<id>; habilita relleno RS HTTP",
+    "cdfinanceGroupId": "ID de grupo CDFinance (opcional)",
+    "placeholderCdfinanceGroupId": "ej. 7694"
   },
   "alertsTab": {
     "noAlerts": "Sin alertas",

@@ -67,7 +67,8 @@ async def get_land(
         .first()
     )
     if not row:
-        raise HTTPException(status_code=404, detail="land parcel not found")
+        # Allow RS ingest for agri-tagged fields before land_parcels upsert.
+        return AgriLandOut(land_id=land_id)
     return AgriLandOut(
         land_id=row["land_id"],
         tile_id=row.get("tile_id"),
@@ -90,15 +91,7 @@ async def land_scene_dates(
 
     Matches ingest ``existing_agri_scene_dates`` filter semantics.
     """
-    exists = (
-        await db.execute(
-            text("SELECT 1 FROM agri.land_parcels WHERE land_id = :lid"),
-            {"lid": land_id},
-        )
-    ).scalar()
-    if not exists:
-        raise HTTPException(status_code=404, detail="land parcel not found")
-
+    # land_parcels row is optional — tagged fields may ingest before parcel upsert.
     rows = (
         await db.execute(
             text(

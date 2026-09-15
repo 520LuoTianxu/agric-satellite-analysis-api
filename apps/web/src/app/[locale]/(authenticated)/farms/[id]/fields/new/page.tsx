@@ -4,7 +4,7 @@ import React, { useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
 import dynamic from "next/dynamic";
-import { fieldsApi } from "@/lib/api";
+import { fieldsApi, withAgriFieldTags } from "@/lib/api";
 import CropSelect from "@/components/field/crop-select";
 import { toast } from "sonner";
 import { ArrowLeft, Loader2, Plus, ChevronDown, ChevronUp, Check, TriangleAlert } from "lucide-react";
@@ -44,6 +44,8 @@ export default function NewFieldPage() {
     const [name, setName] = useState("");
     const [cropType, setCropType] = useState("");
     const [season, setSeason] = useState("");
+    const [agriLandId, setAgriLandId] = useState("");
+    const [cdfinanceGroupId, setCdfinanceGroupId] = useState("");
     const [geometry, setGeometry] = useState<GeoJSON.Geometry | null>(null);
     const [saving, setSaving] = useState(false);
     const [panelOpen, setPanelOpen] = useState(true);
@@ -84,12 +86,17 @@ export default function NewFieldPage() {
 
         setSaving(true);
         try {
+            const tags = withAgriFieldTags([], {
+                landId: agriLandId.trim() || undefined,
+                groupId: cdfinanceGroupId.trim() || undefined,
+            });
             const field = await fieldsApi.create({
                 farm_id: farmId,
                 name: name.trim(),
                 geom: geometry,
                 crop_type: cropType.trim(),
                 season: season.trim() || undefined,
+                tags: tags.length ? tags : undefined,
             });
             toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
             router.push(`/farms/${farmId}/fields/${field.id}`);
@@ -177,6 +184,31 @@ export default function NewFieldPage() {
                                         value={season}
                                         onChange={(e) => setSeason(e.target.value)}
                                         placeholder={t("placeholderSeason")}
+                                        className="h-9"
+                                    />
+                                </div>
+
+                                <div className="space-y-1.5">
+                                    <Label htmlFor="agri-land-id" className="text-xs">{t("agriLandId")}</Label>
+                                    <Input
+                                        id="agri-land-id"
+                                        type="text"
+                                        value={agriLandId}
+                                        onChange={(e) => setAgriLandId(e.target.value)}
+                                        placeholder={t("placeholderAgriLandId")}
+                                        className="h-9"
+                                    />
+                                    <p className="text-[11px] text-muted-foreground">{t("agriLandIdHint")}</p>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                    <Label htmlFor="cdfinance-group-id" className="text-xs">{t("cdfinanceGroupId")}</Label>
+                                    <Input
+                                        id="cdfinance-group-id"
+                                        type="text"
+                                        value={cdfinanceGroupId}
+                                        onChange={(e) => setCdfinanceGroupId(e.target.value)}
+                                        placeholder={t("placeholderCdfinanceGroupId")}
                                         className="h-9"
                                     />
                                 </div>

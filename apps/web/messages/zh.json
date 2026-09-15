@@ -310,7 +310,12 @@
     "placeholderName": "例如：地块 A1",
     "placeholderCrop": "从目录选择作物",
     "placeholderSeason": "例如：2025 年早稻、2026 年冬小麦",
-    "cropRequired": "请选择作物"
+    "cropRequired": "请选择作物",
+    "agriLandId": "农情地块ID / agri land_id",
+    "placeholderAgriLandId": "例如：25107",
+    "agriLandIdHint": "填写后写入 agri:<id> 标签，用于遥感 HTTP 回填",
+    "cdfinanceGroupId": "中和农信项目组ID（可选）",
+    "placeholderCdfinanceGroupId": "例如：7694"
   },
   "fieldDetail": {
     "backToFarm": "返回农场",
@@ -349,7 +354,12 @@
     "parcelCloudCover": "地块云量 {percent}%",
     "sceneCloudCover": "整景云量 {percent}%",
     "tabLandReport": "选地报告",
-    "cropUnset": "未设置"
+    "cropUnset": "未设置",
+    "agriLandId": "农情地块ID / agri land_id",
+    "placeholderAgriLandId": "例如：25107",
+    "agriLandIdHint": "填写后写入 agri:<id> 标签，用于遥感 HTTP 回填",
+    "cdfinanceGroupId": "中和农信项目组ID（可选）",
+    "placeholderCdfinanceGroupId": "例如：7694"
   },
   "alertsTab": {
     "noAlerts": "暂无预警",

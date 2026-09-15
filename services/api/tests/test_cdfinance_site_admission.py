@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from app.core.agri_tags import (
+    ensure_agri_land_tag,
     ensure_cdfinance_group_tag,
     parse_cdfinance_group_id,
 )
@@ -102,6 +103,17 @@ class CdfinanceSiteAdmissionHelpersTests(unittest.TestCase):
         self.assertEqual(
             ensure_cdfinance_group_tag(tags, 3232).count("cdfinance_group:3232"), 1
         )
+
+    def test_ensure_agri_land_tag(self):
+        self.assertEqual(
+            ensure_agri_land_tag(["crop:wheat", "agri:OLD"], "25107"),
+            ["crop:wheat", "agri:25107"],
+        )
+        self.assertEqual(
+            ensure_agri_land_tag(["agri:OLD", "cdfinance_group:1"], ""),
+            ["cdfinance_group:1"],
+        )
+        self.assertEqual(ensure_agri_land_tag(None, "9"), ["agri:9"])
 
 
 if __name__ == "__main__":

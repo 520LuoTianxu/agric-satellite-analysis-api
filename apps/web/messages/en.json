@@ -310,7 +310,12 @@
     "placeholderName": "e.g. Block A1",
     "placeholderCrop": "Select a crop from the catalog",
     "placeholderSeason": "e.g. Kharif 2025, Rabi 2026",
-    "cropRequired": "Please select a crop"
+    "cropRequired": "Please select a crop",
+    "agriLandId": "Agri land ID",
+    "placeholderAgriLandId": "e.g. 25107",
+    "agriLandIdHint": "Saved as agri:<id> tag; enables RS HTTP backfill",
+    "cdfinanceGroupId": "CDFinance group ID (optional)",
+    "placeholderCdfinanceGroupId": "e.g. 7694"
   },
   "fieldDetail": {
     "backToFarm": "Back to farm",
@@ -349,7 +354,12 @@
     "parcelCloudCover": "parcel cloud {percent}%",
     "sceneCloudCover": "scene cloud {percent}%",
     "tabLandReport": "Land report",
-    "cropUnset": "Not set"
+    "cropUnset": "Not set",
+    "agriLandId": "Agri land ID",
+    "placeholderAgriLandId": "e.g. 25107",
+    "agriLandIdHint": "Saved as agri:<id> tag; enables RS HTTP backfill",
+    "cdfinanceGroupId": "CDFinance group ID (optional)",
+    "placeholderCdfinanceGroupId": "e.g. 7694"
   },
   "alertsTab": {
     "noAlerts": "No alerts",

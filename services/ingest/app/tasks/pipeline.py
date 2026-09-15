@@ -189,6 +189,10 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
                 error=str(e),
             )
 
+    # http_only callers pass session=None; treat as no existing dates.
+    if session is None:
+        return set()
+
     from sqlalchemy import text as sa_text
 
     rows = session.execute(

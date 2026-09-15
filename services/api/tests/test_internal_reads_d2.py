@@ -92,5 +92,47 @@ class ResolveBothIdsTests(unittest.TestCase):
         self.assertEqual(out.land_id, "L1")
 
 
+
+class EnsureAgriLandTagTests(unittest.TestCase):
+    def test_replace_and_clear(self) -> None:
+        from app.core.agri_tags import ensure_agri_land_tag
+
+        self.assertEqual(
+            ensure_agri_land_tag(["crop:wheat", "agri:OLD"], "25107"),
+            ["crop:wheat", "agri:25107"],
+        )
+        self.assertEqual(
+            ensure_agri_land_tag(["agri:OLD", "cdfinance_group:1"], ""),
+            ["cdfinance_group:1"],
+        )
+        self.assertEqual(ensure_agri_land_tag(None, "9"), ["agri:9"])
+
+
+class PatchFieldTagsTests(unittest.TestCase):
+    def test_merge_land_and_group(self) -> None:
+        field = MagicMock()
+        field.id = uuid.uuid4()
+        field.tags_json = ["crop:corn"]
+        field.name = "郎吕坡村委会4号"
+        field.deleted_at = None
+
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=field)
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+
+        body = fields_mod.FieldTagsPatch(land_id="25107", group_id="7694")
+        out = asyncio.get_event_loop().run_until_complete(
+            fields_mod.patch_field_tags(str(field.id), body, None, db)
+        )
+        self.assertEqual(out.land_id, "25107")
+        self.assertIn("agri:25107", out.tags or [])
+        self.assertIn("cdfinance_group:7694", out.tags or [])
+        self.assertEqual(out.name, "郎吕坡村委会4号")
+        db.commit.assert_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

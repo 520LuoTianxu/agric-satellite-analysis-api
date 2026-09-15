@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid as _uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -208,6 +208,77 @@ async def field_geom(
         centroid_lon=row["centroid_lon"],
         centroid_lat=row["centroid_lat"],
         geojson=row["geojson"] if include_geojson else None,
+    )
+
+
+
+class FieldTagsPatch(BaseModel):
+    """Set agri / cdfinance tags without requiring agri.land_parcels."""
+
+    land_id: str | None = None
+    group_id: str | None = None
+    tags: list[str] | None = None
+
+
+@router.patch("/{field_id}/tags", response_model=FieldResolveOut)
+async def patch_field_tags(
+    field_id: str,
+    body: FieldTagsPatch,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Merge agri / cdfinance group tags into ``fields.tags_json``.
+
+    Ops / download-machine can fix tagging without a user JWT.
+    Does not require an ``agri.land_parcels`` row.
+    """
+    from app.core.agri_tags import (
+        ensure_agri_land_tag,
+        ensure_cdfinance_group_tag,
+        iter_tag_strings,
+        parse_agri_land_id,
+    )
+
+    fid_uuid = _parse_field_uuid(field_id)
+    row = (
+        await db.execute(
+            select(FieldModel).where(
+                FieldModel.id == fid_uuid,
+                FieldModel.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="field not found")
+
+    if body.tags is not None:
+        tags = list(iter_tag_strings(body.tags))
+    else:
+        tags = list(iter_tag_strings(row.tags_json))
+
+    if body.land_id is not None:
+        tags = ensure_agri_land_tag(tags, body.land_id)
+    if body.group_id is not None:
+        gid = str(body.group_id).strip()
+        # Replace any prior group tag (mirror frontend withAgriFieldTags).
+        tags = [
+            t
+            for t in tags
+            if not t.startswith("cdfinance_group:") and not t.startswith("group:")
+        ]
+        if gid:
+            tags = ensure_cdfinance_group_tag(tags, gid)
+
+    row.tags_json = tags
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    out_tags = row.tags_json if isinstance(row.tags_json, list) else tags
+    return FieldResolveOut(
+        field_id=str(row.id),
+        land_id=parse_agri_land_id(out_tags),
+        tags=out_tags if isinstance(out_tags, list) else None,
+        name=row.name,
     )
 
 
