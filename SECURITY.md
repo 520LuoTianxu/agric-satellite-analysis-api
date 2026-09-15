@@ -15,7 +15,7 @@ We aim to acknowledge reports within 2 business days and provide a resolution or
 ## Scope
 
 - agric-satellite-analysis backend (`services/api`, `services/tiler`)
-- agric-satellite-analysis frontend (`apps/web`)
+- agric-satellite-analysis frontend (`agric-satellite-analysis-web`)
 - Infrastructure in this repository (`docker-compose.yml`)
 
 Out of scope: third-party services and forks not maintained by the agric-satellite-analysis team.
@@ -41,7 +41,7 @@ We will not pursue legal action against researchers who:
 
 MapLibre GL JS does not support `Authorization` headers on tile requests. As a
 result, tile endpoints receive the JWT via `?access_token=<token>` query
-parameter (see `apps/web/src/lib/map-auth.ts`).
+parameter (see `agric-satellite-analysis-web/src/lib/map-auth.ts`).
 
 **Risk:** Tokens may appear in server access logs and browser history.
 

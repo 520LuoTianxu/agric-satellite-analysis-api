@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm.attributes import flag_modified
 
-from openfarm_common.job_progress_redis import (  # noqa: F401
+from agric_satellite_analysis_common.job_progress_redis import (  # noqa: F401
     apply_redis_to_progress,
     clear_progress,
     incr_done,

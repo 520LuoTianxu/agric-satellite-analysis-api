@@ -383,7 +383,7 @@ def _upsert_agri_s1(
     json_oss_key = None
     json_url = None
     json_upload_ms = 0
-    from openfarm_common.mq_results import (
+    from agric_satellite_analysis_common.mq_results import (
         scene_json_oss_key,
         upload_scene_product_json,
     )
@@ -423,7 +423,7 @@ def _upsert_agri_s1(
     if not json_url or not json_oss_key:
         raise RuntimeError("S1 agri path requires OSS scene JSON upload before MQ publish")
 
-    from openfarm_common.mq_results import publish_task_result
+    from agric_satellite_analysis_common.mq_results import publish_task_result
 
     label = f"{date_str}_S1"
     parent = (mq_task_id or "").strip() or None

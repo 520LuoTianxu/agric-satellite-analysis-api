@@ -21,7 +21,7 @@ class WeeklyIndexHttpTests(unittest.TestCase):
             patch.object(bf, "get_db_session") as get_db,
             patch.object(bf, "_schedule_via_http", return_value=True),
             patch(
-                "openfarm_common.internal_api.weekly_index_prepare",
+                "agric_satellite_analysis_common.internal_api.weekly_index_prepare",
                 return_value={
                     "items": [
                         {
@@ -55,11 +55,11 @@ class WeatherScheduleHttpTests(unittest.TestCase):
             patch.object(wx, "_get_db_session") as get_db,
             patch.object(wx, "group", return_value=group_mock),
             patch(
-                "openfarm_common.internal_api.internal_api_enabled",
+                "agric_satellite_analysis_common.internal_api.internal_api_enabled",
                 return_value=True,
             ),
             patch(
-                "openfarm_common.internal_api.weather_land_ids",
+                "agric_satellite_analysis_common.internal_api.weather_land_ids",
                 return_value={"land_ids": ["L1", "L2"], "batch_size": 50},
             ),
         ):
@@ -76,7 +76,7 @@ class OverviewScheduleHttpTests(unittest.TestCase):
         from app.tasks import overview_preagg as ov
 
         with patch(
-            "openfarm_common.internal_api.internal_api_enabled",
+            "agric_satellite_analysis_common.internal_api.internal_api_enabled",
             return_value=False,
         ):
             with self.assertRaises(RuntimeError):
@@ -87,11 +87,11 @@ class OverviewScheduleHttpTests(unittest.TestCase):
 
         with (
             patch(
-                "openfarm_common.internal_api.internal_api_enabled",
+                "agric_satellite_analysis_common.internal_api.internal_api_enabled",
                 return_value=True,
             ),
             patch(
-                "openfarm_common.internal_api.refresh_overview_stats",
+                "agric_satellite_analysis_common.internal_api.refresh_overview_stats",
                 return_value={"ok": True, "regions": 3},
             ) as http_call,
         ):

@@ -82,7 +82,7 @@ def _get_db_session():
 def _http_only_weather() -> bool:
     """True when download must not use SyncSession (reads or writes)."""
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             http_writes_enabled,
             ingest_pg_reads_allowed,
             ingest_pg_writes_enabled,
@@ -102,7 +102,7 @@ def _http_only_weather() -> bool:
 def _resolve_land_lat_lon(land_id: str, session=None) -> tuple[float, float] | None:
     """Centroid (lat, lon) via internal geom API, else database land_parcels.geom."""
     try:
-        from openfarm_common.internal_api import land_geom, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import land_geom, internal_api_enabled
 
         if internal_api_enabled():
             g = land_geom(land_id)
@@ -116,7 +116,7 @@ def _resolve_land_lat_lon(land_id: str, session=None) -> tuple[float, float] | N
             error=str(exc),
         )
         try:
-            from openfarm_common.internal_api import ingest_pg_reads_allowed
+            from agric_satellite_analysis_common.internal_api import ingest_pg_reads_allowed
 
             if not ingest_pg_reads_allowed():
                 return None
@@ -392,7 +392,7 @@ def fetch_weather_for_land(
         else:
             # HTTP-only: push rows to API (water balance computed server-side)
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled() and pending_records:
                     apply_results(
@@ -502,7 +502,7 @@ def schedule_daily_weather_fetch() -> dict:
     http = False
 
     try:
-        from openfarm_common.internal_api import internal_api_enabled, weather_land_ids
+        from agric_satellite_analysis_common.internal_api import internal_api_enabled, weather_land_ids
 
         if internal_api_enabled():
             # 向 API 要 land_id，不在本机 SELECT land_parcels
@@ -645,7 +645,7 @@ def backfill_weather_for_land(
         result = fetch_weather_for_land(land_id, backfill_days=backfill)
         if mq_task_id:
             try:
-                from openfarm_common.mq_results import publish_task_result
+                from agric_satellite_analysis_common.mq_results import publish_task_result
 
                 status = "success"
                 if isinstance(result, dict) and result.get("status") in (
@@ -669,7 +669,7 @@ def backfill_weather_for_land(
                         except Exception:
                             payload = None
                     try:
-                        from openfarm_common.internal_api import (
+                        from agric_satellite_analysis_common.internal_api import (
                             apply_results,
                             http_writes_enabled,
                             ingest_pg_writes_enabled,
@@ -720,7 +720,7 @@ def backfill_weather_for_land(
     except Exception as e:
         if mq_task_id:
             try:
-                from openfarm_common.mq_results import publish_task_result
+                from agric_satellite_analysis_common.mq_results import publish_task_result
 
                 publish_task_result(
                     task_id=mq_task_id,

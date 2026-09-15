@@ -10,7 +10,7 @@ wrapper). Compose build context: **repo root** → `services/ingest/Dockerfile`.
 celery -A app.worker worker -Q ingest --loglevel=info
 ```
 
-Shared helpers: `packages/openfarm_common`. Uploads go through
+Shared helpers: `packages/agric_satellite_analysis_common`. Uploads go through
 `app.tasks.storage.*` via shared `/data/scratch`.
 See `docs/design/ingest-storage-split.md`.
 

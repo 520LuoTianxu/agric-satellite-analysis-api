@@ -51,7 +51,7 @@ def _publish_mq_result(
     if not mq_task_id:
         return
     try:
-        from openfarm_common.mq_results import publish_task_result
+        from agric_satellite_analysis_common.mq_results import publish_task_result
 
         publish_task_result(
             task_id=mq_task_id,
@@ -76,7 +76,7 @@ def _publish_mq_result(
 def _maybe_sync_session():
     """Open SyncSession only when PG reads are still allowed on this host."""
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             ingest_pg_reads_allowed,
             internal_api_enabled,
         )
@@ -94,7 +94,7 @@ def _data_readiness_http(
     date_to: str | None,
 ) -> dict | None:
     try:
-        from openfarm_common.internal_api import data_readiness, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import data_readiness, internal_api_enabled
 
         if not internal_api_enabled():
             return None
@@ -281,7 +281,7 @@ def _resolve_wait_started_at(job, job_id_str: str | None) -> datetime:
             return job.started_at
     if job_id_str:
         try:
-            from openfarm_common.internal_api import get_job, internal_api_enabled
+            from agric_satellite_analysis_common.internal_api import get_job, internal_api_enabled
 
             if internal_api_enabled():
                 remote = get_job(str(job_id_str))
@@ -620,7 +620,7 @@ def generate_assessment_report(
             public_url = upload_result.get("public_url")
         if not public_url:
             try:
-                from openfarm_common.storage import get_storage
+                from agric_satellite_analysis_common.storage import get_storage
 
                 public_url = get_storage().public_url(object_key)
             except Exception as e:
@@ -767,7 +767,7 @@ def generate_assessment_report(
         # When HTTP writes on and local job missing, still patch API job via apply
         if job is None and job_id_str:
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
                     apply_results(mq_payload)
@@ -824,7 +824,7 @@ def generate_assessment_report(
             pass
         if job is None and job_id_str:
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
                     apply_results({**fail_payload, "status": "failed"})

@@ -15,13 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV MPLCONFIGDIR=/tmp/matplotlib
 ENV PYTHONUNBUFFERED=1
 
-COPY packages/openfarm_common /packages/openfarm_common
+COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/api/pyproject.toml .
 COPY services/api/alembic.ini .
 COPY services/api/alembic ./alembic
 COPY services/api/app ./app
 
-RUN pip install --no-cache-dir /packages/openfarm_common \
+RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
     && pip install --no-cache-dir .
 
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \

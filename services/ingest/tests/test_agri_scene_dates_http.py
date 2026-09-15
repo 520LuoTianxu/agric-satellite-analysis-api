@@ -22,10 +22,10 @@ class ExistingAgriSceneDatesHttpTests(unittest.TestCase):
         session = MagicMock()
         with (
             patch(
-                "openfarm_common.internal_api.internal_api_enabled", return_value=True
+                "agric_satellite_analysis_common.internal_api.internal_api_enabled", return_value=True
             ),
             patch(
-                "openfarm_common.internal_api.agri_scene_dates",
+                "agric_satellite_analysis_common.internal_api.agri_scene_dates",
                 return_value=["2024-05-01", "2024-05-02"],
             ),
         ):
@@ -33,7 +33,7 @@ class ExistingAgriSceneDatesHttpTests(unittest.TestCase):
             with patch.dict(
                 "sys.modules",
                 {
-                    "openfarm_common.internal_api": SimpleNamespace(
+                    "agric_satellite_analysis_common.internal_api": SimpleNamespace(
                         agri_scene_dates=lambda *a, **k: ["2024-05-01", "2024-05-02"],
                         internal_api_enabled=lambda: True,
                     )

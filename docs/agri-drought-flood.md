@@ -2,7 +2,7 @@
 
 Field timeseries, heatmaps, overview, and land-assessment optical inputs share
 these rules. Implementation: `services/api/app/core/agri_classify.py` (mirrored
-in ingest) and `apps/web/src/lib/agri-classify.ts`.
+in ingest) and `agric-satellite-analysis-web/src/lib/agri-classify.ts`.
 
 Fair/bad decloud products are stored for audit only and never enter drought
 or other official land metrics. NDVI and similar growth charts compare raw

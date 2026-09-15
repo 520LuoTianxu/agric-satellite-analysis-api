@@ -9,7 +9,7 @@ from typing import Any
 def _as_date(value: Any) -> date | None:
     """Coerce ISO string / date / datetime → ``date`` for SQL params.
 
-    Mirrors ``openfarm_common.harvest_detect._parse_date``. Returns None when
+    Mirrors ``agric_satellite_analysis_common.harvest_detect._parse_date``. Returns None when
     the value cannot be parsed so callers can skip the bound cleanly.
     """
     if value is None:

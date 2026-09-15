@@ -8,7 +8,7 @@ from typing import Any
 def ingest_http_only() -> bool:
     """True when download must not open SyncSession (reads or writes)."""
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             ingest_pg_reads_allowed,
             ingest_pg_writes_enabled,
             internal_api_enabled,
@@ -25,7 +25,7 @@ def ingest_http_only() -> bool:
 
 def resolve_land_http(land_id: str) -> dict[str, Any]:
     """GET the canonical land parcel metadata without identity translation."""
-    from openfarm_common.internal_api import resolve_land
+    from agric_satellite_analysis_common.internal_api import resolve_land
 
     data = resolve_land(land_id=str(land_id))
     if not isinstance(data, dict):
@@ -34,7 +34,7 @@ def resolve_land_http(land_id: str) -> dict[str, Any]:
 
 
 def land_geom_http(land_id: str, *, include_geojson: bool = True) -> dict[str, Any]:
-    from openfarm_common.internal_api import land_geom
+    from agric_satellite_analysis_common.internal_api import land_geom
 
     data = land_geom(str(land_id), include_geojson=include_geojson)
     if not isinstance(data, dict):
@@ -45,14 +45,14 @@ def land_geom_http(land_id: str, *, include_geojson: bool = True) -> dict[str, A
 def patch_job_http(job_id: str | None, body: dict[str, Any]) -> None:
     if not job_id:
         return
-    from openfarm_common.internal_api import patch_job
+    from agric_satellite_analysis_common.internal_api import patch_job
 
     patch_job(str(job_id), body)
 
 
 def get_job_http(job_id: str) -> dict[str, Any] | None:
     try:
-        from openfarm_common.internal_api import get_job, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import get_job, internal_api_enabled
 
         if not internal_api_enabled():
             return None

@@ -141,7 +141,7 @@ def _dsn() -> str:
 
 def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) -> int:
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             agri_scenes_summary,
             internal_api_enabled,
         )
@@ -196,7 +196,7 @@ def publish_optical_lonlat_to_oss_mq(
     ``oss_sensor`` only changes the object key / MQ label (e.g. ``S2_decloud``).
     The stored row stays ``sensor='S2'`` so existing clients keep working.
     """
-    from openfarm_common.mq_results import (
+    from agric_satellite_analysis_common.mq_results import (
         publish_task_result,
         scene_json_oss_key,
         upload_scene_product_json,

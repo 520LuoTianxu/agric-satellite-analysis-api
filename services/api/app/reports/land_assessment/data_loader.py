@@ -744,7 +744,7 @@ def load_land_bundle(
     """
     if allow_http:
         try:
-            from openfarm_common.internal_api import (
+            from agric_satellite_analysis_common.internal_api import (
                 assessment_bundle,
                 ingest_pg_reads_allowed,
                 internal_api_enabled,

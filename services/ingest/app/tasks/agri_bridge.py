@@ -42,7 +42,7 @@ def _publish_mq_result(
 ) -> None:
     """Best-effort CloudAMQP ResultMessage publish (outer scheduling bus)."""
     try:
-        from openfarm_common.mq_results import publish_task_result
+        from agric_satellite_analysis_common.mq_results import publish_task_result
 
         publish_task_result(
             task_id=mq_task_id,

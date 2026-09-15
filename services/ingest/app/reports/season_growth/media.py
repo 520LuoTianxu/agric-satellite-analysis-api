@@ -30,7 +30,7 @@ def _resolve_url(url: str | None, oss_key: str | None) -> str | None:
     if not oss_key:
         return None
     try:
-        from openfarm_common.storage import get_parcel_product_storage
+        from agric_satellite_analysis_common.storage import get_parcel_product_storage
 
         storage = get_parcel_product_storage()
         return storage.presigned_get(str(oss_key))

@@ -6,7 +6,7 @@ import structlog
 
 def setup_logging() -> None:
     """Configure JSON structured logging for the API."""
-    from openfarm_common.trace import install_stdlib_trace_log_record
+    from agric_satellite_analysis_common.trace import install_stdlib_trace_log_record
 
     install_stdlib_trace_log_record()
     structlog.configure(

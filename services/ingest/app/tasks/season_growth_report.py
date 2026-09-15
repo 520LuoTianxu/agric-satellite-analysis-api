@@ -12,7 +12,7 @@ from app.core.database_sync import SyncSession
 
 def _maybe_sync_session():
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             ingest_pg_reads_allowed,
             internal_api_enabled,
         )
@@ -64,7 +64,7 @@ def _publish_mq_result(
     if not mq_task_id:
         return
     try:
-        from openfarm_common.mq_results import publish_task_result
+        from agric_satellite_analysis_common.mq_results import publish_task_result
 
         publish_task_result(
             task_id=mq_task_id,
@@ -326,7 +326,7 @@ def generate_season_growth_report(
             public_url = upload_result.get("public_url")
         if not public_url:
             try:
-                from openfarm_common.storage import get_storage
+                from agric_satellite_analysis_common.storage import get_storage
 
                 public_url = get_storage().public_url(object_key)
             except Exception as e:
@@ -407,7 +407,7 @@ def generate_season_growth_report(
             pass
         if job is None and job_id_str:
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
                     apply_results(mq_payload)
@@ -464,7 +464,7 @@ def generate_season_growth_report(
             pass
         if job is None and job_id_str:
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
                     apply_results({**fail_payload, "status": "failed"})

@@ -22,13 +22,13 @@ def refresh_overview_stats(
     下载机不得查库。
     """
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             internal_api_enabled,
             refresh_overview_stats as refresh_overview_http,
         )
     except ImportError as exc:
         raise RuntimeError(
-            "refresh_overview_stats 需要 openfarm_common.internal_api"
+            "refresh_overview_stats 需要 agric_satellite_analysis_common.internal_api"
         ) from exc
 
     if not internal_api_enabled():

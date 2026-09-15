@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
-from openfarm_common.trace import (
+from agric_satellite_analysis_common.trace import (
     TRACE_HEADER,
     bind_trace_id,
     clear_trace_id,

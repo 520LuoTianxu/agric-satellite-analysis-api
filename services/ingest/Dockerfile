@@ -15,11 +15,11 @@ RUN mkdir -p /tmp/matplotlib && chmod 777 /tmp/matplotlib
 ENV OPENFARM_SCRATCH_DIR=/data/scratch
 ENV PYTHONUNBUFFERED=1
 
-COPY packages/openfarm_common /packages/openfarm_common
+COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/ingest/pyproject.toml .
 COPY services/ingest/app ./app
 
-RUN pip install --no-cache-dir /packages/openfarm_common \
+RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
     && pip install --no-cache-dir . \
     && pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
 

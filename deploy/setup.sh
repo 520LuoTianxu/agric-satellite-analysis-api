@@ -14,8 +14,11 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis.git"
+WEB_REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis-web.git"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-INSTALL_DIR="/opt/openfarm"
+WORKSPACE_DIR="/opt/agric-satellite-analysis-workspace"
+INSTALL_DIR="$WORKSPACE_DIR/agric-satellite-analysis"
+WEB_INSTALL_DIR="$WORKSPACE_DIR/agric-satellite-analysis-web"
 
 echo "──────────────────────────────────────────────────────────"
 echo " agric-satellite-analysis - Server Setup"
@@ -111,12 +114,21 @@ systemctl enable fail2ban
 systemctl start fail2ban
 
 # ── 7. Clone repository ─────────────────────────────────────────────
-if [ ! -d "$INSTALL_DIR" ]; then
+mkdir -p "$WORKSPACE_DIR"
+if [ ! -d "$INSTALL_DIR/.git" ]; then
     echo "▸ Cloning agric-satellite-analysis ($REPO_BRANCH) to $INSTALL_DIR..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
 else
     echo "▸ agric-satellite-analysis already cloned, pulling latest..."
     cd "$INSTALL_DIR" && git pull origin "$REPO_BRANCH"
+fi
+
+if [ ! -d "$WEB_INSTALL_DIR/.git" ]; then
+    echo "▸ Cloning agric-satellite-analysis-web ($REPO_BRANCH) to $WEB_INSTALL_DIR..."
+    git clone --branch "$REPO_BRANCH" "$WEB_REPO_URL" "$WEB_INSTALL_DIR"
+else
+    echo "▸ agric-satellite-analysis-web already cloned, pulling latest..."
+    cd "$WEB_INSTALL_DIR" && git pull origin "$REPO_BRANCH"
 fi
 
 cd "$INSTALL_DIR"

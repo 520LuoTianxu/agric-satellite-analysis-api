@@ -102,7 +102,7 @@ def download_material_keys(
 
     if storage is None:
         try:
-            from openfarm_common.storage import get_storage
+            from agric_satellite_analysis_common.storage import get_storage
 
             storage = get_storage()
         except Exception:

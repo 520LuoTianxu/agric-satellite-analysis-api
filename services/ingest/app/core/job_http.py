@@ -1,6 +1,6 @@
 """HTTP-first job / work-item writes for download-host isolation (D3).
 
-When ``http_writes_enabled()`` (see openfarm_common.internal_api), prefer
+When ``http_writes_enabled()`` (see agric_satellite_analysis_common.internal_api), prefer
 PATCH /v1/internal/jobs and work complete/fail over SyncSession.
 """
 
@@ -34,7 +34,7 @@ def update_job_record(
     ``job`` may be None when the row lives only on the API DB; in that case
     ``job_id`` is required for the HTTP path.
     """
-    from openfarm_common.internal_api import http_writes_enabled, patch_job
+    from agric_satellite_analysis_common.internal_api import http_writes_enabled, patch_job
 
     jid = str(job_id or (job.id if job is not None else "") or "")
     if http_writes_enabled() and jid:
@@ -86,7 +86,7 @@ def complete_work_item_http(
     if not work_item_id:
         return
     try:
-        from openfarm_common.internal_api import complete_work, http_writes_enabled, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import complete_work, http_writes_enabled, internal_api_enabled
 
         if not (http_writes_enabled() or internal_api_enabled()):
             return
@@ -109,7 +109,7 @@ def fail_work_item_http(
     if not work_item_id:
         return
     try:
-        from openfarm_common.internal_api import fail_work, http_writes_enabled, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import fail_work, http_writes_enabled, internal_api_enabled
 
         if not (http_writes_enabled() or internal_api_enabled()):
             return

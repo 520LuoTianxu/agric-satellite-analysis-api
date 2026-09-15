@@ -1,5 +1,5 @@
 # storage worker 精简镜像：只做 OSS 上传，不装 GDAL / 栅格栈。
-# 必须在仓库根目录构建，才能 COPY packages/openfarm_common：
+# 必须在仓库根目录构建，才能 COPY packages/agric_satellite_analysis_common：
 #   docker build -f services/storage/Dockerfile -t openfarm-storage .
 
 FROM python:3.12-slim
@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # ObjectStorage / Celery factory / 日志都来自共享包，避免本服务再拷一份。
-COPY packages/openfarm_common /packages/openfarm_common
-RUN pip install --no-cache-dir /packages/openfarm_common
+COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
+RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common
 
 COPY services/storage/app ./app
 

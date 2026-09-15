@@ -1,4 +1,2 @@
-apps/web/.next
-apps/web/node_modules
 **/__pycache__
 .git

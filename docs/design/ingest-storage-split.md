@@ -1,6 +1,6 @@
 # 国外数据下载与 OSS 上传服务拆分设计
 
-> 状态：已定稿；**物理拆包已落地**（openfarm_common + 独立 ingest/storage 镜像）  
+> 状态：已定稿；**物理拆包已落地**（agric_satellite_analysis_common + 独立 ingest/storage 镜像）
 > 关联仓库：`agric-satellite-analysis`  
 > 日期：2026-09-10
 
@@ -132,7 +132,7 @@ API 现有 `routers/storage.py`（presign、客户端直传）保留在 **api**�
 
 ```
 packages/
-  openfarm_common/     # settings, ObjectStorage, celery factory, storage_client
+  agric_satellite_analysis_common/     # settings, ObjectStorage, celery factory, storage_client
 services/
   api/                 # FastAPI + beat client（send_task，不含重任务模块）
   ingest/
@@ -150,8 +150,8 @@ services/
 
 **共享策略（本轮）**
 
-- 短期：`ingest` / `storage` **复制或 git subtree 式引用** `api` 内必要模块，用 `PYTHONPATH` 或 pip editable 包 `openfarm-common`（若时间紧，Dockerfile `COPY` 共享目录 `packages/common`）。  
-- 推荐落地：新建 `packages/common`（config 片段、DB sync、Job 模型访问），api/ingest/storage 依赖之，避免三份 storage 实现。
+- 短期：`ingest` / `storage` **复制或 git subtree 式引用** `api` 内必要模块，用 `PYTHONPATH` 或 pip editable 包 `agric_satellite_analysis_common`。
+- 推荐落地：继续扩展 `packages/agric_satellite_analysis_common`（config 片段、DB sync、Job 模型访问），api/ingest/storage 依赖同一份共享实现，避免三份 storage 实现。
 
 若「一次改到位」工期紧：允许 ingest Dockerfile `COPY services/api/app` 并以 `celery -A app.worker` 启动、仅改 **compose 命令与 queue** + **任务内上传改为 send_task**；同时新建精简 `services/storage`。随后再物理搬目录。设计上以「逻辑拆分完成」为验收，物理目录以可维护为优先。
 

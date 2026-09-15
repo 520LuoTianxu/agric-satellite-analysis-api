@@ -143,7 +143,7 @@ async def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
     # Prefer live Redis hot-path counters when present (graceful no-op if down).
     try:
-        from openfarm_common.job_progress_redis import merge_progress_for_api
+        from agric_satellite_analysis_common.job_progress_redis import merge_progress_for_api
 
         merged = merge_progress_for_api(job.id, job.progress_json)
         if merged is not None and merged is not job.progress_json:

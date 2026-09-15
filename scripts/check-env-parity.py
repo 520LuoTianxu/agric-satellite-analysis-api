@@ -4,13 +4,14 @@
 Three real defects motivated this, all of which a file-to-file diff of
 .env against .env.example would have missed:
 
-  * NEXT_PUBLIC_MINIO_URL was set correctly in production and still
+  * NEXT_PUBLIC_OSS_URL was set correctly in production and still
     produced broken photo URLs, because compose never passed it to the
     web service and Next.js inlines NEXT_PUBLIC_* at build time.
   * Four soil variables were documented and read by tasks/soil.py, but
     never given to the worker (processor/ingest) that runs those tasks, so editing them
     did nothing and the code defaults applied silently.
-  * MINIO_CONSOLE_PORT existed in .env.example and nowhere else at all.
+  * A documented storage variable existed in .env.example and nowhere else at
+    all.
 
 So the checks below run from the consumer backwards: for every variable,
 does it reach the process that reads it?
@@ -27,6 +28,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+WEB_ROOT = ROOT.parent / "agric-satellite-analysis-web"
 COMPOSE_FILES = ["docker-compose.yml", "docker-compose.dev.yml", "docker-compose.prod.yml"]
 
 failures: list[str] = []
@@ -78,9 +80,7 @@ if undocumented:
 
 # 2. A key documented in .env.example that nothing reads is a lie in the
 #    docs. Look everywhere a variable could legitimately be consumed.
-haystack = "".join(
-    read(f) for f in COMPOSE_FILES + ["apps/web/Dockerfile", "deploy/setup.sh"]
-)
+haystack = "".join(read(f) for f in COMPOSE_FILES + ["deploy/setup.sh"])
 for extra in (ROOT / "deploy" / "terraform" / "templates").glob("*.tftpl"):
     haystack += extra.read_text(encoding="utf-8")
 for key in sorted(example_active):
@@ -90,19 +90,33 @@ for key in sorted(example_active):
 # 3. NEXT_PUBLIC_* is inlined at build time. Reading one in the web app
 #    without passing it as a build arg bakes the fallback into the image,
 #    which is exactly how the scouting photos broke.
-web_src = " ".join(
-    p.read_text(encoding="utf-8", errors="replace")
-    for p in (ROOT / "apps" / "web" / "src").rglob("*.ts*")
-)
-used_public = set(re.findall(r"process\.env\.(NEXT_PUBLIC_[A-Z0-9_]+)", web_src))
-web_block = service_block(compose, "web")
-build_args = set(re.findall(r"(NEXT_PUBLIC_[A-Z0-9_]+):", web_block.split("environment:")[0]))
-dockerfile = read("apps/web/Dockerfile")
-for key in sorted(used_public):
-    if key not in build_args:
-        failures.append(f"{key} is read by the web app but is not a build arg of the web service")
-    elif f"ARG {key}" not in dockerfile:
-        failures.append(f"{key} is a compose build arg but has no ARG in apps/web/Dockerfile")
+web_src_root = WEB_ROOT / "src"
+web_dockerfile = WEB_ROOT / "Dockerfile"
+used_public: set[str] = set()
+if web_src_root.is_dir() and web_dockerfile.is_file():
+    web_src = " ".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in web_src_root.rglob("*.ts*")
+    )
+    used_public = set(re.findall(r"process\.env\.(NEXT_PUBLIC_[A-Z0-9_]+)", web_src))
+    web_block = service_block(compose, "web")
+    build_args = set(
+        re.findall(r"(NEXT_PUBLIC_[A-Z0-9_]+):", web_block.split("environment:")[0])
+    )
+    dockerfile = web_dockerfile.read_text(encoding="utf-8")
+    for key in sorted(used_public):
+        if key not in build_args:
+            failures.append(
+                f"{key} is read by the web app but is not a build arg of the web service"
+            )
+        elif f"ARG {key}" not in dockerfile:
+            failures.append(
+                f"{key} is a compose build arg but has no ARG in the frontend Dockerfile"
+            )
+else:
+    notes.append(
+        "frontend repository is not checked out beside the backend; skipping web build-arg checks"
+    )
 
 # 4. A documented API setting has to reach the container that runs the
 #    code reading it. Celery tasks run on the workers, not on the API.

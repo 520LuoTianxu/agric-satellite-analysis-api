@@ -4,7 +4,7 @@ Beat 只往本机 Redis 发布任务名，不导入栅格任务，也不查 Post
 真正拉地块清单、执行下载的是 ingest worker。
 """
 
-from openfarm_common.celery_app import create_celery_app
+from agric_satellite_analysis_common.celery_app import create_celery_app
 
 celery_app = create_celery_app(
     name="openfarm-ingest",

@@ -33,7 +33,7 @@ class LoadLandBundleHttpTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "openfarm_common.internal_api.assessment_bundle",
+                "agric_satellite_analysis_common.internal_api.assessment_bundle",
                 return_value=fake,
             ) as ab,
         ):
@@ -54,7 +54,7 @@ class LoadLandBundleHttpTests(unittest.TestCase):
                 clear=False,
             ),
             patch(
-                "openfarm_common.internal_api.assessment_bundle",
+                "agric_satellite_analysis_common.internal_api.assessment_bundle",
                 side_effect=RuntimeError("boom"),
             ),
         ):

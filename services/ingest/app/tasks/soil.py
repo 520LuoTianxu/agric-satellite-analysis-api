@@ -121,7 +121,7 @@ def _get_db_session():
 
 def _soil_http_only() -> bool:
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             ingest_pg_reads_allowed,
             ingest_pg_writes_enabled,
             internal_api_enabled,
@@ -139,7 +139,7 @@ def _resolve_land_lat_lon_soil(
 ) -> tuple[float, float] | None:
     """Return (lat, lon) via internal geom API or SyncSession LandParcel.geom."""
     try:
-        from openfarm_common.internal_api import land_geom, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import land_geom, internal_api_enabled
 
         if internal_api_enabled():
             g = land_geom(land_id)
@@ -151,7 +151,7 @@ def _resolve_land_lat_lon_soil(
             "soil_land_geom_http_failed", land_id=land_id, error=str(exc)
         )
         try:
-            from openfarm_common.internal_api import ingest_pg_reads_allowed
+            from agric_satellite_analysis_common.internal_api import ingest_pg_reads_allowed
 
             if not ingest_pg_reads_allowed():
                 return None
@@ -1155,7 +1155,7 @@ def fetch_soil_for_land(
         if not mq_task_id:
             return
         try:
-            from openfarm_common.mq_results import publish_task_result
+            from agric_satellite_analysis_common.mq_results import publish_task_result
 
             publish_task_result(
                 task_id=mq_task_id,
@@ -1290,7 +1290,7 @@ def fetch_soil_for_land(
         }
         if http_only:
             try:
-                from openfarm_common.internal_api import apply_results, http_writes_enabled
+                from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
                     apply_results(soil_payload)

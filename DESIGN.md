@@ -1,7 +1,7 @@
 # agric-satellite-analysis design system
 
-The rulebook for every surface in `apps/web`. Read it before writing or changing any UI, whether you are a contributor or a coding agent.
-Source of truth for values: **`openfarm-tokens.css`** (token blocks live in `apps/web/src/app/globals.css`). Visual reference: **`docs/design/OpenFarm Design System.dc.html`** (open in a browser; the reference pages are standalone). The reference pages use inline styles so they render without a build step - never copy inline hex out of them; production code uses Tailwind classes reading the tokens.
+The rulebook for every surface in `agric-satellite-analysis-web`. Read it before writing or changing any UI, whether you are a contributor or a coding agent.
+Source of truth for values: **`openfarm-tokens.css`** (token blocks live in `agric-satellite-analysis-web/src/app/globals.css`). Visual reference: **`docs/design/OpenFarm Design System.dc.html`** (open in a browser; the reference pages are standalone). The reference pages use inline styles so they render without a build step - never copy inline hex out of them; production code uses Tailwind classes reading the tokens.
 
 ---
 

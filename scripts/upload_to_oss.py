@@ -13,16 +13,16 @@ Examples:
 
   # Upload glossary PNGs as public web assets
   python3 scripts/upload_to_oss.py \\
-    --src apps/web/public/glossary \\
+    --src ../agric-satellite-analysis-web/public/glossary \\
     --prefix web/glossary/ \\
     --public-read \\
-    --write-manifest apps/web/public/glossary/oss-manifest.json
+    --write-manifest ../agric-satellite-analysis-web/public/glossary/oss-manifest.json
 
   # Upload a single file
   python3 scripts/upload_to_oss.py --src ./foo.png --prefix web/misc/ --public-read
 
   # Dry run
-  python3 scripts/upload_to_oss.py --src apps/web/public/glossary --prefix web/glossary/ --dry-run
+  python3 scripts/upload_to_oss.py --src ../agric-satellite-analysis-web/public/glossary --prefix web/glossary/ --dry-run
 """
 from __future__ import annotations
 

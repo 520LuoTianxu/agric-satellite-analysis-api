@@ -276,7 +276,7 @@ CloudAMQP 为可选兼容。开发按 **D0 → D4** 推进。
 
 **已落地（代码）**
 
-- `openfarm_common.result_apply`：与 mq_result_writer 同一套 assessment/season job 更新 + weather/soil/scene upsert。
+- `agric_satellite_analysis_common.result_apply`：与 mq_result_writer 同一套 assessment/season job 更新 + weather/soil/scene upsert。
 - `POST /v1/internal/work/{id}/complete` → `apply_complete_result`。
 - `POST /v1/internal/results/apply`：无 work_item 时的域写入。
 - ingest：`http_writes_enabled()` 时 assessment / season_growth 走 `PATCH /internal/jobs`；带 `work_item_id` 时任务结束再 `complete`（claim agent 只 progress=dispatched）。

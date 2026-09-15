@@ -1,7 +1,7 @@
 """Celery worker for the ingest queue (download + raster compute)."""
 
-from openfarm_common.celery_app import create_celery_app
-from openfarm_common.logging import setup_logging
+from agric_satellite_analysis_common.celery_app import create_celery_app
+from agric_satellite_analysis_common.logging import setup_logging
 
 setup_logging()
 

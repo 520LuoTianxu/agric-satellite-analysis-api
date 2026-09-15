@@ -46,7 +46,7 @@ class CompleteApplyTests(unittest.TestCase):
         }
 
         with patch(
-            "openfarm_common.result_apply.apply_complete_result",
+            "agric_satellite_analysis_common.result_apply.apply_complete_result",
             return_value={"domain": {"assessment_report": {"job_updated": True}}},
         ) as apply_mock:
             out = asyncio.run(
@@ -68,7 +68,7 @@ class CompleteApplyTests(unittest.TestCase):
         db.flush = AsyncMock()
 
         with patch(
-            "openfarm_common.result_apply.apply_complete_result",
+            "agric_satellite_analysis_common.result_apply.apply_complete_result",
             return_value={"skipped": True, "reason": "dispatch_ack"},
         ) as apply_mock:
             asyncio.run(
@@ -84,7 +84,7 @@ class CompleteApplyTests(unittest.TestCase):
 
 class ResultApplyUnitTests(unittest.TestCase):
     def test_assessment_payload_updates_job(self) -> None:
-        from openfarm_common import result_apply as ra
+        from agric_satellite_analysis_common import result_apply as ra
 
         job_id = str(uuid.uuid4())
         with patch.object(ra, "_apply_assessment_job_progress", return_value=True) as m:
@@ -102,7 +102,7 @@ class ResultApplyUnitTests(unittest.TestCase):
         self.assertTrue(stats["domain"]["assessment_report"]["job_updated"])
 
     def test_weather_payload_calls_apply_weather(self) -> None:
-        from openfarm_common import result_apply as ra
+        from agric_satellite_analysis_common import result_apply as ra
 
         with patch.object(ra, "apply_weather_payload", return_value=3) as m:
             stats = ra.apply_result_envelope(
@@ -132,7 +132,7 @@ class InternalResultsRouterTests(unittest.TestCase):
 
 class HttpWritesFlagTests(unittest.TestCase):
     def test_default_pg_writes(self) -> None:
-        from openfarm_common import internal_api as ia
+        from agric_satellite_analysis_common import internal_api as ia
         import os
         from unittest.mock import patch as p
 
@@ -151,7 +151,7 @@ class HttpWritesFlagTests(unittest.TestCase):
             self.assertFalse(ia.http_writes_enabled())
 
     def test_force_http_when_pg_writes_off(self) -> None:
-        from openfarm_common import internal_api as ia
+        from agric_satellite_analysis_common import internal_api as ia
         import os
         from unittest.mock import patch as p
 
@@ -169,7 +169,7 @@ class HttpWritesFlagTests(unittest.TestCase):
             self.assertTrue(ia.http_writes_enabled())
 
     def test_claim_mode_enables_http_writes(self) -> None:
-        from openfarm_common import internal_api as ia
+        from agric_satellite_analysis_common import internal_api as ia
         import os
         from unittest.mock import patch as p
 

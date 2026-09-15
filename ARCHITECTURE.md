@@ -37,7 +37,7 @@ queue; object-store puts (OSS/MinIO) run on the **`storage`** queue. The FastAPI
 
 | Path | Role |
 |------|------|
-| `packages/openfarm_common` | Shared settings, `ObjectStorage`, Celery factory, storage client |
+| `packages/agric_satellite_analysis_common` | Shared settings, `ObjectStorage`, Celery factory, storage client |
 | `services/ingest` | Own `app/tasks/*` + GDAL/STAC image |
 | `services/storage` | Lean Celery image (**no GDAL**) |
 | `services/api` | FastAPI + beat client only |
