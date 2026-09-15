@@ -50,7 +50,7 @@ class SoilLayerOut(BaseModel):
 
 class SoilProfileOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     source: str
     source_resolution_m: int | None = None
     fetched_at: datetime
@@ -61,7 +61,7 @@ class SoilProfileOut(BaseModel):
 
 class SoilFieldSummaryOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     dominant_texture: str | None = None
     avg_ph: float | None = None
     total_soc_stock_t_ha: float | None = None
@@ -85,7 +85,7 @@ class SoilFieldSummaryOut(BaseModel):
 
 
 class SoilRefreshResponse(BaseModel):
-    field_id: str
+    land_id: str
     job_id: str
     status: str
     message: str
@@ -166,8 +166,7 @@ class SoilNpkIndicatorOut(BaseModel):
 
 
 class SoilNpkOut(BaseModel):
-    field_id: uuid.UUID
-    land_id: str | None = None
+    land_id: str
     source: str
     # Normalized
     tn_g_kg: float | None = None  # 全氮
@@ -205,7 +204,7 @@ class SoilNpkFetchRequest(BaseModel):
 
 
 class SoilNpkFetchResponse(BaseModel):
-    field_id: str
+    land_id: str
     status: str
     npk: SoilNpkOut
     message: str | None = None
@@ -216,9 +215,8 @@ class SoilNpkFetchResponse(BaseModel):
 
 class SiteAdmissionOut(BaseModel):
     id: uuid.UUID | None = None
-    field_id: uuid.UUID | None = None
+    land_id: str
     group_id: str
-    land_id: str | None = None
     source: str
     status: str | None = None
     score: float | None = None
@@ -248,12 +246,10 @@ class SiteAdmissionFetchRequest(BaseModel):
     auth_query: str | None = None
     hr_base_id: str | None = None
     force: bool = False
-    # Persist cdfinance_group:<id> onto field.tags_json when True (default).
-    link_field_tag: bool = True
 
 
 class SiteAdmissionFetchResponse(BaseModel):
-    field_id: str | None = None
+    land_id: str
     group_id: str
     status: str
     admission: SiteAdmissionOut

@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from openfarm_common.trace import stamp_trace_on_payload
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -17,7 +18,7 @@ CLAIMABLE_TYPES = frozenset(
     {
         "assessment_report",
         "season_growth_report",
-        "field_bootstrap",
+        "land_bootstrap",
         "satellite_analysis",  # agri optical + S1 chunk wave via backfill
         "agri_bridge",
         "weather_backfill",
@@ -29,7 +30,7 @@ CLAIMABLE_TYPES = frozenset(
 # fire-and-forget). Report types stay leased until the Celery task POSTs complete.
 COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
-        "field_bootstrap",
+        "land_bootstrap",
         "satellite_analysis",
         "agri_bridge",
         "weather_backfill",
@@ -94,6 +95,7 @@ def enqueue_work_item_sync(
     if type not in CLAIMABLE_TYPES:
         return None
     payload = dict(payload or {})
+    payload = stamp_trace_on_payload(payload)
     from openfarm_common.database_sync import SyncSession
     from app.models.tables import WorkItem
 
@@ -164,6 +166,7 @@ async def enqueue_work_item(
 ) -> WorkItem:
     """Insert a pending work_item (idempotent when key set)."""
     payload = dict(payload or {})
+    payload = stamp_trace_on_payload(payload)
     if idempotency_key:
         existing = (
             await db.execute(

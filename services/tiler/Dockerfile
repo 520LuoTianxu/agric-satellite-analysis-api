@@ -1,3 +1,6 @@
+# TiTiler 历史兼容镜像（当前暂不使用）。
+# 默认 Compose 已移除该服务，当前 agri 页面走 OSS + pixel_data 渲染；只有
+# 后续重新启用 COG 瓦片链路时才需要构建本镜像。
 FROM python:3.11-slim
 
 # Install GDAL system dependencies

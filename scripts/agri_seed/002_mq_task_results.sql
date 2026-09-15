@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS agric_satellite.mq_task_results (
     oss_urls jsonb NOT NULL DEFAULT '{}'::jsonb,
     payload jsonb NOT NULL DEFAULT '{}'::jsonb,
     error text,
-    field_id text,
     land_id text,
     finished_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),

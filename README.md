@@ -29,11 +29,11 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 
 ## Why this stack / 为什么用这套栈
 
-- Self-hostable services: Next.js ↔ FastAPI ↔ TiTiler ↔ Aliyun OSS (MinIO optional) ↔ PostGIS
+- Self-hostable services: Next.js ↔ FastAPI ↔ Aliyun OSS ↔ PostGIS
 - Vegetation indices from Sentinel-2: NDVI, EVI, SAVI, NDWI, with 24-month backfill
 - Daily weather (Open-Meteo) plus agricultural indices (GDD, water balance, drought)
 - Soil intelligence from SoilGrids (global, 250 m) and POLARIS (US, 30 m)
-- Provenance: Element84 STAC → COG → TiTiler tiles
+- Provenance: Element84 STAC → COG/scene JSON → Aliyun OSS
 - Tenant isolation via `X-Org-Id` + JWT; RBAC (`owner` / `admin` / `member` / `viewer`)
 - MapLibre + PMTiles (no Mapbox token), ECharts time series
 - Permissive BSD-3-Clause license
@@ -54,8 +54,11 @@ cp .env.example .env
 #   OPENFARM_JWT_SECRET: openssl rand -base64 64
 
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-# Optional local MinIO: add --profile minio (and STORAGE_BACKEND=minio)
 ```
+
+For a split deployment, start the control plane on the API machine with
+`docker-compose.api-machine.yml`; run `docker-compose.download-machine.yml`
+only on download workers.
 
 Do **not** commit `.env`. Only `.env.example` is in git.
 
@@ -64,14 +67,11 @@ Do **not** commit `.env`. Only `.env.example` is in git.
 | Web (Next.js) | http://localhost:3000 | Frontend UI（默认中文） |
 | API (FastAPI) | http://localhost:8000 | Backend API |
 | API Docs | http://localhost:8000/docs | Swagger UI |
-| TiTiler | http://localhost:8080 | COG tiles |
-| MinIO Console | http://localhost:9001 | Optional (`--profile minio`) |
 
 Health checks:
 
 ```bash
 curl http://localhost:8000/healthz    # API
-curl http://localhost:8080/healthz    # TiTiler
 curl http://localhost:3000/api/health # Web
 ```
 
@@ -127,14 +127,13 @@ Leave both `false` in production unless you want a shared demo user. After enabl
 Messages: `apps/web/messages/{zh,en,es}.json`. Routing: `apps/web/src/i18n/routing.ts`. Switch languages with the globe control in the header / sidebar.
 
 
-## Object storage / 对象存储（Aliyun OSS default · MinIO opt-in）
+## Object storage / 对象存储（Aliyun OSS）
 
 The API and Celery workers talk to object storage through `app.core.storage.get_storage()`, selected by `STORAGE_BACKEND`:
 
 | `STORAGE_BACKEND` | Use case |
 |---|---|
 | `oss` (**default**) | Aliyun OSS (`OSS_*`) — uploads + S1/S2 parcel JSON under `OSS_PREFIX` |
-| `minio` | Local MinIO (`MINIO_*`) — start with `docker compose --profile minio up` |
 
 ```bash
 # .env — default OSS (do not commit real secrets)
@@ -146,9 +145,6 @@ OSS_ACCESS_KEY_SECRET=
 OSS_BUCKET=agric-dev
 OSS_PREFIX=s1s2_parcel/json/
 
-# Optional local MinIO
-# STORAGE_BACKEND=minio
-# docker compose --profile minio up
 ```
 
 Useful API routes (auth + `X-Org-Id` required):
@@ -187,8 +183,7 @@ Layer A - Observation:  Satellite · Weather · Soil · Boundaries
 ```
 apps/web/       → Next.js 14 + NextAuth (Google + optional demo) + Tailwind + MapLibre
 services/api/   → FastAPI + SQLAlchemy 2.0 (async) + Alembic + Celery
-services/tiler/ → TiTiler COG tile server (shared JWT auth)
-docker-compose.yml → Postgres/PostGIS, Redis, API, workers, TiTiler, Web (MinIO via `--profile minio`)
+docker-compose.yml → Postgres/PostGIS, Redis, API, workers, Web
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the upstream strategic document.

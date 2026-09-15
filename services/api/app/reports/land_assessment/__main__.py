@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CLI: python -m app.reports.land_assessment --field-id <uuid> [--out path]
+"""CLI: python -m app.reports.land_assessment --land-id <id> [--out path]
 
 Also supports offline fixtures:
   python -m app.reports.land_assessment --from-dir /path/to/openfarm-report-hebei --out report.pdf
@@ -14,7 +14,7 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate 选地体检（白话版）PDF")
-    parser.add_argument("--field-id", help="agric-satellite-analysis field UUID")
+    parser.add_argument("--land-id", help="canonical agric_satellite land_id")
     parser.add_argument(
         "--from-dir", help="Fixture directory (field.json + all_indices.csv)"
     )
@@ -24,8 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.field_id and not args.from_dir:
-        parser.error("Provide --field-id or --from-dir")
+    if not args.land_id and not args.from_dir:
+        parser.error("Provide --land-id or --from-dir")
 
     from app.reports.land_assessment.service import generate_assessment_pdf
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         session = SyncSession()
         try:
             result = generate_assessment_pdf(
-                session=session, field_id=args.field_id, out_path=args.out
+                session=session, land_id=args.land_id, out_path=args.out
             )
             session.commit()
         except Exception:

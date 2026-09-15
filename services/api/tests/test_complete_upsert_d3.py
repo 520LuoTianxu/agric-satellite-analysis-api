@@ -108,8 +108,8 @@ class ResultApplyUnitTests(unittest.TestCase):
             stats = ra.apply_result_envelope(
                 {
                     "kind": "weather_daily",
-                    "field_id": str(uuid.uuid4()),
-                    "rows": [{"field_id": "x", "date": "2026-01-01"}],
+                    "land_id": "L1",
+                    "rows": [{"land_id": "L1", "date": "2026-01-01"}],
                 }
             )
         m.assert_called_once()

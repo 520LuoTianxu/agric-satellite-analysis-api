@@ -123,13 +123,13 @@ export interface Org {
 export interface OrgDetail extends Org {
     member_count: number;
     farm_count: number;
-    field_count: number;
+    land_count: number;
 }
 
 /** Blast radius of a workspace deletion, shown before the owner confirms. */
 export interface OrgDeletionImpact {
     farm_count: number;
-    field_count: number;
+    land_count: number;
     history_months: number;
     scouting_count: number;
 }
@@ -179,22 +179,55 @@ export interface Farm {
     updated_at: string;
 }
 
-export interface Field {
-    id: string;
-    org_id: string;
-    farm_id: string;
-    name: string;
+/** 唯一地块主表返回值；所有下游资源都使用 land_id 关联它。 */
+export interface LandParcel {
+    land_id: string;
+    source_parcel_id: string | null;
+    tile_id: string;
+    virtual_tile_id: string | null;
+    project_key: string | null;
+    tile_assignment_type: string | null;
+    tile_anchor_land_id: string | null;
+    farm_id: string | null;
+    land_name: string | null;
+    group_id: string | null;
+    group_name: string | null;
+    org_code: string | null;
+    org_name: string | null;
+    base_id: string | null;
+    province_code: string | null;
+    province_name: string | null;
+    city_code: string | null;
+    city_name: string | null;
+    county_code: string | null;
+    county_name: string | null;
+    town_code: string | null;
+    town_name: string | null;
+    village_code: string | null;
+    village_name: string | null;
+    soil_property: string | null;
+    current_batch: string | null;
+    land_status: string | null;
+    source_update_time: string | null;
+    boundary_geojson: GeoJSON.Geometry;
+    boundary_srid: number;
+    min_lon: number;
+    min_lat: number;
+    max_lon: number;
+    max_lat: number;
     geom: GeoJSON.Geometry | null;
     area_ha: number | null;
     crop_type: string | null;
     season: string | null;
-    tags: string[] | null;
-    created_by: string;
+    tags_json: string[] | null;
+    source_properties: Record<string, any> | null;
+    source_file: string | null;
+    source_feature_index: number | null;
     created_at: string;
     updated_at: string;
 }
 
-export interface FieldImportResult {
+export interface LandParcelImportResult {
     imported: number;
     errors: string[];
 }
@@ -316,7 +349,7 @@ export const ALL_INDEX_TYPES: IndexType[] = [
 
 export interface RasterLayer {
     id: string;
-    field_id: string;
+    land_id: string;
     layer_type: string;
     satellite: string;
     date: string;
@@ -329,9 +362,9 @@ export interface RasterLayer {
     created_at: string;
 }
 
-export interface FieldStat {
+export interface LandStat {
     id: string;
-    field_id: string;
+    land_id: string;
     date: string;
     mean: number | null;
     median: number | null;
@@ -358,7 +391,7 @@ export interface FieldStat {
 
 export interface NdviJob {
     id: string;
-    field_id: string;
+    land_id: string | null;
     type: string;
     status: string;
     progress_json: Record<string, any> | null;
@@ -378,7 +411,7 @@ export interface AlertSummary {
 
 export interface Alert {
     id: string;
-    field_id: string;
+    land_id: string;
     date: string;
     severity: string;
     rule_name: string;
@@ -391,7 +424,7 @@ export interface Alert {
     created_at: string;
     /** Resolved by the API at query time, not stored on the alert. Null
      *  when the field or farm has been deleted. */
-    field_name: string | null;
+    land_name: string | null;
     farm_id: string | null;
     farm_name: string | null;
 }
@@ -400,7 +433,7 @@ export interface Alert {
 
 export interface ScoutingObservation {
     id: string;
-    field_id: string;
+    land_id: string;
     alert_id: string | null;
     geom_point: GeoJSON.Point | null;
     title: string;
@@ -468,7 +501,7 @@ export interface WeatherForecastDay {
 }
 
 export interface WeatherSummary {
-    field_id: string;
+    land_id: string;
     period_start: string;
     period_end: string;
     avg_temperature: number | null;
@@ -487,7 +520,7 @@ export interface WeatherSummary {
 }
 
 export interface WeatherResponse {
-    field_id: string;
+    land_id: string;
     location: { latitude: number; longitude: number };
     data: WeatherDaily[];
     forecast: WeatherForecastDay[];
@@ -519,16 +552,16 @@ export const farmsApi = {
         apiFetch<Farm>(`/farms/${farmId}`, { method: "PUT", body: JSON.stringify(data) }),
     delete: (farmId: string) =>
         apiFetch(`/farms/${farmId}`, { method: "DELETE" }),
-    fields: (farmId: string, limit = 200, offset = 0) =>
-        apiFetch<Paginated<Field>>(`/farms/${farmId}/fields?limit=${limit}&offset=${offset}`),
+    lands: (farmId: string, limit = 200, offset = 0) =>
+        apiFetch<Paginated<LandParcel>>(`/farms/${farmId}/lands?limit=${limit}&offset=${offset}`),
 };
 
-// ── Fields ───────────────────────────────────────────────────────────
+// ── Canonical land parcels ──────────────────────────────────────────
 
 export type BackfillPhase = "idle" | "stac" | "bridge" | "done";
 
 export interface BackfillStatusResponse {
-    field_id: string;
+    land_id: string;
     has_active_backfill: boolean;
     pending_jobs: number;
     running_jobs: number;
@@ -540,21 +573,62 @@ export interface BackfillStatusResponse {
     message: string;
 }
 
-export const fieldsApi = {
-    get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
-    create: (data: { farm_id: string; name: string; geom: any; crop_type: string; season?: string; tags?: string[] }) =>
-        apiFetch<Field>("/fields", { method: "POST", body: JSON.stringify(data) }),
-    update: (fieldId: string, data: { name?: string; geom?: any; crop_type?: string; season?: string; tags?: string[] }) =>
-        apiFetch<Field>(`/fields/${fieldId}`, { method: "PUT", body: JSON.stringify(data) }),
-    delete: (fieldId: string) =>
-        apiFetch(`/fields/${fieldId}`, { method: "DELETE" }),
+export const landsApi = {
+    get: (landId: string) => apiFetch<LandParcel>(`/lands/${landId}`),
+    create: (data: {
+        land_id: string;
+        farm_id?: string;
+        land_name: string;
+        boundary_geojson: GeoJSON.Geometry;
+        tile_id?: string;
+        group_id?: string;
+        group_name?: string;
+        province_code?: string;
+        province_name?: string;
+        city_code?: string;
+        city_name?: string;
+        county_code?: string;
+        county_name?: string;
+        town_code?: string;
+        town_name?: string;
+        village_code?: string;
+        village_name?: string;
+        crop_type?: string;
+        season?: string;
+        tags_json?: string[];
+    }) =>
+        apiFetch<LandParcel>("/lands", { method: "POST", body: JSON.stringify(data) }),
+    update: (landId: string, data: {
+        land_name?: string;
+        boundary_geojson?: GeoJSON.Geometry;
+        tile_id?: string;
+        group_id?: string;
+        group_name?: string;
+        province_code?: string;
+        province_name?: string;
+        city_code?: string;
+        city_name?: string;
+        county_code?: string;
+        county_name?: string;
+        town_code?: string;
+        town_name?: string;
+        village_code?: string;
+        village_name?: string;
+        crop_type?: string;
+        season?: string;
+        tags_json?: string[];
+        farm_id?: string;
+    }) =>
+        apiFetch<LandParcel>(`/lands/${landId}`, { method: "PUT", body: JSON.stringify(data) }),
+    delete: (landId: string) =>
+        apiFetch(`/lands/${landId}`, { method: "DELETE" }),
     import: (farmId: string, file: File) => {
         const formData = new FormData();
         formData.append("file", file);
-        return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
+        return apiFetch<LandParcelImportResult>(`/lands/import?farm_id=${farmId}`, { method: "POST", body: formData });
     },
     backfillIndices: (
-        fieldId: string,
+        landId: string,
         opts: {
             months?: number;
             force?: boolean;
@@ -571,38 +645,38 @@ export const fieldsApi = {
         if (opts.date_to) body.date_to = opts.date_to;
         if (opts.growing_seasons?.length) body.growing_seasons = opts.growing_seasons;
         if (opts.season_months?.length) body.season_months = opts.season_months;
-        return apiFetch<{ field_id: string; status: string; message: string }>(
-            `/fields/${fieldId}/backfill-indices`,
+        return apiFetch<{ land_id: string; status: string; message: string }>(
+            `/lands/${landId}/backfill-indices`,
             { method: "POST", body: JSON.stringify(body) },
         );
     },
-    backfillStatus: (fieldId: string) =>
+    backfillStatus: (landId: string) =>
         apiFetch<BackfillStatusResponse>(
-            `/fields/${fieldId}/backfill-status`,
+            `/lands/${landId}/backfill-status`,
         ),
 };
 
 // ── Monitoring ───────────────────────────────────────────────────────
 
 export const monitoringApi = {
-    layers: (fieldId: string, type: IndexType = "NDVI", limit = 50) =>
-        apiFetch<Paginated<RasterLayer>>(`/fields/${fieldId}/layers?type=${type}&limit=${limit}`),
-    stats: (fieldId: string, type: IndexType = "NDVI", limit = 200) =>
-        apiFetch<Paginated<FieldStat>>(`/fields/${fieldId}/stats?type=${type}&limit=${limit}`),
-    layerTypes: (fieldId: string) =>
-        apiFetch<string[]>(`/fields/${fieldId}/layers/types`),
+    layers: (landId: string, type: IndexType = "NDVI", limit = 50) =>
+        apiFetch<Paginated<RasterLayer>>(`/lands/${landId}/layers?type=${type}&limit=${limit}`),
+    stats: (landId: string, type: IndexType = "NDVI", limit = 200) =>
+        apiFetch<Paginated<LandStat>>(`/lands/${landId}/stats?type=${type}&limit=${limit}`),
+    layerTypes: (landId: string) =>
+        apiFetch<string[]>(`/lands/${landId}/layers/types`),
 };
 
 // ── Jobs ─────────────────────────────────────────────────────────────
 
 export const jobsApi = {
-    createNdvi: (fieldId: string, dateFrom: string, dateTo: string) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/ndvi`, {
+    createNdvi: (landId: string, dateFrom: string, dateTo: string) =>
+        apiFetch<NdviJob>(`/lands/${landId}/jobs/ndvi`, {
             method: "POST",
             body: JSON.stringify({ date_from: dateFrom, date_to: dateTo }),
         }),
-    createIndex: (fieldId: string, indexType: IndexType, dateFrom: string, dateTo: string, params?: { savi_l?: number }) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/index`, {
+    createIndex: (landId: string, indexType: IndexType, dateFrom: string, dateTo: string, params?: { savi_l?: number }) =>
+        apiFetch<NdviJob>(`/lands/${landId}/jobs/index`, {
             method: "POST",
             body: JSON.stringify({ index_type: indexType.toLowerCase(), date_from: dateFrom, date_to: dateTo, ...params }),
         }),
@@ -691,20 +765,20 @@ export interface AssessmentGenerateBody {
 }
 
 export const assessmentApi = {
-    generate: (fieldId: string, body?: AssessmentGenerateBody) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
+    generate: (landId: string, body?: AssessmentGenerateBody) =>
+        apiFetch<NdviJob>(`/lands/${landId}/assessment-report`, {
             method: "POST",
             body: JSON.stringify(body || {}),
         }),
-    latestMeta: (fieldId: string) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
-    latestScorecard: (fieldId: string) =>
+    latestMeta: (landId: string) =>
+        apiFetch<NdviJob>(`/lands/${landId}/assessment-report/latest/meta`),
+    latestScorecard: (landId: string) =>
         apiFetch<AssessmentScorecard>(
-            `/fields/${fieldId}/assessment-report/latest/scorecard`,
+            `/lands/${landId}/assessment-report/latest/scorecard`,
         ),
-    downloadLatest: async (fieldId: string) => {
+    downloadLatest: async (landId: string) => {
         const res = await fetch(
-            `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
+            `${getApiBase()}/lands/${landId}/assessment-report/latest`,
         );
         if (!res.ok) {
             const detail = await res.text();
@@ -752,24 +826,24 @@ export interface SeasonGrowthMaterialUpload {
 }
 
 export const seasonGrowthApi = {
-    generate: (fieldId: string, body: SeasonGrowthGenerateBody) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report`, {
+    generate: (landId: string, body: SeasonGrowthGenerateBody) =>
+        apiFetch<NdviJob>(`/lands/${landId}/season-growth-report`, {
             method: "POST",
             body: JSON.stringify(body),
         }),
-    latestMeta: (fieldId: string) =>
-        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report/latest/meta`),
-    uploadMaterial: async (fieldId: string, file: File) => {
+    latestMeta: (landId: string) =>
+        apiFetch<NdviJob>(`/lands/${landId}/season-growth-report/latest/meta`),
+    uploadMaterial: async (landId: string, file: File) => {
         const formData = new FormData();
         formData.append("file", file);
         return apiFetch<SeasonGrowthMaterialUpload>(
-            `/fields/${fieldId}/season-growth-report/materials`,
+            `/lands/${landId}/season-growth-report/materials`,
             { method: "POST", body: formData },
         );
     },
-    downloadLatest: async (fieldId: string) => {
+    downloadLatest: async (landId: string) => {
         const res = await fetch(
-            `${getApiBase()}/fields/${fieldId}/season-growth-report/latest`,
+            `${getApiBase()}/lands/${landId}/season-growth-report/latest`,
         );
         if (!res.ok) {
             const detail = await res.text();
@@ -804,8 +878,8 @@ export const alertsApi = {
     },
     /** Open counts by severity across the workspace, for the summary cards. */
     summary: () => apiFetch<AlertSummary>("/alerts/summary"),
-    listForField: (fieldId: string, limit = 50, indexType?: string) => {
-        const params = new URLSearchParams({ field_id: fieldId, limit: String(limit) });
+    listForLand: (landId: string, limit = 50, indexType?: string) => {
+        const params = new URLSearchParams({ land_id: landId, limit: String(limit) });
         if (indexType) params.set("index_type", indexType);
         return apiFetch<Paginated<Alert>>(`/alerts?${params}`);
     },
@@ -818,37 +892,37 @@ export const alertsApi = {
 // ── Scouting ─────────────────────────────────────────────────────
 
 export const scoutingApi = {
-    list: (fieldId: string, limit = 50, offset = 0) =>
+    list: (landId: string, limit = 50, offset = 0) =>
         apiFetch<Paginated<ScoutingObservation>>(
-            `/fields/${fieldId}/scouting?limit=${limit}&offset=${offset}`,
+            `/lands/${landId}/scouting?limit=${limit}&offset=${offset}`,
         ),
-    create: (fieldId: string, data: ScoutingCreate) =>
-        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting`, {
+    create: (landId: string, data: ScoutingCreate) =>
+        apiFetch<ScoutingObservation>(`/lands/${landId}/scouting`, {
             method: "POST",
             body: JSON.stringify(data),
         }),
-    update: (fieldId: string, obsId: string, data: ScoutingUpdate) =>
-        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting/${obsId}`, {
+    update: (landId: string, obsId: string, data: ScoutingUpdate) =>
+        apiFetch<ScoutingObservation>(`/lands/${landId}/scouting/${obsId}`, {
             method: "PATCH",
             body: JSON.stringify(data),
         }),
-    delete: (fieldId: string, obsId: string) =>
-        apiFetch(`/fields/${fieldId}/scouting/${obsId}`, { method: "DELETE" }),
+    delete: (landId: string, obsId: string) =>
+        apiFetch(`/lands/${landId}/scouting/${obsId}`, { method: "DELETE" }),
 };
 
 
 // ── Weather ──────────────────────────────────────────────────────
 
 export const weatherApi = {
-    get: (fieldId: string, startDate: string, endDate: string, includeForecast = true) =>
+    get: (landId: string, startDate: string, endDate: string, includeForecast = true) =>
         apiFetch<WeatherResponse>(
-            `/fields/${fieldId}/weather?start_date=${startDate}&end_date=${endDate}&include_forecast=${includeForecast}`,
+            `/lands/${landId}/weather?start_date=${startDate}&end_date=${endDate}&include_forecast=${includeForecast}`,
         ),
-    summary: (fieldId: string, days = 30) =>
-        apiFetch<WeatherSummary>(`/fields/${fieldId}/weather/summary?days=${days}`),
-    backfill: (fieldId: string, days = 90) =>
-        apiFetch<{ field_id: string; status: string; message: string }>(
-            `/fields/${fieldId}/weather/backfill`,
+    summary: (landId: string, days = 30) =>
+        apiFetch<WeatherSummary>(`/lands/${landId}/weather/summary?days=${days}`),
+    backfill: (landId: string, days = 90) =>
+        apiFetch<{ land_id: string; status: string; message: string }>(
+            `/lands/${landId}/weather/backfill`,
             { method: "POST", body: JSON.stringify({ days }) },
         ),
 };
@@ -857,7 +931,7 @@ export const weatherApi = {
 
 export interface ShareLink {
     id: string;
-    field_id: string;
+    land_id: string;
     token: string;
     scope: string;
     expires_at: string | null;
@@ -875,7 +949,7 @@ export interface ShareStatPoint {
     stddev?: number | null;
     quality_score?: number | null;
     id?: string | null;
-    field_id?: string | null;
+    land_id?: string | null;
     created_at?: string | null;
     cloud_cover?: number | null;
     decloud_quality?: string | null;
@@ -902,9 +976,8 @@ export interface ShareReport {
     weather_summary: Record<string, any> | null;
     weather_data: WeatherDaily[];
     soil_summary: Record<string, any> | null;
-    /** classic FieldStat/RasterLayer, agri parcel_scene_products, or both */
-    rs_source?: "classic" | "agri" | "mixed" | null;
-    agri_land_id?: string | null;
+    /** All report data is sourced from the canonical land parcel. */
+    rs_source?: "agri" | null;
     agri_heatmap_available?: boolean;
 }
 
@@ -997,7 +1070,7 @@ export interface SoilLayer {
 
 export interface SoilProfile {
     id: string;
-    field_id: string;
+    land_id: string;
     source: string;
     source_resolution_m: number | null;
     fetched_at: string;
@@ -1006,7 +1079,7 @@ export interface SoilProfile {
 
 export interface SoilFieldSummary {
     id: string;
-    field_id: string;
+    land_id: string;
     dominant_texture: string | null;
     avg_ph: number | null;
     total_soc_stock_t_ha: number | null;
@@ -1023,7 +1096,7 @@ export interface SoilFieldSummary {
 }
 
 export interface SoilRefreshResponse {
-    field_id: string;
+    land_id: string;
     job_id: string;
     status: string;
     message: string;
@@ -1098,8 +1171,7 @@ export interface SoilNpkIndicator {
 }
 
 export interface SoilNpk {
-    field_id: string;
-    land_id?: string | null;
+    land_id: string;
     source: string;
     tn_g_kg?: number | null;
     an_mg_kg?: number | null;
@@ -1121,7 +1193,7 @@ export interface SoilNpk {
 }
 
 export interface SoilNpkFetchResponse {
-    field_id: string;
+    land_id: string;
     status: string;
     npk: SoilNpk;
     message?: string | null;
@@ -1130,9 +1202,8 @@ export interface SoilNpkFetchResponse {
 
 export interface SiteAdmission {
     id?: string | null;
-    field_id?: string | null;
     group_id: string;
-    land_id?: string | null;
+    land_id: string;
     source: string;
     status?: string | null;
     score?: number | null;
@@ -1152,7 +1223,7 @@ export interface SiteAdmission {
 }
 
 export interface SiteAdmissionFetchResponse {
-    field_id?: string | null;
+    land_id: string;
     group_id: string;
     status: string;
     admission: SiteAdmission;
@@ -1160,41 +1231,41 @@ export interface SiteAdmissionFetchResponse {
 }
 
 export const soilApi = {
-    get: (fieldId: string) =>
-        apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
-    getSummary: (fieldId: string) =>
-        apiFetch<SoilFieldSummary>(`/fields/${fieldId}/soil/summary`),
-    refresh: (fieldId: string) =>
-        apiFetch<SoilRefreshResponse>(`/fields/${fieldId}/soil/refresh`, {
+    get: (landId: string) =>
+        apiFetch<SoilProfile>(`/lands/${landId}/soil`),
+    getSummary: (landId: string) =>
+        apiFetch<SoilFieldSummary>(`/lands/${landId}/soil/summary`),
+    refresh: (landId: string) =>
+        apiFetch<SoilRefreshResponse>(`/lands/${landId}/soil/refresh`, {
             method: "POST",
         }),
-    getSamplingZones: (fieldId: string) =>
-        apiFetch<SamplingZonesResponse>(`/fields/${fieldId}/soil/sampling-zones`),
-    getCropSuitability: (fieldId: string) =>
-        apiFetch<CropSuitabilityResponse>(`/fields/${fieldId}/soil/crop-suitability`),
-    getNutrientContext: (fieldId: string) =>
-        apiFetch<NutrientContextResponse>(`/fields/${fieldId}/soil/nutrient-context`),
-    getCarbon: (fieldId: string) =>
-        apiFetch<CarbonEstimateResponse>(`/fields/${fieldId}/soil/carbon`),
-    getWeatherStress: (fieldId: string) =>
-        apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
-    getNpk: (fieldId: string) =>
-        apiFetch<SoilNpk>(`/fields/${fieldId}/soil/npk`),
+    getSamplingZones: (landId: string) =>
+        apiFetch<SamplingZonesResponse>(`/lands/${landId}/soil/sampling-zones`),
+    getCropSuitability: (landId: string) =>
+        apiFetch<CropSuitabilityResponse>(`/lands/${landId}/soil/crop-suitability`),
+    getNutrientContext: (landId: string) =>
+        apiFetch<NutrientContextResponse>(`/lands/${landId}/soil/nutrient-context`),
+    getCarbon: (landId: string) =>
+        apiFetch<CarbonEstimateResponse>(`/lands/${landId}/soil/carbon`),
+    getWeatherStress: (landId: string) =>
+        apiFetch<SoilWeatherStressResponse>(`/lands/${landId}/soil/weather-stress`),
+    getNpk: (landId: string) =>
+        apiFetch<SoilNpk>(`/lands/${landId}/soil/npk`),
     fetchNpk: (
-        fieldId: string,
+        landId: string,
         body: { token?: string; auth_query?: string; force?: boolean; hr_base_id?: string },
     ) =>
-        apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
+        apiFetch<SoilNpkFetchResponse>(`/lands/${landId}/soil/npk`, {
             method: "POST",
             body: JSON.stringify(body),
             headers: body.token
                 ? { Authorization: body.token.startsWith("Bearer ") ? body.token : `Bearer ${body.token}` }
                 : undefined,
         }),
-    getSiteAdmission: (fieldId: string) =>
-        apiFetch<SiteAdmission>(`/fields/${fieldId}/site-admission`),
+    getSiteAdmission: (landId: string) =>
+        apiFetch<SiteAdmission>(`/lands/${landId}/site-admission`),
     fetchSiteAdmission: (
-        fieldId: string,
+        landId: string,
         body: {
             token?: string;
             group_id?: string | number;
@@ -1204,7 +1275,7 @@ export const soilApi = {
             link_field_tag?: boolean;
         },
     ) =>
-        apiFetch<SiteAdmissionFetchResponse>(`/fields/${fieldId}/site-admission`, {
+        apiFetch<SiteAdmissionFetchResponse>(`/lands/${landId}/site-admission`, {
             method: "POST",
             body: JSON.stringify(body),
             headers: body.token
@@ -1304,55 +1375,6 @@ export interface AgriLandScenesSummary {
     land_id: string;
     total: number;
     sensors: AgriSensorSceneSummary[];
-}
-
-/** Parse agri:<land_id> tag from field.tags */
-export function parseAgriLandId(tags: string[] | null | undefined): string | null {
-    if (!tags?.length) return null;
-    for (const tag of tags) {
-        if (typeof tag === "string" && tag.startsWith("agri:")) {
-            const id = tag.slice(5).trim();
-            if (id) return id;
-        }
-    }
-    return null;
-}
-
-/** Parse cdfinance_group:<id> / group:<id> from field.tags */
-export function parseCdfinanceGroupId(tags: string[] | null | undefined): string | null {
-    if (!tags?.length) return null;
-    for (const tag of tags) {
-        if (typeof tag !== "string") continue;
-        for (const prefix of ["cdfinance_group:", "group:"] as const) {
-            if (tag.startsWith(prefix)) {
-                const id = tag.slice(prefix.length).trim();
-                if (id) return id;
-            }
-        }
-    }
-    return null;
-}
-
-/** Merge agri / optional cdfinance group tags into an existing tag list. */
-export function withAgriFieldTags(
-    existing: string[] | null | undefined,
-    opts: { landId?: string | null; groupId?: string | null },
-): string[] {
-    const landId = (opts.landId ?? "").trim();
-    const groupId = (opts.groupId ?? "").trim();
-    let out = (existing ?? []).filter((t) => typeof t === "string");
-    // Replace any agri:* when landId provided; drop agri:* when cleared.
-    if (opts.landId !== undefined) {
-        out = out.filter((t) => !t.startsWith("agri:"));
-        if (landId) out.push(`agri:${landId}`);
-    }
-    if (opts.groupId !== undefined) {
-        out = out.filter(
-            (t) => !t.startsWith("cdfinance_group:") && !t.startsWith("group:"),
-        );
-        if (groupId) out.push(`cdfinance_group:${groupId}`);
-    }
-    return out;
 }
 
 export const agriApi = {
@@ -1639,15 +1661,15 @@ export interface OverviewWeakParcels {
 // ── Share Links ──────────────────────────────────────────────────
 
 export const shareApi = {
-    list: (fieldId: string) =>
-        apiFetch<ShareLink[]>(`/fields/${fieldId}/share`),
-    create: (fieldId: string, expiresInDays: number | null) =>
-        apiFetch<ShareLink>(`/fields/${fieldId}/share`, {
+    list: (landId: string) =>
+        apiFetch<ShareLink[]>(`/lands/${landId}/share`),
+    create: (landId: string, expiresInDays: number | null) =>
+        apiFetch<ShareLink>(`/lands/${landId}/share`, {
             method: "POST",
             body: JSON.stringify({ expires_in_days: expiresInDays }),
         }),
-    revoke: (fieldId: string, token: string) =>
-        apiFetch(`/fields/${fieldId}/share/${token}`, { method: "DELETE" }),
+    revoke: (landId: string, token: string) =>
+        apiFetch(`/lands/${landId}/share/${token}`, { method: "DELETE" }),
     /** Public endpoint - no auth required. Uses plain fetch. */
     async getReport(token: string): Promise<ShareReport> {
         const res = await fetch(`${getApiBase()}/share/${token}`);

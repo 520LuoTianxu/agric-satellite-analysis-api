@@ -1,6 +1,8 @@
 # S1/S2 地块产品：Aliyun OSS JSON → PostgreSQL
 
-独立小工具：从 bucket `agric-dev` 前缀 `s1s2_parcel/json/{tile_id}/parcel_{id}/{date}_{S1|S2}.json` 拉取产品 JSON，upsert 到 PostgreSQL schema `agric_satellite`。
+独立小工具：从 bucket `agric-dev` 前缀 `s1s2_parcel/json/{tile_id}/parcel_{id}/{date}_{S1|S2}.json` 拉取 canonical 产品 JSON，直接按 `land_id` upsert 到 PostgreSQL schema `agric_satellite`。
+
+唯一的建表来源是 `scripts/agri_seed/001_agri_schema.sql`（生产环境用 Alembic）。本目录的 `sql/001_schema.sql` 只校验 canonical 表，不创建或维护另一套表结构。
 
 相对旧脚本 `agri_s1s2_parcel_bundle/scripts/oss_json_to_postgres.py` 的改进：统一业务 schema/视图/入库日志、更多元数据列、`--apply-schema`、可配置 `OSS_ENV`、兼容 psycopg3/psycopg2。
 
@@ -31,16 +33,16 @@ cp .env.example .env
 
 脚本会自动 `setdefault` 加载项目根目录 `.env`（已有环境变量不被覆盖）。
 
-## 建表
+## Schema 校验
 
-方式 A — 用 psql：
+方式 A — 用 psql 校验 canonical schema：
 
 ```bash
 export $(grep -v '^#' .env | xargs)   # 或自行 export PG*
 psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -f sql/001_schema.sql
 ```
 
-方式 B — 入库时顺带应用：
+方式 B — 入库前顺带校验：
 
 ```bash
 python3 scripts/oss_to_pg.py --apply-schema --limit 1
@@ -50,7 +52,7 @@ python3 scripts/oss_to_pg.py --apply-schema --limit 1
 
 | 对象 | 说明 |
 |------|------|
-| `agric_satellite.parcel_scene_products` | 主表，PK `(parcel_id, date, sensor, scene_id)` |
+| `agric_satellite.parcel_scene_products` | 唯一场景产品表，PK `(land_id, date, sensor, scene_id)` |
 | `agric_satellite.v_parcel_scene_products_meta` | 去掉 `pixels` 的轻量视图 |
 | `agric_satellite.ingest_runs` | 可选入库运行日志 |
 
@@ -62,7 +64,7 @@ python3 scripts/oss_to_pg.py --apply-schema --limit 1
 # 仅列出 OSS key
 python3 scripts/oss_to_pg.py --dry-run --limit 20
 
-# 小批量试跑（先建表）
+# 小批量试跑（先校验 canonical schema）
 python3 scripts/oss_to_pg.py --apply-schema --prefix s1s2_parcel/json/ --limit 100
 
 # 指定瓦片前缀
@@ -75,7 +77,7 @@ python3 scripts/oss_to_pg.py --prefix s1s2_parcel/json/
 行为要点：
 
 - 默认列举 OSS 前缀（**需要 ListObjects**）；无列举权限见下一节 `--from-done-dir` / `--keys-file`
-- upsert：冲突时更新 URL/云量/payload 等，并刷新 `ingested_at`
+- upsert：冲突时更新媒体地址/云量/指标/`pixel_data` 等，并刷新 `ingested_at`
 - 每 50 条 `commit`，打印进度
 - 单对象解析失败会记 error 并继续
 
@@ -101,7 +103,7 @@ python3 scripts/oss_to_pg.py --keys-file keys.txt --limit 100
 
 ```sql
 -- 按瓦片/日期/传感器列元数据（无 pixels）
-SELECT parcel_id, date, sensor, scene_id, cloud_cover, rgb_url
+SELECT land_id, date, sensor, scene_id, cloud_cover, rgb_url
 FROM agric_satellite.v_parcel_scene_products_meta
 WHERE tile_id = 'p4079_t00001_a15526'
   AND date >= '2025-06-01' AND sensor = 'S2'
@@ -112,10 +114,10 @@ LIMIT 50;
 SELECT sensor, count(*) FROM agric_satellite.parcel_scene_products GROUP BY 1;
 
 -- jsonb 抽一个像元 NDVI
-SELECT parcel_id, date,
-       payload #>> '{pixels,0,ndvi}' AS ndvi0
+SELECT land_id, date,
+       pixel_data #>> '{pixels,0,ndvi}' AS ndvi0
 FROM agric_satellite.parcel_scene_products
-WHERE sensor = 'S2' AND parcel_id = '15526'
+WHERE sensor = 'S2' AND land_id = '15526'
 ORDER BY date DESC LIMIT 10;
 ```
 

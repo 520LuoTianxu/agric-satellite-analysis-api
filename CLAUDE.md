@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Open source crop intelligence platform. Fuses satellite (Sentinel-2), weather (Open-Meteo), and soil (SoilGrids/POLARIS) data into per-field insights. BSD-3-Clause. Repo: https://github.com/520LuoTianxu/agric-satellite-analysis
 
-Deeper docs: ARCHITECTURE.md (3-layer strategic architecture), README.md (product overview), DEPLOYMENT.md, ROADMAP.md. `.github/copilot-instructions.md` mirrors much of this file - keep them in sync when conventions change.
+Deeper docs: ARCHITECTURE.md (3-layer strategic architecture), README.md (product overview), DEPLOYMENT.md, ROADMAP.md. Agent hard rules: AGENTS.md. `.github/copilot-instructions.md` mirrors much of this file - keep them in sync when conventions change.
 
 ## Branch workflow
 
@@ -44,7 +44,7 @@ uvicorn app.main:app --reload --port 8000
 ruff check .              # must pass before PR
 ruff format --check .     # must pass before PR
 ```
-Python 3.11 (CI pins it; CI also apt-installs gdal-bin).
+Python 3.11 (CI pins it). Raster/GDAL deps belong to ingest, not the API image.
 
 ### Migrations
 ```bash
@@ -113,3 +113,4 @@ Target: Oracle Cloud Always Free (Ampere A1 ARM, 2 OCPU / 12 GB). Automated via 
 - Add heavyweight unused deps to the base API image.
 - Break the pagination envelope or `/v1` prefix conventions.
 - Use em-dashes, emojis, or AI-filler phrasing anywhere in the project. UI icons are lucide-react only.
+- Give download-host services (`ingest`, `storage`, `beat`, `decloud`, `mq_consumer`) a connection to API Postgres or API Redis. Work and land discovery go through Internal HTTP (`API_BASE_URL` + token). See AGENTS.md.

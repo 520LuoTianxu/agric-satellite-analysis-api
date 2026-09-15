@@ -30,7 +30,7 @@ class ClaimModeGuardTests(unittest.TestCase):
         for t in (
             "weather_backfill",
             "soil_fetch",
-            "field_bootstrap",
+            "land_bootstrap",
             "satellite_analysis",
         ):
             self.assertIn(t, wa.DEFAULT_TYPES)
@@ -44,7 +44,7 @@ class ProcessItemTests(unittest.TestCase):
             "id": "w1",
             "type": "assessment_report",
             "payload_json": {
-                "field_id": "f1",
+                "land_id": "f1",
                 "extras": {"job_id": "j1"},
             },
         }
@@ -68,15 +68,15 @@ class ProcessItemTests(unittest.TestCase):
         item = {
             "id": "w2",
             "type": "weather_backfill",
-            "payload_json": {"field_id": "f1", "extras": {"days": 7}},
+            "payload_json": {"land_id": "f1", "extras": {"days": 7}},
         }
         with patch.object(
             wa,
             "_dispatch_celery",
             return_value={
-                "dispatched": ["app.tasks.weather.backfill_weather_for_field"],
+                "dispatched": ["app.tasks.weather.backfill_weather_for_land"],
                 "celery_ids": ["c2"],
-                "field_id": "f1",
+                "land_id": "f1",
             },
         ):
             with patch.object(wa, "progress"):

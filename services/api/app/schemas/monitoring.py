@@ -19,7 +19,7 @@ IndexType = Literal["ndvi", "evi", "savi", "ndwi", "ndmi", "ndre", "cire", "mndw
 
 class RasterLayerOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     layer_type: str
     satellite: str
     date: date
@@ -39,7 +39,7 @@ class RasterLayerOut(BaseModel):
 
 class FieldStatOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     date: date
     mean: float | None = None
     median: float | None = None
@@ -87,7 +87,7 @@ class JobCreateIndex(BaseModel):
 
 class JobOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID | None = None
+    land_id: str | None = None
     type: str
     status: str
     progress_json: dict[str, Any] | None = None
@@ -118,7 +118,7 @@ class AlertSummaryOut(BaseModel):
 
 class AlertOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     date: date
     severity: str
     rule_name: str
@@ -130,10 +130,9 @@ class AlertOut(BaseModel):
     soil_context: dict[str, Any] | None = None
     created_at: datetime
 
-    # Resolved by an outer join at query time, never stored on the alert
-    # row: a rename is reflected on the next request. Null when the field
-    # has been soft-deleted, which is what the client used to show.
-    field_name: str | None = None
+    # Resolved by an outer join at query time, never stored on the alert row.
+    # The canonical parcel name is read directly from land_parcels.
+    land_name: str | None = None
     farm_id: uuid.UUID | None = None
     farm_name: str | None = None
 
@@ -164,7 +163,7 @@ class ScoutingUpdate(BaseModel):
 
 class ScoutingOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     alert_id: uuid.UUID | None = None
     geom_point: dict[str, Any] | None = None
     title: str
@@ -188,7 +187,7 @@ class ShareCreate(BaseModel):
 
 class ShareOut(BaseModel):
     id: uuid.UUID
-    field_id: uuid.UUID
+    land_id: str
     token: str
     scope: str
     expires_at: datetime | None = None
@@ -210,7 +209,7 @@ class ShareStatPoint(BaseModel):
     stddev: float | None = None
     quality_score: float | None = None
     id: uuid.UUID | None = None
-    field_id: uuid.UUID | None = None
+    land_id: str | None = None
     created_at: datetime | None = None
     cloud_cover: float | None = None
     decloud_quality: str | None = None
@@ -235,9 +234,8 @@ class ShareReportOut(BaseModel):
     weather_summary: dict[str, Any] | None = None
     weather_data: list[dict[str, Any]] = []
     soil_summary: dict[str, Any] | None = None
-    # agri-tagged fields: RS truth from parcel_scene_products
-    rs_source: Literal["classic", "agri", "mixed"] | None = None
-    agri_land_id: str | None = None
+    # 遥感统计与图层都属于同一张规范地块表，不再区分旧字段链路。
+    rs_source: Literal["agri"] | None = None
     agri_heatmap_available: bool = False
 
 

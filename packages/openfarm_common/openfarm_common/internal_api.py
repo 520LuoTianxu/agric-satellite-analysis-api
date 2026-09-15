@@ -28,7 +28,7 @@ __all__ = [
     "complete_work",
     "data_readiness",
     "fail_work",
-    "field_geom",
+    "land_geom",
     "get_job",
     "http_writes_enabled",
     "ingest_pg_reads_allowed",
@@ -38,8 +38,11 @@ __all__ = [
     "internal_client",
     "patch_job",
     "progress_work",
-    "resolve_field",
+    "refresh_overview_stats",
+    "resolve_land",
     "season_growth_inputs",
+    "weather_land_ids",
+    "weekly_index_prepare",
 ]
 
 
@@ -118,14 +121,20 @@ def http_writes_enabled() -> bool:
 
 
 def _headers() -> dict[str, str]:
+    from openfarm_common.trace import TRACE_HEADER, current_trace_id
+
     token = internal_api_token()
     if not token:
         raise InternalApiError("INTERNAL_API_TOKEN is required for internal HTTP")
-    return {
+    headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    tid = current_trace_id()
+    if tid:
+        headers[TRACE_HEADER] = tid
+    return headers
 
 
 @contextmanager
@@ -133,7 +142,14 @@ def internal_client(*, timeout: float = 30.0) -> Iterator[httpx.Client]:
     base = api_base_url()
     if not base:
         raise InternalApiError("API_BASE_URL is required for internal HTTP")
-    with httpx.Client(base_url=base, timeout=timeout, headers=_headers()) as client:
+    from openfarm_common.trace import attach_trace_header
+
+    with httpx.Client(
+        base_url=base,
+        timeout=timeout,
+        headers=_headers(),
+        event_hooks={"request": [attach_trace_header]},
+    ) as client:
         yield client
 
 
@@ -153,28 +169,22 @@ def _raise_for_status(r: httpx.Response, *, context: str) -> None:
     )
 
 
-def resolve_field(
+def resolve_land(
     *,
-    field_id: str | None = None,
     land_id: str | None = None,
-    parcel_id: str | None = None,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """GET /v1/internal/fields/resolve → {field_id, land_id, tags?}."""
+    """GET /v1/internal/lands/resolve → canonical land metadata."""
     params: dict[str, str] = {}
-    if field_id:
-        params["field_id"] = str(field_id)
     if land_id:
         params["land_id"] = str(land_id)
-    if parcel_id:
-        params["parcel_id"] = str(parcel_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get("/v1/internal/fields/resolve", params=params)
-        _raise_for_status(r, context="fields/resolve")
+        r = c.get("/v1/internal/lands/resolve", params=params)
+        _raise_for_status(r, context="lands/resolve")
         data = r.json()
         if not isinstance(data, dict):
-            raise InternalApiError("fields/resolve returned non-object")
+            raise InternalApiError("lands/resolve returned non-object")
         return data
 
     if client is not None:
@@ -297,23 +307,23 @@ def agri_scenes_summary(
         return _do(c)
 
 
-def field_geom(
-    field_id: str,
+def land_geom(
+    land_id: str,
     *,
     include_geojson: bool = False,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """GET /v1/internal/fields/{id}/geom."""
+    """GET /v1/internal/lands/{id}/geom."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/fields/{field_id}/geom",
+            f"/v1/internal/lands/{land_id}/geom",
             params={"include_geojson": 1 if include_geojson else 0},
         )
-        _raise_for_status(r, context="fields/geom")
+        _raise_for_status(r, context="lands/geom")
         data = r.json()
         if not isinstance(data, dict):
-            raise InternalApiError("fields/geom returned non-object")
+            raise InternalApiError("lands/geom returned non-object")
         return data
 
     if client is not None:
@@ -424,14 +434,14 @@ def progress_work(
 
 
 def assessment_bundle(
-    field_id: str,
+    land_id: str,
     *,
     date_from: str | None = None,
     date_to: str | None = None,
     client: httpx.Client | None = None,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """GET /v1/internal/fields/{id}/assessment-bundle — full load_field_bundle JSON."""
+    """GET /v1/internal/lands/{id}/assessment-bundle — full parcel bundle."""
     params: dict[str, str] = {}
     if date_from:
         params["date_from"] = str(date_from)[:10]
@@ -440,10 +450,10 @@ def assessment_bundle(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/fields/{field_id}/assessment-bundle",
+            f"/v1/internal/lands/{land_id}/assessment-bundle",
             params=params or None,
         )
-        _raise_for_status(r, context="fields/assessment-bundle")
+        _raise_for_status(r, context="lands/assessment-bundle")
         data = r.json()
         if not isinstance(data, dict):
             raise InternalApiError("assessment-bundle returned non-object")
@@ -456,22 +466,22 @@ def assessment_bundle(
 
 
 def season_growth_inputs(
-    field_id: str,
+    land_id: str,
     *,
     date_from: str,
     date_to: str,
     client: httpx.Client | None = None,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """GET /v1/internal/fields/{id}/season-growth-inputs — field + S2/S1/indices rows."""
+    """GET /v1/internal/lands/{id}/season-growth-inputs — parcel + S1/S2 rows."""
     params = {"date_from": str(date_from)[:10], "date_to": str(date_to)[:10]}
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/fields/{field_id}/season-growth-inputs",
+            f"/v1/internal/lands/{land_id}/season-growth-inputs",
             params=params,
         )
-        _raise_for_status(r, context="fields/season-growth-inputs")
+        _raise_for_status(r, context="lands/season-growth-inputs")
         data = r.json()
         if not isinstance(data, dict):
             raise InternalApiError("season-growth-inputs returned non-object")
@@ -483,14 +493,81 @@ def season_growth_inputs(
         return _do(c)
 
 
+def weekly_index_prepare(
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/schedule/weekly-index：过期地块 + 在 API 建 Job。"""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post("/v1/internal/schedule/weekly-index")
+        _raise_for_status(r, context="schedule/weekly-index")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("weekly-index returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def weather_land_ids(
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """GET /v1/internal/schedule/weather-lands：每日天气要拉的 land_id。"""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.get("/v1/internal/schedule/weather-lands")
+        _raise_for_status(r, context="schedule/weather-lands")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("weather-lands returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)
+
+
+def refresh_overview_stats(
+    *,
+    window_days: int = 60,
+    crop: str | None = None,
+    client: httpx.Client | None = None,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/schedule/overview-refresh：总览预聚合在 API 上执行。"""
+    params: dict[str, str] = {"window_days": str(int(window_days))}
+    if crop:
+        params["crop"] = str(crop)
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post("/v1/internal/schedule/overview-refresh", params=params)
+        _raise_for_status(r, context="schedule/overview-refresh")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("overview-refresh returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
 def data_readiness(
-    field_id: str,
+    land_id: str,
     *,
     date_from: str | None = None,
     date_to: str | None = None,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """GET /v1/internal/fields/{id}/data-readiness — weather/soil/RS coverage counts."""
+    """GET /v1/internal/lands/{id}/data-readiness — weather/soil/RS coverage counts."""
     params: dict[str, str] = {}
     if date_from:
         params["date_from"] = str(date_from)[:10]
@@ -499,10 +576,10 @@ def data_readiness(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/fields/{field_id}/data-readiness",
+            f"/v1/internal/lands/{land_id}/data-readiness",
             params=params or None,
         )
-        _raise_for_status(r, context="fields/data-readiness")
+        _raise_for_status(r, context="lands/data-readiness")
         data = r.json()
         if not isinstance(data, dict):
             raise InternalApiError("data-readiness returned non-object")

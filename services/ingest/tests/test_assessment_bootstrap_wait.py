@@ -19,7 +19,7 @@ _TEST_STUBS = {
     "app.core.logging": SimpleNamespace(logger=MagicMock()),
     "app.tasks.storage_tasks": SimpleNamespace(upload_file_via_storage=MagicMock()),
     "app.models.tables": SimpleNamespace(
-        Job=object, SoilProfile=object, WeatherDaily=object, Field=object
+        Job=object, SoilProfile=object, WeatherDaily=object, LandParcel=object
     ),
     "app.reports.land_assessment.scorecard_view": SimpleNamespace(
         scorecard_public_view=lambda x: x
@@ -49,7 +49,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         ):
             status = ar.bootstrap_pulls_ready(
                 session,
-                field_id=uuid.uuid4(),
+                land_id=str(uuid.uuid4()),
                 date_from="2024-01-01",
                 date_to="2024-01-31",
                 wait_celery_ids=["c1"],
@@ -70,7 +70,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         ):
             status = ar.bootstrap_pulls_ready(
                 session,
-                field_id=uuid.uuid4(),
+                land_id=str(uuid.uuid4()),
                 date_from="2024-01-01",
                 date_to="2024-01-31",
                 wait_celery_ids=["c1", "c2"],
@@ -90,7 +90,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         ):
             status = ar.bootstrap_pulls_ready(
                 session,
-                field_id=uuid.uuid4(),
+                land_id=str(uuid.uuid4()),
                 date_from=None,
                 date_to=None,
                 wait_celery_ids=["c1"],
@@ -121,7 +121,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         ):
             status = ar.bootstrap_pulls_ready(
                 session,
-                field_id=uuid.uuid4(),
+                land_id=str(uuid.uuid4()),
                 date_from="2023-09-14",
                 date_to="2026-09-14",
                 wait_celery_ids=["c1"],
@@ -146,7 +146,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         ):
             status = ar.bootstrap_pulls_ready(
                 session,
-                field_id=uuid.uuid4(),
+                land_id=str(uuid.uuid4()),
                 date_from="2024-01-01",
                 date_to="2024-12-31",
                 wait_celery_ids=["c1"],

@@ -1,4 +1,8 @@
-"""Map CloudAMQP TaskMessage → existing Celery ingest tasks."""
+"""Map CloudAMQP TaskMessage to direct canonical-land Celery tasks.
+
+A message contains one identity only: land_id. The consumer never looks up a
+UUID field, parses tags, or translates between parcel identifiers.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +11,13 @@ import uuid
 from typing import Any
 
 from openfarm_common.celery_app import celery_client
-from openfarm_common.database_sync import SyncSession
 from openfarm_common.mq_results import publish_task_result
 from openfarm_common.mq_schemas import TaskMessage
-from sqlalchemy import text
+from openfarm_common.trace import (
+    bind_trace_from_mapping,
+    clear_trace_id,
+    get_or_create_trace_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,196 +26,87 @@ SUPPORTED_TYPES = {
     "agri_bridge",
     "weather_backfill",
     "soil_fetch",
-    "field_bootstrap",
+    "land_bootstrap",
     "assessment_report",
     "season_growth_report",
 }
 
 
-def _resolve_field_and_land_db(
-    field_id: str | None,
-    parcel_id: str | None,
-    land_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Legacy SyncSession resolve (when API_BASE_URL unset)."""
-    lid = land_id or parcel_id
-    fid = field_id
-    session = SyncSession()
-    try:
-        if fid and not lid:
-            row = session.execute(
-                text("SELECT tags_json FROM fields WHERE id = CAST(:fid AS uuid)"),
-                {"fid": fid},
-            ).first()
-            if row and row[0]:
-                tags = row[0]
-                if isinstance(tags, list):
-                    for tag in tags:
-                        if isinstance(tag, str) and tag.startswith("agri:"):
-                            lid = tag[5:].strip() or lid
-                            break
-        if lid and not fid:
-            # parcel_id / land_id → agric-satellite-analysis field tagged agri:<land_id>
-            row = session.execute(
-                text(
-                    """
-                    SELECT id::text
-                    FROM fields
-                    WHERE deleted_at IS NULL
-                      AND tags_json::text LIKE :pat
-                    ORDER BY created_at DESC NULLS LAST
-                    LIMIT 1
-                    """
-                ),
-                {"pat": f"%agri:{lid}%"},
-            ).first()
-            if row:
-                fid = row[0]
-    finally:
-        session.close()
-    return fid, lid
-
-
-def _resolve_field_and_land_http(
-    field_id: str | None,
-    parcel_id: str | None,
-    land_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Resolve via GET /v1/internal/fields/resolve."""
-    from openfarm_common.internal_api import resolve_field
-
-    data = resolve_field(field_id=field_id, land_id=land_id, parcel_id=parcel_id)
-    return data.get("field_id"), data.get("land_id")
-
-
-def _resolve_field_and_land(
-    field_id: str | None,
-    parcel_id: str | None,
-    land_id: str | None,
-) -> tuple[str | None, str | None]:
-    """Map field_id / parcel_id(land_id); prefer internal HTTP when configured."""
-    lid = land_id or parcel_id
-    fid = field_id
-    if fid and lid:
-        return fid, lid
-
-    try:
-        from openfarm_common.internal_api import internal_api_enabled
-    except ImportError:
-        internal_api_enabled = lambda: False  # noqa: E731
-
-    if internal_api_enabled():
-        try:
-            return _resolve_field_and_land_http(field_id, parcel_id, land_id)
-        except Exception as exc:
-            logger.warning(
-                "field_resolve_http_failed falling_back_db err=%s",
-                exc,
-            )
-    return _resolve_field_and_land_db(field_id, parcel_id, land_id)
-
-
 def _dispatch_satellite_analysis(
     task: TaskMessage,
-    field_id: str,
-    land_id: str | None,
+    land_id: str,
 ) -> dict[str, Any]:
-    """Fire-and-forget: agri lonlat-direct backfill (or classic COG) + wait publisher."""
+    """Dispatch the remote-sensing wave for one canonical land parcel."""
     extras = dict(task.extras or {})
     months = int(extras.get("months") or 24)
     force = bool(extras.get("force") or False)
     mode = str(extras.get("mode") or "full")
-    allow_agri = bool(extras.get("allow_agri") or False)
-    # External producers default to agri-aware full path (historical MVP behavior).
-    if "allow_agri" not in extras and mode != "bridge_only":
-        allow_agri = True
     with_bridge = bool(extras.get("with_bridge") or extras.get("bridge_job_id"))
     if mode == "full" and "with_bridge" not in extras and "bridge_job_id" not in extras:
-        # Default full path includes bridge when land_id known or allow_agri
-        with_bridge = bool(land_id) or allow_agri
+        with_bridge = True
+
     sentinel_job_id = extras.get("sentinel_job_id")
     bridge_job_id = extras.get("bridge_job_id")
     dispatch_alerts = bool(extras.get("dispatch_alerts") or False)
-    lid = land_id or extras.get("land_id")
 
     if mode == "bridge_only":
         async_result = celery_client.send_task(
-            "app.tasks.agri_bridge.bridge_field_stac_to_agri",
-            args=[field_id],
-            kwargs={
-                "mq_task_id": task.task_id,
-                "land_id": lid,
-            },
+            "app.tasks.agri_bridge.bridge_land_stac_to_agri",
+            args=[land_id],
+            kwargs={"mq_task_id": task.task_id},
             queue="ingest",
         )
         return {
-            "dispatched": ["app.tasks.agri_bridge.bridge_field_stac_to_agri"],
+            "dispatched": ["app.tasks.agri_bridge.bridge_land_stac_to_agri"],
             "celery_ids": [async_result.id],
             "mode": mode,
         }
 
     backfill_kwargs: dict[str, Any] = {
         "months": months,
-        "allow_agri": allow_agri,
         "force": force,
         "mq_task_id": task.task_id,
     }
-    if extras.get("date_from"):
-        backfill_kwargs["date_from"] = str(extras["date_from"])[:10]
-    if extras.get("date_to"):
-        backfill_kwargs["date_to"] = str(extras["date_to"])[:10]
+    for key in ("date_from", "date_to"):
+        if extras.get(key):
+            backfill_kwargs[key] = str(extras[key])[:10]
     if sentinel_job_id:
         backfill_kwargs["sentinel_job_id"] = str(sentinel_job_id)
 
-    celery_client.send_task(
-        "app.tasks.backfill.backfill_indices_for_field",
-        args=[field_id],
+    backfill = celery_client.send_task(
+        "app.tasks.backfill.backfill_indices_for_land",
+        args=[land_id],
         kwargs=backfill_kwargs,
         queue="ingest",
     )
-    dispatched = ["app.tasks.backfill.backfill_indices_for_field"]
-    celery_ids: list[str] = []
+    dispatched = ["app.tasks.backfill.backfill_indices_for_land"]
+    celery_ids = [backfill.id]
 
     if with_bridge:
-        bridge_kwargs: dict[str, Any] = {
-            "land_id": lid,
-            "mq_task_id": task.task_id,
-        }
+        bridge_kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
         if bridge_job_id:
             bridge_kwargs["bridge_job_id"] = str(bridge_job_id)
         bridge = celery_client.send_task(
             "app.tasks.agri_bridge.bridge_after_backfill",
-            args=[field_id],
+            args=[land_id],
             kwargs=bridge_kwargs,
             queue="ingest",
         )
         dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
         celery_ids.append(bridge.id)
-
         if dispatch_alerts:
-            try:
-                celery_client.send_task(
-                    "app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
-                    args=[field_id],
-                    kwargs={"land_id": lid, "replace_open": True},
-                    queue="ingest",
-                )
-                dispatched.append(
-                    "app.tasks.agri_alerts.evaluate_agri_alerts_for_field"
-                )
-            except Exception:
-                logger.warning(
-                    "mq_alert_dispatch_failed task_id=%s field_id=%s",
-                    task.task_id,
-                    field_id,
-                )
+            celery_client.send_task(
+                "app.tasks.agri_alerts.evaluate_agri_alerts_for_land",
+                args=[land_id],
+                kwargs={"replace_open": True},
+                queue="ingest",
+            )
+            dispatched.append("app.tasks.agri_alerts.evaluate_agri_alerts_for_land")
     else:
-        # Non-agri / no bridge: publish lightweight accepted result (orchestration only).
         publish_task_result(
             task_id=task.task_id,
             status="success",
-            field_id=field_id,
-            land_id=lid,
+            land_id=land_id,
             extras={
                 "phase": "dispatched",
                 "dispatched": dispatched,
@@ -228,20 +126,20 @@ def _dispatch_satellite_analysis(
 
 def _dispatch_weather_backfill(
     task: TaskMessage,
-    field_id: str,
+    land_id: str,
 ) -> dict[str, Any]:
     extras = dict(task.extras or {})
     kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
     if extras.get("days") is not None:
         kwargs["days"] = int(extras["days"])
     async_result = celery_client.send_task(
-        "app.tasks.weather.backfill_weather_for_field",
-        args=[field_id],
+        "app.tasks.weather.backfill_weather_for_land",
+        args=[land_id],
         kwargs=kwargs,
         queue="ingest",
     )
     return {
-        "dispatched": ["app.tasks.weather.backfill_weather_for_field"],
+        "dispatched": ["app.tasks.weather.backfill_weather_for_land"],
         "celery_ids": [async_result.id],
         "days": kwargs.get("days"),
     }
@@ -249,42 +147,31 @@ def _dispatch_weather_backfill(
 
 def _dispatch_soil_fetch(
     task: TaskMessage,
-    field_id: str,
+    land_id: str,
 ) -> dict[str, Any]:
     extras = dict(task.extras or {})
     kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
-    job_id = extras.get("job_id")
-    args: list[str] = [field_id]
-    if job_id:
-        args.append(str(job_id))
+    args = [land_id]
+    if extras.get("job_id"):
+        args.append(str(extras["job_id"]))
     async_result = celery_client.send_task(
-        "app.tasks.soil.fetch_soil_for_field",
+        "app.tasks.soil.fetch_soil_for_land",
         args=args,
         kwargs=kwargs,
         queue="ingest",
     )
     return {
-        "dispatched": ["app.tasks.soil.fetch_soil_for_field"],
+        "dispatched": ["app.tasks.soil.fetch_soil_for_land"],
         "celery_ids": [async_result.id],
-        "job_id": job_id,
+        "job_id": extras.get("job_id"),
     }
 
 
-def _dispatch_field_bootstrap(
+def _dispatch_land_bootstrap(
     task: TaskMessage,
-    field_id: str,
-    land_id: str | None,
+    land_id: str,
 ) -> dict[str, Any]:
-    """One MQ message → fan-out weather + soil + optional satellite indices.
-
-    Publishes a single lightweight ResultMessage after Celery enqueue
-    (accepted/dispatched). Standalone weather_backfill / soil_fetch /
-    satellite_analysis carry full end-of-task results via mq_task_id hooks.
-
-    Optional extras:
-      - date_from / date_to → backfill_indices_for_field
-      - days / weather_days → backfill_weather_for_field (or derived from date_from)
-    """
+    """Fan out weather, soil, and optional remote-sensing work for one parcel."""
     extras = dict(task.extras or {})
     skip_indices = bool(extras.get("skip_indices") or False)
     sentinel_job_id = extras.get("sentinel_job_id")
@@ -292,146 +179,125 @@ def _dispatch_field_bootstrap(
     celery_ids: list[str] = []
 
     weather_kwargs: dict[str, Any] = {}
-    days = extras.get("days")
-    if days is None:
-        days = extras.get("weather_days")
+    days = extras.get("days") or extras.get("weather_days")
     if days is None and extras.get("date_from"):
         try:
-            from datetime import date as _date
+            from datetime import date as date_cls
 
-            start = _date.fromisoformat(str(extras["date_from"])[:10])
+            start = date_cls.fromisoformat(str(extras["date_from"])[:10])
             end_raw = extras.get("date_to")
-            end = _date.fromisoformat(str(end_raw)[:10]) if end_raw else _date.today()
+            end = (
+                date_cls.fromisoformat(str(end_raw)[:10])
+                if end_raw
+                else date_cls.today()
+            )
             days = max(1, (end - start).days)
         except ValueError:
             days = None
     if days is not None:
         weather_kwargs["days"] = int(days)
 
-    w = celery_client.send_task(
-        "app.tasks.weather.backfill_weather_for_field",
-        args=[field_id],
+    weather = celery_client.send_task(
+        "app.tasks.weather.backfill_weather_for_land",
+        args=[land_id],
         kwargs=weather_kwargs,
         queue="ingest",
     )
-    dispatched.append("app.tasks.weather.backfill_weather_for_field")
-    celery_ids.append(w.id)
+    dispatched.append("app.tasks.weather.backfill_weather_for_land")
+    celery_ids.append(weather.id)
 
-    s = celery_client.send_task(
-        "app.tasks.soil.fetch_soil_for_field",
-        args=[field_id],
+    soil = celery_client.send_task(
+        "app.tasks.soil.fetch_soil_for_land",
+        args=[land_id],
         kwargs={},
         queue="ingest",
     )
-    dispatched.append("app.tasks.soil.fetch_soil_for_field")
-    celery_ids.append(s.id)
+    dispatched.append("app.tasks.soil.fetch_soil_for_land")
+    celery_ids.append(soil.id)
 
     if not skip_indices:
-        # Agri parcels need lonlat-direct optical/S1 path (same as satellite_analysis).
-        # Without allow_agri=True, backfill_indices_for_field skips immediately.
-        bk: dict[str, Any] = {
-            "allow_agri": True
-            if extras.get("allow_agri") is None
-            else bool(extras.get("allow_agri")),
-        }
+        index_kwargs: dict[str, Any] = {}
         if sentinel_job_id:
-            bk["sentinel_job_id"] = str(sentinel_job_id)
-        if extras.get("date_from"):
-            bk["date_from"] = str(extras["date_from"])[:10]
-        if extras.get("date_to"):
-            bk["date_to"] = str(extras["date_to"])[:10]
+            index_kwargs["sentinel_job_id"] = str(sentinel_job_id)
+        for key in ("date_from", "date_to"):
+            if extras.get(key):
+                index_kwargs[key] = str(extras[key])[:10]
         if extras.get("months") is not None:
-            bk["months"] = int(extras["months"])
+            index_kwargs["months"] = int(extras["months"])
         if extras.get("force") is not None:
-            bk["force"] = bool(extras["force"])
-        b = celery_client.send_task(
-            "app.tasks.backfill.backfill_indices_for_field",
-            args=[field_id],
-            kwargs=bk,
+            index_kwargs["force"] = bool(extras["force"])
+        indices = celery_client.send_task(
+            "app.tasks.backfill.backfill_indices_for_land",
+            args=[land_id],
+            kwargs=index_kwargs,
             queue="ingest",
         )
-        dispatched.append("app.tasks.backfill.backfill_indices_for_field")
-        celery_ids.append(b.id)
+        dispatched.append("app.tasks.backfill.backfill_indices_for_land")
+        celery_ids.append(indices.id)
 
-        # Match satellite_analysis: wait-publisher after agri lonlat wave when land known.
-        with_bridge = bool(extras.get("with_bridge") or False)
-        if "with_bridge" not in extras and land_id:
-            with_bridge = True
+        with_bridge = bool(extras.get("with_bridge", True))
         if with_bridge:
-            bridge_kwargs: dict[str, Any] = {
-                "land_id": land_id or extras.get("land_id")
-            }
+            bridge_kwargs: dict[str, Any] = {}
             if extras.get("bridge_job_id"):
                 bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
-            br = celery_client.send_task(
+            bridge = celery_client.send_task(
                 "app.tasks.agri_bridge.bridge_after_backfill",
-                args=[field_id],
+                args=[land_id],
                 kwargs=bridge_kwargs,
                 queue="ingest",
             )
             dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
-            celery_ids.append(br.id)
+            celery_ids.append(bridge.id)
 
-    # Optional one-click assessment: enqueue PDF worker AFTER pull tasks are queued
-    # so it can wait on celery ids + child RS jobs (no API race with empty data).
     followup = extras.get("followup_assessment")
     if isinstance(followup, dict) and followup.get("job_id"):
         assess_kwargs: dict[str, Any] = {
             "job_id": str(followup["job_id"]),
-            "field_id": str(field_id),
+            "land_id": land_id,
             "pull_data": True,
             "wait_celery_ids": list(celery_ids),
         }
         for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
             if followup.get(key) is not None:
                 assess_kwargs[key] = followup[key]
-            elif extras.get(key) is not None and key not in assess_kwargs:
+            elif extras.get(key) is not None:
                 assess_kwargs[key] = extras[key]
         if followup.get("mq_task_id"):
             assess_kwargs["mq_task_id"] = str(followup["mq_task_id"])
-        a = celery_client.send_task(
+        result = celery_client.send_task(
             "app.tasks.assessment_report.generate_assessment_report",
             kwargs=assess_kwargs,
             queue="ingest",
         )
         dispatched.append("app.tasks.assessment_report.generate_assessment_report")
-        celery_ids.append(a.id)
+        celery_ids.append(result.id)
 
-    # Optional one-click season growth: same bootstrap → wait pattern as assessment.
     followup_sg = extras.get("followup_season_growth")
     if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
-        sg_kwargs: dict[str, Any] = {
+        season_kwargs: dict[str, Any] = {
             "job_id": str(followup_sg["job_id"]),
-            "field_id": str(field_id),
+            "land_id": land_id,
             "pull_data": True,
             "wait_celery_ids": list(celery_ids),
         }
         for key in ("start_date", "end_date", "crops", "label", "material_keys"):
             if followup_sg.get(key) is not None:
-                sg_kwargs[key] = followup_sg[key]
-            elif extras.get(key) is not None and key not in sg_kwargs:
-                sg_kwargs[key] = extras[key]
-        # Map bootstrap date window aliases if followup omitted start/end.
-        if sg_kwargs.get("start_date") is None and extras.get("date_from"):
-            sg_kwargs["start_date"] = str(extras["date_from"])[:10]
-        if sg_kwargs.get("end_date") is None and extras.get("date_to"):
-            sg_kwargs["end_date"] = str(extras["date_to"])[:10]
-        if followup_sg.get("mq_task_id"):
-            sg_kwargs["mq_task_id"] = str(followup_sg["mq_task_id"])
-        sg = celery_client.send_task(
+                season_kwargs[key] = followup_sg[key]
+            elif extras.get(key) is not None:
+                season_kwargs[key] = extras[key]
+        result = celery_client.send_task(
             "app.tasks.season_growth_report.generate_season_growth_report",
-            kwargs=sg_kwargs,
+            kwargs=season_kwargs,
             queue="ingest",
         )
         dispatched.append(
             "app.tasks.season_growth_report.generate_season_growth_report"
         )
-        celery_ids.append(sg.id)
+        celery_ids.append(result.id)
 
     publish_task_result(
         task_id=task.task_id,
         status="success",
-        field_id=field_id,
         land_id=land_id,
         extras={
             "phase": "bootstrap_dispatched",
@@ -440,15 +306,6 @@ def _dispatch_field_bootstrap(
             "date_from": extras.get("date_from"),
             "date_to": extras.get("date_to"),
             "days": weather_kwargs.get("days"),
-            "allow_agri": True
-            if extras.get("allow_agri") is None
-            else bool(extras.get("allow_agri")),
-            "followup_assessment": bool(
-                isinstance(followup, dict) and followup.get("job_id")
-            ),
-            "followup_season_growth": bool(
-                isinstance(followup_sg, dict) and followup_sg.get("job_id")
-            ),
         },
         upload_summary_if_empty=True,
     )
@@ -459,29 +316,19 @@ def _dispatch_field_bootstrap(
         "date_from": extras.get("date_from"),
         "date_to": extras.get("date_to"),
         "days": weather_kwargs.get("days"),
-        "allow_agri": True
-        if extras.get("allow_agri") is None
-        else bool(extras.get("allow_agri")),
     }
 
 
 def _dispatch_assessment_report(
     task: TaskMessage,
-    field_id: str,
+    land_id: str,
 ) -> dict[str, Any]:
-    """Dispatch land-assessment PDF Celery task; result published by ingest.
-
-    ``field_id`` is required (resolved by handle_task_message). ``job_id`` is
-    optional and forwarded so ingest can update a *local* Job when present, and
-    so ResultMessage carries job_id for the process-host writer / API DB.
-    """
+    """Dispatch land-assessment PDF generation using the same land_id."""
     extras = dict(task.extras or {})
-    if not field_id:
-        raise ValueError("assessment_report requires field_id")
     job_id = extras.get("job_id")
     kwargs: dict[str, Any] = {
         "mq_task_id": task.task_id,
-        "field_id": str(field_id),
+        "land_id": land_id,
     }
     if job_id:
         kwargs["job_id"] = str(job_id)
@@ -489,7 +336,7 @@ def _dispatch_assessment_report(
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
     if extras.get("pull_data") is not None:
-        kwargs["pull_data"] = bool(extras.get("pull_data"))
+        kwargs["pull_data"] = bool(extras["pull_data"])
     if extras.get("wait_celery_ids"):
         kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
     async_result = celery_client.send_task(
@@ -501,22 +348,19 @@ def _dispatch_assessment_report(
         "dispatched": ["app.tasks.assessment_report.generate_assessment_report"],
         "celery_ids": [async_result.id],
         "job_id": str(job_id) if job_id else None,
-        "field_id": field_id,
     }
 
 
 def _dispatch_season_growth_report(
     task: TaskMessage,
-    field_id: str,
+    land_id: str,
 ) -> dict[str, Any]:
-    """Dispatch season-growth PDF Celery task; result published by ingest."""
+    """Dispatch season-growth PDF generation using the same land_id."""
     extras = dict(task.extras or {})
-    if not field_id:
-        raise ValueError("season_growth_report requires field_id")
     job_id = extras.get("job_id")
     kwargs: dict[str, Any] = {
         "mq_task_id": task.task_id,
-        "field_id": str(field_id),
+        "land_id": land_id,
     }
     if job_id:
         kwargs["job_id"] = str(job_id)
@@ -524,7 +368,7 @@ def _dispatch_season_growth_report(
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
     if extras.get("pull_data") is not None:
-        kwargs["pull_data"] = bool(extras.get("pull_data"))
+        kwargs["pull_data"] = bool(extras["pull_data"])
     if extras.get("wait_celery_ids"):
         kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
     async_result = celery_client.send_task(
@@ -536,12 +380,20 @@ def _dispatch_season_growth_report(
         "dispatched": ["app.tasks.season_growth_report.generate_season_growth_report"],
         "celery_ids": [async_result.id],
         "job_id": str(job_id) if job_id else None,
-        "field_id": field_id,
     }
 
 
 def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
-    """Process one TaskMessage. Permanent failures publish failed result (no raise)."""
+    """Validate and dispatch one canonical-land task message."""
+    bind_trace_from_mapping(payload)
+    get_or_create_trace_id()
+    try:
+        _handle_task_message(payload, meta)
+    finally:
+        clear_trace_id()
+
+
+def _handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
     try:
         task = TaskMessage.model_validate(payload)
     except Exception as exc:
@@ -560,96 +412,61 @@ def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
             task_id=task.task_id,
             status="failed",
             error=f"unsupported type: {task.type}",
-            field_id=task.field_id,
-            land_id=task.land_id or task.parcel_id,
+            land_id=task.land_id,
             upload_summary_if_empty=False,
         )
         return
 
-    field_id, land_id = _resolve_field_and_land(
-        task.field_id, task.parcel_id, task.land_id
-    )
-    if not field_id:
+    if not task.land_id:
         publish_task_result(
             task_id=task.task_id,
             status="failed",
-            error="field_id could not be resolved (provide field_id or agri-tagged parcel_id)",
-            land_id=land_id,
+            error="land_id is required",
             upload_summary_if_empty=False,
         )
         return
 
+    land_id = str(task.land_id)
     try:
         if task.type in ("satellite_analysis", "agri_bridge"):
             if task.type == "agri_bridge":
                 task.extras = {**(task.extras or {}), "mode": "bridge_only"}
-            info = _dispatch_satellite_analysis(task, field_id, land_id)
+            info = _dispatch_satellite_analysis(task, land_id)
         elif task.type == "weather_backfill":
-            info = _dispatch_weather_backfill(task, field_id)
+            info = _dispatch_weather_backfill(task, land_id)
         elif task.type == "soil_fetch":
-            info = _dispatch_soil_fetch(task, field_id)
-        elif task.type == "field_bootstrap":
-            info = _dispatch_field_bootstrap(task, field_id, land_id)
+            info = _dispatch_soil_fetch(task, land_id)
+        elif task.type == "land_bootstrap":
+            info = _dispatch_land_bootstrap(task, land_id)
         elif task.type == "assessment_report":
-            try:
-                info = _dispatch_assessment_report(task, field_id)
-            except ValueError as exc:
-                publish_task_result(
-                    task_id=task.task_id,
-                    status="failed",
-                    error=str(exc),
-                    field_id=field_id,
-                    land_id=land_id,
-                    upload_summary_if_empty=False,
-                )
-                return
+            info = _dispatch_assessment_report(task, land_id)
         elif task.type == "season_growth_report":
-            try:
-                info = _dispatch_season_growth_report(task, field_id)
-            except ValueError as exc:
-                publish_task_result(
-                    task_id=task.task_id,
-                    status="failed",
-                    error=str(exc),
-                    field_id=field_id,
-                    land_id=land_id,
-                    upload_summary_if_empty=False,
-                )
-                return
+            info = _dispatch_season_growth_report(task, land_id)
         else:
-            publish_task_result(
-                task_id=task.task_id,
-                status="failed",
-                error=f"unhandled type: {task.type}",
-                field_id=field_id,
-                land_id=land_id,
-                upload_summary_if_empty=False,
-            )
-            return
+            raise ValueError(f"unhandled type: {task.type}")
 
         logger.info(
-            "mq_task_dispatched task_id=%s type=%s field_id=%s land_id=%s info=%s meta=%s",
+            "mq_task_dispatched task_id=%s type=%s land_id=%s info=%s meta=%s",
             task.task_id,
             task.type,
-            field_id,
             land_id,
             info,
             {k: meta.get(k) for k in ("retry_count", "redelivered")},
         )
     except Exception as exc:
-        # Transient broker/dispatch errors → requeue via raise
-        logger.exception("mq_dispatch_failed task_id=%s", task.task_id)
+        logger.exception(
+            "mq_dispatch_failed task_id=%s land_id=%s", task.task_id, land_id
+        )
         if int(meta.get("retry_count") or 0) >= 2:
-            try:
-                publish_task_result(
-                    task_id=task.task_id,
-                    status="failed",
-                    error=f"dispatch failed: {exc}",
-                    field_id=field_id,
-                    land_id=land_id,
-                    upload_summary_if_empty=False,
-                )
-            except Exception:
-                pass
+            publish_task_result(
+                task_id=task.task_id,
+                status="failed",
+                error=f"dispatch failed: {exc}",
+                land_id=land_id,
+                upload_summary_if_empty=False,
+            )
             return
         raise
+
+
+__all__ = ["SUPPORTED_TYPES", "handle_task_message"]

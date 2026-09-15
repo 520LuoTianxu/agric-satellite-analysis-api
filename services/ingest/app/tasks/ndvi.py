@@ -41,8 +41,8 @@ logger = structlog.get_logger()
     time_limit=1800,
     soft_time_limit=1500)
 def process_ndvi(self, job_id: str) -> dict:
-    """Process NDVI for a field - delegates to the shared pipeline."""
-    from app.models.tables import Job, Field, FieldStat
+    """Process NDVI for one canonical land parcel."""
+    from app.models.tables import Job, LandParcel, FieldStat
 
     index_def = get_index("ndvi")
     session = get_db_session()
@@ -57,31 +57,31 @@ def process_ndvi(self, job_id: str) -> dict:
         job.progress_json = {"current_step": "scene_search", "steps": {}}
         session.commit()
 
-        field = session.get(Field, job.field_id)
-        if not field:
+        land = session.get(LandParcel, job.land_id)
+        if not land or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Field not found"
+            job.error = "Land parcel not found"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        field_geom = to_shape(field.geom)
-        field_geom_geojson = mapping(field_geom)
+        land_geom = to_shape(land.geom)
+        land_geom_geojson = mapping(land_geom)
 
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
         org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
-        field_id_str = str(job.field_id)
+        land_id_str = str(job.land_id)
 
         # Step 1: Scene Search
         update_job_progress(session, job, "scene_search")
-        scenes = search_scenes(field_geom_geojson, date_from, date_to, index_def)
+        scenes = search_scenes(land_geom_geojson, date_from, date_to, index_def)
         force = bool(params.get("force") or False)
         if not force:
             existing = collect_existing_scene_dates(
                 session,
-                field,
+                land_id_str,
                 layer_type=index_def.label,
                 satellite="S2",
                 agri_sensor="S2")
@@ -90,7 +90,7 @@ def process_ndvi(self, job_id: str) -> dict:
                 scenes,
                 existing,
                 force=False,
-                field_id=field_id_str,
+                land_id=land_id_str,
                 index=index_def.key)
             complete_step(
                 session,
@@ -118,14 +118,14 @@ def process_ndvi(self, job_id: str) -> dict:
 
         # Compute target grid
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
-            field_geom.bounds, field_geom
+            land_geom.bounds, land_geom
         )
 
         # Historical means for alerts
         existing_stats = (
             session.execute(
                 select(FieldStat.mean)
-                .where(FieldStat.field_id == job.field_id)
+                .where(FieldStat.land_id == job.land_id)
                 .order_by(FieldStat.date.asc())
             )
             .scalars()
@@ -149,7 +149,7 @@ def process_ndvi(self, job_id: str) -> dict:
             field_mask=field_mask,
             bounds=bounds,
             org_id_str=org_id_str,
-            field_id_str=field_id_str,
+            land_id_str=land_id_str,
             date_from=date_from,
             date_to=date_to,
             historical_means=historical_means)

@@ -1,6 +1,8 @@
-"""Celery tasks for object-storage uploads (storage queue only).
+"""对象存储上传任务（仅 ``storage`` 队列）。
 
-Task names stay ``app.tasks.storage.*`` for API/ingest send_task compatibility.
+任务名固定为 ``app.tasks.storage.*``，与 API / ingest 的 ``send_task``
+以及 ``openfarm_common.celery_app.TASK_ROUTES`` 对齐。实际 OSS 读写走
+``openfarm_common.storage.get_storage()``，本文件只做队列侧契约。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from app.worker import celery_app
 
 
 def _result_payload(key: str) -> dict:
+    """上传成功后的统一返回：对象 key、公开 URL、后端名、内部 URI。"""
     storage = get_storage()
     return {
         "key": key,
@@ -31,15 +34,20 @@ def upload_file(
     path: str,
     content_type: str | None = None,
 ) -> dict:
-    """Upload a local (shared-scratch) file to object storage."""
+    """把共享 scratch 卷上的本地文件上传到对象存储。
+
+    ingest 把 COG / PDF 等产物写到 ``OPENFARM_SCRATCH_DIR``（默认
+    ``/data/scratch``），再投递本任务。上传由本 worker 负责清理临时文件，
+    避免 ingest 在等待结果时崩溃导致两边争着删文件。
+    """
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"upload path missing or not a file: {path!r}")
     storage = get_storage()
     try:
         storage.upload_file(key, path, content_type=content_type)
     finally:
-        # Own cleanup of shared-scratch staging dirs so ingest can leave files
-        # until upload succeeds (avoids race when ingest workers die mid-wait).
+        # 只清理 scratch 卷上的暂存文件；非 scratch 路径（调试用本地文件）不动。
+        # rmdir 失败直接忽略：目录里可能还有同批其它文件。
         scratch_root = os.environ.get("OPENFARM_SCRATCH_DIR", "/data/scratch")
         try:
             if path.startswith(scratch_root.rstrip("/") + "/") and os.path.isfile(path):
@@ -67,7 +75,11 @@ def put_bytes(
     data_b64: str,
     content_type: str | None = None,
 ) -> dict:
-    """Upload raw bytes (base64) — use only for small payloads, not COGs."""
+    """上传小对象（payload 为 base64）。
+
+    走 Redis broker 传字节，只适合 JSON、缩略图等小文件。COG 等大文件
+    必须走 ``upload_file``（共享卷），否则会撑爆 broker。
+    """
     data = base64.b64decode(data_b64)
     storage = get_storage()
     storage.put_bytes(key, data, content_type=content_type)
@@ -82,11 +94,13 @@ def put_bytes(
 
 @celery_app.task(name="app.tasks.storage.exists")
 def exists(key: str) -> bool:
+    """查询对象存储里是否已有该 key。"""
     return bool(get_storage().exists(key))
 
 
 @celery_app.task(name="app.tasks.storage.public_url")
 def public_url(key: str) -> str:
+    """按当前后端规则拼公开访问 URL，不访问网络。"""
     return get_storage().public_url(key)
 
 

@@ -1,133 +1,103 @@
-"""Unit tests for D2 internal read helpers (resolve tag parse, job patch merge)."""
+"""Unit tests for direct internal land reads and job progress patching."""
 
 from __future__ import annotations
 
 import asyncio
-import unittest
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-from app.routers import internal_fields as fields_mod
 from app.routers import internal_jobs as jobs_mod
+from app.routers import internal_lands as lands_mod
 
 
-class LandIdFromTagsTests(unittest.TestCase):
-    def test_extracts_agri_tag(self) -> None:
-        self.assertEqual(
-            fields_mod._land_id_from_tags(["crop:wheat", "agri:LAND99"]),
-            "LAND99",
-        )
-
-    def test_ignores_non_list(self) -> None:
-        self.assertIsNone(fields_mod._land_id_from_tags(None))
-        self.assertIsNone(fields_mod._land_id_from_tags({"agri": "x"}))
-
-
-class JobPatchMergeTests(unittest.TestCase):
-    def test_merge_progress_steps(self) -> None:
-        job = MagicMock()
-        job.id = uuid.uuid4()
-        job.field_id = None
-        job.type = "ndvi"
-        job.status = "pending"
-        job.progress_json = {
-            "current_step": "scene_search",
-            "steps": {"scene_search": {"status": "completed"}},
-        }
-        job.error = None
-        job.params_json = None
-        job.created_at = datetime.now(timezone.utc)
-        job.started_at = None
-        job.finished_at = None
-
-        db = AsyncMock()
-        db.get = AsyncMock(return_value=job)
-        db.commit = AsyncMock()
-        db.refresh = AsyncMock()
-
-        body = jobs_mod.InternalJobPatch(
-            status="running",
-            merge_progress=True,
-            progress_json={
-                "current_step": "download",
-                "steps": {"download": {"status": "running"}},
-            },
-        )
-
-        out = asyncio.run(jobs_mod.patch_job(job.id, body, None, db))
-        self.assertEqual(job.status, "running")
-        self.assertIsNotNone(job.started_at)
-        steps = job.progress_json["steps"]
-        self.assertIn("scene_search", steps)
-        self.assertIn("download", steps)
-        self.assertEqual(out.status, "running")
+def _land() -> MagicMock:
+    land = MagicMock()
+    land.land_id = "L1"
+    land.source_parcel_id = "L1"
+    land.tile_id = "tile-1"
+    land.virtual_tile_id = None
+    land.project_key = None
+    land.land_name = "测试地块"
+    land.farm_id = None
+    land.group_id = "G1"
+    land.group_name = "测试项目"
+    land.province_name = "河北省"
+    land.city_name = "邢台市"
+    land.county_name = "清河县"
+    land.town_name = None
+    land.village_name = None
+    land.boundary_geojson = {"type": "MultiPolygon", "coordinates": []}
+    land.crop_type = None
+    land.season = None
+    land.tags_json = ["crop:wheat"]
+    land.deleted_at = None
+    return land
 
 
-class ResolveBothIdsTests(unittest.TestCase):
-    def test_both_ids_validates_field(self) -> None:
-        field = MagicMock()
-        field.id = uuid.uuid4()
-        field.tags_json = ["agri:L1"]
-        field.name = "f"
-        field.deleted_at = None
+def test_resolve_land_returns_the_requested_primary_key() -> None:
+    land = _land()
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=land)
 
-        db = AsyncMock()
-        result = MagicMock()
-        result.scalar_one_or_none = MagicMock(return_value=field)
-        db.execute = AsyncMock(return_value=result)
+    out = asyncio.run(lands_mod.resolve_land(None, db, land_id="L1"))
 
-        out = asyncio.run(
-            fields_mod.resolve_field(
-                None,
-                db,
-                field_id=str(field.id),
-                land_id="L1",
-                parcel_id=None,
-            )
-        )
-        self.assertEqual(out.field_id, str(field.id))
-        self.assertEqual(out.land_id, "L1")
+    assert out.land_id == "L1"
+    assert out.tile_id == "tile-1"
+    assert out.group_id == "G1"
+    db.get.assert_awaited_once()
 
 
-class EnsureAgriLandTagTests(unittest.TestCase):
-    def test_replace_and_clear(self) -> None:
-        from app.core.agri_tags import ensure_agri_land_tag
+def test_patch_land_tags_updates_metadata_on_same_row() -> None:
+    land = _land()
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=land)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
 
-        self.assertEqual(
-            ensure_agri_land_tag(["crop:wheat", "agri:OLD"], "25107"),
-            ["crop:wheat", "agri:25107"],
-        )
-        self.assertEqual(
-            ensure_agri_land_tag(["agri:OLD", "cdfinance_group:1"], ""),
-            ["cdfinance_group:1"],
-        )
-        self.assertEqual(ensure_agri_land_tag(None, "9"), ["agri:9"])
+    body = lands_mod.LandTagsPatch(tags_json=["crop:corn"])
+    out = asyncio.run(lands_mod.patch_land_tags("L1", body, None, db))
 
-
-class PatchFieldTagsTests(unittest.TestCase):
-    def test_merge_land_and_group(self) -> None:
-        field = MagicMock()
-        field.id = uuid.uuid4()
-        field.tags_json = ["crop:corn"]
-        field.name = "郎吕坡村委会4号"
-        field.deleted_at = None
-
-        db = AsyncMock()
-        result = MagicMock()
-        result.scalar_one_or_none = MagicMock(return_value=field)
-        db.execute = AsyncMock(return_value=result)
-        db.commit = AsyncMock()
-        db.refresh = AsyncMock()
-
-        body = fields_mod.FieldTagsPatch(land_id="25107", group_id="7694")
-        out = asyncio.run(fields_mod.patch_field_tags(str(field.id), body, None, db))
-        self.assertEqual(out.land_id, "25107")
-        self.assertIn("agri:25107", out.tags or [])
-        self.assertIn("cdfinance_group:7694", out.tags or [])
-        self.assertEqual(out.name, "郎吕坡村委会4号")
-        db.commit.assert_awaited()
+    assert land.tags_json == ["crop:corn"]
+    assert out.land_id == "L1"
+    assert out.tile_id == "tile-1"
+    db.commit.assert_awaited_once()
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_job_patch_merges_progress_steps() -> None:
+    job = MagicMock()
+    job.id = uuid.uuid4()
+    job.land_id = "L1"
+    job.type = "ndvi"
+    job.status = "pending"
+    job.progress_json = {
+        "current_step": "scene_search",
+        "steps": {"scene_search": {"status": "completed"}},
+    }
+    job.error = None
+    job.params_json = None
+    job.created_at = datetime.now(timezone.utc)
+    job.started_at = None
+    job.finished_at = None
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=job)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    body = jobs_mod.InternalJobPatch(
+        status="running",
+        merge_progress=True,
+        progress_json={
+            "current_step": "download",
+            "steps": {"download": {"status": "running"}},
+        },
+    )
+
+    out = asyncio.run(jobs_mod.patch_job(job.id, body, None, db))
+
+    assert job.status == "running"
+    assert job.started_at is not None
+    assert "scene_search" in job.progress_json["steps"]
+    assert "download" in job.progress_json["steps"]
+    assert out.status == "running"

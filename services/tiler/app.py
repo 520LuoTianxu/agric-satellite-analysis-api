@@ -1,4 +1,9 @@
-"""agric-satellite-analysis TiTiler - custom TiTiler with JWT authentication.
+"""TiTiler 兼容服务（当前暂不启用）。
+
+当前 agri 地块详情页直接使用 OSS 中的 scene JSON / ``pixel_data``
+渲染连续色斑，不再依赖 COG 瓦片服务。因此 TiTiler 已从默认 Docker
+Compose 和 Caddy 路由中下线；本文件仅保留历史 COG 链路，方便后续确有
+栅格瓦片需求时恢复，不代表当前部署会启动此服务。
 
 Per PRD: TiTiler endpoints require a valid JWT so that only authenticated
 users can fetch NDVI tile imagery. The JWT is the same token minted by
@@ -18,6 +23,8 @@ from titiler.core.factory import TilerFactory
 from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
 
 # ── Config ────────────────────────────────────────────────────────────
+# 这些配置只供未来恢复历史 COG 瓦片链路使用；当前 Compose 不会注入或启动
+# TiTiler 容器，OSS 数据由 agri 的 API/worker 路径直接处理。
 
 JWT_SECRET = os.environ.get("OPENFARM_JWT_SECRET", "change-me")
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
@@ -91,6 +98,8 @@ app.add_middleware(
 )
 
 # ── COG Tiler with JWT ───────────────────────────────────────────────
+# 保留原有鉴权和路由实现，避免恢复历史栅格链路时重新拼装；当前没有外部
+# Caddy / Compose 入口指向这里。
 
 cog = TilerFactory(
     router_prefix="/cog",

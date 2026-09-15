@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
-from app.models.tables import Alert, Farm, Field
+from app.models.tables import Alert, Farm, LandParcel
 from app.schemas.common import PaginatedResponse
 from app.schemas.monitoring import AlertOut, AlertSummaryOut, AlertUpdate
 
@@ -23,11 +23,11 @@ _writer = require_roles("owner", "admin", "member")
 
 
 def _with_context(stmt):
-    """Attach the field and farm an alert belongs to.
+    """Attach the canonical land parcel and farm for an alert.
 
     Outer joins, deliberately: an alert outlives its field, and an inner
     join would make alerts silently disappear from the list the moment
-    someone deletes a field. The deleted_at condition sits in the join
+    someone deletes a parcel. The deleted_at condition sits in the join
     rather than in a WHERE for the same reason - it nulls the name
     without dropping the row.
 
@@ -35,20 +35,20 @@ def _with_context(stmt):
     own tables on every request, so a rename shows up immediately.
     """
     return stmt.outerjoin(
-        Field, (Alert.field_id == Field.id) & Field.deleted_at.is_(None)
-    ).outerjoin(Farm, (Field.farm_id == Farm.id) & Farm.deleted_at.is_(None))
+        LandParcel, (Alert.land_id == LandParcel.land_id) & LandParcel.deleted_at.is_(None)
+    ).outerjoin(Farm, (LandParcel.farm_id == Farm.id) & Farm.deleted_at.is_(None))
 
 
 def _alert_out(
     alert: Alert,
-    field_name: str | None,
+    land_name: str | None,
     farm_id: uuid.UUID | None,
     farm_name: str | None,
 ) -> AlertOut:
-    """Build the response from an (alert, field name, farm) row."""
+    """Build the response from an (alert, land name, farm) row."""
     return AlertOut.model_validate(alert).model_copy(
         update={
-            "field_name": field_name,
+            "land_name": land_name,
             "farm_id": farm_id,
             "farm_name": farm_name,
         }
@@ -59,7 +59,7 @@ def _alert_out(
 async def list_alerts(
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    field_id: uuid.UUID | None = Query(None),
+    land_id: str | None = Query(None),
     farm_id: uuid.UUID | None = Query(None),
     status_filter: str | None = Query(None, alias="status"),
     severity: str | None = Query(None),
@@ -68,8 +68,8 @@ async def list_alerts(
     offset: int = Query(0, ge=0),
 ):
     base = _with_context(select(Alert)).where(org_scope(None, ctx))
-    if field_id:
-        base = base.where(Alert.field_id == field_id)
+    if land_id:
+        base = base.where(Alert.land_id == land_id)
     if status_filter:
         base = base.where(Alert.status == status_filter)
     if severity:
@@ -77,14 +77,14 @@ async def list_alerts(
     if index_type:
         base = base.where(Alert.index_type == index_type)
     if farm_id:
-        base = base.where(Field.farm_id == farm_id)
+        base = base.where(LandParcel.farm_id == farm_id)
 
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
     rows = (
         await db.execute(
-            base.add_columns(Field.name, Farm.id, Farm.name)
+            base.add_columns(LandParcel.land_name, Farm.id, Farm.name)
             .order_by(Alert.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -125,23 +125,23 @@ async def alerts_summary(
     )
 
 
-@router.get("/fields/{field_id}/alerts", response_model=PaginatedResponse[AlertOut])
+@router.get("/lands/{land_id}/alerts", response_model=PaginatedResponse[AlertOut])
 async def list_field_alerts(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     base = _with_context(select(Alert)).where(
-        org_scope(None, ctx), Alert.field_id == field_id
+        org_scope(None, ctx), Alert.land_id == land_id
     )
     total = (
         await db.execute(select(func.count()).select_from(base.subquery()))
     ).scalar() or 0
     rows = (
         await db.execute(
-            base.add_columns(Field.name, Farm.id, Farm.name)
+            base.add_columns(LandParcel.land_name, Farm.id, Farm.name)
             .order_by(Alert.created_at.desc())
             .limit(limit)
             .offset(offset)

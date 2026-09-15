@@ -900,7 +900,7 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 19.9 | Create `backfill_all_existing_fields()` task in `tasks/backfill.py` | [x] | 60s stagger per field; `apply_async(countdown=...)` |
+| 19.9 | Create `backfill_all_existing_lands()` task in `tasks/backfill.py` | [x] | 60s stagger per land parcel; `apply_async(countdown=...)` |
 | 19.10 | Add admin-only endpoint `POST /v1/admin/backfill-all-fields` | [x] | `require_roles("owner")` - owner-only |
 
 ---

@@ -3,8 +3,8 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Link, useRouter } from "@/i18n/navigation";
-import { farmsApi, fieldsApi } from "@/lib/api";
-import type { Farm, Field } from "@/lib/api";
+import { farmsApi, landsApi } from "@/lib/api";
+import type { Farm, LandParcel } from "@/lib/api";
 import { formatAreaMu } from "@/lib/area";
 import { toast } from "sonner";
 import {
@@ -41,7 +41,7 @@ export default function FarmDetailPage() {
     const farmId = params.id as string;
 
     const [farm, setFarm] = useState<Farm | null>(null);
-    const [fields, setFields] = useState<Field[]>([]);
+    const [lands, setLands] = useState<LandParcel[]>([]);
     const [loading, setLoading] = useState(true);
 
     // Edit mode
@@ -71,10 +71,10 @@ export default function FarmDetailPage() {
         }
 
         try {
-            const fieldsRes = await farmsApi.fields(farmId, 200, 0);
-            setFields(fieldsRes.items);
+            const landsRes = await farmsApi.lands(farmId, 200, 0);
+            setLands(landsRes.items);
         } catch (err) {
-            console.error("Failed to load fields:", err);
+            console.error("Failed to load land parcels:", err);
         }
 
         setLoading(false);
@@ -126,7 +126,7 @@ export default function FarmDetailPage() {
         if (!file) return;
         setImporting(true);
         try {
-            const result = await fieldsApi.import(farmId, file);
+            const result = await landsApi.import(farmId, file);
             toast.success(`Imported ${result.imported} field(s)`);
             if (result.errors.length > 0) {
                 toast.warning(`${result.errors.length} error(s) during import`);
@@ -140,18 +140,18 @@ export default function FarmDetailPage() {
         }
     };
 
-    const handleDeleteField = async (fieldId: string, fieldName: string) => {
+    const handleDeleteLand = async (landId: string, landName: string) => {
         const ok = await confirm({
             title: tFarms("deleteField"),
-            description: tFarms("deleteFieldConfirm", { name: fieldName }),
+            description: tFarms("deleteFieldConfirm", { name: landName }),
             confirmLabel: tCommon("delete"),
             variant: "destructive",
         });
         if (!ok) return;
         try {
-            await fieldsApi.delete(fieldId);
+            await landsApi.delete(landId);
             toast.success(tFarms("fieldDeleted"));
-            setFields((prev) => prev.filter((f) => f.id !== fieldId));
+            setLands((prev) => prev.filter((land) => land.land_id !== landId));
         } catch (err: any) {
             toast.error(err.detail || tFarms("failedDeleteField"));
         }
@@ -259,7 +259,7 @@ export default function FarmDetailPage() {
             <div>
                 <div className="flex items-center justify-between mb-4">
                     <h2 className="text-lg font-semibold">
-                        Fields ({fields.length})
+                        Land parcels ({lands.length})
                     </h2>
                     <div className="flex gap-2">
                         <Button variant="outline" asChild>
@@ -278,7 +278,7 @@ export default function FarmDetailPage() {
                     </div>
                 </div>
 
-                {fields.length === 0 ? (
+                {lands.length === 0 ? (
                     <Card className="border-2 border-dashed">
                         <CardContent className="p-12 text-center">
                             <Map className="mx-auto h-12 w-12 text-muted-foreground/50" />
@@ -303,27 +303,27 @@ export default function FarmDetailPage() {
                     </Card>
                 ) : (
                     <div className="space-y-2">
-                        {fields.map((field) => (
+                        {lands.map((land) => (
                             <Card
-                                key={field.id}
+                                key={land.land_id}
                                 className={cn("hover:border-primary/30 transition-colors")}
                             >
                                 <CardContent className="flex items-center justify-between p-4">
                                     <Link
-                                        href={`/farms/${farmId}/fields/${field.id}`}
+                                        href={`/farms/${farmId}/fields/${land.land_id}`}
                                         className="flex-1 flex items-center gap-3"
                                     >
                                         <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-subtle">
                                             <Map className="h-5 w-5 text-primary" />
                                         </div>
                                         <div>
-                                            <p className="text-sm font-medium">{field.name}</p>
+                                            <p className="text-sm font-medium">{land.land_name || land.land_id}</p>
                                             <div className="flex items-center gap-1.5 mt-0.5">
                                                 <span className="text-xs text-muted-foreground">
-                                                    {formatAreaMu(field.area_ha)}
+                                                    {formatAreaMu(land.area_ha)}
                                                 </span>
-                                                {field.crop_type && <Badge variant="secondary">{field.crop_type}</Badge>}
-                                                {field.season && <Badge variant="outline">{field.season}</Badge>}
+                                                {land.crop_type && <Badge variant="secondary">{land.crop_type}</Badge>}
+                                                {land.season && <Badge variant="outline">{land.season}</Badge>}
                                             </div>
                                         </div>
                                     </Link>
@@ -332,11 +332,11 @@ export default function FarmDetailPage() {
                                             variant="ghost"
                                             size="icon"
                                             className="h-8 w-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                                            onClick={() => handleDeleteField(field.id, field.name)}
+                                            onClick={() => handleDeleteLand(land.land_id, land.land_name || land.land_id)}
                                         >
                                             <Trash2 className="h-4 w-4" />
                                         </Button>
-                                        <Link href={`/farms/${farmId}/fields/${field.id}`}>
+                                        <Link href={`/farms/${farmId}/fields/${land.land_id}`}>
                                             <ChevronRight className="h-4 w-4 text-muted-foreground" />
                                         </Link>
                                     </div>

@@ -1,3 +1,4 @@
+# 历史 TiTiler COG 链路依赖；当前默认部署不安装、不启动该服务。
 titiler.core>=0.18.0,<1.0
 titiler.mosaic>=0.18.0,<1.0
 titiler.extensions>=0.18.0,<1.0

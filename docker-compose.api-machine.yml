@@ -1,0 +1,21 @@
+# API 机：只跑控制面。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.api-machine.yml up -d --build
+#
+# API 机持有 Postgres、API Redis、FastAPI、Web、Caddy。
+# 国外数据下载、Beat、去云 worker 放在 docker-compose.download-machine.yml，
+# 避免把 API 机当成跨境处理机。Beat 在下载机单实例
+# （ingest 镜像，celery -A app.beat）。
+
+services:
+  # 这些 worker 属于下载机。profile 防止 API 机上普通 docker compose up 误启。
+  ingest:
+    profiles: ["download-machine"]
+
+  storage:
+    profiles: ["download-machine"]
+
+  beat:
+    profiles: ["download-machine"]

@@ -25,7 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.models.tables import (
     Alert,
     AuditEvent,
-    Field,
+    LandParcel,
     Job,
     SoilFieldSummary,
     SoilLayer,
@@ -134,21 +134,21 @@ def _soil_http_only() -> bool:
         return False
 
 
-def _resolve_field_lat_lon_soil(
-    field_id: str, session=None
+def _resolve_land_lat_lon_soil(
+    land_id: str, session=None
 ) -> tuple[float, float] | None:
-    """Return (lat, lon) via internal geom API or SyncSession Field.geom."""
+    """Return (lat, lon) via internal geom API or SyncSession LandParcel.geom."""
     try:
-        from openfarm_common.internal_api import field_geom, internal_api_enabled
+        from openfarm_common.internal_api import land_geom, internal_api_enabled
 
         if internal_api_enabled():
-            g = field_geom(field_id)
+            g = land_geom(land_id)
             lat, lon = g.get("centroid_lat"), g.get("centroid_lon")
             if lat is not None and lon is not None:
                 return float(lat), float(lon)
     except Exception as exc:
         logger.warning(
-            "soil_field_geom_http_failed", field_id=field_id, error=str(exc)
+            "soil_land_geom_http_failed", land_id=land_id, error=str(exc)
         )
         try:
             from openfarm_common.internal_api import ingest_pg_reads_allowed
@@ -160,10 +160,10 @@ def _resolve_field_lat_lon_soil(
 
     if session is None:
         return None
-    field = session.get(Field, uuid.UUID(field_id))
-    if not field or field.deleted_at is not None:
+    land = session.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None or land.geom is None:
         return None
-    geom = to_shape(field.geom)
+    geom = to_shape(land.geom)
     c = geom.centroid
     return float(c.y), float(c.x)
 
@@ -645,10 +645,10 @@ def _compute_layer_awc_mm(
     return awc_per_cm * thickness_cm * 0.1
 
 
-# ── Field Summary Computation ────────────────────────────────────────
+# ── LandParcel Summary Computation ────────────────────────────────────────
 
 
-def _compute_field_summary(layers: list[dict]) -> dict:
+def _compute_land_summary(layers: list[dict]) -> dict:
     """Compute depth-weighted summary from layer data."""
     textures = []
     ph_values = []
@@ -1126,15 +1126,15 @@ def _update_soil_job(session, job: Job | None, step: str, status: str = "running
 
 
 @celery_app.task(
-    name="app.tasks.soil.fetch_soil_for_field",
+    name="app.tasks.soil.fetch_soil_for_land",
     bind=True,
     max_retries=2,
     # Parallel WCS is much faster, but keep headroom for DB/MQ publish.
     time_limit=600,
     soft_time_limit=540)
-def fetch_soil_for_field(
+def fetch_soil_for_land(
     self,
-    field_id: str,
+    land_id: str,
     job_id: str | None = None,
     mq_task_id: str | None = None) -> dict:
     """Fetch soil data for a field and store profile + layers + summary.
@@ -1160,7 +1160,7 @@ def fetch_soil_for_field(
             publish_task_result(
                 task_id=mq_task_id,
                 status=status,
-                field_id=field_id,
+                land_id=land_id,
                 error=error,
                 extras={"source": "soil_fetch", **(extras or {})},
                 payload=payload,
@@ -1169,7 +1169,7 @@ def fetch_soil_for_field(
         except Exception as e:
             logger.warning(
                 "soil_mq_result_publish_failed",
-                field_id=field_id,
+                land_id=land_id,
                 mq_task_id=mq_task_id,
                 error=str(e))
 
@@ -1196,20 +1196,20 @@ def fetch_soil_for_field(
             except Exception:
                 pass
 
-        coords = _resolve_field_lat_lon_soil(
-            field_id, session=None if http_only else session
+        coords = _resolve_land_lat_lon_soil(
+            land_id, session=None if http_only else session
         )
         if coords is None:
-            logger.error("soil_field_not_found", field_id=field_id)
+            logger.error("soil_field_not_found", land_id=land_id)
             if job:
                 job.status = "failed"
-                job.error = "Field not found"
+                job.error = "LandParcel not found"
                 job.finished_at = datetime.now(timezone.utc)
                 session.commit()
-            _publish_soil_mq("failed", error="Field not found")
-            return {"status": "error", "message": "Field not found"}
+            _publish_soil_mq("failed", error="LandParcel not found")
+            return {"status": "error", "message": "LandParcel not found"}
         lat, lon = coords
-        field = None if http_only else session.get(Field, uuid.UUID(field_id))
+        land = None if http_only else session.get(LandParcel, land_id)
 
         # Step 1: Determine source
         if not http_only:
@@ -1217,7 +1217,7 @@ def fetch_soil_for_field(
 
         logger.info(
             "soil_fetch_start",
-            field_id=field_id,
+            land_id=land_id,
             lat=lat,
             lon=lon)
 
@@ -1236,7 +1236,7 @@ def fetch_soil_for_field(
             converted = _convert_soilgrids_units(raw_data)
 
         if not converted:
-            logger.warning("soil_no_data", field_id=field_id, source=source)
+            logger.warning("soil_no_data", land_id=land_id, source=source)
             if job:
                 job.status = "failed"
                 job.error = f"No soil data available from {source}"
@@ -1268,12 +1268,12 @@ def fetch_soil_for_field(
         # Step 4: Compute summary
         _update_soil_job(session, job, "compute_summary")
 
-        summary_data = _compute_field_summary(layer_dicts)
+        summary_data = _compute_land_summary(layer_dicts)
 
         # Step 4b: Persist to DB (or HTTP results/apply when download has no PG)
         soil_payload = {
             "kind": "soil_profile",
-            "field_id": field_id,
+            "land_id": land_id,
             "profile": {
                 "source": source,
                 "source_resolution_m": resolution,
@@ -1296,7 +1296,7 @@ def fetch_soil_for_field(
                     apply_results(soil_payload)
             except Exception as e:
                 logger.warning(
-                    "soil_http_apply_failed", field_id=field_id, error=str(e)
+                    "soil_http_apply_failed", land_id=land_id, error=str(e)
                 )
                 _publish_soil_mq("failed", error=str(e)[:500])
                 return {"status": "error", "message": str(e)}
@@ -1324,7 +1324,7 @@ def fetch_soil_for_field(
             )
             logger.info(
                 "soil_fetch_complete",
-                field_id=field_id,
+                land_id=land_id,
                 source=source,
                 layers=len(layer_dicts),
                 quality_score=quality,
@@ -1332,7 +1332,7 @@ def fetch_soil_for_field(
             )
             return {
                 "status": "success",
-                "field_id": field_id,
+                "land_id": land_id,
                 "source": source,
                 "layers": len(layer_dicts),
                 "quality_score": quality,
@@ -1342,7 +1342,7 @@ def fetch_soil_for_field(
         # Delete old profile + layers + summary for this field (upsert pattern)
         old_profiles = (
             session.execute(
-                select(SoilProfile).where(SoilProfile.field_id == uuid.UUID(field_id))
+                select(SoilProfile).where(SoilProfile.land_id == land_id)
             )
             .scalars()
             .all()
@@ -1360,7 +1360,7 @@ def fetch_soil_for_field(
         # Create new profile
         profile = SoilProfile(
 
-            field_id=uuid.UUID(field_id),
+            land_id=land_id,
             source=source,
             source_resolution_m=resolution,
             fetched_at=datetime.now(timezone.utc),
@@ -1407,7 +1407,7 @@ def fetch_soil_for_field(
 
         # Create field summary
         summary = SoilFieldSummary(
-            field_id=uuid.UUID(field_id),
+            land_id=land_id,
             profile_id=profile.id,
             dominant_texture=summary_data.get("dominant_texture"),
             avg_ph=summary_data.get("avg_ph"),
@@ -1424,7 +1424,7 @@ def fetch_soil_for_field(
         # Upsert: delete old summary first
         session.execute(
             delete(SoilFieldSummary).where(
-                SoilFieldSummary.field_id == uuid.UUID(field_id)
+                SoilFieldSummary.land_id == land_id
             )
         )
         session.add(summary)
@@ -1435,7 +1435,7 @@ def fetch_soil_for_field(
 
                 event_type="soil_profile_created",
                 metadata_json={
-                    "field_id": field_id,
+                    "land_id": land_id,
                     "source": source,
                     "resolution_m": resolution,
                     "layers": len(layer_dicts),
@@ -1450,7 +1450,7 @@ def fetch_soil_for_field(
             today = datetime.now(timezone.utc).date()
             for candidate in alert_candidates:
                 alert = Alert(
-                    field_id=uuid.UUID(field_id),
+                    land_id=land_id,
 
                     date=today,
                     severity=candidate.severity,
@@ -1468,11 +1468,11 @@ def fetch_soil_for_field(
                 session.commit()
                 logger.info(
                     "soil_alerts_created",
-                    field_id=field_id,
+                    land_id=land_id,
                     count=len(alert_candidates))
         except Exception:
             logger.warning(
-                "soil_alert_evaluation_failed", field_id=field_id, exc_info=True
+                "soil_alert_evaluation_failed", land_id=land_id, exc_info=True
             )
 
         # Step 5: Complete
@@ -1485,14 +1485,14 @@ def fetch_soil_for_field(
 
         logger.info(
             "soil_fetch_complete",
-            field_id=field_id,
+            land_id=land_id,
             source=source,
             layers=len(layer_dicts),
             quality_score=quality)
 
         soil_payload = {
             "kind": "soil_profile",
-            "field_id": field_id,
+            "land_id": land_id,
 
             "profile": {
                 "source": source,
@@ -1516,7 +1516,7 @@ def fetch_soil_for_field(
             payload=soil_payload)
         return {
             "status": "success",
-            "field_id": field_id,
+            "land_id": land_id,
             "source": source,
             "layers": len(layer_dicts),
         }
@@ -1524,7 +1524,7 @@ def fetch_soil_for_field(
     except Exception as exc:
         if session is not None:
             session.rollback()
-        logger.exception("soil_fetch_error", field_id=field_id)
+        logger.exception("soil_fetch_error", land_id=land_id)
         _publish_soil_mq("failed", error=str(exc)[:500])
         if job_id and session is not None:
             try:

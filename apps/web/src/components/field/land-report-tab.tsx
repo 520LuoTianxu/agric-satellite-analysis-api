@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
     assessmentApi,
-    fieldsApi,
+    landsApi,
     jobsApi,
     seasonGrowthApi,
     soilApi,
@@ -35,7 +35,7 @@ import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 
 interface LandReportTabProps {
-    fieldId: string;
+    landId: string;
     cropType?: string | null;
     onCropBound?: (cropKey: string) => void;
 }
@@ -106,7 +106,7 @@ function isCropRequiredError(err: any): boolean {
     return false;
 }
 
-export default function LandReportTab({ fieldId, cropType, onCropBound }: LandReportTabProps) {
+export default function LandReportTab({ landId, cropType, onCropBound }: LandReportTabProps) {
     const t = useTranslations("landReportTab");
     const [latest, setLatest] = useState<NdviJob | null>(null);
     const [loading, setLoading] = useState(true);
@@ -154,7 +154,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
 
     const refreshMeta = useCallback(async () => {
         try {
-            const job = await assessmentApi.latestMeta(fieldId);
+            const job = await assessmentApi.latestMeta(landId);
             setLatest(job);
             return job;
         } catch {
@@ -163,22 +163,22 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
         } finally {
             setLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     const refreshScorecard = useCallback(async () => {
         try {
-            const next = await assessmentApi.latestScorecard(fieldId);
+            const next = await assessmentApi.latestScorecard(landId);
             setScorecard(next);
             setScorecardState("ready");
         } catch (err) {
             setScorecard(null);
             setScorecardState(errorCode(err) === "scorecard_unavailable" ? "legacy" : "empty");
         }
-    }, [fieldId]);
+    }, [landId]);
 
     const refreshSgMeta = useCallback(async () => {
         try {
-            const job = await seasonGrowthApi.latestMeta(fieldId);
+            const job = await seasonGrowthApi.latestMeta(landId);
             setSgLatest(job);
             return job;
         } catch {
@@ -187,7 +187,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
         } finally {
             setSgLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         refreshMeta();
@@ -238,7 +238,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
             if (sgFiles.length) {
                 setSgUploading(true);
                 for (const f of sgFiles) {
-                    const up = await seasonGrowthApi.uploadMaterial(fieldId, f);
+                    const up = await seasonGrowthApi.uploadMaterial(landId, f);
                     if (up.key) material_keys.push(up.key);
                 }
                 setSgUploading(false);
@@ -258,7 +258,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
             if (cdfinanceHrBaseId.trim()) {
                 cdfinanceBody.hr_base_id = cdfinanceHrBaseId.trim();
             }
-            const job = await seasonGrowthApi.generate(fieldId, {
+            const job = await seasonGrowthApi.generate(landId, {
                 start_date: sgStart,
                 end_date: sgEnd,
                 crops,
@@ -290,7 +290,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const handleSgDownload = async () => {
         setSgDownloading(true);
         try {
-            await seasonGrowthApi.downloadLatest(fieldId);
+            await seasonGrowthApi.downloadLatest(landId);
         } catch (e: any) {
             toast.error(e?.message || ts("downloadFailed"));
         } finally {
@@ -363,12 +363,12 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
             // Soft prompt when no token and no cached site admission
             if (!body.cdfinance_token) {
                 try {
-                    await soilApi.getSiteAdmission(fieldId);
+                    await soilApi.getSiteAdmission(landId);
                 } catch {
                     toast.message(t("siteAdmissionMissingHint"));
                 }
             }
-            const job = await assessmentApi.generate(fieldId, body);
+            const job = await assessmentApi.generate(landId, body);
             if (cropKey) {
                 setBoundCrop(cropKey);
                 onCropBound?.(cropKey);
@@ -417,7 +417,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
         }
         try {
             const key = pickCrop.trim();
-            await fieldsApi.update(fieldId, { crop_type: key });
+            await landsApi.update(landId, { crop_type: key });
             setBoundCrop(key);
             onCropBound?.(key);
             toast.success(t("cropBound"));
@@ -429,7 +429,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     const handleDownload = async () => {
         setDownloading(true);
         try {
-            await assessmentApi.downloadLatest(fieldId);
+            await assessmentApi.downloadLatest(landId);
         } catch (e: any) {
             toast.error(e?.message || t("downloadFailed"));
         } finally {

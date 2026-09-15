@@ -171,8 +171,7 @@ def test_publish_retries_on_plain_broken_pipe_errno():
             {
                 "task_id": "bp-errno",
                 "type": "weather_backfill",
-                "field_id": "f1",
-                "land_id": None,
+                "land_id": "L1",
                 "extras": {},
             }
         )

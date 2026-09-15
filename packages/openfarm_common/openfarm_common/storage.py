@@ -1,27 +1,20 @@
-"""Switchable object storage: MinIO (S3) or Aliyun OSS.
-
-Selected by ``settings.storage_backend`` (``minio`` | ``oss``).
-"""
+"""Aliyun OSS object storage implementation."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import timedelta
 from functools import lru_cache
-from io import BytesIO
 from urllib.parse import urlparse
 
 import oss2
-from minio import Minio
 
 from openfarm_common.settings import settings
 
 
 def signed_get_expire_sec(*, years: float = 20.0) -> int:
-    """OSS/MinIO signed GET TTL in seconds (default 20 years)."""
+    """OSS signed GET TTL in seconds (default 20 years)."""
     return max(int(years * 365.25 * 24 * 3600), 24 * 3600)
-
-
 
 class ObjectStorage(ABC):
     """Backend-agnostic object storage interface."""
@@ -29,7 +22,7 @@ class ObjectStorage(ABC):
     @property
     @abstractmethod
     def backend(self) -> str:
-        """Backend name: ``minio`` or ``oss``."""
+        """Backend name."""
 
     @property
     @abstractmethod
@@ -106,132 +99,6 @@ class ObjectStorage(ABC):
     @abstractmethod
     def uri_for(self, key: str) -> str:
         """Canonical storage URI (``s3://`` or ``oss://``)."""
-
-
-class MinioStorage(ObjectStorage):
-    def __init__(self) -> None:
-        self._bucket = settings.minio_bucket
-        self._client = Minio(
-            settings.minio_endpoint,
-            access_key=settings.minio_access_key,
-            secret_key=settings.minio_secret_key,
-            secure=settings.minio_secure,
-        )
-        # Browser-reachable client for presigned URL signing (host in signature).
-        signing_endpoint = settings.minio_public_endpoint or settings.minio_endpoint
-        self._signing_client = Minio(
-            signing_endpoint,
-            access_key=settings.minio_access_key,
-            secret_key=settings.minio_secret_key,
-            secure=settings.minio_secure,
-            region="us-east-1",
-        )
-
-    @property
-    def backend(self) -> str:
-        return "minio"
-
-    @property
-    def bucket(self) -> str:
-        return self._bucket
-
-    def upload_file(
-        self,
-        key: str,
-        file_path: str,
-        content_type: str | None = None,
-    ) -> str:
-        self._client.fput_object(
-            self._bucket,
-            key,
-            file_path,
-            content_type=content_type or "application/octet-stream",
-        )
-        return key
-
-    def download_file(self, key: str, file_path: str) -> None:
-        self._client.fget_object(self._bucket, key, file_path)
-
-    def put_bytes(
-        self,
-        key: str,
-        data: bytes,
-        content_type: str | None = None,
-    ) -> str:
-        self._client.put_object(
-            self._bucket,
-            key,
-            BytesIO(data),
-            length=len(data),
-            content_type=content_type or "application/octet-stream",
-        )
-        return key
-
-    def get_bytes(self, key: str) -> bytes:
-        response = self._client.get_object(self._bucket, key)
-        try:
-            return response.read()
-        finally:
-            response.close()
-            response.release_conn()
-
-    def exists(self, key: str) -> bool:
-        try:
-            self._client.stat_object(self._bucket, key)
-            return True
-        except Exception:
-            return False
-
-    def list_keys(
-        self,
-        prefix: str,
-        suffix: str = "",
-        limit: int = 0,
-    ) -> list[str]:
-        keys: list[str] = []
-        for obj in self._client.list_objects(
-            self._bucket, prefix=prefix, recursive=True
-        ):
-            key = obj.object_name
-            if key is None:
-                continue
-            if suffix and not key.endswith(suffix):
-                continue
-            keys.append(key)
-            if limit and len(keys) >= limit:
-                break
-        return keys
-
-    def presigned_put(
-        self,
-        key: str,
-        expires: timedelta = timedelta(minutes=15),
-        content_type: str | None = None,
-    ) -> str:
-        # MinIO Python SDK does not bind Content-Type into the signature here;
-        # callers may still set it on the PUT request when allowed by CORS.
-        _ = content_type
-        return self._signing_client.presigned_put_object(
-            self._bucket, key, expires=expires
-        )
-
-    def public_url(self, key: str) -> str:
-        endpoint = settings.minio_public_endpoint or settings.minio_endpoint
-        scheme = "https" if settings.minio_secure else "http"
-        return f"{scheme}://{endpoint}/{self._bucket}/{key}"
-
-    def presigned_get(
-        self,
-        key: str,
-        expires: timedelta | None = None,
-    ) -> str:
-        ttl = expires if expires is not None else timedelta(seconds=signed_get_expire_sec())
-        return self._signing_client.presigned_get_object(
-            self._bucket, key, expires=ttl
-        )
-
-    def uri_for(self, key: str) -> str:
-        return f"s3://{self._bucket}/{key}"
 
 
 class OssStorage(ObjectStorage):
@@ -346,8 +213,8 @@ def configure_gdal_vsis3(storage: ObjectStorage | None = None) -> dict[str, str]
     """Point rasterio/GDAL ``/vsis3/`` at the active object store.
 
     Returns the previous env values for keys we touch (caller may restore).
-    Uses assignment (not setdefault) so a prior MinIO config cannot stick
-    when ``STORAGE_BACKEND=oss``.
+    Uses assignment (not setdefault) so stale process environment cannot stick
+    to a previous storage configuration.
     """
     import os
     from urllib.parse import urlparse
@@ -365,28 +232,18 @@ def configure_gdal_vsis3(storage: ObjectStorage | None = None) -> dict[str, str]
     )
     previous = {k: os.environ[k] for k in keys if k in os.environ}
 
-    if storage.backend == "oss":
-        parsed = urlparse(settings.oss_endpoint)
-        endpoint = parsed.netloc or parsed.path or "oss-cn-beijing.aliyuncs.com"
-        # Strip scheme leftovers
-        endpoint = endpoint.replace("https://", "").replace("http://", "")
-        os.environ["AWS_S3_ENDPOINT"] = endpoint
-        os.environ["AWS_ACCESS_KEY_ID"] = settings.oss_access_key_id
-        os.environ["AWS_SECRET_ACCESS_KEY"] = settings.oss_access_key_secret
-        os.environ["AWS_VIRTUAL_HOSTING"] = "TRUE"
-        os.environ["AWS_HTTPS"] = "YES"
-        os.environ["AWS_NO_SIGN_REQUEST"] = "NO"
-        os.environ["AWS_REGION"] = settings.oss_region or "oss-cn-beijing"
-        os.environ["AWS_DEFAULT_REGION"] = settings.oss_region or "oss-cn-beijing"
-    else:
-        os.environ["AWS_S3_ENDPOINT"] = settings.minio_endpoint
-        os.environ["AWS_ACCESS_KEY_ID"] = settings.minio_access_key
-        os.environ["AWS_SECRET_ACCESS_KEY"] = settings.minio_secret_key
-        os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        os.environ["AWS_HTTPS"] = "YES" if settings.minio_secure else "NO"
-        os.environ["AWS_NO_SIGN_REQUEST"] = "NO"
-        os.environ["AWS_REGION"] = "us-east-1"
-        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+    parsed = urlparse(settings.oss_endpoint)
+    endpoint = parsed.netloc or parsed.path or "oss-cn-beijing.aliyuncs.com"
+    # Strip scheme leftovers
+    endpoint = endpoint.replace("https://", "").replace("http://", "")
+    os.environ["AWS_S3_ENDPOINT"] = endpoint
+    os.environ["AWS_ACCESS_KEY_ID"] = settings.oss_access_key_id
+    os.environ["AWS_SECRET_ACCESS_KEY"] = settings.oss_access_key_secret
+    os.environ["AWS_VIRTUAL_HOSTING"] = "TRUE"
+    os.environ["AWS_HTTPS"] = "YES"
+    os.environ["AWS_NO_SIGN_REQUEST"] = "NO"
+    os.environ["AWS_REGION"] = settings.oss_region or "oss-cn-beijing"
+    os.environ["AWS_DEFAULT_REGION"] = settings.oss_region or "oss-cn-beijing"
     return previous
 
 
@@ -417,14 +274,12 @@ def restore_gdal_env(
 def get_storage() -> ObjectStorage:
     """Return a cached storage backend instance for the configured backend."""
     backend = (settings.storage_backend or "oss").strip().lower()
-    if backend == "oss":
-        return OssStorage()
-    if backend == "minio":
-        return MinioStorage()
-    raise ValueError(
-        f"Unsupported STORAGE_BACKEND={settings.storage_backend!r}; "
-        "expected 'minio' or 'oss'"
-    )
+    if backend != "oss":
+        raise ValueError(
+            f"Unsupported STORAGE_BACKEND={settings.storage_backend!r}; "
+            "only 'oss' is supported"
+        )
+    return OssStorage()
 
 
 @lru_cache(maxsize=1)
@@ -447,7 +302,6 @@ def clear_storage_cache() -> None:
 
 __all__ = [
     "ObjectStorage",
-    "MinioStorage",
     "OssStorage",
     "get_storage",
     "get_parcel_product_storage",

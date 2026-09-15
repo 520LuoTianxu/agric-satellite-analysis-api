@@ -28,7 +28,7 @@ from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
-from app.models.tables import Field, Job
+from app.models.tables import LandParcel, Job
 from app.schemas.monitoring import JobOut
 from app.services.cdfinance_report_prefetch import (
     normalize_optional_group_id,
@@ -86,10 +86,10 @@ router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
 
 
-async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -> Field:
-    field = await db.get(Field, field_id)
+async def _get_field(land_id: str, org_id: uuid.UUID, db: AsyncSession) -> LandParcel:
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="LandParcel not found")
     return field
 
 
@@ -104,7 +104,7 @@ async def _maybe_enqueue_season_growth_work(
     db,
     *,
     job_id: str,
-    field_id: str,
+    land_id: str,
     extras: dict,
 ) -> str | None:
     """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
@@ -113,7 +113,7 @@ async def _maybe_enqueue_season_growth_work(
     if not should_enqueue_work_items():
         return None
     payload = {
-        "field_id": field_id,
+        "land_id": land_id,
         "extras": dict(extras),
     }
     item = await enqueue_work_item(
@@ -128,14 +128,14 @@ async def _maybe_enqueue_season_growth_work(
 
 
 @router.post(
-    "/fields/{field_id}/season-growth-report",
+    "/lands/{land_id}/season-growth-report",
     response_model=JobOut,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit("5/minute")
 async def create_season_growth_report(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     body: SeasonGrowthGenerateRequest,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -145,9 +145,9 @@ async def create_season_growth_report(
 
     Never refuses generation merely because weather / soil / RS are incomplete;
     missing series are handled inside the PDF worker. When pull_data=true,
-    field_bootstrap fans out pulls first and season_growth follows (no race).
+    land_bootstrap fans out pulls first and season_growth follows (no race).
     """
-    field = await _get_field(field_id, ctx.org_id, db)
+    field = await _get_field(land_id, ctx.org_id, db)
 
     start = date.fromisoformat(body.start_date)
     end = date.fromisoformat(body.end_date)
@@ -182,7 +182,7 @@ async def create_season_growth_report(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == "season_growth_report",
                 Job.status.in_(("pending", "running")),
             )
@@ -210,7 +210,7 @@ async def create_season_growth_report(
         "hr_base_id": hr_base_id,
     }
     job = Job(
-        field_id=field_id,
+        land_id=land_id,
         type="season_growth_report",
         status="pending",
         params_json=params,
@@ -236,12 +236,12 @@ async def create_season_growth_report(
             "group_id": group_id,
             "hr_base_id": hr_base_id,
         }
-        # pull_data → field_bootstrap(+followup) only (same race fix as assessment).
+        # pull_data → land_bootstrap(+followup) only (same race fix as assessment).
         if not pull_data:
             work_id = await _maybe_enqueue_season_growth_work(
                 db,
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 extras=season_extras,
             )
             if work_id:
@@ -254,8 +254,8 @@ async def create_season_growth_report(
 
         if pull_data:
             # Do NOT publish season_growth_report in parallel — that raced PDF ahead
-            # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out with
-            # allow_agri and enqueues season growth as followup after Celery ids.
+            # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out canonical
+            # pulls and enqueues season growth as followup after Celery ids.
             # publish_api_task also inserts work_items when dual|claim (D4).
             season_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
@@ -264,7 +264,6 @@ async def create_season_growth_report(
                 "days": weather_days,
                 "weather_days": weather_days,
                 "source": "season_growth_one_click",
-                "allow_agri": True,
                 "with_bridge": True,
                 "followup_season_growth": {
                     "job_id": str(job.id),
@@ -282,14 +281,14 @@ async def create_season_growth_report(
                 },
             }
             bootstrap_task_id = publish_api_task(
-                type="field_bootstrap",
-                field_id=str(field_id),
+                type="land_bootstrap",
+                land_id=str(land_id),
                 extras=bootstrap_extras,
             )
             logger.info(
                 "season_growth_bootstrap_dispatched",
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 mq_task_id=bootstrap_task_id,
                 season_mq_task_id=season_mq_task_id,
                 start_date=body.start_date,
@@ -300,13 +299,13 @@ async def create_season_growth_report(
         else:
             mq_task_id = publish_api_task(
                 type="season_growth_report",
-                field_id=str(field_id),
+                land_id=str(land_id),
                 extras=season_extras,
             )
             logger.info(
                 "season_growth_job_dispatched",
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 mq_task_id=mq_task_id,
                 pull_data=False,
             )
@@ -325,19 +324,19 @@ async def create_season_growth_report(
 
 
 @router.post(
-    "/fields/{field_id}/season-growth-report/materials",
+    "/lands/{land_id}/season-growth-report/materials",
     response_model=MaterialUploadOut,
 )
 @limiter.limit("20/minute")
 async def upload_season_growth_material(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(...),
 ):
     """Upload an optional material file; returns storage key for generate body."""
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="empty file")
@@ -346,7 +345,7 @@ async def upload_season_growth_material(
 
     safe_name = (file.filename or "material.bin").replace("/", "_").replace("\\", "_")
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    object_key = f"reports/season_growth/{field_id}/{ts}-{safe_name}"
+    object_key = f"reports/season_growth/{land_id}/{ts}-{safe_name}"
     storage = get_storage()
     content_type = file.content_type or "application/octet-stream"
     storage.put_bytes(object_key, raw, content_type=content_type)
@@ -361,21 +360,21 @@ async def upload_season_growth_material(
     )
 
 
-@router.get("/fields/{field_id}/season-growth-report/latest")
+@router.get("/lands/{land_id}/season-growth-report/latest")
 async def get_latest_season_growth_report(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Download the latest succeeded season-growth PDF for a field."""
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
 
     job = (
         await db.execute(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == "season_growth_report",
                 Job.status == "succeeded",
             )
@@ -417,7 +416,7 @@ async def _latest_report_job_for_meta(
     db: AsyncSession,
     *,
     ctx: OrgContext,
-    field_id: uuid.UUID,
+    land_id: str,
     job_type: str,
 ) -> Job | None:
     """Latest job for UI polling, without letting zombie failures shadow PDFs.
@@ -432,7 +431,7 @@ async def _latest_report_job_for_meta(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == job_type,
             )
             .order_by(Job.created_at.desc())
@@ -449,7 +448,7 @@ async def _latest_report_job_for_meta(
                 select(Job)
                 .where(
                     org_scope(None, ctx),
-                    Job.field_id == field_id,
+                    Job.land_id == land_id,
                     Job.type == job_type,
                     Job.status == "succeeded",
                 )
@@ -465,11 +464,11 @@ async def _latest_report_job_for_meta(
 
 
 @router.get(
-    "/fields/{field_id}/season-growth-report/latest/meta",
+    "/lands/{land_id}/season-growth-report/latest/meta",
     response_model=JobOut,
 )
 async def get_latest_season_growth_meta(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -479,9 +478,9 @@ async def get_latest_season_growth_meta(
     terminal failure/cancel but an earlier succeeded PDF exists, prefer that
     succeeded job so the UI is not shadowed by a zombie error.
     """
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
     job = await _latest_report_job_for_meta(
-        db, ctx=ctx, field_id=field_id, job_type="season_growth_report"
+        db, ctx=ctx, land_id=land_id, job_type="season_growth_report"
     )
     if not job:
         raise HTTPException(status_code=404, detail="No season growth report yet")

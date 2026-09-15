@@ -103,7 +103,7 @@ After import (and API restart if needed), authenticated org members can call:
 - `GET /v1/agri/lands/{land_id}/scenes` — time series (`?sensor=S1|S2`, `from`, `to`; `?include_pixels=1` optional)
 - `GET /v1/agri/lands/{land_id}/scenes/summary`
 
-Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; member+ for import-as-field).
+Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; member+ for imports).
 
 ## Product model (primary)
 
@@ -113,7 +113,10 @@ Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; membe
 | `land_parcels` | 地块 with `boundary_geojson` |
 | `parcel_scene_products` | S2 optical indices + S1 VV/VH time series |
 
-`/v1/farms` / `/v1/fields` are **legacy** in this fork; UI should target `/v1/agri/*`.
+`/v1/lands` is the canonical parcel API. Every parcel-related API, task, and
+report uses `land_parcels.land_id`; there is no second `fields` table or
+parcel-ID mapping layer. The `/v1/agri/*` routes are read-oriented scene and
+project-area endpoints over the same canonical rows.
 
 ## Files in this folder
 
@@ -123,11 +126,11 @@ Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; membe
 - `manifest.json` — part checksums + expected joined sha256
 
 
-## Sync project areas → agric-satellite-analysis farms/fields
+## Assign project areas to farm containers
 
-Map each `agric_satellite.virtual_project_areas` tile to a `farms` row and each
-`agric_satellite.land_parcels` parcel to a `fields` row (tagged `agri:<land_id>`, geom
-from `boundary_geojson`). Deterministic uuid5 IDs; conflicts skipped.
+Create/update one `farms` container per project tile and fill the optional
+`land_parcels.farm_id` ownership column. The utility never creates a parcel
+mirror, UUID identity, or tag-based mapping.
 
 ```bash
 python3 scripts/agri_seed/sync_project_areas_to_farms.py
@@ -136,27 +139,10 @@ python3 scripts/agri_seed/sync_project_areas_to_farms.py
 Uses `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` or `DATABASE_URL_SYNC`.
 Does not delete existing sample farms.
 
-## Bridge agri scenes → agric-satellite-analysis monitoring (optional)
-
-For field records tagged `agri:<land_id>`, copy S1/S2 index averages into
-`raster_layers` + `field_stats` so classic NdviTab charts work without Celery:
-
-```bash
-python3 scripts/agri_seed/sync_agri_scenes_to_field_stats.py
-```
-
-Idempotent (`ON CONFLICT` on `uq_raster_field_date_type`). Placeholder
-`cog_uri` values look like `agri://land/{land_id}/{sensor}/{date}`.
-
-**色斑图** does **not** use this sync — the web UI reads
-`parcel_scene_products.pixel_data` directly via
-`GET /v1/agri/lands/{id}/scenes?include_pixels=1` and rasterizes a MapLibre
-image overlay client-side.
-
-## Agri-first data plane
+## Agri data plane
 
 See **[docs/agri-first-data.md](../../docs/agri-first-data.md)** for the binding rules:
 
-- RS → `agric_satellite.parcel_scene_products` only (`lonlat_v1`). Agri satellite jobs write lonlat-direct (no new index COGs). The OSS TIF scanner is migration-only.
-- **Soil / weather** → `agric_satellite` tables keyed by `fields.id`, with `agri:<land_id>` tags linking the parcel.
-- Ops: `python3 scripts/agri_seed/ensure_agri_field_soil_weather.py --apply`
+- RS → `agric_satellite.parcel_scene_products` (`lonlat_v1`) keyed by `land_id`.
+- Soil / weather → `agric_satellite` tables keyed directly by `land_id`.
+- Ops: `python3 scripts/agri_seed/ensure_land_soil_weather.py --apply`

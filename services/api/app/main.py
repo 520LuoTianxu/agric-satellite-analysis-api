@@ -12,6 +12,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.rate_limit import limiter
+from app.middleware.trace import TraceIdMiddleware
 from app.routers import (
     agri,
     alerts,
@@ -19,7 +20,7 @@ from app.routers import (
     season_growth,
     crops,
     farms,
-    fields,
+    lands,
     jobs,
     monitoring,
     orgs,
@@ -32,10 +33,11 @@ from app.routers import (
     weather,
     mq_tasks,
     internal_work,
-    internal_fields,
+    internal_lands,
     internal_jobs,
     internal_agri,
     internal_results,
+    internal_schedule,
 )
 
 
@@ -68,7 +70,8 @@ app.add_middleware(
     allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Trace-Id", "X-Request-Id"],
+    expose_headers=["X-Trace-Id"],
     max_age=3600,
 )
 
@@ -85,6 +88,7 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(TraceIdMiddleware)
 
 
 # ── Routers ──────────────────────────────────────────────────────────
@@ -93,7 +97,7 @@ PREFIX = "/v1"
 app.include_router(users.router, prefix=PREFIX, tags=["users"])
 app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
-app.include_router(fields.router, prefix=PREFIX, tags=["fields"])
+app.include_router(lands.router, prefix=PREFIX, tags=["lands"])
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])
@@ -109,10 +113,11 @@ app.include_router(weather.router, prefix=PREFIX, tags=["weather"])
 app.include_router(soil.router, prefix=PREFIX, tags=["soil"])
 app.include_router(mq_tasks.router, prefix=PREFIX, tags=["mq"])
 app.include_router(internal_work.router, prefix=PREFIX)
-app.include_router(internal_fields.router, prefix=PREFIX)
+app.include_router(internal_lands.router, prefix=PREFIX)
 app.include_router(internal_jobs.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
 app.include_router(internal_results.router, prefix=PREFIX)
+app.include_router(internal_schedule.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────

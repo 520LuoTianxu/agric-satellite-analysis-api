@@ -196,7 +196,7 @@ Alembic `0015_drop_detected_boundaries` drops the unused table.
 - [x] Backfill status API: `GET /fields/{id}/backfill-status` - pending, running, completed job counts
 - [x] Endpoint-level deduplication - 409 Conflict if backfill already in progress
 - [x] Sentinel job pattern - synchronous placeholder job before async dispatch to prevent race conditions
-- [x] Batch backfill task (`backfill_all_existing_fields`) for retroactive backfill of all org fields
+- [x] Batch backfill task (`backfill_all_existing_lands`) for retroactive backfill of all land parcels
 - [x] Backfill History button on Indices tab with active-backfill detection and progress banner
 - [x] Config settings: `index_backfill_months` (24), `index_backfill_chunk_days` (90)
 - [x] i18n translations (English + Spanish) for all backfill UI strings

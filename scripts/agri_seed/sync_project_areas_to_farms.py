@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Upsert agric-satellite-analysis farms/fields from agric_satellite.virtual_project_areas / land_parcels."""
+"""Upsert farms and assign canonical land parcels to their farm container.
+
+The parcel identity remains ``land_parcels.land_id``.  This utility only fills
+the optional ``farm_id`` ownership column; it never creates a second parcel
+row, UUID, or tag-based identity.
+"""
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -58,10 +62,6 @@ def farm_id_for(tile_id: str) -> uuid.UUID:
     return uuid.uuid5(NS, f"agri:tile:{tile_id}")
 
 
-def field_id_for(land_id: str) -> uuid.UUID:
-    return uuid.uuid5(NS, f"agri:land:{land_id}")
-
-
 def main() -> int:
     started = time.perf_counter()
     conn = connect()
@@ -102,11 +102,11 @@ def main() -> int:
             farm_ins += _upsert_farms(conn, batch)
         print(f"[farms] done attempted={farm_ins}", flush=True)
 
-        field_ins = field_skip = 0
+        parcel_updates = 0
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT land_id, tile_id, land_name, land_area_mu, boundary_geojson::text
+                SELECT land_id, tile_id
                 FROM agric_satellite.land_parcels ORDER BY land_id
                 """
             )
@@ -116,39 +116,26 @@ def main() -> int:
                 if not rows:
                     break
                 payload = []
-                for land_id, tile_id, land_name, land_area_mu, boundary_text in rows:
-                    area_ha = None
-                    if land_area_mu is not None:
-                        try:
-                            area_ha = float(land_area_mu) / 15.0
-                        except Exception:
-                            area_ha = None
-                    payload.append(
-                        (
-                            str(field_id_for(land_id)),
-                            str(farm_id_for(tile_id)),
-                            pick_name(land_name, land_id),
-                            boundary_text,
-                            area_ha,
-                            "unknown",
-                            json.dumps([f"agri:{land_id}"]),
-                        )
-                    )
-                ok, skip = _upsert_fields(conn, payload)
-                field_ins += ok
-                field_skip += skip
+                for land_id, tile_id in rows:
+                    # 地块归属只写回唯一主表，farm 只是容器关系，不再生成第二套地块记录。
+                    payload.append((str(farm_id_for(tile_id)), str(land_id)))
+                parcel_updates += _assign_parcels_to_farms(conn, payload)
                 print(
-                    f"[fields] inserted~={field_ins} skipped~={field_skip}",
+                    f"[land_parcels] assigned~={parcel_updates}",
                     flush=True,
                 )
 
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM farms WHERE deleted_at IS NULL")
             nf = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM fields WHERE deleted_at IS NULL")
-            nfield = cur.fetchone()[0]
+            cur.execute(
+                "SELECT count(*) FROM agric_satellite.land_parcels "
+                "WHERE deleted_at IS NULL AND farm_id IS NOT NULL"
+            )
+            nparcel = cur.fetchone()[0]
         print(
-            f"[done] farms={nf} fields={nfield} elapsed={time.perf_counter()-started:.1f}s",
+            f"[done] farms={nf} assigned_land_parcels={nparcel} "
+            f"elapsed={time.perf_counter()-started:.1f}s",
             flush=True,
         )
     finally:
@@ -190,40 +177,33 @@ def _upsert_farms(conn, rows) -> int:
         return n
 
 
-def _upsert_fields(conn, rows) -> tuple[int, int]:
+def _assign_parcels_to_farms(conn, rows) -> int:
+    """Set the direct farm ownership on existing canonical parcel rows."""
     sql = """
-    INSERT INTO fields (id, farm_id, name, geom, area_ha, crop_type, tags_json)
-    VALUES (
-      %s, %s, %s,
-      ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)),
-      %s, %s, %s::jsonb
-    )
-    ON CONFLICT (id) DO NOTHING
+    UPDATE agric_satellite.land_parcels
+       SET farm_id = %s, updated_at = now()
+     WHERE land_id = %s
     """
     try:
         with conn.cursor() as cur:
             cur.executemany(sql, rows)
         conn.commit()
-        return len(rows), 0
+        return len(rows)
     except Exception as exc:
         conn.rollback()
-        print(f"[fields-batch-fallback] {exc}", flush=True)
-        ok = skip = 0
+        print(f"[land-parcels-batch-fallback] {exc}", flush=True)
+        updated = 0
         for row in rows:
             try:
                 with conn.cursor() as cur:
                     cur.execute(sql, row)
-                    if cur.rowcount and cur.rowcount > 0:
-                        ok += 1
-                    else:
-                        skip += 1
+                    updated += cur.rowcount or 0
                 conn.commit()
             except Exception as e2:
                 conn.rollback()
-                skip += 1
-                if skip <= 20:
-                    print(f"[skip-field] {e2}", flush=True)
-        return ok, skip
+                if updated < 20:
+                    print(f"[skip-land-parcel] {e2}", flush=True)
+        return updated
 
 
 if __name__ == "__main__":

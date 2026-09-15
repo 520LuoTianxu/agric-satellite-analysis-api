@@ -55,7 +55,7 @@ def _publish_mq_result(
     *,
     mq_task_id: str | None,
     status: str,
-    field_id: str | None,
+    land_id: str | None,
     error: str | None = None,
     payload: dict | None = None,
     oss_urls: dict[str, str] | None = None,
@@ -69,7 +69,7 @@ def _publish_mq_result(
         publish_task_result(
             task_id=mq_task_id,
             status=status,
-            field_id=str(field_id) if field_id else None,
+            land_id=str(land_id) if land_id else None,
             error=error,
             payload=payload,
             oss_urls=oss_urls or {},
@@ -105,7 +105,7 @@ def generate_season_growth_report(
     job_id: str | None = None,
     mq_task_id: str | None = None,
     work_item_id: str | None = None,
-    field_id: str | None = None,
+    land_id: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     crops: list | None = None,
@@ -114,14 +114,14 @@ def generate_season_growth_report(
     pull_data: bool = False,
     wait_celery_ids: list | None = None,
 ) -> dict:
-    """Generate season-growth PDF for a field + growing-season window.
+    """Generate season-growth PDF for one land parcel + growing-season window.
 
     When ``pull_data`` is true (one-click CTA), wait for bootstrap weather +
     soil + agri RS wave before building the PDF so we do not race an empty
     S1/S2 window. After max retries, proceed with whatever data is available.
     """
     session = _maybe_sync_session()
-    field_id_str: str | None = str(field_id) if field_id else None
+    land_id_str: str | None = str(land_id) if land_id else None
     job_id_str: str | None = str(job_id) if job_id else None
     job: Job | None = None
 
@@ -144,8 +144,8 @@ def generate_season_growth_report(
         if job and isinstance(job.params_json, dict):
             params = dict(job.params_json)
 
-        if not field_id_str and job and job.field_id:
-            field_id_str = str(job.field_id)
+        if not land_id_str and job and job.land_id:
+            land_id_str = str(job.land_id)
 
         start_date = start_date or params.get("start_date")
         end_date = end_date or params.get("end_date")
@@ -157,26 +157,26 @@ def generate_season_growth_report(
         if not pull_data and params.get("pull_data") is not None:
             pull_data = bool(params.get("pull_data"))
 
-        if not field_id_str:
+        if not land_id_str:
             if job or job_id_str:
-                _uj(job, "failed", error="field_id required")
+                _uj(job, "failed", error="land_id required")
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
-                field_id=None,
-                error="field_id required",
+                land_id=None,
+                error="land_id required",
                 extras={
                     "source": "season_growth_report",
                     **({"job_id": job_id_str} if job_id_str else {}),
                 },
             )
-            return {"error": "field_id required"}
+            return {"error": "land_id required"}
 
         if job_id_str and not job:
             logger.info(
                 "season_growth_job_absent_local",
                 job_id=job_id_str,
-                field_id=field_id_str,
+                land_id=land_id_str,
                 mq_task_id=mq_task_id,
             )
 
@@ -187,7 +187,7 @@ def generate_season_growth_report(
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
-                field_id=field_id_str,
+                land_id=land_id_str,
                 error=err,
                 extras={
                     "source": "season_growth_report",
@@ -214,7 +214,7 @@ def generate_season_growth_report(
             started_at = _resolve_wait_started_at(job, job_id_str)
             status = bootstrap_pulls_ready(
                 session,
-                field_id=uuid.UUID(field_id_str),
+                land_id=land_id_str,
                 date_from=str(start_date)[:10],
                 date_to=str(end_date)[:10],
                 wait_celery_ids=[str(x) for x in (wait_celery_ids or []) if x],
@@ -246,7 +246,7 @@ def generate_season_growth_report(
                 if retries < max_r:
                     logger.info(
                         "season_growth_waiting_for_bootstrap",
-                        field_id=field_id_str,
+                        land_id=land_id_str,
                         job_id=job_id_str,
                         retry=retries,
                         **{
@@ -264,7 +264,7 @@ def generate_season_growth_report(
                     raise self.retry(countdown=30)
                 logger.warning(
                     "season_growth_bootstrap_wait_timeout",
-                    field_id=field_id_str,
+                    land_id=land_id_str,
                     job_id=job_id_str,
                     **{
                         k: status[k]
@@ -287,7 +287,7 @@ def generate_season_growth_report(
 
         result = generate_season_growth_pdf(
             session=session,
-            field_id=uuid.UUID(field_id_str),
+            land_id=land_id_str,
             start_date=str(start_date),
             end_date=str(end_date),
             crops=list(crops or []),
@@ -301,7 +301,7 @@ def generate_season_growth_report(
             _publish_mq_result(
                 mq_task_id=mq_task_id,
                 status="failed",
-                field_id=field_id_str,
+                land_id=land_id_str,
                 error="PDF not produced",
                 extras={
                     "source": "season_growth_report",
@@ -317,7 +317,7 @@ def generate_season_growth_report(
             )
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        object_key = f"reports/season_growth/{field_id_str}/season-growth-{ts}.pdf"
+        object_key = f"reports/season_growth/{land_id_str}/season-growth-{ts}.pdf"
         upload_result = upload_file_via_storage(
             object_key, str(pdf_path), content_type="application/pdf"
         )
@@ -360,7 +360,7 @@ def generate_season_growth_report(
         logger.info(
             "season_growth_report_done",
             job_id=job_id_str,
-            field_id=field_id_str,
+            land_id=land_id_str,
             object_key=object_key,
             public_url=public_url,
             mq_task_id=mq_task_id,
@@ -372,7 +372,7 @@ def generate_season_growth_report(
             oss_urls["season_growth_pdf"] = public_url
         mq_payload = {
             "kind": "season_growth_report",
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "object_key": object_key,
             "public_url": public_url,
             "filename": progress["filename"],
@@ -394,7 +394,7 @@ def generate_season_growth_report(
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="success",
-            field_id=field_id_str,
+            land_id=land_id_str,
             payload=mq_payload,
             oss_urls=oss_urls,
             extras=extras_out,
@@ -426,15 +426,15 @@ def generate_season_growth_report(
         logger.exception(
             "season_growth_report_failed",
             job_id=job_id_str,
-            field_id=field_id_str,
+            land_id=land_id_str,
             error=str(exc),
         )
         try:
             if job is None and job_id_str:
                 job = _resolve_job(session, job_id_str)
             if job:
-                field_id_str = field_id_str or (
-                    str(job.field_id) if job.field_id else None
+                land_id_str = land_id_str or (
+                    str(job.land_id) if job.land_id else None
                 )
                 _uj(job, "failed", error=str(exc)[:2000])
         except Exception:
@@ -444,14 +444,14 @@ def generate_season_growth_report(
             extras_fail["job_id"] = job_id_str
         fail_payload = {
             "kind": "season_growth_report",
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "error": str(exc)[:2000],
             **({"job_id": job_id_str} if job_id_str else {}),
         }
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="failed",
-            field_id=field_id_str,
+            land_id=land_id_str,
             error=str(exc)[:500],
             extras=extras_fail,
             payload=fail_payload,

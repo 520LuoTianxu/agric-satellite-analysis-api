@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Bridge STAC/Celery COGs in object storage → agric_satellite.parcel_scene_products lonlat_v1.
 
-**Legacy / migration only.** The agri satellite path writes lonlat_v1 in memory
-after index compute (``app.tasks.agri_lonlat``) and does not upload index TIFs.
-Use this module when you already have ``cogs/{org_id}/{field_id}/{date}/*.tif``
-and need a one-shot convert (MQ type ``agri_bridge`` / ``mode=bridge_only``).
+**One-shot compatibility importer.** The current satellite path writes lonlat_v1
+directly from ``app.tasks.agri_lonlat``. This optional importer reads an existing
+COG prefix keyed by the canonical ``land_id``; it never reads or translates a
+legacy raster product identity.
 
-Discovers dates under ``cogs/{org_id}/{field_id}/`` on the **configured**
-backend (``STORAGE_BACKEND=oss|minio``, default OSS) via ``exists`` probes
+Discovers dates under ``cogs/default/{land_id}/`` on the **configured**
+backend (``STORAGE_BACKEND=oss``) via ``exists`` probes
 (no ListObjects — many OSS bucket policies deny listing), samples the six agri
 optical indices (NDVI/EVI/NDMI/NDRE/CIre/MNDWI; NDWI COG only as MNDWI fallback)
-inside the field polygon at native COG resolution, and upserts one S2 row per
+inside the land parcel polygon at native COG resolution, and upserts one S2 row per
 date with ``pixel_data.format = lonlat_v1``.
 
 COGs are opened via GDAL ``/vsis3/`` using ``app.core.storage.configure_gdal_vsis3``
-(same path as index pipeline uploads). Happy path does **not** require MinIO.
+(same path as index pipeline uploads).
 
 Usage (api / processor container)::
 
     python -c "from app.tasks.bridge_stac_cogs_to_agri_lonlat import main; \
-      raise SystemExit(main(['--field-id','0fa5ecc0-944b-4202-a0f8-1ba78ae3746c']))"
+      raise SystemExit(main(['--land-id','25107']))"
 """
 
 from __future__ import annotations
@@ -140,62 +140,32 @@ def _stats(arr: np.ndarray) -> tuple[float | None, float | None, float | None]:
         _round6(float(np.max(valid))))
 
 
-def _load_field(conn, field_id: str, land_id: str | None) -> dict[str, Any]:
+def _load_land(conn, land_id: str) -> dict[str, Any]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT f.id::text AS field_id,
-                   
-                   f.name AS field_name,
-                   f.tags_json,
-                   ST_AsGeoJSON(f.geom)::text AS geom_geojson
-            FROM fields f
-            WHERE f.id = %s::uuid AND f.deleted_at IS NULL
+            SELECT land_id, tile_id, land_name,
+                   COALESCE(ST_AsGeoJSON(geom), boundary_geojson::text) AS geom_geojson
+            FROM agric_satellite.land_parcels
+            WHERE land_id = %s AND deleted_at IS NULL
             """,
-            (field_id,),  # (x,) required; (x) is a str and psycopg2 binds each char
+            (str(land_id),),
         )
         row = cur.fetchone()
         if not row:
-            raise SystemExit(f"field not found: {field_id}")
+            raise SystemExit(f"land parcel not found: {land_id}")
         if not row["geom_geojson"]:
-            raise SystemExit(f"field {field_id} has no geom")
-
-        resolved = land_id
-        if not resolved:
-            tags = row["tags_json"] or []
-            if isinstance(tags, str):
-                tags = json.loads(tags)
-            for t in tags:
-                if isinstance(t, str) and t.startswith("agri:"):
-                    resolved = t[5:]
-                    break
-        if not resolved:
-            raise SystemExit("pass --land-id or set agri:<land_id> on field tags")
-
-        cur.execute(
-            """
-            SELECT land_id, tile_id, land_name
-            FROM agric_satellite.land_parcels
-            WHERE land_id = %s
-            """,
-            (resolved,),
-        )
-        parcel = cur.fetchone()
-        if not parcel:
-            raise SystemExit(f"agric_satellite.land_parcels missing land_id={resolved}")
+            raise SystemExit(f"land parcel {land_id} has no geometry")
 
         return {
-            "field_id": row["field_id"],
-
-            "field_name": row["field_name"],
             "geom": json.loads(row["geom_geojson"]),
-            "land_id": parcel["land_id"],
-            "tile_id": parcel["tile_id"],
-            "land_name": parcel["land_name"] or row["field_name"],
+            "land_id": row["land_id"],
+            "tile_id": row["tile_id"],
+            "land_name": row["land_name"] or row["land_id"],
         }
 
 
-def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, float]]:
+def _land_stats_map(conn, land_id: str) -> dict[tuple[str, str], dict[str, float]]:
     """(date_iso, LAYER_TYPE) → {mean,min,max,quality_score}."""
     out: dict[tuple[str, str], dict[str, float]] = {}
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -205,9 +175,9 @@ def _field_stats_map(conn, field_id: str) -> dict[tuple[str, str], dict[str, flo
                    fs.mean, fs.min, fs.max, fs.quality_score
             FROM field_stats fs
             JOIN raster_layers rl ON rl.id = fs.layer_id
-            WHERE fs.field_id = %s::uuid
+            WHERE fs.land_id = %s
             """,
-            (field_id,),
+            (str(land_id),),
         )
         for r in cur.fetchall():
             out[(r["d"], r["layer_type"])] = {
@@ -229,7 +199,7 @@ def _list_dates_from_storage(storage, prefix: str) -> list[str]:
     try:
         for key in storage.list_keys(prefix, suffix=".tif"):
             parts = key.split("/")
-            # cogs/{org}/{field}/{date}/ndvi.tif
+            # cogs/{org}/{land_id}/{date}/ndvi.tif
             if len(parts) < 5:
                 continue
             d = parts[3]
@@ -242,16 +212,16 @@ def _list_dates_from_storage(storage, prefix: str) -> list[str]:
     return sorted(dates)
 
 
-def _list_dates_from_db(conn, field_id: str) -> list[str]:
+def _list_dates_from_db(conn, land_id: str) -> list[str]:
     dates: set[str] = set()
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT DISTINCT date::text
             FROM raster_layers
-            WHERE field_id = %s::uuid AND date IS NOT NULL
+            WHERE land_id = %s AND date IS NOT NULL
             """,
-            (field_id,),
+            (str(land_id),),
         )
         for (d,) in cur.fetchall():
             if d and DATE_RE.match(d):
@@ -259,7 +229,7 @@ def _list_dates_from_db(conn, field_id: str) -> list[str]:
     return sorted(dates)
 
 
-def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
+def _candidate_dates_from_jobs(conn, land_id: str) -> list[str]:
     """Expand job params date_from/date_to into daily candidates (inclusive)."""
     from datetime import date, timedelta
 
@@ -271,11 +241,11 @@ def _candidate_dates_from_jobs(conn, field_id: str) -> list[str]:
               params_json->>'date_from' AS df,
               params_json->>'date_to' AS dt
             FROM jobs
-            WHERE field_id = %s::uuid
+            WHERE land_id = %s
               AND params_json ? 'date_from'
               AND params_json ? 'date_to'
             """,
-            (field_id,),
+            (str(land_id),),
         )
         for df, dt in cur.fetchall():
             if not df or not dt:
@@ -561,7 +531,7 @@ def process_date(
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"
         ),
-        "pixel_data_url": f"stac-bridge://field/{meta['field_id']}/{date_str}",
+        "pixel_data_url": f"stac-bridge://land/{meta['land_id']}/{date_str}",
         "ndvi_avg": ndvi_avg,
         "ndvi_min": ndvi_min,
         "ndvi_max": ndvi_max,
@@ -594,15 +564,14 @@ def process_date(
     return row
 
 
-def bridge_field_stac_to_agri(
-    field_id: str,
-    land_id: str | None = None,
+def bridge_land_stac_to_agri(
+    land_id: str,
     *,
     dry_run: bool = False,
     limit: int = 0,
     dates: list[str] | None = None,
     quiet: bool = False) -> dict[str, Any]:
-    """Sample active-store STAC COGs for *field_id* and upsert agri lonlat_v1 rows.
+    """Sample active-store STAC COGs for *land_id* and upsert lonlat_v1 rows.
 
     Uses ``get_storage()`` (OSS by default). Raises on hard errors.
     """
@@ -622,23 +591,23 @@ def bridge_field_stac_to_agri(
             print(msg, flush=True)
 
     try:
-        meta = _load_field(conn, field_id, land_id)
-        fs_map = _field_stats_map(conn, meta["field_id"])
-        prefix = f"cogs/default/{meta['field_id']}/"
+        meta = _load_land(conn, str(land_id))
+        fs_map = _land_stats_map(conn, meta["land_id"])
+        prefix = f"cogs/default/{meta['land_id']}/"
         uri_scheme = "oss" if storage.backend == "oss" else "s3"
         _log(
-            f"field={meta['field_id']} land={meta['land_id']} "
+            f"land={meta['land_id']} "
             f"tile={meta['tile_id']} backend={storage.backend} "
             f"prefix={uri_scheme}://{bucket}/{prefix}"
         )
 
         # Prefer exists-probes (OSS often denies ListObjects). list_keys is
         # opportunistic only; job date ranges supply candidate calendars.
-        date_set = set(_list_dates_from_db(conn, meta["field_id"]))
+        date_set = set(_list_dates_from_db(conn, meta["land_id"]))
         listed = _list_dates_from_storage(storage, prefix)
         if listed:
             date_set.update(listed)
-        candidates = _candidate_dates_from_jobs(conn, meta["field_id"])
+        candidates = _candidate_dates_from_jobs(conn, meta["land_id"])
         probed = _discover_dates_via_exists(storage, prefix, candidates)
         date_set.update(probed)
         date_list = sorted(date_set)
@@ -740,7 +709,6 @@ def bridge_field_stac_to_agri(
         result = {
             "ok": True,
             "land_id": meta["land_id"],
-            "field_id": meta["field_id"],
             "backend": storage.backend,
             "bucket": bucket,
             "dates_seen": len(date_list),
@@ -761,8 +729,7 @@ def bridge_field_stac_to_agri(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--field-id", required=True, help="agric_satellite.fields UUID")
-    ap.add_argument("--land-id", default=None, help="agri land_id (or agri: tag)")
+    ap.add_argument("--land-id", required=True, help="canonical land_id")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="Max dates (0=all)")
     ap.add_argument(
@@ -771,8 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated YYYY-MM-DD subset (optional)")
     args = ap.parse_args(argv)
     dates = [d.strip() for d in args.dates.split(",") if d.strip()] or None
-    bridge_field_stac_to_agri(
-        args.field_id,
+    bridge_land_stac_to_agri(
         args.land_id,
         dry_run=args.dry_run,
         limit=args.limit,

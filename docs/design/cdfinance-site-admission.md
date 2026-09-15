@@ -16,18 +16,21 @@
 
 ## 存储
 
-表 `group_site_admission`：按 `group_id` 唯一；可选 `field_id` / `land_id`；`summary_json` + `vendor_payload`。
+表 `group_site_admission`：按 `group_id` 唯一；通过可选的
+`land_id` 直接关联 `agric_satellite.land_parcels`；`summary_json` +
+`vendor_payload`。
 
-## groupId ↔ 田块
+## groupId 与地块
 
 1. 请求体显式 `group_id`
-2. 字段 tags：`cdfinance_group:<id>` 或 `group:<id>`（拉取成功后可写入）
-3. `agri:<land_id>` → `agric_satellite.land_parcels.group_id`
+2. 从请求路径直接取得 `land_id`，写入 `group_site_admission.land_id`
+3. 地块本身的 `land_parcels.group_id` 是项目归属字段；不通过 tags 或
+   另一张地块表做映射
 
 ## API
 
-- `GET /v1/fields/{id}/site-admission`
-- `POST /v1/fields/{id}/site-admission` — Bearer 同 NPK；`force=true` 刷新
+- `GET /v1/lands/{land_id}/site-admission`
+- `POST /v1/lands/{land_id}/site-admission` — Bearer 同 NPK；`force=true` 刷新
 - Assessment / season-growth generate bodies: optional `cdfinance_token` + `group_id` (soft prefetch before MQ)
 
 ## 评估

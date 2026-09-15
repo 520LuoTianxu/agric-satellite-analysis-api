@@ -61,14 +61,14 @@ const PICK_LAYER = "scouting-pick-marker";
 /* ── Props ─────────────────────────────────────────────────── */
 
 interface ScoutingTabProps {
-    fieldId: string;
+    landId: string;
     mapInstance: maplibregl.Map | null;
     activeTab?: string;
 }
 
 /* ── Component ─────────────────────────────────────────────── */
 
-export default function ScoutingTab({ fieldId, mapInstance, activeTab }: ScoutingTabProps) {
+export default function ScoutingTab({ landId, mapInstance, activeTab }: ScoutingTabProps) {
     const t = useTranslations("scoutingTab");
     const confirm = useConfirm();
 
@@ -108,7 +108,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
 
     const loadObservations = useCallback(async () => {
         try {
-            const res = await scoutingApi.list(fieldId, 200);
+            const res = await scoutingApi.list(landId, 200);
             setObservations(res.items);
             setTotal(res.total);
         } catch {
@@ -116,7 +116,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
         } finally {
             setLoading(false);
         }
-    }, [fieldId]);
+    }, [landId]);
 
     useEffect(() => {
         loadObservations();
@@ -125,10 +125,10 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
     // Load field alerts (all - for linked alert display; open subset for dropdown)
     useEffect(() => {
         alertsApi
-            .listForField(fieldId, 200)
+            .listForLand(landId, 200)
             .then((res) => setFieldAlerts(res.items))
             .catch(() => { });
-    }, [fieldId]);
+    }, [landId]);
 
     const openAlerts = fieldAlerts.filter((a) => a.status === "open");
 
@@ -411,7 +411,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
                     .split(",")
                     .map((s) => s.trim())
                     .filter(Boolean);
-                const updated = await scoutingApi.update(fieldId, editingObs.id, {
+                const updated = await scoutingApi.update(landId, editingObs.id, {
                     title: title.trim(),
                     note: note.trim() || undefined,
                     tags: tags.length > 0 ? tags : undefined,
@@ -465,7 +465,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
                 alert_id: alertId || undefined,
             };
 
-            const created = await scoutingApi.create(fieldId, data);
+            const created = await scoutingApi.create(landId, data);
             setObservations((prev) => [created, ...prev]);
             setTotal((t) => t + 1);
             toast.success(t("observationCreated"));
@@ -491,7 +491,7 @@ export default function ScoutingTab({ fieldId, mapInstance, activeTab }: Scoutin
 
         setDeletingId(obsId);
         try {
-            await scoutingApi.delete(fieldId, obsId);
+            await scoutingApi.delete(landId, obsId);
             setObservations((prev) => prev.filter((o) => o.id !== obsId));
             setTotal((t) => t - 1);
             toast.success(t("observationDeleted"));

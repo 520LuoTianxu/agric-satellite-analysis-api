@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Load field / soil / weather / RS inputs for land assessment."""
+"""Load canonical land / soil / weather / RS inputs for assessment."""
 
 from __future__ import annotations
 
 import csv
 import json
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,9 +13,8 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.agri_classify import CLOUD_MAX_PCT, cloud_pct, official_s2_sql
-from app.core.agri_tags import parse_agri_land_id
 from app.models.tables import (
-    Field,
+    LandParcel,
     FieldStat,
     RasterLayer,
     SoilFieldSummary,
@@ -26,30 +24,27 @@ from app.models.tables import (
 )
 
 
-def _tag_map(tags: Any) -> dict[str, str]:
-    out: dict[str, str] = {}
-    if not isinstance(tags, list):
-        return out
-    for t in tags:
-        if isinstance(t, str) and ":" in t:
-            k, _, v = t.partition(":")
-            out[k] = v
-    return out
+def _location_from_land(land: LandParcel) -> str:
+    """Build the display location from canonical parcel columns.
+
+    地块位置是地块主表的业务字段，不能再从 tags 反向推导；tags 只保留
+    给展示或外部元数据使用，绝不参与地块身份或行政区解析。
+    """
+    parts = [
+        value
+        for value in (
+            land.province_name,
+            land.city_name,
+            land.county_name,
+            land.town_name,
+            land.village_name,
+        )
+        if value
+    ]
+    return " · ".join(parts) if parts else (land.land_name or land.land_id or "—")
 
 
-def _location_from_tags(tags: Any, field_name: str) -> str:
-    tm = _tag_map(tags)
-    parts = []
-    for key in ("province", "city", "county", "township", "town", "village"):
-        if tm.get(key):
-            parts.append(tm[key])
-    if parts:
-        # Prefer "河北省沧州市青县 · 村委会" style when we only have county/village
-        return " · ".join(parts)
-    return field_name or "—"
-
-
-def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list[dict]:
+def load_indices_from_field_stats(session: Session, land_id: str) -> list[dict]:
     rows = session.execute(
         select(
             FieldStat.date,
@@ -64,7 +59,7 @@ def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list
             FieldStat.quality_score,
         )
         .join(RasterLayer, RasterLayer.id == FieldStat.layer_id)
-        .where(FieldStat.field_id == field_id)
+        .where(FieldStat.land_id == land_id)
         .order_by(FieldStat.date)
     ).all()
     out = []
@@ -285,9 +280,9 @@ def load_agri_pixel_date_index(
     return out
 
 
-def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
+def load_soil(session: Session, land_id: str) -> dict[str, Any]:
     s = session.execute(
-        select(SoilFieldSummary).where(SoilFieldSummary.field_id == field_id)
+        select(SoilFieldSummary).where(SoilFieldSummary.land_id == land_id)
     ).scalar_one_or_none()
     out: dict[str, Any] = {}
     if s:
@@ -309,7 +304,7 @@ def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
         SoilNutrientNpk = None  # type: ignore
     if SoilNutrientNpk is not None:
         npk = session.execute(
-            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field_id)
+            select(SoilNutrientNpk).where(SoilNutrientNpk.land_id == land_id)
         ).scalar_one_or_none()
         if npk:
             out["npk"] = {
@@ -338,7 +333,7 @@ def load_soil(session: Session, field_id: uuid.UUID) -> dict[str, Any]:
     return out
 
 
-def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
+def load_weather(session: Session, land_id: str) -> tuple[dict, dict]:
     """Return (weather_summary, weather_stress) for recent ~30 days."""
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=30)
@@ -346,7 +341,7 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
         session.execute(
             select(WeatherDaily)
             .where(
-                WeatherDaily.field_id == field_id,
+                WeatherDaily.land_id == land_id,
                 WeatherDaily.date >= start,
             )
             .order_by(WeatherDaily.date)
@@ -359,7 +354,7 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
         rows = (
             session.execute(
                 select(WeatherDaily)
-                .where(WeatherDaily.field_id == field_id)
+                .where(WeatherDaily.land_id == land_id)
                 .order_by(WeatherDaily.date.desc())
                 .limit(30)
             )
@@ -397,7 +392,7 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
         water_deficit_mm = et0 - precip
 
     summary = {
-        "field_id": str(field_id),
+        "land_id": str(land_id),
         "period_start": rows[0].date.isoformat(),
         "period_end": rows[-1].date.isoformat(),
         "avg_temperature": round(sum(temps) / len(temps), 1) if temps else None,
@@ -415,7 +410,7 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
     }
 
     awc = None
-    soil = load_soil(session, field_id)
+    soil = load_soil(session, land_id)
     if soil.get("rootzone_awc_mm") is not None:
         awc = float(soil["rootzone_awc_mm"])
 
@@ -447,7 +442,7 @@ def load_weather(session: Session, field_id: uuid.UUID) -> tuple[dict, dict]:
 
 def load_weather_history(
     session: Session,
-    field_id: uuid.UUID,
+    land_id: str,
     season_months: set[int] | list[int] | None = None,
     *,
     lookback_days: int = 400,
@@ -463,7 +458,7 @@ def load_weather_history(
         session.execute(
             select(WeatherDaily)
             .where(
-                WeatherDaily.field_id == field_id,
+                WeatherDaily.land_id == land_id,
                 WeatherDaily.date >= start,
             )
             .order_by(WeatherDaily.date)
@@ -475,7 +470,7 @@ def load_weather_history(
         rows = (
             session.execute(
                 select(WeatherDaily)
-                .where(WeatherDaily.field_id == field_id)
+                .where(WeatherDaily.land_id == land_id)
                 .order_by(WeatherDaily.date.desc())
                 .limit(lookback_days)
             )
@@ -582,7 +577,7 @@ def load_weather_history(
 
 def load_suitability_sync(
     session: Session,
-    field_id: uuid.UUID,
+    land_id: str,
     weather_summary: dict,
     preferred_crop: str | None = None,
 ) -> dict:
@@ -592,12 +587,12 @@ def load_suitability_sync(
     except Exception:
         return {}
 
-    summary = load_soil(session, field_id)
+    summary = load_soil(session, land_id)
     if not summary:
         return {}
 
     profile = session.execute(
-        select(SoilProfile).where(SoilProfile.field_id == field_id)
+        select(SoilProfile).where(SoilProfile.land_id == land_id)
     ).scalar_one_or_none()
     layer_dicts: list[dict] = []
     if profile:
@@ -700,49 +695,22 @@ def load_suitability_sync(
 
 
 def load_site_admission(
-    session: Session, field_id: uuid.UUID, land_id: str | None = None
+    session: Session, land_id: str
 ) -> dict[str, Any] | None:
-    """Optional cdfinance site-admission questionnaire; soft-absent → None."""
+    """Load the optional site-admission snapshot by direct land_id."""
     try:
         from app.models.tables import GroupSiteAdmission
     except ImportError:
         return None
-    from app.core.agri_tags import parse_cdfinance_group_id
-    from app.models.tables import Field as FieldModel
 
     row = session.execute(
-        select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field_id)
+        select(GroupSiteAdmission).where(GroupSiteAdmission.land_id == land_id)
     ).scalar_one_or_none()
-    if row is None and land_id:
-        # Resolve group_id from agri parcels
-        from sqlalchemy import text as sa_text
-
-        gid = session.execute(
-            sa_text(
-                "SELECT group_id::text FROM agric_satellite.land_parcels WHERE land_id = :lid LIMIT 1"
-            ),
-            {"lid": land_id},
-        ).scalar()
-        if gid:
-            row = session.execute(
-                select(GroupSiteAdmission).where(
-                    GroupSiteAdmission.group_id == str(gid)
-                )
-            ).scalar_one_or_none()
-    if row is None:
-        field = session.get(FieldModel, field_id)
-        if field is not None:
-            tagged = parse_cdfinance_group_id(field.tags_json)
-            if tagged:
-                row = session.execute(
-                    select(GroupSiteAdmission).where(
-                        GroupSiteAdmission.group_id == tagged
-                    )
-                ).scalar_one_or_none()
     if row is None:
         return None
+
     summary = row.summary_json if isinstance(row.summary_json, dict) else {}
-    out = {
+    return {
         "group_id": row.group_id,
         "land_id": row.land_id,
         "status": row.status,
@@ -759,19 +727,18 @@ def load_site_admission(
         "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
         "source": row.source,
     }
-    return out
 
 
-def load_field_bundle(
+def load_land_bundle(
     session: Session | None,
-    field_id: uuid.UUID,
+    land_id: str,
     *,
     allow_http: bool = True,
 ) -> dict[str, Any]:
-    """Load everything needed to score + render a field assessment.
+    """Load everything needed to score + render a land assessment.
 
     When ``API_BASE_URL`` + ``INTERNAL_API_TOKEN`` are set (download host), prefer
-    ``GET /v1/internal/fields/{id}/assessment-bundle``. SyncSession is used only
+    ``GET /v1/internal/lands/{id}/assessment-bundle``. SyncSession is used only
     when HTTP is unavailable or ``INGEST_PG_READS`` / ``INGEST_PG_WRITES`` still
     allow local PG reads.
     """
@@ -789,7 +756,7 @@ def load_field_bundle(
 
         if assessment_bundle is not None and internal_api_enabled():
             try:
-                return assessment_bundle(str(field_id))
+                return assessment_bundle(str(land_id))
             except Exception:
                 if not ingest_pg_reads_allowed():
                     raise
@@ -797,16 +764,16 @@ def load_field_bundle(
 
     if session is None:
         raise ValueError(
-            "session required for load_field_bundle when internal HTTP is "
+            "session required for load_land_bundle when internal HTTP is "
             "disabled or failed and PG reads are not allowed"
         )
 
-    field = session.get(Field, field_id)
-    if not field or field.deleted_at is not None:
-        raise ValueError(f"Field not found: {field_id}")
+    land = session.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
+        raise ValueError(f"Land parcel not found: {land_id}")
 
-    land_id = parse_agri_land_id(field.tags_json)
-    indices = load_indices_from_field_stats(session, field_id)
+    land_id = land.land_id
+    indices = load_indices_from_field_stats(session, land_id)
     source = "field_stats"
     if len(indices) < 8 and land_id:
         agri_idx = load_indices_from_agri(session, land_id)
@@ -814,41 +781,36 @@ def load_field_bundle(
             indices = agri_idx
             source = "agric_satellite.parcel_scene_products"
 
-    soil = load_soil(session, field_id)
-    wsum, wstress = load_weather(session, field_id)
+    soil = load_soil(session, land_id)
+    wsum, wstress = load_weather(session, land_id)
     from app.core.crops import (
         crop_name_zh,
         get_crop_season,
         normalize_crop_key,
     )
 
-    crop_key = normalize_crop_key(field.crop_type) or "corn"
+    crop_key = normalize_crop_key(land.crop_type) or "corn"
     season = get_crop_season(crop_key)
     crop_label = f"{crop_name_zh(crop_key)}（{season.label_zh}）"
     weather_history = load_weather_history(
-        session, field_id, season.season_months, lookback_days=450
+        session, land_id, season.season_months, lookback_days=450
     )
 
-    suit = load_suitability_sync(session, field_id, wsum, preferred_crop=crop_key)
-    site_admission = load_site_admission(session, field_id, land_id=land_id)
+    suit = load_suitability_sync(session, land_id, wsum, preferred_crop=crop_key)
+    site_admission = load_site_admission(session, land_id)
 
-    tags = field.tags_json or []
-    boundary = (
-        "测绘 WGS 坐标（档案地块，不是手画框）"
-        if land_id
-        else "地块边界（平台绘制/导入）"
-    )
+    boundary = "测绘 WGS 坐标（统一地块表边界）"
 
-    area_ha = float(field.area_ha) if field.area_ha is not None else 0.0
+    area_ha = float(land.area_ha) if land.area_ha is not None else 0.0
     return {
         "field": {
-            "id": str(field.id),
-            "name": field.name,
-            "crop_type": field.crop_type,
-            "season": field.season,
+            "id": str(land.land_id),
+            "name": land.land_name,
+            "crop_type": land.crop_type,
+            "season": land.season,
             "area_ha": area_ha,
-            "tags": tags,
-            "location": _location_from_tags(tags, field.name),
+            "tags": land.tags_json or [],
+            "location": _location_from_land(land),
             "boundary": boundary,
             "crop_label": crop_label,
             "crop_key": crop_key,
@@ -914,7 +876,7 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     area_ha = float(field.get("area_ha") or 0)
     return {
         "field": {
-            "id": str(field.get("id") or field.get("field_id") or ""),
+            "id": str(field.get("id") or field.get("land_id") or ""),
             "name": field.get("name") or "地块",
             "crop_type": field.get("crop_type"),
             "season": field.get("season"),
@@ -1022,11 +984,11 @@ def load_oss_media_for_dates(
 
 def load_daily_precipitation(
     session: Session,
-    field_id: uuid.UUID,
+    land_id: str,
     start: Any,
     end: Any,
 ) -> list[dict[str, Any]]:
-    """Load daily precipitation_sum for field between start and end (inclusive)."""
+    """Load daily precipitation_sum for one land parcel between two dates."""
     if isinstance(start, str):
         start = datetime.fromisoformat(start[:10]).date()
     if isinstance(end, str):
@@ -1035,7 +997,7 @@ def load_daily_precipitation(
         session.execute(
             select(WeatherDaily)
             .where(
-                WeatherDaily.field_id == field_id,
+                WeatherDaily.land_id == land_id,
                 WeatherDaily.date >= start,
                 WeatherDaily.date <= end,
             )
@@ -1142,15 +1104,11 @@ def _scene_analysis_zh(
 def build_flood_evidence(
     session: Session | None,
     *,
-    field_id: uuid.UUID | str | None,
     land_id: str | None,
     open_water_dates: list[dict[str, Any]] | None,
     max_scenes: int = FLOOD_EVIDENCE_MAX_SCENES,
-) -> dict[str, Any] | None:
-    """Build structured flood-evidence payload (dates, media, precip, analysis).
-
-    Returns None when there is no hard open-water evidence.
-    """
+):
+    """Build structured flood evidence from one parcel's scenes and weather."""
     scenes_all = list(open_water_dates or [])
     if not scenes_all:
         return None
@@ -1164,12 +1122,11 @@ def build_flood_evidence(
 
     # Load precip spanning earliest window through latest scene day
     precip_by_scene: dict[str, dict[str, Any]] = {}
-    if session is not None and field_id is not None:
-        fid = uuid.UUID(str(field_id))
+    if session is not None and land_id is not None:
         dates = [datetime.fromisoformat(s["date"][:10]).date() for s in selected]
         lo = min(dates) - timedelta(days=15)
         hi = max(dates)
-        series = load_daily_precipitation(session, fid, lo, hi)
+        series = load_daily_precipitation(session, land_id, lo, hi)
         for s in selected:
             precip_by_scene[s["date"]] = _precip_window_summary(series, s["date"])
 

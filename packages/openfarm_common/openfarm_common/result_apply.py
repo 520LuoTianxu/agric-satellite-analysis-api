@@ -39,7 +39,7 @@ __all__ = [
 
 UPSERT_WEATHER_SQL = """
 INSERT INTO weather_daily (
-  id, field_id, date, latitude, longitude,
+  id, land_id, date, latitude, longitude,
   temperature_2m_min, temperature_2m_max, temperature_2m_mean,
   precipitation_sum, et0_fao_mm,
   soil_temperature_0cm, soil_temperature_6cm,
@@ -51,7 +51,7 @@ INSERT INTO weather_daily (
   gdd_daily, gdd_cumulative, water_balance_30d_mm, drought_index,
   heat_stress_flag, source, model_used, updated_at
 ) VALUES (
-  :id, CAST(:field_id AS uuid), CAST(:date AS date),
+  :id, :land_id, CAST(:date AS date),
   :latitude, :longitude,
   :temperature_2m_min, :temperature_2m_max, :temperature_2m_mean,
   :precipitation_sum, :et0_fao_mm,
@@ -64,7 +64,7 @@ INSERT INTO weather_daily (
   :gdd_daily, :gdd_cumulative, :water_balance_30d_mm, :drought_index,
   :heat_stress_flag, :source, :model_used, now()
 )
-ON CONFLICT (field_id, date) DO UPDATE SET
+ON CONFLICT (land_id, date) DO UPDATE SET
   latitude = EXCLUDED.latitude,
   longitude = EXCLUDED.longitude,
   temperature_2m_min = EXCLUDED.temperature_2m_min,
@@ -286,7 +286,7 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                 continue
             params = {
                 "id": str(uuid.uuid4()),
-                "field_id": row.get("field_id") or payload.get("field_id"),
+                "land_id": row.get("land_id") or payload.get("land_id"),
                 "date": row.get("date"),
                 "latitude": row.get("latitude"),
                 "longitude": row.get("longitude"),
@@ -316,18 +316,18 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                 "source": row.get("source") or "open-meteo",
                 "model_used": row.get("model_used"),
             }
-            if not params["field_id"] or not params["date"]:
+            if not params["land_id"] or not params["date"]:
                 continue
             session.execute(text(UPSERT_WEATHER_SQL), params)
             n += 1
         session.commit()
         # Rolling water balance / drought index (same as ingest worker SQL)
-        field_ids = {
-            str(r.get("field_id") or payload.get("field_id"))
+        land_ids = {
+            str(r.get("land_id") or payload.get("land_id"))
             for r in rows
-            if isinstance(r, dict) and (r.get("field_id") or payload.get("field_id"))
+            if isinstance(r, dict) and (r.get("land_id") or payload.get("land_id"))
         }
-        for fid in field_ids:
+        for lid in land_ids:
             try:
                 session.execute(
                     text(
@@ -345,24 +345,24 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                                 id,
                                 SUM(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
                                     OVER (
-                                        PARTITION BY field_id
+                                        PARTITION BY land_id
                                         ORDER BY date
                                         ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                                     ) AS wb,
                                 STDDEV(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
                                     OVER (
-                                        PARTITION BY field_id
+                                        PARTITION BY land_id
                                         ORDER BY date
                                         ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                                     ) AS stddev_wb
                             FROM weather_daily
-                            WHERE field_id = CAST(:field_id AS uuid)
+                            WHERE land_id = :land_id
                               AND date >= CURRENT_DATE - INTERVAL '90 days'
                         ) sub
                         WHERE w.id = sub.id
                         """
                     ),
-                    {"field_id": fid},
+                    {"land_id": lid},
                 )
                 session.commit()
             except Exception:
@@ -377,12 +377,12 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
 
 def apply_soil_payload(payload: dict[str, Any]) -> None:
     """Replace soil profile/layers/summary for field from inline payload."""
-    field_id = payload.get("field_id")
+    land_id = payload.get("land_id")
     profile = payload.get("profile") or {}
     layers = payload.get("layers") or []
     summary = payload.get("summary") or {}
-    if not field_id:
-        raise ValueError("soil_profile payload missing field_id")
+    if not land_id:
+        raise ValueError("soil_profile payload missing land_id")
 
     session = SyncSession()
     try:
@@ -390,9 +390,9 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
         old_ids = (
             session.execute(
                 text(
-                    "SELECT id FROM soil_profiles WHERE field_id = CAST(:fid AS uuid)"
+                    "SELECT id FROM soil_profiles WHERE land_id = :land_id"
                 ),
-                {"fid": field_id},
+                {"land_id": land_id},
             )
             .scalars()
             .all()
@@ -409,8 +409,8 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
                 {"pid": str(pid)},
             )
         session.execute(
-            text("DELETE FROM soil_field_summary WHERE field_id = CAST(:fid AS uuid)"),
-            {"fid": field_id},
+            text("DELETE FROM soil_field_summary WHERE land_id = :land_id"),
+            {"land_id": land_id},
         )
 
         profile_id = str(uuid.uuid4())
@@ -419,10 +419,10 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             text(
                 """
                 INSERT INTO soil_profiles (
-                  id, field_id, source, source_resolution_m,
+                  id, land_id, source, source_resolution_m,
                   fetched_at, metadata_json
                 ) VALUES (
-                  CAST(:id AS uuid), CAST(:field_id AS uuid),
+                  CAST(:id AS uuid), :land_id,
                   :source, :resolution, CAST(:fetched_at AS timestamptz),
                   CAST(:metadata AS jsonb)
                 )
@@ -430,7 +430,7 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             ),
             {
                 "id": profile_id,
-                "field_id": field_id,
+                "land_id": land_id,
                 "source": profile.get("source") or "soilgrids",
                 "resolution": profile.get("source_resolution_m"),
                 "fetched_at": fetched_at,
@@ -496,13 +496,13 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             text(
                 """
                 INSERT INTO soil_field_summary (
-                  id, field_id, profile_id, dominant_texture, avg_ph,
+                  id, land_id, profile_id, dominant_texture, avg_ph,
                   total_soc_stock_t_ha, rootzone_awc_mm, drainage_class,
                   acidification_risk, compaction_risk, leaching_risk,
                   rooting_constraint, waterlogging_risk, topsoil_soc_stock_t_ha,
                   data_quality_score
                 ) VALUES (
-                  CAST(:id AS uuid), CAST(:field_id AS uuid), CAST(:profile_id AS uuid),
+                  CAST(:id AS uuid), :land_id, CAST(:profile_id AS uuid),
                   :dominant_texture, :avg_ph,
                   :total_soc_stock_t_ha, :rootzone_awc_mm, :drainage_class,
                   :acidification_risk, :compaction_risk, :leaching_risk,
@@ -513,7 +513,7 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
             ),
             {
                 "id": str(uuid.uuid4()),
-                "field_id": field_id,
+                "land_id": land_id,
                 "profile_id": profile_id,
                 "dominant_texture": summary.get("dominant_texture"),
                 "avg_ph": summary.get("avg_ph"),

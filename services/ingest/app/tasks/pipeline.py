@@ -21,8 +21,6 @@ import rasterio
 from rasterio.features import geometry_mask
 from rasterio.transform import from_bounds
 from rasterio.warp import Resampling, reproject, transform_bounds
-from rio_cogeo.cogeo import cog_translate
-from rio_cogeo.profiles import cog_profiles
 from pystac_client import Client as STACClient
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -65,28 +63,6 @@ RETRY_DELAYS = [60, 300, 900]  # Per PRD Section 7.4
 
 
 # ── Storage / DB helpers ─────────────────────────────────────────────
-
-
-def get_minio_client():
-    """Deprecated: prefer ``get_storage()``. Thin wrapper for MinIO only."""
-    import warnings
-    from minio import Minio
-
-    warnings.warn(
-        "get_minio_client is deprecated; use app.core.storage.get_storage()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return Minio(
-        settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-    )
-
-
-# Deprecated alias kept for callers that still import MINIO_BUCKET.
-MINIO_BUCKET = settings.minio_bucket
 
 
 def get_db_session():
@@ -143,13 +119,13 @@ def complete_step(session, job, step: str, details: dict | None = None):
 
 
 def existing_layer_dates(
-    session, field_id, layer_type: str, satellite: str | None = None
+    session, land_id, layer_type: str, satellite: str | None = None
 ) -> set[date]:
-    """Dates already present in raster_layers for this field + layer_type."""
+    """Dates already present in raster_layers for this land parcel + layer type."""
     from app.models.tables import RasterLayer
 
     q = select(RasterLayer.date).where(
-        RasterLayer.field_id == field_id, RasterLayer.layer_type == layer_type
+        RasterLayer.land_id == land_id, RasterLayer.layer_type == layer_type
     )
     if satellite is not None:
         q = q.where(RasterLayer.satellite == satellite)
@@ -212,27 +188,20 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
 
 
 def collect_existing_scene_dates(
-    session, field, *, layer_type: str, satellite: str, agri_sensor: str | None = None
+    session, land_id: str, *, layer_type: str, satellite: str, agri_sensor: str | None = None
 ) -> set[date]:
-    """Union of raster_layers dates and (for agri fields) parcel_scene_products dates."""
-    existing = existing_layer_dates(session, field.id, layer_type, satellite=satellite)
+    """Union of derived raster dates and scene-product dates for one land_id."""
+    existing = existing_layer_dates(session, land_id, layer_type, satellite=satellite)
     sensor = agri_sensor or satellite
     try:
-        from app.core.agri_tags import parse_agri_land_id
-
-        land_id = parse_agri_land_id(getattr(field, "tags_json", None))
-    except Exception:
-        land_id = None
-    if land_id:
-        try:
-            existing |= existing_agri_scene_dates(session, land_id, sensor)
-        except Exception as e:
-            logger.warning(
-                "agri_existing_dates_failed",
-                land_id=land_id,
-                sensor=sensor,
-                error=str(e),
-            )
+        existing |= existing_agri_scene_dates(session, land_id, sensor)
+    except Exception as e:
+        logger.warning(
+            "existing_scene_dates_failed",
+            land_id=land_id,
+            sensor=sensor,
+            error=str(e),
+        )
     return existing
 
 
@@ -241,7 +210,7 @@ def filter_scenes_skip_existing(
     existing: set[date],
     *,
     force: bool,
-    field_id: str | None = None,
+    land_id: str | None = None,
     index: str | None = None,
 ) -> list[dict]:
     """Drop scenes whose date is already present unless force=True."""
@@ -258,7 +227,7 @@ def filter_scenes_skip_existing(
     if skipped:
         logger.info(
             "scene_skipped_existing",
-            field_id=field_id,
+            land_id=land_id,
             index=index,
             skipped=skipped,
             remaining=len(kept),
@@ -310,7 +279,7 @@ def _resolve_extra_asset_hrefs(
 
 
 def search_scenes_for_defs(
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     date_from: date,
     date_to: date,
     index_defs: list[IndexDef],
@@ -340,7 +309,7 @@ def search_scenes_for_defs(
     catalog = STACClient.open(STAC_API_URL)
     search = catalog.search(
         collections=[STAC_COLLECTION],
-        intersects=field_geom_geojson,
+        intersects=land_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
         # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 still includes 100.0% scenes
         query={"eo:cloud_cover": {"lte": cloud_cap}},
@@ -403,11 +372,11 @@ def search_scenes_for_defs(
 
 
 def search_scenes(
-    field_geom_geojson: dict, date_from: date, date_to: date, index_def: IndexDef
+    land_geom_geojson: dict, date_from: date, date_to: date, index_def: IndexDef
 ) -> list[dict]:
     """Search Element84 STAC and resolve per-band HREFs for the given index."""
     return search_scenes_for_defs(
-        field_geom_geojson, date_from, date_to, [index_def], index_label=index_def.key
+        land_geom_geojson, date_from, date_to, [index_def], index_label=index_def.key
     )
 
 
@@ -507,12 +476,17 @@ def write_cog(
     transform,
     crs: str,
     org_id: str,
-    field_id: str,
+    land_id: str,
     scene_date: date,
     index_key: str,
 ) -> str:
     """Write an index array as COG to object storage. Returns the ``cog_uri``."""
-    object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{index_key}.tif"
+    # rio-cogeo 只在真正写 COG 时需要；把重型可选依赖延迟到这里，避免
+    # HTTP-only 编排和日期检查在不写本地 COG 的场景下无法加载任务模块。
+    from rio_cogeo.cogeo import cog_translate
+    from rio_cogeo.profiles import cog_profiles
+
+    object_key = f"cogs/{org_id}/{land_id}/{scene_date.isoformat()}/{index_key}.tif"
     src_fd, tmp_src_path = tempfile.mkstemp(suffix="_src.tif")
     dst_fd, tmp_dst_path = tempfile.mkstemp(suffix="_cog.tif")
     os.close(src_fd)
@@ -586,7 +560,7 @@ def compute_zonal_stats(data: np.ndarray) -> dict:
 # ── Alert evaluation ────────────────────────────────────────────────
 
 
-def _get_weather_context(session, field_id, alert_date: date) -> dict | None:
+def _get_weather_context(session, land_id, alert_date: date) -> dict | None:
     """Query recent weather data to build context JSONB for alert enrichment."""
     from datetime import timedelta
 
@@ -599,7 +573,7 @@ def _get_weather_context(session, field_id, alert_date: date) -> dict | None:
         session.execute(
             select(WeatherDaily)
             .where(
-                WeatherDaily.field_id == field_id,
+                WeatherDaily.land_id == land_id,
                 WeatherDaily.date >= start,
                 WeatherDaily.date <= alert_date,
             )
@@ -633,7 +607,7 @@ def _get_weather_context(session, field_id, alert_date: date) -> dict | None:
 
 def run_alerts(
     session,
-    field_id,
+    land_id,
     scene_date: date,
     stats: dict,
     historical_means: list[float],
@@ -647,7 +621,7 @@ def run_alerts(
         return
 
     # Fetch recent weather context for alert enrichment
-    weather_ctx = _get_weather_context(session, field_id, scene_date)
+    weather_ctx = _get_weather_context(session, land_id, scene_date)
 
     alert_cfg = index_def.alerts
     label = index_def.label
@@ -657,7 +631,7 @@ def run_alerts(
         severity = "high" if current_mean < alert_cfg.threshold_high else "medium"
         session.add(
             Alert(
-                field_id=field_id,
+                land_id=land_id,
                 date=scene_date,
                 severity=severity,
                 rule_name=f"{index_def.key}_threshold",
@@ -684,7 +658,7 @@ def run_alerts(
                 )
                 session.add(
                     Alert(
-                        field_id=field_id,
+                        land_id=land_id,
                         date=scene_date,
                         severity=severity,
                         rule_name=f"{index_def.key}_drop",
@@ -708,7 +682,7 @@ def run_alerts(
 # ── Grid / mask helpers ──────────────────────────────────────────────
 
 
-def compute_target_grid(field_bounds: tuple, field_geom):
+def compute_target_grid(field_bounds: tuple, land_geom):
     """Return (target_transform, target_shape, field_mask, expanded_bounds)."""
     minx, miny, maxx, maxy = field_bounds
     buf = 0.001
@@ -728,7 +702,7 @@ def compute_target_grid(field_bounds: tuple, field_geom):
     target_transform = from_bounds(minx, miny, maxx, maxy, width, height)
     target_shape = (height, width)
     field_mask = geometry_mask(
-        [field_geom], out_shape=target_shape, transform=target_transform, invert=True
+        [land_geom], out_shape=target_shape, transform=target_transform, invert=True
     )
     return target_transform, target_shape, field_mask, (minx, miny, maxx, maxy)
 
@@ -748,7 +722,7 @@ def process_scene(
     field_mask: np.ndarray,
     bounds: tuple,
     org_id_str: str,
-    field_id_str: str,
+    land_id_str: str,
     date_from: date,
     date_to: date,
     historical_means: list[float],
@@ -757,18 +731,16 @@ def process_scene(
 ):
     """Download bands, compute index, optionally write COG, stats, alerts.
 
-    Agri / ``WRITE_INDEX_COGS=0`` skips COG upload and raster_layers. Agri
-    lonlat is emitted by ``app.tasks.agri_lonlat`` (all optical indices in
-    one pass), not here.
+    Canonical lonlat products are emitted by ``app.tasks.agri_lonlat`` (all
+    optical indices in one pass). COG upload and the optional raster statistics
+    copy are disabled unless ``WRITE_INDEX_COGS=1`` is explicitly configured.
 
     ``scene_workers`` is the parent scene-pool size so band ThreadPool size
     can be nested-capped (see ``app.core.band_parallel``).
 
     Returns the stats dict on success, ``None`` on failure.
     """
-    from app.models.tables import RasterLayer, FieldStat, Field
-
-    from app.core.agri_tags import is_agri_tagged
+    from app.models.tables import RasterLayer, FieldStat
     from app.core.index_cogs import write_index_cogs_enabled
 
     scene_id = scene["id"]
@@ -776,9 +748,7 @@ def process_scene(
     band_hrefs = scene["band_hrefs"]
     index_key = index_def.key
     compute_step = f"compute_{index_key}"
-    field_row = session.get(Field, job.field_id)
-    is_agri = bool(field_row and is_agri_tagged(field_row.tags_json))
-    write_cogs = write_index_cogs_enabled(is_agri=is_agri)
+    write_cogs = write_index_cogs_enabled()
 
     # -- download bands --
     update_job_progress(
@@ -804,7 +774,7 @@ def process_scene(
     index_data[~field_mask] = np.nan
     complete_step(session, job, compute_step)
 
-    # -- write COG (legacy path / explicit WRITE_INDEX_COGS=1 only) --
+    # -- optional COG copy (only when explicitly enabled) --
     cog_uri = None
     if write_cogs:
         update_job_progress(session, job, "write_cog")
@@ -813,7 +783,7 @@ def process_scene(
             target_transform,
             "EPSG:4326",
             org_id_str,
-            field_id_str,
+            land_id_str,
             scene_date,
             index_key,
         )
@@ -821,9 +791,8 @@ def process_scene(
     else:
         logger.info(
             "cog_upload_skipped",
-            object_key=f"cogs/{org_id_str}/{field_id_str}/{scene_date.isoformat()}/{index_key}.tif",
+            object_key=f"cogs/{org_id_str}/{land_id_str}/{scene_date.isoformat()}/{index_key}.tif",
             index=index_key,
-            is_agri=is_agri,
         )
 
     # -- compute stats --
@@ -834,9 +803,9 @@ def process_scene(
     data_max = float(np.nanmax(valid)) if len(valid) > 0 else None
 
     if write_cogs and cog_uri:
-        # -- upsert RasterLayer (field_id + date + layer_type) --
+        # -- upsert RasterLayer (land_id + date + layer_type) --
         layer_values = dict(
-            field_id=job.field_id,
+            land_id=job.land_id,
             layer_type=index_def.label,
             satellite="S2",
             date=scene_date,
@@ -860,7 +829,7 @@ def process_scene(
             pg_insert(RasterLayer)
             .values(**layer_values)
             .on_conflict_do_update(
-                constraint="uq_raster_field_date_type",
+                constraint="uq_raster_land_date_type",
                 set_={
                     "cog_uri": cog_uri,
                     "min": data_min,
@@ -877,7 +846,7 @@ def process_scene(
         # -- upsert FieldStat (via layer_id which is now stable) --
         existing_stat = session.execute(
             select(FieldStat.id).where(
-                FieldStat.field_id == job.field_id,
+                FieldStat.land_id == job.land_id,
                 FieldStat.date == scene_date,
                 FieldStat.layer_id == layer_id,
             )
@@ -901,7 +870,7 @@ def process_scene(
             )
         else:
             field_stat = FieldStat(
-                field_id=job.field_id, layer_id=layer_id, date=scene_date, **stat_values
+                land_id=job.land_id, layer_id=layer_id, date=scene_date, **stat_values
             )
             session.add(field_stat)
         session.commit()
@@ -912,9 +881,10 @@ def process_scene(
     update_job_progress(session, job, "run_alerts")
     if stats["mean"] is not None:
         historical_means.append(stats["mean"])
-    if not is_backfill and not is_agri:
+    # canonical land 任务都使用同一套告警计算；仅批量补算跳过告警，避免历史数据回填时刷屏。
+    if not is_backfill:
         run_alerts(
-            session, job.field_id, scene_date, stats, historical_means, index_def
+            session, job.land_id, scene_date, stats, historical_means, index_def
         )
     complete_step(session, job, "run_alerts")
 
@@ -938,7 +908,7 @@ def process_scenes_parallel(
     field_mask: np.ndarray,
     bounds: tuple,
     org_id_str: str,
-    field_id_str: str,
+    land_id_str: str,
     date_from: date,
     date_to: date,
     historical_means: list[float],
@@ -988,7 +958,7 @@ def process_scenes_parallel(
                 field_mask=field_mask,
                 bounds=bounds,
                 org_id_str=org_id_str,
-                field_id_str=field_id_str,
+                land_id_str=land_id_str,
                 date_from=date_from,
                 date_to=date_to,
                 historical_means=list(hist_snapshot),

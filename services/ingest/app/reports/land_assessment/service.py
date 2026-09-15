@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import tempfile
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +24,7 @@ from app.reports.land_assessment.data_loader import (
     load_agri_lonlat_pixels,
     load_agri_pixel_date_index,
     load_bundle_from_dir,
-    load_field_bundle,
+    load_land_bundle,
     load_oss_media_for_dates,
 )
 from app.reports.land_assessment.ai_analysis import (
@@ -136,23 +135,23 @@ def _stage_media_maps(
 def generate_assessment_pdf(
     *,
     session: Session | None = None,
-    field_id: uuid.UUID | str | None = None,
+    land_id: str | None = None,
     data_dir: Path | str | None = None,
     out_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Generate 选地体检 PDF.
 
-    Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
+    Provide either ``session``+``land_id`` (DB) or ``data_dir`` (fixtures).
     Returns dict with out_path, scorecard summary, flood_evidence, object payload.
     """
     # Soft-fail policy: empty weather / soil / RS series still produce a PDF
-    # with available evidence; only a missing field is hard-fail.
+    # with available evidence; only a missing land parcel is hard-fail.
     if data_dir is not None:
         bundle = load_bundle_from_dir(Path(data_dir))
     else:
-        if field_id is None:
-            raise ValueError("field_id required when data_dir is omitted")
-        fid = uuid.UUID(str(field_id))
+        if land_id is None:
+            raise ValueError("land_id required when data_dir is omitted")
+        land_id = str(land_id)
         try:
             from openfarm_common.internal_api import internal_api_enabled
 
@@ -161,10 +160,10 @@ def generate_assessment_pdf(
             http_ok = False
         if session is None and not http_ok:
             raise ValueError(
-                "session and field_id required when data_dir is omitted "
+                "session and land_id required when data_dir is omitted "
                 "and internal HTTP is not configured"
             )
-        bundle = load_field_bundle(session, fid)
+        bundle = load_land_bundle(session, land_id)
 
     field = bundle["field"]
     computed = compute_assessment(
@@ -181,15 +180,13 @@ def generate_assessment_pdf(
         weather_history=bundle.get("weather_history") or {},
     )
 
-    land_id = field.get("land_id")
-    fid_raw = field.get("id") or field_id
+    land_id = field.get("land_id") or land_id
     open_water = (computed.get("rs") or {}).get("open_water_dates") or []
 
     flood_evidence = None
     if open_water and session is not None:
         flood_evidence = build_flood_evidence(
             session,
-            field_id=fid_raw,
             land_id=land_id,
             open_water_dates=open_water,
         )
@@ -197,7 +194,6 @@ def generate_assessment_pdf(
         # Offline fixtures: still expose dates + placeholder analysis
         flood_evidence = build_flood_evidence(
             None,
-            field_id=None,
             land_id=None,
             open_water_dates=open_water,
         )
@@ -409,7 +405,7 @@ def generate_assessment_pdf(
     return {
         "out_path": str(out_path),
         "download_filename": assessment_pdf_filename(field.get("name")),
-        "field_id": field.get("id"),
+        "land_id": field.get("land_id") or land_id,
         "field_name": field.get("name"),
         "area_ha": field.get("area_ha"),
         "area_mu": round(float(field.get("area_ha") or 0) * 15, 1),

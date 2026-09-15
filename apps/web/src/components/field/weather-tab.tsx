@@ -35,10 +35,10 @@ function getDateRange(range: RangeOption): { start: string; end: string } {
 }
 
 interface WeatherTabProps {
-    fieldId: string;
+    landId: string;
 }
 
-export default function WeatherTab({ fieldId }: WeatherTabProps) {
+export default function WeatherTab({ landId }: WeatherTabProps) {
     const t = useTranslations("weather");
 
     const [range, setRange] = useState<RangeOption>("30d");
@@ -62,7 +62,7 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
         setLoading(true);
         try {
             const { start, end } = getDateRange(range);
-            const res = await weatherApi.get(fieldId, start, end, true);
+            const res = await weatherApi.get(landId, start, end, true);
             setData(res.data);
             setForecast(res.forecast);
             setSummary(res.summary);
@@ -71,7 +71,7 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
         } finally {
             setLoading(false);
         }
-    }, [fieldId, range]);
+    }, [landId, range]);
 
     useEffect(() => {
         loadWeather();
@@ -81,7 +81,7 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
         setBackfilling(true);
         setFetchProgress(true);
         try {
-            await weatherApi.backfill(fieldId, 90);
+            await weatherApi.backfill(landId, 90);
             toast.success(t("backfillStarted"));
             // Lightweight progress: silently reload a few times, then stop spinner
             let attempts = 0;
@@ -90,7 +90,7 @@ export default function WeatherTab({ fieldId }: WeatherTabProps) {
             const poll = async () => {
                 attempts += 1;
                 try {
-                    const res = await weatherApi.get(fieldId, start, end, true);
+                    const res = await weatherApi.get(landId, start, end, true);
                     setData(res.data);
                     setForecast(res.forecast);
                     setSummary(res.summary);

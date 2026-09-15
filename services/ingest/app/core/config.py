@@ -17,17 +17,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_ttl_seconds: int = 3600  # 1 hour
 
-    # Object storage backend: oss | minio (default Aliyun OSS)
+    # Object storage backend: Aliyun OSS only.
     storage_backend: str = "oss"
-
-    # MinIO
-    minio_endpoint: str = "minio:9000"
-    # Browser-reachable endpoint for presigned URLs (empty = use minio_endpoint)
-    minio_public_endpoint: str = ""
-    minio_access_key: str = "openfarm"
-    minio_secret_key: str = "openfarm_dev_secret"
-    minio_bucket: str = "openfarm"
-    minio_secure: bool = False
 
     # Aliyun OSS (default primary backend)
     oss_region: str = "oss-cn-beijing"

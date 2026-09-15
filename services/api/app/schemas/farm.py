@@ -39,37 +39,99 @@ class FarmOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── Field ────────────────────────────────────────────────────────────
+# ── Canonical land parcel ───────────────────────────────────────────
 
 
-class FieldCreate(BaseModel):
-    farm_id: uuid.UUID
-    name: str
-    geom: dict[str, Any]  # GeoJSON geometry
-    crop_type: str  # catalog key from GET /v1/crops (required)
-    season: str | None = None
-    tags: list[str] | None = None
+class LandParcelCreate(BaseModel):
+    """Create one canonical parcel row; ``land_id`` is supplied by the caller."""
 
-
-class FieldUpdate(BaseModel):
-    name: str | None = None
-    geom: dict[str, Any] | None = None  # GeoJSON geometry
+    land_id: str
+    tile_id: str | None = None
+    farm_id: uuid.UUID | None = None
+    land_name: str
+    group_id: str | None = None
+    group_name: str | None = None
+    province_code: str | None = None
+    province_name: str | None = None
+    city_code: str | None = None
+    city_name: str | None = None
+    county_code: str | None = None
+    county_name: str | None = None
+    town_code: str | None = None
+    town_name: str | None = None
+    village_code: str | None = None
+    village_name: str | None = None
+    boundary_geojson: dict[str, Any]
     crop_type: str | None = None
     season: str | None = None
-    tags: list[str] | None = None
+    tags_json: list[str] | None = None
 
 
-class FieldOut(BaseModel):
-    id: uuid.UUID
-    org_id: uuid.UUID | None = None
-    farm_id: uuid.UUID
-    name: str
-    geom: dict[str, Any] | None = None  # GeoJSON geometry
+class LandParcelUpdate(BaseModel):
+    tile_id: str | None = None
+    land_name: str | None = None
+    group_id: str | None = None
+    group_name: str | None = None
+    province_code: str | None = None
+    province_name: str | None = None
+    city_code: str | None = None
+    city_name: str | None = None
+    county_code: str | None = None
+    county_name: str | None = None
+    town_code: str | None = None
+    town_name: str | None = None
+    village_code: str | None = None
+    village_name: str | None = None
+    boundary_geojson: dict[str, Any] | None = None
+    crop_type: str | None = None
+    season: str | None = None
+    tags_json: list[str] | None = None
+    farm_id: uuid.UUID | None = None
+
+
+class LandParcelOut(BaseModel):
+    land_id: str
+    source_parcel_id: str | None = None
+    tile_id: str
+    virtual_tile_id: str | None = None
+    project_key: str | None = None
+    tile_assignment_type: str | None = None
+    tile_anchor_land_id: str | None = None
+    farm_id: uuid.UUID | None = None
+    land_name: str | None = None
+    group_id: str | None = None
+    group_name: str | None = None
+    org_code: str | None = None
+    org_name: str | None = None
+    base_id: str | None = None
+    province_code: str | None = None
+    province_name: str | None = None
+    city_code: str | None = None
+    city_name: str | None = None
+    county_code: str | None = None
+    county_name: str | None = None
+    town_code: str | None = None
+    town_name: str | None = None
+    village_code: str | None = None
+    village_name: str | None = None
+    soil_property: str | None = None
+    current_batch: str | None = None
+    land_status: str | None = None
+    source_update_time: datetime | None = None
+    boundary_geojson: dict[str, Any]
+    boundary_srid: int = 4326
+    min_lon: float
+    min_lat: float
+    max_lon: float
+    max_lat: float
+    geom: dict[str, Any] | None = None
     area_ha: float | None = None
     crop_type: str | None = None
     season: str | None = None
-    tags: list[str] | None = PydanticField(default=None, validation_alias="tags_json")
-    created_by: uuid.UUID | None = None
+    tags_json: list[str] | None = None
+    source_properties: dict[str, Any] | None = None
+    source_file: str | None = None
+    source_feature_index: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -92,16 +154,16 @@ class FieldOut(BaseModel):
         except Exception:
             return None
 
-    @field_validator("tags", mode="before")
+    @field_validator("tags_json", mode="before")
     @classmethod
     def normalize_tags(cls, v: Any) -> list[str] | None:
-        """Handle tags_json attribute name from ORM."""
+        """Normalize the JSON tag array stored on the canonical parcel."""
         if v is None:
             return None
         return v
 
 
-class FieldImportResponse(BaseModel):
+class LandParcelImportResponse(BaseModel):
     imported: int
     errors: list[str] = []
 
@@ -154,13 +216,13 @@ class BackfillIndicesRequest(BaseModel):
 
 
 class BackfillIndicesResponse(BaseModel):
-    field_id: uuid.UUID
+    land_id: str
     status: str
     message: str
 
 
 class BackfillStatusResponse(BaseModel):
-    field_id: uuid.UUID
+    land_id: str
     has_active_backfill: bool
     pending_jobs: int
     running_jobs: int

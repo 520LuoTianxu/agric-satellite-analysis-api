@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Best-effort cdfinance site-admission + NPK prefetch before report PDF jobs.
+"""Best-effort cdfinance prefetch for canonical land-parcel report jobs.
 
-Called from assessment / season-growth generate so ``group_site_admission`` and
-``soil_nutrient_npk`` are fresh in DB when the ingest PDF worker loads facts.
-Never stores the Bearer token in job params or MQ extras.
+The report worker receives one canonical land_id. This module deliberately
+does not resolve UUID fields, tags, or a second parcel identifier at runtime.
 """
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,7 +15,7 @@ from sqlalchemy import select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import logger
-from app.models.tables import Field, GroupSiteAdmission, SoilNutrientNpk
+from app.models.tables import LandParcel, GroupSiteAdmission, SoilNutrientNpk
 
 
 def normalize_optional_token(token: str | None) -> str | None:
@@ -32,16 +30,16 @@ def normalize_optional_token(token: str | None) -> str | None:
 def normalize_optional_group_id(group_id: str | int | None) -> str | None:
     if group_id is None:
         return None
-    s = str(group_id).strip()
-    return s or None
+    value = str(group_id).strip()
+    return value or None
 
 
 def normalize_optional_hr_base_id(hr_base_id: str | int | None) -> str | None:
     """Empty / whitespace → None so env CDFINANCE_HR_BASE_ID remains the fallback."""
     if hr_base_id is None:
         return None
-    s = str(hr_base_id).strip()
-    return s or None
+    value = str(hr_base_id).strip()
+    return value or None
 
 
 def resolve_request_token(
@@ -59,52 +57,53 @@ def resolve_request_token(
 
 
 async def _resolve_group_id(
-    db: AsyncSession, field: Field, explicit: str | None
-) -> tuple[str | None, str | None]:
-    from app.core.agri_tags import parse_agri_land_id, parse_cdfinance_group_id
-
-    land_id = parse_agri_land_id(field.tags_json)
+    db: AsyncSession, land: LandParcel, explicit: str | None
+) -> tuple[str | None, str]:
+    """Read group_id from the current parcel row; no tag or parcel mapping is used."""
     if explicit:
-        return explicit, land_id
+        return explicit, land.land_id
 
-    tagged = parse_cdfinance_group_id(field.tags_json)
-    if tagged:
-        return tagged, land_id
-
-    if land_id:
-        result = await db.execute(
-            sa_text(
-                """
-                SELECT group_id::text AS group_id
-                FROM agric_satellite.land_parcels
-                WHERE land_id = :land_id
-                LIMIT 1
-                """
-            ),
-            {"land_id": land_id},
-        )
-        row = result.mappings().first()
-        if row and row.get("group_id"):
-            return str(row["group_id"]), land_id
-    return None, land_id
+    result = await db.execute(
+        sa_text(
+            """
+            SELECT group_id::text AS group_id
+            FROM agric_satellite.land_parcels
+            WHERE land_id = :land_id
+            LIMIT 1
+            """
+        ),
+        {"land_id": land.land_id},
+    )
+    row = result.mappings().first()
+    return (
+        str(row["group_id"]) if row and row.get("group_id") else None,
+        land.land_id,
+    )
 
 
-def _field_coords_string_soft(field: Field) -> str | None:
-    from geoalchemy2.shape import to_shape
-    from shapely.geometry import mapping
-
+def _land_coords_string_soft(land: LandParcel) -> str | None:
     from app.core.cdfinance_soil import geojson_to_coords_string
 
-    if field.geom is None:
+    # 供应商请求优先使用规范地块的 GeoJSON 边界，避免再从另一套地块表取形状。
+    if isinstance(land.boundary_geojson, dict):
+        try:
+            return geojson_to_coords_string(land.boundary_geojson)
+        except Exception:
+            return None
+
+    if land.geom is None:
         return None
+
     try:
-        gj = mapping(to_shape(field.geom))
-        return geojson_to_coords_string(gj)
+        from geoalchemy2.shape import to_shape
+        from shapely.geometry import mapping
+
+        return geojson_to_coords_string(mapping(to_shape(land.geom)))
     except Exception:
         return None
 
 
-async def _load_agri_admin_and_boundary(
+async def _load_land_admin_and_boundary(
     db: AsyncSession, land_id: str
 ) -> dict[str, Any]:
     result = await db.execute(
@@ -125,53 +124,36 @@ async def _load_agri_admin_and_boundary(
 
 async def prefetch_site_admission(
     db: AsyncSession,
-    field: Field,
+    land: LandParcel,
     *,
     bearer_token: str,
     group_id: str | None = None,
     hr_base_id: str | None = None,
     force: bool = True,
-    link_field_tag: bool = True,
 ) -> dict[str, Any]:
-    """Fetch+upsert site admission. Raises on hard failures (caller soft-catches)."""
-    from app.core.agri_tags import ensure_cdfinance_group_tag
+    """Fetch and upsert site admission for one canonical land parcel."""
     from app.core.cdfinance_site_admission import (
         SOURCE_NAME,
         fetch_group_site_admission,
         normalize_admission_payload,
     )
 
-    gid, land_id = await _resolve_group_id(db, field, group_id)
-    if not gid:
+    resolved_group_id, land_id = await _resolve_group_id(db, land, group_id)
+    if not resolved_group_id:
         return {"status": "skipped", "reason": "no_group_id"}
 
     existing = (
         await db.execute(
-            select(GroupSiteAdmission).where(GroupSiteAdmission.group_id == gid)
+            select(GroupSiteAdmission).where(
+                GroupSiteAdmission.land_id == land_id
+            )
         )
     ).scalar_one_or_none()
-    field_row = (
-        await db.execute(
-            select(GroupSiteAdmission).where(GroupSiteAdmission.field_id == field.id)
-        )
-    ).scalar_one_or_none()
-
-    if not force:
-        if field_row:
-            return {"status": "cached", "group_id": field_row.group_id}
-        if existing and existing.field_id == field.id:
-            return {"status": "cached", "group_id": existing.group_id}
-        if existing and existing.field_id is None:
-            existing.field_id = field.id
-            if land_id and not existing.land_id:
-                existing.land_id = land_id
-            if link_field_tag:
-                field.tags_json = ensure_cdfinance_group_tag(field.tags_json, gid)
-            await db.flush()
-            return {"status": "linked", "group_id": existing.group_id}
+    if existing and not force:
+        return {"status": "cached", "group_id": existing.group_id}
 
     record = await fetch_group_site_admission(
-        group_id=gid,
+        group_id=resolved_group_id,
         bearer_token=bearer_token,
         hr_base_id=hr_base_id,
     )
@@ -179,14 +161,13 @@ async def prefetch_site_admission(
     now = datetime.now(timezone.utc)
     summary["fetched_at"] = now.isoformat()
 
-    row = existing or field_row
+    row = existing
     if row is None:
-        row = GroupSiteAdmission(group_id=gid)
+        row = GroupSiteAdmission(group_id=resolved_group_id, land_id=land_id)
         db.add(row)
 
-    row.field_id = field.id
-    row.group_id = str(summary.get("group_id") or gid)
     row.land_id = land_id
+    row.group_id = str(summary.get("group_id") or resolved_group_id)
     row.source = SOURCE_NAME
     row.status = summary.get("status")
     row.score = summary.get("score")
@@ -201,13 +182,10 @@ async def prefetch_site_admission(
     row.fetched_at = now
     row.updated_at = now
 
-    if link_field_tag:
-        field.tags_json = ensure_cdfinance_group_tag(field.tags_json, row.group_id)
-
     await db.flush()
     logger.info(
         "report_prefetch_site_admission",
-        field_id=str(field.id),
+        land_id=land_id,
         group_id=row.group_id,
         score=row.score,
     )
@@ -216,43 +194,41 @@ async def prefetch_site_admission(
 
 async def prefetch_soil_npk(
     db: AsyncSession,
-    field: Field,
+    land: LandParcel,
     *,
     bearer_token: str,
     hr_base_id: str | None = None,
     force: bool = True,
 ) -> dict[str, Any]:
-    """Fetch+upsert vendor NPK. Raises on hard failures (caller soft-catches)."""
-    from app.core.agri_tags import parse_agri_land_id
+    """Fetch and upsert vendor NPK for one canonical land parcel."""
     from app.core.cdfinance_soil import (
         SOURCE_NAME,
         analyze_soil_v2,
         build_analysis_body,
-        geojson_to_coords_string,
         normalize_vendor_payload,
     )
 
+    land_id = land.land_id
     existing = (
         await db.execute(
-            select(SoilNutrientNpk).where(SoilNutrientNpk.field_id == field.id)
+            select(SoilNutrientNpk).where(SoilNutrientNpk.land_id == land_id)
         )
     ).scalar_one_or_none()
     if existing and not force:
         return {"status": "cached"}
 
-    land_id = parse_agri_land_id(field.tags_json)
-    admin: dict[str, Any] = {}
-    coords: str | None = None
-    if land_id:
-        admin = await _load_agri_admin_and_boundary(db, land_id)
-        bj = admin.get("boundary_geojson")
-        if bj:
-            try:
-                coords = geojson_to_coords_string(bj if isinstance(bj, dict) else None)
-            except ValueError:
-                coords = None
+    admin = await _load_land_admin_and_boundary(db, land_id)
+    coords = None
+    boundary = admin.get("boundary_geojson")
+    if isinstance(boundary, dict):
+        from app.core.cdfinance_soil import geojson_to_coords_string
+
+        try:
+            coords = geojson_to_coords_string(boundary)
+        except ValueError:
+            coords = None
     if not coords:
-        coords = _field_coords_string_soft(field)
+        coords = _land_coords_string_soft(land)
     if not coords:
         return {"status": "skipped", "reason": "no_coords"}
 
@@ -273,7 +249,7 @@ async def prefetch_soil_npk(
     norm = normalize_vendor_payload(payload)
     now = datetime.now(timezone.utc)
 
-    row = existing or SoilNutrientNpk(field_id=field.id)
+    row = existing or SoilNutrientNpk(land_id=land_id)
     if existing is None:
         db.add(row)
 
@@ -298,7 +274,6 @@ async def prefetch_soil_npk(
     await db.flush()
     logger.info(
         "report_prefetch_soil_npk",
-        field_id=str(field.id),
         land_id=land_id,
         tn=row.tn_g_kg,
     )
@@ -307,20 +282,14 @@ async def prefetch_soil_npk(
 
 async def prefetch_cdfinance_for_report(
     db: AsyncSession,
-    field: Field,
+    land: LandParcel,
     *,
     token: str | None,
     group_id: str | int | None = None,
     hr_base_id: str | int | None = None,
     force: bool = True,
 ) -> dict[str, Any]:
-    """Soft prefetch: never raises; returns status map for logging / job params.
-
-    - token + resolvable group_id → site admission upsert
-    - token → NPK upsert (best-effort)
-    Token is never returned or persisted.
-    Request ``hr_base_id`` overrides env ``CDFINANCE_HR_BASE_ID`` when set.
-    """
+    """Soft prefetch for report generation; the token is never persisted."""
     out: dict[str, Any] = {
         "token_provided": False,
         "site_admission": None,
@@ -337,11 +306,11 @@ async def prefetch_cdfinance_for_report(
     out["token_provided"] = True
 
     try:
-        resolved_gid, _ = await _resolve_group_id(db, field, gid)
+        resolved_gid, _ = await _resolve_group_id(db, land, gid)
         if resolved_gid or gid:
             out["site_admission"] = await prefetch_site_admission(
                 db,
-                field,
+                land,
                 bearer_token=bearer,
                 group_id=gid,
                 hr_base_id=hid,
@@ -349,47 +318,49 @@ async def prefetch_cdfinance_for_report(
             )
         else:
             out["site_admission"] = {"status": "skipped", "reason": "no_group_id"}
-    except httpx.HTTPError as e:
+    except httpx.HTTPError as exc:
         logger.warning(
             "report_prefetch_site_admission_http",
-            field_id=str(field.id),
-            error=str(e),
+            land_id=land.land_id,
+            error=str(exc),
         )
         out["site_admission"] = {"status": "error", "reason": "http"}
-    except Exception as e:
+    except Exception as exc:
         logger.warning(
             "report_prefetch_site_admission_failed",
-            field_id=str(field.id),
-            error=str(e),
+            land_id=land.land_id,
+            error=str(exc),
         )
-        out["site_admission"] = {"status": "error", "reason": str(e)[:200]}
+        out["site_admission"] = {"status": "error", "reason": str(exc)[:200]}
 
     try:
         out["soil_npk"] = await prefetch_soil_npk(
-            db, field, bearer_token=bearer, hr_base_id=hid, force=force
+            db, land, bearer_token=bearer, hr_base_id=hid, force=force
         )
-    except httpx.HTTPError as e:
+    except httpx.HTTPError as exc:
         logger.warning(
             "report_prefetch_soil_npk_http",
-            field_id=str(field.id),
-            error=str(e),
+            land_id=land.land_id,
+            error=str(exc),
         )
         out["soil_npk"] = {"status": "error", "reason": "http"}
-    except Exception as e:
+    except Exception as exc:
         logger.warning(
             "report_prefetch_soil_npk_failed",
-            field_id=str(field.id),
-            error=str(e),
+            land_id=land.land_id,
+            error=str(exc),
         )
-        out["soil_npk"] = {"status": "error", "reason": str(e)[:200]}
+        out["soil_npk"] = {"status": "error", "reason": str(exc)[:200]}
 
     return out
 
 
-async def field_has_site_admission(db: AsyncSession, field_id: uuid.UUID) -> bool:
+async def land_has_site_admission(db: AsyncSession, land_id: str) -> bool:
     row = (
         await db.execute(
-            select(GroupSiteAdmission.id).where(GroupSiteAdmission.field_id == field_id)
+            select(GroupSiteAdmission.id).where(
+                GroupSiteAdmission.land_id == land_id
+            )
         )
     ).scalar_one_or_none()
     return row is not None

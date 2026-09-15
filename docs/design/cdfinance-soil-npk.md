@@ -21,5 +21,5 @@ H5/网关偶发附带 query：`timestamp`（毫秒）、`nonce`、`z_seller`（�
 
 ## API
 
-- `GET /v1/fields/{id}/soil/npk`
-- `POST /v1/fields/{id}/soil/npk` — body/header 传临时 Bearer；`force=true` 刷新
+- `GET /v1/lands/{land_id}/soil/npk`
+- `POST /v1/lands/{land_id}/soil/npk` — body/header 传临时 Bearer；`force=true` 刷新

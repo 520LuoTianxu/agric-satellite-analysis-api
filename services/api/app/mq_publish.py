@@ -1,7 +1,7 @@
-"""Publish CloudAMQP TaskMessage from API routers.
+"""Publish canonical-land tasks to CloudAMQP.
 
-Fail closed when CLOUDAMQP_URL is missing unless MQ_FALLBACK_CELERY=1
-(legacy direct Celery for local/dev only).
+Every task carries one parcel identity: land_id. No UUID-field or parcel-id
+resolution is performed here.
 """
 
 from __future__ import annotations
@@ -27,128 +27,83 @@ def _mq_fallback_enabled() -> bool:
 def _fallback_celery(
     *,
     type: str,
-    field_id: str | None,
-    land_id: str | None,
+    land_id: str,
     extras: dict[str, Any],
 ) -> None:
-    """Best-effort mirror of mq_consumer dispatch (dev only)."""
+    """Best-effort direct Celery dispatch for local/dev fallback."""
     from app.celery_client import send_task
 
-    fid = field_id
-    if not fid:
-        raise HTTPException(
-            status_code=503,
-            detail="MQ_FALLBACK_CELERY requires field_id",
-        )
     if type == "weather_backfill":
-        days = extras.get("days")
-        kwargs: dict[str, Any] = {}
-        if days is not None:
-            kwargs["days"] = int(days)
+        days = extras.get("days") or extras.get("weather_days")
+        kwargs = {"days": int(days)} if days is not None else {}
         send_task(
-            "app.tasks.weather.backfill_weather_for_field",
-            args=[fid],
-            kwargs=kwargs,
+            "app.tasks.weather.backfill_weather_for_land", args=[land_id], kwargs=kwargs
         )
     elif type == "soil_fetch":
-        job_id = extras.get("job_id")
-        args: list[str] = [fid]
-        if job_id:
-            args.append(str(job_id))
-        send_task("app.tasks.soil.fetch_soil_for_field", args=args)
+        args = [land_id]
+        if extras.get("job_id"):
+            args.append(str(extras["job_id"]))
+        send_task("app.tasks.soil.fetch_soil_for_land", args=args)
     elif type == "satellite_analysis":
-        months = int(extras.get("months") or 24)
-        force = bool(extras.get("force") or False)
-        allow_agri = bool(extras.get("allow_agri") or False)
-        sentinel_job_id = extras.get("sentinel_job_id")
-        kwargs = {
-            "months": months,
-            "force": force,
-            "allow_agri": allow_agri,
+        kwargs: dict[str, Any] = {
+            "months": int(extras.get("months") or 24),
+            "force": bool(extras.get("force") or False),
         }
-        if sentinel_job_id:
-            kwargs["sentinel_job_id"] = str(sentinel_job_id)
-        if extras.get("date_from"):
-            kwargs["date_from"] = str(extras["date_from"])[:10]
-        if extras.get("date_to"):
-            kwargs["date_to"] = str(extras["date_to"])[:10]
-        if extras.get("growing_seasons"):
-            kwargs["growing_seasons"] = extras["growing_seasons"]
-        if extras.get("season_months"):
-            kwargs["season_months"] = extras["season_months"]
+        for key in (
+            "sentinel_job_id",
+            "date_from",
+            "date_to",
+            "growing_seasons",
+            "season_months",
+        ):
+            if extras.get(key) is not None:
+                kwargs[key] = extras[key]
         send_task(
-            "app.tasks.backfill.backfill_indices_for_field",
-            args=[fid],
+            "app.tasks.backfill.backfill_indices_for_land",
+            args=[land_id],
             kwargs=kwargs,
         )
         if extras.get("with_bridge") or extras.get("bridge_job_id"):
-            bk: dict[str, Any] = {"land_id": land_id or extras.get("land_id")}
+            bridge_kwargs: dict[str, Any] = {}
             if extras.get("bridge_job_id"):
-                bk["bridge_job_id"] = str(extras["bridge_job_id"])
+                bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
             send_task(
-                "app.tasks.agri_bridge.bridge_after_backfill",
-                args=[fid],
-                kwargs=bk,
+                "app.tasks.agri_bridge.bridge_land_stac_to_agri",
+                args=[land_id],
+                kwargs=bridge_kwargs,
             )
             if extras.get("dispatch_alerts"):
-                try:
-                    send_task(
-                        "app.tasks.agri_alerts.evaluate_agri_alerts_for_field",
-                        args=[fid],
-                        kwargs={
-                            "land_id": land_id or extras.get("land_id"),
-                            "replace_open": True,
-                        },
-                    )
-                except Exception:
-                    pass
-    elif type == "field_bootstrap":
-        wkwargs: dict[str, Any] = {}
-        days = extras.get("days")
-        if days is None:
-            days = extras.get("weather_days")
-        if days is None and extras.get("date_from"):
-            try:
-                from datetime import date as _date
-
-                start = _date.fromisoformat(str(extras["date_from"])[:10])
-                end_raw = extras.get("date_to")
-                end = (
-                    _date.fromisoformat(str(end_raw)[:10]) if end_raw else _date.today()
+                send_task(
+                    "app.tasks.agri_alerts.evaluate_agri_alerts_for_land",
+                    args=[land_id],
+                    kwargs={"replace_open": True},
                 )
-                days = max(1, (end - start).days)
-            except ValueError:
-                days = None
+    elif type == "land_bootstrap":
+        weather_kwargs: dict[str, Any] = {}
+        days = extras.get("days") or extras.get("weather_days")
         if days is not None:
-            wkwargs["days"] = int(days)
+            weather_kwargs["days"] = int(days)
         send_task(
-            "app.tasks.weather.backfill_weather_for_field",
-            args=[fid],
-            kwargs=wkwargs,
+            "app.tasks.weather.backfill_weather_for_land",
+            args=[land_id],
+            kwargs=weather_kwargs,
         )
-        send_task("app.tasks.soil.fetch_soil_for_field", args=[fid])
+        send_task("app.tasks.soil.fetch_soil_for_land", args=[land_id])
         if not extras.get("skip_indices"):
-            kwargs = {
-                "allow_agri": True
-                if extras.get("allow_agri") is None
-                else bool(extras.get("allow_agri")),
-            }
-            if extras.get("sentinel_job_id"):
-                kwargs["sentinel_job_id"] = str(extras["sentinel_job_id"])
-            if extras.get("date_from"):
-                kwargs["date_from"] = str(extras["date_from"])[:10]
-            if extras.get("date_to"):
-                kwargs["date_to"] = str(extras["date_to"])[:10]
+            index_kwargs: dict[str, Any] = {}
+            for key in ("sentinel_job_id", "date_from", "date_to"):
+                if extras.get(key) is not None:
+                    index_kwargs[key] = extras[key]
             send_task(
-                "app.tasks.backfill.backfill_indices_for_field",
-                args=[fid],
-                kwargs=kwargs,
+                "app.tasks.backfill.backfill_indices_for_land",
+                args=[land_id],
+                kwargs=index_kwargs,
             )
             followup = extras.get("followup_assessment")
             if isinstance(followup, dict) and followup.get("job_id"):
-                ak: dict[str, Any] = {
+                kwargs = {
                     "job_id": str(followup["job_id"]),
-                    "field_id": fid,
+                    "land_id": land_id,
                     "pull_data": True,
                 }
                 for key in (
@@ -160,17 +115,17 @@ def _fallback_celery(
                     "mq_task_id",
                 ):
                     if followup.get(key) is not None:
-                        ak[key] = followup[key]
+                        kwargs[key] = followup[key]
                 send_task(
                     "app.tasks.assessment_report.generate_assessment_report",
-                    kwargs=ak,
+                    kwargs=kwargs,
                     queue="ingest",
                 )
             followup_sg = extras.get("followup_season_growth")
             if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
-                sk: dict[str, Any] = {
+                kwargs = {
                     "job_id": str(followup_sg["job_id"]),
-                    "field_id": fid,
+                    "land_id": land_id,
                     "pull_data": True,
                 }
                 for key in (
@@ -182,21 +137,16 @@ def _fallback_celery(
                     "mq_task_id",
                 ):
                     if followup_sg.get(key) is not None:
-                        sk[key] = followup_sg[key]
-                if sk.get("start_date") is None and extras.get("date_from"):
-                    sk["start_date"] = str(extras["date_from"])[:10]
-                if sk.get("end_date") is None and extras.get("date_to"):
-                    sk["end_date"] = str(extras["date_to"])[:10]
+                        kwargs[key] = followup_sg[key]
                 send_task(
                     "app.tasks.season_growth_report.generate_season_growth_report",
-                    kwargs=sk,
+                    kwargs=kwargs,
                     queue="ingest",
                 )
     elif type == "agri_bridge":
         send_task(
-            "app.tasks.agri_bridge.bridge_field_stac_to_agri",
-            args=[fid],
-            kwargs={"land_id": land_id or extras.get("land_id")},
+            "app.tasks.agri_bridge.bridge_land_stac_to_agri",
+            args=[land_id],
         )
     elif type == "assessment_report":
         job_id = extras.get("job_id")
@@ -207,8 +157,7 @@ def _fallback_celery(
             )
         send_task(
             "app.tasks.assessment_report.generate_assessment_report",
-            args=[str(job_id)],
-            kwargs={},
+            kwargs={"job_id": str(job_id), "land_id": land_id},
             queue="ingest",
         )
     elif type == "season_growth_report":
@@ -218,15 +167,12 @@ def _fallback_celery(
                 status_code=503,
                 detail="MQ_FALLBACK_CELERY season_growth_report requires extras.job_id",
             )
-        kwargs = {
-            "job_id": str(job_id),
-            "field_id": fid,
-        }
+        kwargs = {"job_id": str(job_id), "land_id": land_id}
         for key in ("start_date", "end_date", "crops", "label", "material_keys"):
             if extras.get(key) is not None:
                 kwargs[key] = extras[key]
         if extras.get("pull_data") is not None:
-            kwargs["pull_data"] = bool(extras.get("pull_data"))
+            kwargs["pull_data"] = bool(extras["pull_data"])
         if extras.get("wait_celery_ids"):
             kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
         send_task(
@@ -244,21 +190,19 @@ def _fallback_celery(
 def publish_api_task(
     *,
     type: str,
-    field_id: str | None = None,
-    parcel_id: str | None = None,
     land_id: str | None = None,
     extras: dict[str, Any] | None = None,
     task_id: str | None = None,
 ) -> str:
-    """Publish a TaskMessage; return task_id.
-
-    Raises HTTPException 503 when CloudAMQP is not configured (unless
-    MQ_FALLBACK_CELERY=1), or 502 on publish failure.
-    """
+    """Publish a task with the canonical parcel land_id."""
+    if not land_id:
+        raise HTTPException(status_code=400, detail="land_id is required")
     extras = dict(extras or {})
     tid = task_id or str(uuid.uuid4())
+    from openfarm_common.trace import get_or_create_trace_id, stamp_trace_on_payload
 
-    # D4: when dual|claim, insert work_items (idempotent). Claim mode skips MQ below.
+    trace_id = get_or_create_trace_id()
+
     try:
         from app.services.work_items import (
             CLAIMABLE_TYPES,
@@ -270,9 +214,9 @@ def publish_api_task(
     except Exception:
         should_publish_mq = lambda: True  # noqa: E731
         should_enqueue_work_items = lambda: False  # noqa: E731
-        CLAIMABLE_TYPES = frozenset()  # type: ignore
-        enqueue_work_item_sync = None  # type: ignore
-        work_item_idempotency_key = None  # type: ignore
+        CLAIMABLE_TYPES = frozenset()
+        enqueue_work_item_sync = None
+        work_item_idempotency_key = None
 
     if (
         should_enqueue_work_items()
@@ -281,23 +225,20 @@ def publish_api_task(
     ):
         try:
             idem = work_item_idempotency_key(type, task_id=tid, extras=extras)
-            payload = {
-                "field_id": field_id,
-                "parcel_id": parcel_id,
-                "land_id": land_id,
-                "extras": extras,
-                "task_id": tid,
-            }
-            # Priority: reports high; bootstrap/pull next; data tasks default
-            priority = 0
-            if type in ("assessment_report", "season_growth_report"):
-                priority = 10
-            elif type == "field_bootstrap":
-                priority = 5
             work_id = enqueue_work_item_sync(
                 type=type,
-                payload=payload,
-                priority=priority,
+                payload=stamp_trace_on_payload(
+                    {
+                        "land_id": land_id,
+                        "extras": extras,
+                        "task_id": tid,
+                    }
+                ),
+                priority=10
+                if type in ("assessment_report", "season_growth_report")
+                else 5
+                if type == "land_bootstrap"
+                else 0,
                 idempotency_key=idem,
             )
             if work_id:
@@ -306,7 +247,7 @@ def publish_api_task(
                     work_id=work_id,
                     task_id=tid,
                     type=type,
-                    field_id=field_id,
+                    land_id=land_id,
                 )
         except Exception as exc:
             logger.error(
@@ -315,11 +256,9 @@ def publish_api_task(
                 type=type,
                 error=str(exc),
             )
-            # Fail closed in claim mode (no MQ fallback for this publish).
             if not should_publish_mq():
                 raise HTTPException(
-                    status_code=503,
-                    detail=f"work_items enqueue failed: {exc}",
+                    status_code=503, detail=f"work_items enqueue failed: {exc}"
                 ) from exc
 
     if not should_publish_mq():
@@ -327,7 +266,7 @@ def publish_api_task(
             "mq_publish_skipped_claim_mode",
             task_id=tid,
             type=type,
-            field_id=field_id,
+            land_id=land_id,
         )
         return tid
 
@@ -335,35 +274,19 @@ def publish_api_task(
         from openfarm_common.mq import publish_task
         from openfarm_common.mq_schemas import TaskMessage
         from openfarm_common.settings import settings as common_settings
-    except Exception as e:
-        logger.error("mq_helpers_unavailable", error=str(e))
+    except Exception as exc:
+        logger.error("mq_helpers_unavailable", error=str(exc))
         if _mq_fallback_enabled():
-            logger.warning(
-                "mq_fallback_celery",
-                type=type,
-                field_id=field_id,
-                reason="helpers_unavailable",
-            )
-            _fallback_celery(
-                type=type, field_id=field_id, land_id=land_id, extras=extras
-            )
+            _fallback_celery(type=type, land_id=land_id, extras=extras)
             return tid
         raise HTTPException(
-            status_code=503, detail=f"MQ helpers unavailable: {e}"
-        ) from e
+            status_code=503, detail=f"MQ helpers unavailable: {exc}"
+        ) from exc
 
     if not common_settings.cloudamqp_url:
-        logger.error("cloudamqp_url_missing", type=type, field_id=field_id)
+        logger.error("cloudamqp_url_missing", type=type, land_id=land_id)
         if _mq_fallback_enabled():
-            logger.warning(
-                "mq_fallback_celery",
-                type=type,
-                field_id=field_id,
-                reason="CLOUDAMQP_URL_missing",
-            )
-            _fallback_celery(
-                type=type, field_id=field_id, land_id=land_id, extras=extras
-            )
+            _fallback_celery(type=type, land_id=land_id, extras=extras)
             return tid
         raise HTTPException(
             status_code=503,
@@ -373,25 +296,24 @@ def publish_api_task(
     msg = TaskMessage(
         task_id=tid,
         type=type,
-        field_id=field_id,
-        parcel_id=parcel_id,
         land_id=land_id,
         extras=extras,
+        trace_id=trace_id,
     )
     try:
         publish_task(msg)
-    except Exception as e:
-        logger.error("mq_publish_failed", task_id=tid, type=type, error=str(e))
+    except Exception as exc:
+        logger.error("mq_publish_failed", task_id=tid, type=type, error=str(exc))
         raise HTTPException(
-            status_code=502, detail=f"Failed to publish task: {e}"
-        ) from e
+            status_code=502, detail=f"Failed to publish task: {exc}"
+        ) from exc
 
     logger.info(
         "mq_task_published_from_api",
         task_id=tid,
         type=type,
-        field_id=field_id,
-        land_id=land_id or parcel_id,
+        land_id=land_id,
+        trace_id=trace_id,
     )
     return tid
 

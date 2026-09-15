@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
@@ -31,13 +31,15 @@ class PublishEnqueueTests(unittest.TestCase):
         ):
             tid = publish_api_task(
                 type="weather_backfill",
-                field_id="f1",
+                land_id="L1",
                 extras={"days": 3},
                 task_id="t1",
             )
         self.assertEqual(tid, "t1")
         enq.assert_called_once()
         self.assertEqual(enq.call_args.kwargs["type"], "weather_backfill")
+        self.assertEqual(enq.call_args.kwargs["payload"]["land_id"], "L1")
+        self.assertIn("trace_id", enq.call_args.kwargs["payload"])
 
     def test_legacy_does_not_enqueue(self) -> None:
         from app.mq_publish import publish_api_task
@@ -50,15 +52,16 @@ class PublishEnqueueTests(unittest.TestCase):
             patch("app.services.work_items.enqueue_work_item_sync") as enq,
             patch("openfarm_common.settings.settings") as common_settings,
             patch("openfarm_common.mq.publish_task") as pub,
-            patch("openfarm_common.mq_schemas.TaskMessage", MagicMock()),
         ):
             common_settings.cloudamqp_url = "amqps://example"
             tid = publish_api_task(
-                type="weather_backfill", field_id="f1", extras={"days": 1}
+                type="weather_backfill", land_id="L1", extras={"days": 1}
             )
         enq.assert_not_called()
         pub.assert_called_once()
         self.assertTrue(tid)
+        self.assertEqual(pub.call_args.args[0].land_id, "L1")
+        self.assertTrue(pub.call_args.args[0].trace_id)
 
     def test_claim_enqueue_failure_raises(self) -> None:
         from app.mq_publish import publish_api_task
@@ -84,7 +87,7 @@ class PublishEnqueueTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as ctx:
                 publish_api_task(
                     type="soil_fetch",
-                    field_id="f1",
+                    land_id="L1",
                     extras={"job_id": "j1"},
                     task_id="t2",
                 )

@@ -80,9 +80,7 @@ Update these values (the setup script already generated secure random secrets fo
 DOMAIN=agric-satellite-analysis.example.com
 NEXTAUTH_URL=https://agric-satellite-analysis.example.com
 NEXT_PUBLIC_API_URL=https://agric-satellite-analysis.example.com/v1
-NEXT_PUBLIC_TITILER_URL=https://agric-satellite-analysis.example.com/tiles
-NEXT_PUBLIC_PROTOMAPS_URL=https://agric-satellite-analysis.example.com/storage/openfarm/basemap
-TITILER_PUBLIC_URL=https://agric-satellite-analysis.example.com/tiles
+NEXT_PUBLIC_PROTOMAPS_URL=https://your-oss-public-endpoint/basemap
 CORS_ORIGINS=https://agric-satellite-analysis.example.com
 
 # Google OAuth (from Google Cloud Console)
@@ -120,6 +118,19 @@ cd /opt/openfarm
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
+On an API/control-plane machine, add the API-machine override so download
+workers are not started there:
+
+```bash
+sudo docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml \
+  -f docker-compose.api-machine.yml \
+  up -d --build
+```
+
+Run `docker-compose.download-machine.yml` separately on download machines.
+
 First build takes 5–10 minutes (downloading images, compiling). Subsequent deploys are faster with Docker layer caching.
 
 ---
@@ -150,17 +161,14 @@ Internet
     ├── /v1/*          → api:8000      (FastAPI)
     ├── /docs*         → api:8000      (Swagger UI)
     ├── /healthz       → api:8000      (Health check)
-    ├── /tiles/*       → tiler:80      (TiTiler COG tiles)
-    ├── /cog/*         → tiler:80      (TiTiler COG endpoints)
-    ├── /storage/*     → object storage (Aliyun OSS by default; MinIO with --profile minio)
     └── /*             → web:3000      (Next.js frontend)
 
 Internal network (not exposed):
     ├── db:5432        (PostgreSQL + PostGIS)
     ├── redis:6379     (Celery broker + cache)
-    ├── object storage (OSS default; optional MinIO profile)
+    ├── object storage (Aliyun OSS)
     ├── ingest        (Celery -Q ingest: STAC/weather/soil/compute)
-    ├── storage       (Celery -Q storage: OSS/MinIO uploads)
+    ├── storage       (Celery -Q storage: OSS uploads)
     └── beat          (Celery beat schedules → ingest)
 ```
 

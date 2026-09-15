@@ -5,7 +5,6 @@ Daily polling + historical backfill via Celery Beat.
 
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -100,20 +99,20 @@ def _http_only_weather() -> bool:
         return False
 
 
-def _resolve_field_lat_lon(field_id: str, session=None) -> tuple[float, float] | None:
-    """Centroid (lat, lon) via internal geom API, else SyncSession Field.geom."""
+def _resolve_land_lat_lon(land_id: str, session=None) -> tuple[float, float] | None:
+    """Centroid (lat, lon) via internal geom API, else database land_parcels.geom."""
     try:
-        from openfarm_common.internal_api import field_geom, internal_api_enabled
+        from openfarm_common.internal_api import land_geom, internal_api_enabled
 
         if internal_api_enabled():
-            g = field_geom(field_id)
+            g = land_geom(land_id)
             lat, lon = g.get("centroid_lat"), g.get("centroid_lon")
             if lat is not None and lon is not None:
                 return float(lat), float(lon)
     except Exception as exc:
         logger.warning(
-            "weather_field_geom_http_failed",
-            field_id=field_id,
+            "weather_land_geom_http_failed",
+            land_id=land_id,
             error=str(exc),
         )
         try:
@@ -126,23 +125,23 @@ def _resolve_field_lat_lon(field_id: str, session=None) -> tuple[float, float] |
 
     if session is None:
         return None
-    from app.models.tables import Field
+    from app.models.tables import LandParcel
 
-    field = session.get(Field, uuid.UUID(field_id))
-    if not field or field.deleted_at is not None:
+    land = session.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None or land.geom is None:
         return None
-    geom_shape = to_shape(field.geom)
+    geom_shape = to_shape(land.geom)
     centroid = geom_shape.centroid
     return float(centroid.y), float(centroid.x)
 
 
-def _rows_to_weather_payload(field_id: str, records: list[dict]) -> dict:
+def _rows_to_weather_payload(land_id: str, records: list[dict]) -> dict:
     """Serialize in-memory weather records for results/apply."""
     rows = []
     for r in records:
         rows.append(
             {
-                "field_id": field_id,
+                "land_id": land_id,
                 "date": r["date"].isoformat()
                 if hasattr(r["date"], "isoformat")
                 else str(r["date"])[:10],
@@ -175,7 +174,7 @@ def _rows_to_weather_payload(field_id: str, records: list[dict]) -> dict:
                 "model_used": r.get("model_used"),
             }
         )
-    return {"kind": "weather_daily", "field_id": field_id, "rows": rows}
+    return {"kind": "weather_daily", "land_id": land_id, "rows": rows}
 
 
 def _calculate_gdd(
@@ -255,33 +254,33 @@ def _fetch_open_meteo(
 
 
 @celery_app.task(
-    name="app.tasks.weather.fetch_weather_for_field",
+    name="app.tasks.weather.fetch_weather_for_land",
     bind=True,
     max_retries=3,
     default_retry_delay=60)
-def fetch_weather_for_field(
+def fetch_weather_for_land(
     self,
-    field_id: str,
+    land_id: str,
     backfill_days: int = 0) -> dict:
-    """Fetch weather data from Open-Meteo for a single field.
+    """Fetch weather data from Open-Meteo for a single land parcel.
 
     Args:
-        field_id: UUID of the field.
+        land_id: Canonical ``land_parcels.land_id``.
         backfill_days: If >0, fetch last N days via archive API.
             If 0, fetch yesterday + today via forecast API.
 
     Returns:
-        dict with field_id, rows_upserted, status.
+        dict with land_id, rows_upserted, status.
     """
     from app.models.tables import WeatherDaily
 
     http_only = _http_only_weather()
     session = None if http_only else _get_db_session()
     try:
-        coords = _resolve_field_lat_lon(field_id, session=session)
+        coords = _resolve_land_lat_lon(land_id, session=session)
         if coords is None:
-            logger.warning("weather_field_not_found", field_id=field_id)
-            return {"field_id": field_id, "rows_upserted": 0, "status": "skipped"}
+            logger.warning("weather_land_not_found", land_id=land_id)
+            return {"land_id": land_id, "rows_upserted": 0, "status": "skipped"}
         lat, lon = coords
 
         today = date.today()
@@ -296,7 +295,7 @@ def fetch_weather_for_field(
 
         logger.info(
             "weather_fetch_start",
-            field_id=field_id,
+            land_id=land_id,
             lat=lat,
             lon=lon,
             start=start_date.isoformat(),
@@ -309,16 +308,16 @@ def fetch_weather_for_field(
 
         daily = data.get("daily")
         if not daily or "time" not in daily:
-            logger.warning("weather_no_daily_data", field_id=field_id)
-            return {"field_id": field_id, "rows_upserted": 0, "status": "no_data"}
+            logger.warning("weather_no_daily_data", land_id=land_id)
+            return {"land_id": land_id, "rows_upserted": 0, "status": "no_data"}
 
-        # Get last known cumulative GDD for this field (skip when HTTP-only)
+        # Get last known cumulative GDD for this land parcel (skip when HTTP-only)
         cumulative_gdd = 0.0
         if session is not None:
             last_gdd_row = session.execute(
                 select(WeatherDaily.gdd_cumulative, WeatherDaily.date)
                 .where(
-                    WeatherDaily.field_id == uuid.UUID(field_id),
+                    WeatherDaily.land_id == land_id,
                     WeatherDaily.gdd_cumulative.isnot(None))
                 .order_by(WeatherDaily.date.desc())
                 .limit(1)
@@ -335,7 +334,7 @@ def fetch_weather_for_field(
 
             # Extract raw variables from API response
             record: dict = {
-                "field_id": uuid.UUID(field_id),
+                "land_id": land_id,
 
                 "date": row_date,
                 "latitude": Decimal(str(round(lat, 8))),
@@ -378,18 +377,18 @@ def fetch_weather_for_field(
                 # Upsert via INSERT ... ON CONFLICT DO UPDATE
                 stmt = pg_insert(WeatherDaily).values(**record)
                 stmt = stmt.on_conflict_do_update(
-                    constraint="uq_weather_field_date",
+                    constraint="uq_weather_land_date",
                     set_={
                         k: v
                         for k, v in record.items()
-                        if k not in ("field_id", "date")
+                        if k not in ("land_id", "date")
                     },
                 )
                 session.execute(stmt)
 
         if session is not None:
             session.commit()
-            _update_water_balance(session, field_id)
+            _update_water_balance(session, land_id)
         else:
             # HTTP-only: push rows to API (water balance computed server-side)
             try:
@@ -397,16 +396,16 @@ def fetch_weather_for_field(
 
                 if http_writes_enabled() and pending_records:
                     apply_results(
-                        _rows_to_weather_payload(field_id, pending_records)
+                        _rows_to_weather_payload(land_id, pending_records)
                     )
             except Exception as e:
                 logger.warning(
                     "weather_http_apply_inline_failed",
-                    field_id=field_id,
+                    land_id=land_id,
                     error=str(e),
                 )
                 return {
-                    "field_id": field_id,
+                    "land_id": land_id,
                     "rows_upserted": 0,
                     "status": "failed",
                     "error": str(e),
@@ -414,11 +413,11 @@ def fetch_weather_for_field(
 
         logger.info(
             "weather_fetch_complete",
-            field_id=field_id,
+            land_id=land_id,
             rows_upserted=rows_upserted,
             http_only=http_only)
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "rows_upserted": rows_upserted,
             "status": "success",
             "pending_records": pending_records if http_only else None,
@@ -427,7 +426,7 @@ def fetch_weather_for_field(
     except httpx.HTTPStatusError as e:
         logger.error(
             "weather_api_error",
-            field_id=field_id,
+            land_id=land_id,
             status=e.response.status_code,
             detail=str(e))
         if session is not None:
@@ -437,13 +436,13 @@ def fetch_weather_for_field(
     except Exception as e:
         logger.error(
             "weather_fetch_error",
-            field_id=field_id,
+            land_id=land_id,
             error=str(e),
             exc_info=True)
         if session is not None:
             session.rollback()
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "rows_upserted": 0,
             "status": "failed",
             "error": str(e),
@@ -453,9 +452,8 @@ def fetch_weather_for_field(
             session.close()
 
 
-def _update_water_balance(session, field_id: str) -> None:
+def _update_water_balance(session, land_id: str) -> None:
     """Update 30-day water balance and drought index for recent records."""
-    fid = uuid.UUID(field_id)
     cutoff = date.today() - timedelta(days=90)
 
     # Compute 30-day rolling water balance (precip - ET0)
@@ -474,71 +472,91 @@ def _update_water_balance(session, field_id: str) -> None:
                     id,
                     SUM(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
                         OVER (
-                            PARTITION BY field_id
+                            PARTITION BY land_id
                             ORDER BY date
                             ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                         ) AS wb,
                     STDDEV(COALESCE(precipitation_sum, 0) - COALESCE(et0_fao_mm, 0))
                         OVER (
-                            PARTITION BY field_id
+                            PARTITION BY land_id
                             ORDER BY date
                             ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                         ) AS stddev_wb
                 FROM weather_daily
-                WHERE field_id = :field_id AND date >= :cutoff
+                WHERE land_id = :land_id AND date >= :cutoff
             ) sub
             WHERE w.id = sub.id
         """),
-        {"field_id": fid, "cutoff": cutoff})
+        {"land_id": land_id, "cutoff": cutoff})
     session.commit()
 
 
 @celery_app.task(name="app.tasks.weather.schedule_daily_weather_fetch")
 def schedule_daily_weather_fetch() -> dict:
-    """Scheduled task (Celery Beat, 08:00 UTC).
+    """每日天气定时任务（Celery Beat，08:00 UTC）。
 
-    Fetches weather for all active fields in batches.
+    配了 API_BASE_URL 时，地块清单走 Internal HTTP，不在下载机查库。
     """
-    from app.models.tables import Field
+    land_ids: list[str] = []
+    batch_size = settings.weather_batch_size
+    http = False
 
-    session = _get_db_session()
     try:
-        field_ids = (
-            session.execute(select(Field.id).where(Field.deleted_at.is_(None)))
-            .scalars()
-            .all()
-        )
+        from openfarm_common.internal_api import internal_api_enabled, weather_land_ids
 
-        if not field_ids:
-            logger.info("weather_schedule_no_fields")
-            return {"fields": 0, "batches": 0}
+        if internal_api_enabled():
+            # 向 API 要 land_id，不在本机 SELECT land_parcels
+            payload = weather_land_ids()
+            land_ids = [str(x) for x in (payload.get("land_ids") or [])]
+            batch_size = int(payload.get("batch_size") or batch_size)
+            http = True
+    except ImportError:
+        pass
 
-        batch_size = settings.weather_batch_size
-        batches = []
-        for i in range(0, len(field_ids), batch_size):
-            batch = field_ids[i : i + batch_size]
-            task_group = group(fetch_weather_for_field.s(str(fid)) for fid in batch)
-            batches.append(task_group)
+    if not http:
+        # 未配 Internal HTTP 时才走本机库，仅给本地单机 compose 用
+        from app.models.tables import LandParcel
 
-        # Execute batches sequentially to avoid API stampede
-        for batch in batches:
-            batch.apply_async()
+        session = _get_db_session()
+        try:
+            land_ids = [
+                str(lid)
+                for lid in session.execute(
+                    select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
+                )
+                .scalars()
+                .all()
+            ]
+        finally:
+            session.close()
 
-        logger.info(
-            "weather_schedule_dispatched",
-            fields=len(field_ids),
-            batches=len(batches))
-        return {"fields": len(field_ids), "batches": len(batches)}
+    if not land_ids:
+        logger.info("weather_schedule_no_lands", http=http)
+        return {"lands": 0, "batches": 0, "http": http}
 
-    finally:
-        session.close()
+    batches = []
+    for i in range(0, len(land_ids), batch_size):
+        batch = land_ids[i : i + batch_size]
+        task_group = group(fetch_weather_for_land.s(str(land_id)) for land_id in batch)
+        batches.append(task_group)
+
+    for batch in batches:
+        batch.apply_async()
+
+    logger.info(
+        "weather_schedule_dispatched",
+        lands=len(land_ids),
+        batches=len(batches),
+        http=http,
+    )
+    return {"lands": len(land_ids), "batches": len(batches), "http": http}
 
 
 def _num(val):
     return float(val) if val is not None else None
 
 
-def _weather_result_payload(field_id: str, *, days: int) -> dict:
+def _weather_result_payload(land_id: str, *, days: int) -> dict:
     """Serialize recent weather_daily rows for inline ResultMessage.payload."""
     from app.models.tables import WeatherDaily
 
@@ -550,7 +568,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
             session.execute(
                 select(WeatherDaily)
                 .where(
-                    WeatherDaily.field_id == uuid.UUID(field_id),
+                    WeatherDaily.land_id == land_id,
                     WeatherDaily.date >= start,
                     WeatherDaily.date <= end)
                 .order_by(WeatherDaily.date.asc())
@@ -562,7 +580,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
         for r in rows:
             out_rows.append(
                 {
-                    "field_id": str(r.field_id),
+                    "land_id": str(r.land_id),
 
                     "date": r.date.isoformat(),
                     "latitude": float(r.latitude) if r.latitude is not None else None,
@@ -598,7 +616,7 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
             )
         return {
             "kind": "weather_daily",
-            "field_id": field_id,
+            "land_id": land_id,
             "days": days,
             "rows_count": len(out_rows),
             "rows": out_rows,
@@ -607,24 +625,24 @@ def _weather_result_payload(field_id: str, *, days: int) -> dict:
         session.close()
 
 
-@celery_app.task(name="app.tasks.weather.backfill_weather_for_field")
-def backfill_weather_for_field(
-    field_id: str,
+@celery_app.task(name="app.tasks.weather.backfill_weather_for_land")
+def backfill_weather_for_land(
+    land_id: str,
     days: int | None = None,
     mq_task_id: str | None = None) -> dict:
-    """Trigger a historical weather backfill for a field.
+    """Trigger a historical weather backfill for one land parcel.
 
-    Called on field creation or manually via API / CloudAMQP weather_backfill.
+    Called on land parcel creation or manually via API / CloudAMQP weather_backfill.
     When ``mq_task_id`` is set, publish a ResultMessage on completion.
     """
     backfill = days or settings.weather_backfill_days
     logger.info(
         "weather_backfill_start",
-        field_id=field_id,
+        land_id=land_id,
         days=backfill,
         mq_task_id=mq_task_id)
     try:
-        result = fetch_weather_for_field(field_id, backfill_days=backfill)
+        result = fetch_weather_for_land(land_id, backfill_days=backfill)
         if mq_task_id:
             try:
                 from openfarm_common.mq_results import publish_task_result
@@ -642,11 +660,11 @@ def backfill_weather_for_field(
                         else None
                     )
                     if pending:
-                        payload = _rows_to_weather_payload(field_id, pending)
+                        payload = _rows_to_weather_payload(land_id, pending)
                     else:
                         try:
                             payload = _weather_result_payload(
-                                field_id, days=backfill
+                                land_id, days=backfill
                             )
                         except Exception:
                             payload = None
@@ -668,13 +686,13 @@ def backfill_weather_for_field(
                     except Exception as e:
                         logger.warning(
                             "weather_http_apply_failed",
-                            field_id=field_id,
+                            land_id=land_id,
                             error=str(e),
                         )
                 publish_task_result(
                     task_id=mq_task_id,
                     status=status,
-                    field_id=field_id,
+                    land_id=land_id,
                     error=(
                         str(result.get("message") or result.get("detail") or "")[:500]
                         if status == "failed" and isinstance(result, dict)
@@ -695,7 +713,7 @@ def backfill_weather_for_field(
             except Exception as e:
                 logger.warning(
                     "weather_mq_result_publish_failed",
-                    field_id=field_id,
+                    land_id=land_id,
                     mq_task_id=mq_task_id,
                     error=str(e))
         return result
@@ -707,7 +725,7 @@ def backfill_weather_for_field(
                 publish_task_result(
                     task_id=mq_task_id,
                     status="failed",
-                    field_id=field_id,
+                    land_id=land_id,
                     error=str(e)[:500],
                     extras={"source": "weather_backfill", "days": backfill},
                     collect_parcel_urls=False,

@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 
 class BackfillHttpOnlyTests(unittest.TestCase):
-    def test_http_only_agri_dispatches_without_session(self) -> None:
+    def test_http_only_land_dispatches_without_session(self) -> None:
         # Import inside test so docker image deps are available.
         from app.tasks import backfill as bf
 
@@ -33,18 +33,18 @@ class BackfillHttpOnlyTests(unittest.TestCase):
             patch.object(bf, "get_db_session") as get_db,
             patch("app.core.http_mode.ingest_http_only", return_value=True),
             patch(
-                "app.core.http_mode.resolve_field_http",
-                return_value={
-                    "field_id": "3f4a0ed1-d52e-5076-a65a-fd77b7ec2de0",
-                    "land_id": "7570",
-                    "tags": ["agri:7570"],
-                },
+                "app.core.http_mode.resolve_land_http",
+                return_value={"land_id": "7570", "tile_id": "tile-7570"},
             ),
             patch("app.core.http_mode.patch_job_http"),
             patch("app.core.http_mode.get_job_http", return_value=None),
-            patch(
-                "app.tasks.sentinel1.backfill_s1_for_field",
-                SimpleNamespace(delay=s1_delay),
+            patch.dict(
+                sys.modules,
+                {
+                    "app.tasks.sentinel1": SimpleNamespace(
+                        backfill_s1_for_land=SimpleNamespace(delay=s1_delay)
+                    )
+                },
             ),
             patch.object(
                 bf.settings,
@@ -59,10 +59,9 @@ class BackfillHttpOnlyTests(unittest.TestCase):
                 create=True,
             ),
         ):
-            out = bf.backfill_indices_for_field.run(
-                "3f4a0ed1-d52e-5076-a65a-fd77b7ec2de0",
+            out = bf.backfill_indices_for_land.run(
+                "7570",
                 months=3,
-                allow_agri=True,
                 date_from="2026-06-01",
                 date_to="2026-09-01",
             )
@@ -71,11 +70,11 @@ class BackfillHttpOnlyTests(unittest.TestCase):
         self.assertEqual(out["status"], "dispatched")
         self.assertTrue(out.get("http_only"))
         self.assertGreater(out["jobs"], 0)
-        self.assertTrue(any("process_agri_optical" in s[0] for s in sends))
-        optical = next(s for s in sends if "process_agri_optical" in s[0])
+        self.assertTrue(any("process_agri_optical_lonlat" in s[0] for s in sends))
+        optical = next(s for s in sends if "process_agri_optical_lonlat" in s[0])
         self.assertIsNone(optical[1])
         self.assertEqual(
-            optical[2]["field_id"], "3f4a0ed1-d52e-5076-a65a-fd77b7ec2de0"
+            optical[2]["land_id"], "7570"
         )
         self.assertEqual(optical[2]["date_from"], "2026-06-01")
 

@@ -2,13 +2,13 @@
 
 Searches Microsoft Planetary Computer ``sentinel-1-grd`` (VV/VH on Azure Blob,
 SAS-signed via ``planetary_computer``), converts amplitude DN to approximate
-σ⁰ dB, samples the field polygon, and upserts ``sensor='S1'`` lonlat_v1 rows.
+σ⁰ dB, samples the parcel polygon, and upserts ``sensor='S1'`` lonlat_v1 rows.
 
 Override catalog with ``S1_STAC_API_URL`` if needed. Optical S2 still uses
 ``STAC_API_URL`` (Element84 by default).
 
-Index ``vv.tif`` / ``vh.tif`` COGs are **not** uploaded for agri fields
-unless ``WRITE_INDEX_COGS=1``. Classic (non-agri) fields still write COGs.
+Index ``vv.tif`` / ``vh.tif`` COGs are **not** uploaded for canonical parcels
+unless ``WRITE_INDEX_COGS=1``.
 """
 
 from __future__ import annotations
@@ -56,7 +56,6 @@ from app.core.storage import get_storage
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.tasks.pipeline import (
     RETRY_DELAYS,
-    collect_existing_scene_dates,
     complete_step,
     compute_zonal_stats,
     existing_agri_scene_dates,
@@ -126,14 +125,14 @@ def _dn_to_db(dn: np.ndarray) -> np.ndarray:
 
 
 def search_s1_scenes(
-    field_geom_geojson: dict, date_from: date, date_to: date
+    land_geom_geojson: dict, date_from: date, date_to: date
 ) -> list[dict]:
     """Search sentinel-1-grd; keep lowest-id scene per ISO week (IW DV preferred)."""
     t0 = time.perf_counter()
     catalog = open_s1_stac_client()
     search = catalog.search(
         collections=[STAC_S1_COLLECTION],
-        intersects=field_geom_geojson,
+        intersects=land_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
         max_items=200,
     )
@@ -258,10 +257,10 @@ def _read_band_windowed_db(
 
 
 def _write_index_cog(
-    data: np.ndarray, transform, org_id: str, field_id: str, scene_date: date, stem: str
+    data: np.ndarray, transform, org_id: str, land_id: str, scene_date: date, stem: str
 ) -> str:
     """Write float32 COG to active storage; return storage URI."""
-    object_key = f"cogs/{org_id}/{field_id}/{scene_date.isoformat()}/{stem}.tif"
+    object_key = f"cogs/{org_id}/{land_id}/{scene_date.isoformat()}/{stem}.tif"
     src_fd, tmp_src = tempfile.mkstemp(suffix="_src.tif")
     dst_fd, tmp_dst = tempfile.mkstemp(suffix="_cog.tif")
     os.close(src_fd)
@@ -331,59 +330,32 @@ def _sample_s1_lonlat(
     return pixels
 
 
-def _resolve_agri_meta(session, field) -> dict[str, Any] | None:
-    from sqlalchemy import text
-
-    from app.core.agri_tags import parse_agri_land_id
-
-    land_id = parse_agri_land_id(field.tags_json)
-    if not land_id:
-        return None
-
-    try:
-        from openfarm_common.internal_api import agri_land_meta, internal_api_enabled
-    except ImportError:
-        internal_api_enabled = lambda: False  # noqa: E731
-        agri_land_meta = None  # type: ignore
-
-    if agri_land_meta is not None and internal_api_enabled():
-        try:
-            meta = agri_land_meta(str(land_id))
-            return {
-                "land_id": meta.get("land_id") or land_id,
-                "tile_id": meta.get("tile_id"),
-                "land_name": meta.get("land_name") or field.name,
-            }
-        except Exception as e:
-            logger.warning(
-                "agri_land_meta_http_failed falling_back_db",
-                land_id=land_id,
-                error=str(e),
-            )
-
-    if session is None:
+def _resolve_land_meta(
+    session,
+    land_id: str,
+    remote: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read metadata from the canonical parcel row without identity translation."""
+    if remote is not None:
+        if str(remote.get("land_id") or "") != str(land_id):
+            raise RuntimeError("internal land response does not match requested land_id")
         return {
-            "land_id": land_id,
-            "tile_id": None,
-            "land_name": getattr(field, "name", None),
+            "land_id": str(land_id),
+            "tile_id": remote.get("tile_id"),
+            "land_name": remote.get("land_name") or str(land_id),
         }
 
-    row = (
-        session.execute(
-            text(
-                "SELECT land_id, tile_id, land_name FROM agric_satellite.land_parcels WHERE land_id = :lid"
-            ),
-            {"lid": str(land_id)},
-        )
-        .mappings()
-        .first()
-    )
-    if not row:
+    if session is None:
+        return None
+    from app.models.tables import LandParcel
+
+    land = session.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
         return None
     return {
-        "land_id": row["land_id"],
-        "tile_id": row["tile_id"],
-        "land_name": row["land_name"] or field.name,
+        "land_id": land.land_id,
+        "tile_id": land.tile_id,
+        "land_name": land.land_name or land.land_id,
     }
 
 
@@ -392,7 +364,7 @@ def _upsert_agri_s1(
     meta: dict,
     scene_date: date,
     scene_id: str,
-    field_id: str,
+    land_id: str,
     pixels: list,
     vv_stats: dict,
     vh_stats: dict,
@@ -432,7 +404,7 @@ def _upsert_agri_s1(
         "generated_at_shanghai": datetime.now(
             ZoneInfo("Asia/Shanghai")
         ).strftime("%Y-%m-%d %H:%M:%S%z"),
-        "pixel_data_url": f"stac-s1://field/{field_id}/{date_str}",
+        "pixel_data_url": f"stac-s1://land/{land_id}/{date_str}",
         "json_oss_key": json_oss_key,
         "vv_avg": vv_stats.get("mean"),
         "vv_min": vv_stats.get("min"),
@@ -463,7 +435,6 @@ def _upsert_agri_s1(
         task_id=result_task_id,
         status="success",
         land_id=str(meta["land_id"]),
-        field_id=str(field_id) if field_id else None,
         oss_urls={label: json_url},
         collect_parcel_urls=False,
         upload_summary_if_empty=False,
@@ -535,12 +506,12 @@ def _process_one_s1_scene(
     target_transform,
     field_mask: np.ndarray,
     org_id_str: str,
-    field_id_str: str,
-    field_id,
+    land_id_str: str,
+    land_id,
     date_from: date,
     date_to: date,
     agri_meta: dict | None,
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> bool:
@@ -605,8 +576,7 @@ def _process_one_s1_scene(
         vh[~field_mask] = np.nan
         download_ms = int((time.perf_counter() - t0) * 1000)
 
-        is_agri = agri_meta is not None
-        write_cogs = write_index_cogs_enabled(is_agri=is_agri)
+        write_cogs = write_index_cogs_enabled()
         t0 = time.perf_counter()
         vv_stats = compute_zonal_stats(vv)
         vh_stats = compute_zonal_stats(vh)
@@ -623,15 +593,15 @@ def _process_one_s1_scene(
             )
             t0 = time.perf_counter()
             vv_uri = _write_index_cog(
-                vv, target_transform, org_id_str, field_id_str, scene["date"], "vv"
+                vv, target_transform, org_id_str, land_id_str, scene["date"], "vv"
             )
             vh_uri = _write_index_cog(
-                vh, target_transform, org_id_str, field_id_str, scene["date"], "vh"
+                vh, target_transform, org_id_str, land_id_str, scene["date"], "vh"
             )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
             logger.info(
                 "cog_uploaded",
-                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+                object_key=f"cogs/{org_id_str}/{land_id_str}/{scene['date'].isoformat()}/vv.tif",
                 index="s1",
             )
 
@@ -640,7 +610,7 @@ def _process_one_s1_scene(
                 ("VH", vh_uri, vh_stats),
             ):
                 layer_values = dict(
-                    field_id=field_id,
+                    land_id=land_id,
                     layer_type=label,
                     satellite="S1",
                     date=scene["date"],
@@ -662,7 +632,7 @@ def _process_one_s1_scene(
                     pg_insert(RasterLayer)
                     .values(**layer_values)
                     .on_conflict_do_update(
-                        constraint="uq_raster_field_date_type",
+                        constraint="uq_raster_land_date_type",
                         set_={
                             "cog_uri": uri,
                             "min": stats.get("min"),
@@ -679,17 +649,15 @@ def _process_one_s1_scene(
         elif write_cogs and session is None:
             logger.info(
                 "cog_upload_skipped",
-                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+                object_key=f"cogs/{org_id_str}/{land_id_str}/{scene['date'].isoformat()}/vv.tif",
                 index="s1",
-                is_agri=is_agri,
                 reason="http_only_no_pg",
             )
         else:
             logger.info(
                 "cog_upload_skipped",
-                object_key=f"cogs/{org_id_str}/{field_id_str}/{scene['date'].isoformat()}/vv.tif",
+                object_key=f"cogs/{org_id_str}/{land_id_str}/{scene['date'].isoformat()}/vv.tif",
                 index="s1",
-                is_agri=is_agri,
             )
 
         write_lonlat_ms = 0
@@ -701,11 +669,11 @@ def _process_one_s1_scene(
                     reason="agri_meta_missing",
                     scene_id=scene_id,
                     date=str(scene.get("date")),
-                    field_id=field_id_str,
+                    land_id=land_id_str,
                 )
         else:
             t0 = time.perf_counter()
-            pixels = _sample_s1_lonlat(field_geom_geojson, vv, vh, target_transform)
+            pixels = _sample_s1_lonlat(land_geom_geojson, vv, vh, target_transform)
             if not pixels:
                 logger.info(
                     "s1_scene_skipped",
@@ -722,7 +690,7 @@ def _process_one_s1_scene(
                     agri_meta,
                     scene["date"],
                     f"{scene['id']}_stac",
-                    field_id_str,
+                    land_id_str,
                     pixels,
                     vv_stats,
                     vh_stats,
@@ -782,12 +750,12 @@ def _process_s1_scenes_parallel(
     target_transform,
     field_mask: np.ndarray,
     org_id_str: str,
-    field_id_str: str,
-    field_id,
+    land_id_str: str,
+    land_id,
     date_from: date,
     date_to: date,
     agri_meta: dict | None,
-    field_geom_geojson: dict,
+    land_geom_geojson: dict,
     mq_task_id: str | None = None,
     on_chunk=None,
 ) -> int:
@@ -826,12 +794,12 @@ def _process_s1_scenes_parallel(
                 target_transform=target_transform,
                 field_mask=field_mask,
                 org_id_str=org_id_str,
-                field_id_str=field_id_str,
-                field_id=field_id,
+                land_id_str=land_id_str,
+                land_id=land_id,
                 date_from=date_from,
                 date_to=date_to,
                 agri_meta=agri_meta,
-                field_geom_geojson=field_geom_geojson,
+                land_geom_geojson=land_geom_geojson,
                 scene_workers=workers,
                 mq_task_id=mq_task_id,
             ): scene
@@ -869,26 +837,24 @@ def _process_s1_scenes_parallel(
 def _process_s1_http_only(
     *,
     job_id: str | None,
-    field_id: str | None,
+    land_id: str | None,
     date_from: str | None,
     date_to: str | None,
     force: bool,
     mq_task_id: str | None,
 ) -> dict:
     """S1 chunk worker without SyncSession (OSS + MQ path)."""
-    from types import SimpleNamespace
-
     from shapely.geometry import shape as shapely_shape
 
-    from app.core.http_mode import field_geom_http, get_job_http, resolve_field_http
+    from app.core.http_mode import land_geom_http, get_job_http, resolve_land_http
     from app.tasks.pipeline import existing_agri_scene_dates, filter_scenes_skip_existing
 
     params: dict[str, Any] = {}
-    if job_id and (not field_id or not date_from or not date_to):
+    if job_id and (not land_id or not date_from or not date_to):
         remote = get_job_http(job_id) or {}
         params = dict(remote.get("params_json") or {})
-        field_id = field_id or (
-            str(remote["field_id"]) if remote.get("field_id") else None
+        land_id = land_id or (
+            str(remote["land_id"]) if remote.get("land_id") else None
         )
         date_from = date_from or params.get("date_from")
         date_to = date_to or params.get("date_to")
@@ -896,64 +862,57 @@ def _process_s1_http_only(
         if mq_task_id is None and params.get("mq_task_id"):
             mq_task_id = str(params["mq_task_id"])
 
-    if not field_id or not date_from or not date_to:
+    if not land_id or not date_from or not date_to:
         return {
             "job_id": job_id,
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "error",
-            "detail": "field_id/date_from/date_to required",
+            "detail": "land_id/date_from/date_to required",
             "http_only": True,
         }
 
-    resolved = resolve_field_http(field_id)
-    geom_payload = field_geom_http(field_id, include_geojson=True)
+    resolved = resolve_land_http(land_id)
+    geom_payload = land_geom_http(land_id, include_geojson=True)
     geojson = geom_payload.get("geojson")
     if not geojson:
         return {
             "job_id": job_id,
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "failed",
-            "detail": "Field geom missing via HTTP",
+            "detail": "Land parcel geometry missing via HTTP",
             "http_only": True,
         }
 
-    field_geom = shapely_shape(geojson)
-    field_geom_geojson = mapping(field_geom)
-    field = SimpleNamespace(
-        id=uuid.UUID(str(field_id)),
-        name=resolved.get("name") or geom_payload.get("name"),
-        tags_json=resolved.get("tags"),
-        geom=None,
-    )
+    land_geom = shapely_shape(geojson)
+    land_geom_geojson = mapping(land_geom)
     d0 = date.fromisoformat(str(date_from)[:10])
     d1 = date.fromisoformat(str(date_to)[:10])
     org_id_str = "default"
-    field_id_str = str(field_id)
-    synthetic_job_id = job_id or f"http-s1-{field_id_str}-{d0}"
+    land_id_str = str(land_id)
+    synthetic_job_id = job_id or f"http-s1-{land_id_str}-{d0}"
 
     logger.info(
         "s1_http_only_start",
-        field_id=field_id_str,
+        land_id=land_id_str,
         job_id=job_id,
         date_from=str(d0),
         date_to=str(d1),
     )
 
     t_search = time.perf_counter()
-    scenes = search_s1_scenes(field_geom_geojson, d0, d1)
+    scenes = search_s1_scenes(land_geom_geojson, d0, d1)
     skipped_existing = 0
-    agri_meta = _resolve_agri_meta(None, field)
+    agri_meta = _resolve_land_meta(None, land_id, remote=resolved)
     if agri_meta is None:
         logger.warning(
             "s1_agri_meta_unresolved",
-            field_id=field_id_str,
-            tags=field.tags_json,
+            land_id=land_id_str,
         )
     if not force and agri_meta is not None:
         existing = existing_agri_scene_dates(None, agri_meta["land_id"], "S1")
         before = len(scenes)
         scenes = filter_scenes_skip_existing(
-            scenes, existing, force=False, field_id=field_id_str, index="s1"
+            scenes, existing, force=False, land_id=land_id_str, index="s1"
         )
         skipped_existing = before - len(scenes)
 
@@ -973,14 +932,14 @@ def _process_s1_http_only(
     if not scenes:
         return {
             "job_id": job_id,
-            "field_id": field_id_str,
+            "land_id": land_id_str,
             "status": "completed",
             "scenes": 0,
             "skipped_existing": skipped_existing,
             "http_only": True,
         }
 
-    minx, miny, maxx, maxy = field_geom.bounds
+    minx, miny, maxx, maxy = land_geom.bounds
     buf = 0.001
     bounds = (minx - buf, miny - buf, maxx + buf, maxy + buf)
     pixel_size = 0.0001
@@ -994,7 +953,7 @@ def _process_s1_http_only(
     target_transform = from_bounds(*bounds, width, height)
     target_shape = (height, width)
     field_mask = geometry_mask(
-        [mapping(field_geom)],
+        [mapping(land_geom)],
         out_shape=target_shape,
         transform=target_transform,
         invert=True,
@@ -1010,18 +969,18 @@ def _process_s1_http_only(
         target_transform=target_transform,
         field_mask=field_mask,
         org_id_str=org_id_str,
-        field_id_str=field_id_str,
-        field_id=uuid.UUID(str(field_id)),
+        land_id_str=land_id_str,
+        land_id=land_id,
         date_from=d0,
         date_to=d1,
         agri_meta=agri_meta,
-        field_geom_geojson=field_geom_geojson,
+        land_geom_geojson=land_geom_geojson,
         mq_task_id=mq_task_id,
         on_chunk=None,
     )
     return {
         "job_id": job_id,
-        "field_id": field_id_str,
+        "land_id": land_id_str,
         "status": "completed",
         "scenes": len(scenes),
         "processed": processed,
@@ -1040,7 +999,7 @@ def _process_s1_http_only(
 def process_s1_backfill(
     self,
     job_id: str | None = None,
-    field_id: str | None = None,
+    land_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     force: bool = False,
@@ -1049,25 +1008,25 @@ def process_s1_backfill(
 ) -> dict:
     """Celery entry: search S1 GRD, upsert agri lonlat_v1 (COGs only if enabled).
 
-    HTTP-only download hosts may pass ``field_id`` + date kwargs instead of a
+    HTTP-only download hosts may pass ``land_id`` + date kwargs instead of a
     local Job id (orchestration fans out without SyncSession Job rows).
     """
     from app.core.http_mode import ingest_http_only
 
-    if ingest_http_only() or (field_id and not job_id):
+    if ingest_http_only() or (land_id and not job_id):
         return _process_s1_http_only(
             job_id=job_id,
-            field_id=field_id,
+            land_id=land_id,
             date_from=date_from,
             date_to=date_to,
             force=force,
             mq_task_id=mq_task_id,
         )
 
-    from app.models.tables import Job, Field
+    from app.models.tables import Job, LandParcel
 
     if not job_id:
-        return {"status": "error", "detail": "job_id or field_id required"}
+        return {"status": "error", "detail": "job_id or land_id required"}
 
     session = get_db_session()
     try:
@@ -1080,16 +1039,16 @@ def process_s1_backfill(
         job.progress_json = {"current_step": "scene_search", "steps": {}}
         session.commit()
 
-        field = session.get(Field, job.field_id)
-        if not field or field.geom is None:
+        land = session.get(LandParcel, job.land_id)
+        if not land or land.geom is None or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Field not found or missing geom"
+            job.error = "Land parcel not found or missing geom"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        field_geom = to_shape(field.geom)
-        field_geom_geojson = mapping(field_geom)
+        land_geom = to_shape(land.geom)
+        land_geom_geojson = mapping(land_geom)
         params = job.params_json or {}
         mq_task_id = params.get("mq_task_id")
         if mq_task_id is not None:
@@ -1097,32 +1056,24 @@ def process_s1_backfill(
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
         org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
-        field_id_str = str(job.field_id)
+        land_id_str = str(job.land_id)
 
         update_job_progress(session, job, "scene_search")
         t_search = time.perf_counter()
-        scenes = search_s1_scenes(field_geom_geojson, date_from, date_to)
+        scenes = search_s1_scenes(land_geom_geojson, date_from, date_to)
         force = bool(params.get("force") or False)
         skipped_existing = 0
-        agri_meta = _resolve_agri_meta(session, field)
+        agri_meta = _resolve_land_meta(session, land.land_id)
         if agri_meta is None:
             logger.warning(
                 "s1_agri_meta_unresolved",
-                field_id=field_id_str,
-                tags=field.tags_json,
+                land_id=land_id_str,
             )
         if not force:
-            if agri_meta is not None:
-                existing = existing_agri_scene_dates(
-                    session, agri_meta["land_id"], "S1"
-                )
-            else:
-                existing = collect_existing_scene_dates(
-                    session, field, layer_type="VV", satellite="S1", agri_sensor="S1"
-                )
+            existing = existing_agri_scene_dates(session, land.land_id, "S1")
             before = len(scenes)
             scenes = filter_scenes_skip_existing(
-                scenes, existing, force=False, field_id=field_id_str, index="s1"
+                scenes, existing, force=False, land_id=land_id_str, index="s1"
             )
             skipped_existing = before - len(scenes)
             complete_step(
@@ -1160,7 +1111,7 @@ def process_s1_backfill(
                 "skipped_existing": skipped_existing,
             }
 
-        minx, miny, maxx, maxy = field_geom.bounds
+        minx, miny, maxx, maxy = land_geom.bounds
         buf = 0.001
         bounds = (minx - buf, miny - buf, maxx + buf, maxy + buf)
         pixel_size = 0.0001  # ~10 m
@@ -1174,7 +1125,7 @@ def process_s1_backfill(
         target_transform = from_bounds(*bounds, width, height)
         target_shape = (height, width)
         field_mask = geometry_mask(
-            [mapping(field_geom)],
+            [mapping(land_geom)],
             out_shape=target_shape,
             transform=target_transform,
             invert=True,
@@ -1194,7 +1145,7 @@ def process_s1_backfill(
             extra={"total_scenes": len(scenes), "workers": workers},
             current_step="process_scenes",
         )
-        field_id = job.field_id
+        land_id = job.land_id
 
         def _chunk_flush(_completed_n: int, _processed: int) -> None:
             flush_to_job(session, job, current_step="process_scenes")
@@ -1207,12 +1158,12 @@ def process_s1_backfill(
             target_transform=target_transform,
             field_mask=field_mask,
             org_id_str=org_id_str,
-            field_id_str=field_id_str,
-            field_id=field_id,
+            land_id_str=land_id_str,
+            land_id=land_id,
             date_from=date_from,
             date_to=date_to,
             agri_meta=agri_meta,
-            field_geom_geojson=field_geom_geojson,
+            land_geom_geojson=land_geom_geojson,
             mq_task_id=mq_task_id,
             on_chunk=_chunk_flush,
         )
@@ -1286,15 +1237,15 @@ def process_s1_backfill(
 
 
 @celery_app.task(
-    name="app.tasks.sentinel1.backfill_s1_for_field",
+    name="app.tasks.sentinel1.backfill_s1_for_land",
     bind=True,
     max_retries=1,
     time_limit=120,
     soft_time_limit=90,
 )
-def backfill_s1_for_field(
+def backfill_s1_for_land(
     self,
-    field_id: str,
+    land_id: str,
     months: int | None = None,
     force: bool = False,
     mq_task_id: str | None = None,
@@ -1325,11 +1276,11 @@ def backfill_s1_for_field(
     if ingest_http_only():
         # Fan-out Celery kwargs — no SyncSession / Job rows on download host.
         try:
-            from app.core.http_mode import resolve_field_http
+            from app.core.http_mode import resolve_land_http
 
-            resolve_field_http(field_id)
+            resolve_land_http(land_id)
         except Exception as e:
-            logger.error("s1_orchestration_failed", field_id=field_id, error=str(e))
+            logger.error("s1_orchestration_failed", land_id=land_id, error=str(e))
             raise
 
         dispatched = 0
@@ -1337,7 +1288,7 @@ def backfill_s1_for_field(
             celery_app.send_task(
                 "app.tasks.sentinel1.process_s1_backfill",
                 kwargs={
-                    "field_id": field_id,
+                    "land_id": land_id,
                     "date_from": chunk_start.isoformat(),
                     "date_to": chunk_end.isoformat(),
                     "force": bool(force),
@@ -1349,12 +1300,12 @@ def backfill_s1_for_field(
             dispatched += 1
         logger.info(
             "s1_orchestration_complete",
-            field_id=field_id,
+            land_id=land_id,
             jobs=dispatched,
             http_only=True,
         )
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "dispatched",
             "jobs": dispatched,
             "months": months,
@@ -1364,16 +1315,16 @@ def backfill_s1_for_field(
             "http_only": True,
         }
 
-    from app.models.tables import Field, Job
+    from app.models.tables import LandParcel, Job
 
     session = get_db_session()
     try:
-        field = session.get(Field, uuid.UUID(field_id))
-        if not field:
+        land = session.get(LandParcel, land_id)
+        if not land or land.deleted_at is not None:
             return {
-                "field_id": field_id,
+                "land_id": land_id,
                 "status": "error",
-                "detail": "Field not found",
+                "detail": "Land parcel not found",
             }
 
         # Always dispatch chunks; process_s1_backfill skips dates already present
@@ -1382,7 +1333,7 @@ def backfill_s1_for_field(
         dispatched = 0
         for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
             job = Job(
-                field_id=field.id,
+                land_id=land.land_id,
                 type="s1",
                 status="pending",
                 params_json={
@@ -1407,7 +1358,7 @@ def backfill_s1_for_field(
                 countdown=countdown,
             )
         return {
-            "field_id": field_id,
+            "land_id": land_id,
             "status": "dispatched",
             "jobs": dispatched,
             "months": months,
@@ -1417,7 +1368,7 @@ def backfill_s1_for_field(
         }
     except Exception as e:
         session.rollback()
-        logger.error("s1_orchestration_failed", field_id=field_id, error=str(e))
+        logger.error("s1_orchestration_failed", land_id=land_id, error=str(e))
         raise
     finally:
         session.close()

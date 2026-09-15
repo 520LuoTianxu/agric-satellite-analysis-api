@@ -46,12 +46,12 @@ class InternalApiClientTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.env.stop()
 
-    def test_resolve_field(self) -> None:
+    def test_resolve_land(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(request.url.path, "/v1/internal/fields/resolve")
+            self.assertEqual(request.url.path, "/v1/internal/lands/resolve")
             self.assertIn("Bearer tok", request.headers.get("Authorization", ""))
             return httpx.Response(
-                200, json={"field_id": "f1", "land_id": "L1", "tags": ["agri:L1"]}
+                200, json={"land_id": "L1", "tile_id": "tile-1"}
             )
 
         transport = httpx.MockTransport(handler)
@@ -60,7 +60,7 @@ class InternalApiClientTests(unittest.TestCase):
             transport=transport,
             headers={"Authorization": "Bearer tok"},
         )
-        out = ia.resolve_field(field_id="f1", client=client)
+        out = ia.resolve_land(land_id="L1", client=client)
         self.assertEqual(out["land_id"], "L1")
 
     def test_agri_scene_dates(self) -> None:
@@ -115,6 +115,55 @@ class InternalApiClientTests(unittest.TestCase):
             client=client,
         )
         self.assertEqual(out["status"], "running")
+
+    def test_weekly_index_prepare(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/v1/internal/schedule/weekly-index")
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "land_id": "L1",
+                            "job_id": "00000000-0000-0000-0000-000000000001",
+                            "task_name": "app.tasks.ndvi.process_ndvi",
+                            "countdown": 0,
+                        }
+                    ],
+                    "lands_checked": 1,
+                    "jobs_created": 1,
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.weekly_index_prepare(client=client)
+        self.assertEqual(out["jobs_created"], 1)
+        self.assertEqual(out["items"][0]["land_id"], "L1")
+
+    def test_weather_land_ids(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/internal/schedule/weather-lands")
+            return httpx.Response(
+                200, json={"land_ids": ["L1", "L2"], "batch_size": 50}
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.weather_land_ids(client=client)
+        self.assertEqual(out["land_ids"], ["L1", "L2"])
+
+    def test_refresh_overview_stats(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/v1/internal/schedule/overview-refresh")
+            return httpx.Response(200, json={"ok": True, "regions": 2})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.refresh_overview_stats(window_days=60, client=client)
+        self.assertTrue(out["ok"])
 
 
 class HttpWritesTests(unittest.TestCase):
@@ -172,6 +221,31 @@ class AssessmentBundleClientTests(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(ia.ingest_pg_reads_allowed())
+
+
+class TraceHeaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from openfarm_common.trace import bind_trace_id, clear_trace_id
+
+        self._clear = clear_trace_id
+        self.env = patch.dict(
+            os.environ,
+            {"API_BASE_URL": "http://api.test", "INTERNAL_API_TOKEN": "tok"},
+            clear=False,
+        )
+        self.env.start()
+        bind_trace_id("trace-http")
+
+    def tearDown(self) -> None:
+        self._clear()
+        self.env.stop()
+
+    def test_headers_include_trace_id(self) -> None:
+        from openfarm_common.trace import TRACE_HEADER
+
+        headers = ia._headers()
+        self.assertEqual(headers[TRACE_HEADER], "trace-http")
+        self.assertIn("Bearer tok", headers["Authorization"])
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ services/
 ```
 API POST /weather/backfill
   → Job(row)
-  → send_task(fetch_weather_for_field) [queue=ingest]
+  → send_task(fetch_weather_for_land) [queue=ingest]
   → Open-Meteo HTTP
   → upsert weather_daily (PG)
 ```
@@ -187,7 +187,7 @@ API POST /weather/backfill
 ingest: STAC search → download bands → compute → 写 /scratch/{job}/xxx.tif
      → send_task(upload_file, key, path) [queue=storage]
 storage: OSS put → 返回 public_url / key
-ingest: 写 raster_layers / field_stats / agri bridge
+ingest: 写 canonical scene products / agri bridge
 ```
 
 ### 6.4 选地 PDF

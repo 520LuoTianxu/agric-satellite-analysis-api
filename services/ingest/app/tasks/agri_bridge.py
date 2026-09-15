@@ -1,11 +1,11 @@
-"""Celery tasks: wait for agri lonlat-direct jobs; optional legacy OSS COG bridge.
+"""Celery tasks: wait for canonical land lonlat jobs; optional COG importer.
 
 The satellite / MQ path writes ``lonlat_v1`` during optical and S1 compute.
 ``bridge_after_backfill`` waits for those jobs, then publishes the MQ result
 without probing ``cogs/{org}/{field}/{date}/*.tif``.
 
-``bridge_field_stac_to_agri`` remains for explicit ``agri_bridge`` /
-``mode=bridge_only`` (one-time migration of existing OSS index TIFs).
+``bridge_land_stac_to_agri`` is an explicit one-shot importer for COGs already
+stored under a canonical land_id prefix.
 """
 
 from __future__ import annotations
@@ -21,23 +21,20 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 
-def _dispatch_agri_alerts(field_id: str, land_id: str | None = None) -> None:
+def _dispatch_agri_alerts(land_id: str) -> None:
     """Fire-and-forget RS alert re-eval after lonlat upsert."""
     try:
-        from app.tasks.agri_alerts import evaluate_agri_alerts_for_field
+        from app.tasks.agri_alerts import evaluate_agri_alerts_for_land
 
-        evaluate_agri_alerts_for_field.delay(
-            field_id, land_id=land_id, replace_open=True
-        )
+        evaluate_agri_alerts_for_land.delay(land_id, replace_open=True)
     except Exception as e:
-        logger.warning("agri_alerts_dispatch_failed", field_id=field_id, error=str(e))
+        logger.warning("agri_alerts_dispatch_failed", land_id=land_id, error=str(e))
 
 
 def _publish_mq_result(
     mq_task_id: str,
     *,
     status: str,
-    field_id: str | None = None,
     land_id: str | None = None,
     error: str | None = None,
     extras: dict | None = None,
@@ -50,7 +47,6 @@ def _publish_mq_result(
         publish_task_result(
             task_id=mq_task_id,
             status=status,
-            field_id=field_id,
             land_id=land_id,
             error=error,
             extras=extras,
@@ -63,40 +59,38 @@ def _publish_mq_result(
 
 
 @celery_app.task(
-    name="app.tasks.agri_bridge.bridge_field_stac_to_agri",
+    name="app.tasks.agri_bridge.bridge_land_stac_to_agri",
     bind=True,
     max_retries=2,
     time_limit=1800,
     soft_time_limit=1500,
 )
-def bridge_field_stac_to_agri_task(
-    self, field_id: str, land_id: str | None = None, mq_task_id: str | None = None
+def bridge_land_stac_to_agri_task(
+    self, land_id: str, mq_task_id: str | None = None
 ) -> dict:
-    """Sample active-store (OSS) COGs for field and upsert agri lonlat_v1.
+    """Sample canonical land COGs and upsert lonlat_v1.
 
     Legacy migration path. New agri satellite jobs write lonlat during compute.
     """
-    from app.tasks.bridge_stac_cogs_to_agri_lonlat import bridge_field_stac_to_agri
+    from app.tasks.bridge_stac_cogs_to_agri_lonlat import bridge_land_stac_to_agri
 
     try:
-        result = bridge_field_stac_to_agri(field_id, land_id, quiet=True)
+        result = bridge_land_stac_to_agri(land_id, quiet=True)
         logger.info(
-            "bridge_field_stac_to_agri_done",
-            field_id=field_id,
+            "bridge_land_stac_to_agri_done",
             land_id=result.get("land_id"),
             upserted=result.get("upserted"),
             skipped=result.get("skipped"),
         )
-        _dispatch_agri_alerts(field_id, land_id=result.get("land_id") or land_id)
+        _dispatch_agri_alerts(str(result.get("land_id") or land_id))
         if mq_task_id:
             _publish_mq_result(
                 mq_task_id,
                 status="success",
-                field_id=field_id,
                 land_id=result.get("land_id") or land_id,
                 extras={
                     "upserted": result.get("upserted"),
-                    "source": "bridge_field",
+                    "source": "bridge_land",
                     "oss_key_count": len(result.get("oss_urls") or {}),
                 },
                 oss_urls=result.get("oss_urls") or None,
@@ -104,13 +98,12 @@ def bridge_field_stac_to_agri_task(
         return result
     except Exception as e:
         logger.error(
-            "bridge_field_stac_to_agri_failed", field_id=field_id, error=str(e)
+            "bridge_land_stac_to_agri_failed", land_id=land_id, error=str(e)
         )
         if mq_task_id:
             _publish_mq_result(
                 mq_task_id,
                 status="failed",
-                field_id=field_id,
                 land_id=land_id,
                 error=str(e)[:500],
             )
@@ -127,8 +120,7 @@ def bridge_field_stac_to_agri_task(
 )
 def bridge_after_backfill(
     self,
-    field_id: str,
-    land_id: str | None = None,
+    land_id: str,
     bridge_job_id: str | None = None,
     mq_task_id: str | None = None,
 ) -> dict:
@@ -139,8 +131,7 @@ def bridge_after_backfill(
     """
     from datetime import datetime, timedelta, timezone
 
-    from app.core.agri_tags import parse_agri_land_id
-    from app.models.tables import Field, Job
+    from app.models.tables import Job
     from app.tasks.agri_lonlat import count_parcel_scene_rows
 
     session = get_db_session()
@@ -161,7 +152,7 @@ def bridge_after_backfill(
         active = (
             session.execute(
                 select(Job.id).where(
-                    Job.field_id == uuid.UUID(field_id),
+                    Job.land_id == str(land_id),
                     Job.status.in_(["pending", "running"]),
                     Job.params_json["is_backfill"].as_boolean().is_(True),
                     Job.type.notin_(["backfill", "agri_bridge"]),
@@ -174,22 +165,16 @@ def bridge_after_backfill(
         if active:
             logger.info(
                 "bridge_after_backfill_waiting",
-                field_id=field_id,
+                land_id=land_id,
                 active=len(active),
                 retry=self.request.retries,
             )
             raise self.retry(countdown=60)
 
-        field = session.get(Field, uuid.UUID(field_id))
-        resolved_land = land_id or (
-            parse_agri_land_id(field.tags_json) if field else None
-        )
-        lonlat_rows = (
-            count_parcel_scene_rows(session, resolved_land) if resolved_land else 0
-        )
+        resolved_land = str(land_id)
+        lonlat_rows = count_parcel_scene_rows(session, resolved_land)
         result = {
             "ok": True,
-            "field_id": field_id,
             "land_id": resolved_land,
             "upserted": lonlat_rows,
             "source": "lonlat_direct",
@@ -198,12 +183,11 @@ def bridge_after_backfill(
         }
         logger.info(
             "bridge_after_backfill_complete",
-            field_id=field_id,
             land_id=resolved_land,
             lonlat_rows=lonlat_rows,
             skipped_oss_tif_bridge=True,
         )
-        _dispatch_agri_alerts(field_id, land_id=resolved_land)
+        _dispatch_agri_alerts(resolved_land)
         if bridge_job:
             bridge_job = session.get(Job, uuid.UUID(bridge_job_id))
             if bridge_job:
@@ -221,7 +205,6 @@ def bridge_after_backfill(
             _publish_mq_result(
                 mq_task_id,
                 status="success",
-                field_id=field_id,
                 land_id=resolved_land,
                 extras={
                     "upserted": lonlat_rows,
@@ -251,7 +234,6 @@ def bridge_after_backfill(
             _publish_mq_result(
                 mq_task_id,
                 status="failed",
-                field_id=field_id,
                 land_id=land_id,
                 error=str(e)[:500],
             )

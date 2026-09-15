@@ -12,7 +12,7 @@ from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, get_org_context, require_roles
-from app.models.tables import Field, Job
+from app.models.tables import Job, LandParcel
 from app.schemas.monitoring import JobCreateIndex, JobCreateNDVI, JobOut
 from app.tasks.indices import INDEX_TASK_MAP
 
@@ -26,7 +26,7 @@ _INDEX_TASK_MAP = INDEX_TASK_MAP
 
 
 async def _create_index_job(
-    field_id: uuid.UUID,
+    land_id: str,
     index_type: str,
     date_from: str,
     date_to: str,
@@ -37,9 +37,9 @@ async def _create_index_job(
     """Shared logic: validate field, create Job row, dispatch Celery task."""
     from datetime import date as date_type
 
-    field = await db.get(Field, field_id)
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="LandParcel not found")
 
     d_from = date_type.fromisoformat(date_from)
     d_to = date_type.fromisoformat(date_to)
@@ -54,7 +54,7 @@ async def _create_index_job(
         params_json.update(extra_params)
 
     job = Job(
-        field_id=field_id, type=index_type, status="pending", params_json=params_json
+        land_id=land_id, type=index_type, status="pending", params_json=params_json
     )
     db.add(job)
     await db.flush()
@@ -69,7 +69,7 @@ async def _create_index_job(
         logger.info(
             "index_job_dispatched",
             job_id=str(job.id),
-            field_id=str(field_id),
+            land_id=str(land_id),
             index_type=index_type,
         )
     except Exception as e:
@@ -86,11 +86,11 @@ async def _create_index_job(
 # ── Generalized index endpoint ───────────────────────────────────────
 
 
-@router.post("/fields/{field_id}/jobs/index", response_model=JobOut, status_code=201)
+@router.post("/lands/{land_id}/jobs/index", response_model=JobOut, status_code=201)
 @limiter.limit("5/minute")
 async def create_index_job(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     body: JobCreateIndex,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -100,7 +100,7 @@ async def create_index_job(
         extra["savi_l"] = body.savi_l
 
     return await _create_index_job(
-        field_id=field_id,
+        land_id=land_id,
         index_type=body.index_type,
         date_from=str(body.date_from),
         date_to=str(body.date_to),
@@ -113,17 +113,17 @@ async def create_index_job(
 # ── Backward-compatible NDVI endpoint ────────────────────────────────
 
 
-@router.post("/fields/{field_id}/jobs/ndvi", response_model=JobOut, status_code=201)
+@router.post("/lands/{land_id}/jobs/ndvi", response_model=JobOut, status_code=201)
 @limiter.limit("5/minute")
 async def create_ndvi_job(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     body: JobCreateNDVI,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     return await _create_index_job(
-        field_id=field_id,
+        land_id=land_id,
         index_type="ndvi",
         date_from=str(body.date_from),
         date_to=str(body.date_to),
@@ -150,7 +150,7 @@ async def get_job(
             # Build response without mutating the ORM row.
             return JobOut(
                 id=job.id,
-                field_id=job.field_id,
+                land_id=job.land_id,
                 type=job.type,
                 status=job.status,
                 progress_json=merged,

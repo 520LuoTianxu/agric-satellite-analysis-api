@@ -44,7 +44,7 @@ def season_growth_pdf_filename(
 def generate_season_growth_pdf(
     *,
     session: Session,
-    field_id: uuid.UUID | str,
+    land_id: str,
     start_date: str,
     end_date: str,
     crops: list[str] | None = None,
@@ -55,7 +55,7 @@ def generate_season_growth_pdf(
     """Generate 生育期长势 PDF. Returns out_path + summary for job progress."""
     facts = build_season_facts(
         session,
-        field_id,
+        str(land_id),
         start_date=start_date,
         end_date=end_date,
         crops=crops,

@@ -1,11 +1,7 @@
-"""HTTP claim work agent: poll API /v1/internal/work/claim → Celery dispatch.
+"""HTTP claim work agent for direct canonical land-parcel tasks.
 
-Enabled when WORK_QUEUE_MODE=claim only (never dual — avoids double-dispatch with MQ).
-Uses API_BASE_URL + INTERNAL_API_TOKEN. Does not require DATABASE_URL or CloudAMQP.
-
-Report types stay leased until the Celery task POSTs complete (D3).
-Fan-out types (bootstrap / satellite / weather / soil) complete the lease after
-successful Celery dispatch (orchestration ack).
+Claim payloads contain one identity only: land_id. Report and data workers
+therefore receive the same value without a field/parcel translation step.
 """
 
 from __future__ import annotations
@@ -19,13 +15,20 @@ from typing import Any
 import httpx
 from openfarm_common.celery_app import celery_client
 from openfarm_common.mq_schemas import TaskMessage
+from openfarm_common.trace import (
+    attach_trace_header,
+    bind_trace_from_mapping,
+    clear_trace_id,
+    current_trace_id,
+    get_or_create_trace_id,
+)
 
 logger = logging.getLogger("work_agent")
 
 DEFAULT_TYPES = [
     "assessment_report",
     "season_growth_report",
-    "field_bootstrap",
+    "land_bootstrap",
     "satellite_analysis",
     "agri_bridge",
     "weather_backfill",
@@ -34,7 +37,7 @@ DEFAULT_TYPES = [
 
 COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
-        "field_bootstrap",
+        "land_bootstrap",
         "satellite_analysis",
         "agri_bridge",
         "weather_backfill",
@@ -53,15 +56,14 @@ def work_queue_mode() -> str:
 
 
 def should_run_claim_agent() -> bool:
-    """Claim poller is claim-mode only (dual would double-run with MQ)."""
     return work_queue_mode() == "claim"
 
 
 def claim_types() -> list[str]:
     raw = _env("WORK_CLAIM_TYPES")
-    if not raw:
-        return list(DEFAULT_TYPES)
-    return [t.strip() for t in raw.split(",") if t.strip()]
+    return (
+        [t.strip() for t in raw.split(",") if t.strip()] if raw else list(DEFAULT_TYPES)
+    )
 
 
 def worker_id() -> str:
@@ -100,7 +102,12 @@ def _client() -> httpx.Client:
     base = api_base_url()
     if not base:
         raise RuntimeError("API_BASE_URL is required for claim mode")
-    return httpx.Client(base_url=base, timeout=30.0, headers=_headers())
+    return httpx.Client(
+        base_url=base,
+        timeout=30.0,
+        headers=_headers(),
+        event_hooks={"request": [attach_trace_header]},
+    )
 
 
 def claim_batch(
@@ -115,200 +122,164 @@ def claim_batch(
         "limit": limit,
         "lease_seconds": lease_seconds(),
     }
-    r = client.post("/v1/internal/work/claim", json=body)
-    r.raise_for_status()
-    data = r.json()
-    return list(data.get("items") or [])
+    response = client.post("/v1/internal/work/claim", json=body)
+    response.raise_for_status()
+    return list(response.json().get("items") or [])
 
 
 def complete(client: httpx.Client, work_id: str, result: dict[str, Any]) -> None:
-    r = client.post(
+    response = client.post(
         f"/v1/internal/work/{work_id}/complete",
         json={"worker_id": worker_id(), "result": result},
     )
-    r.raise_for_status()
+    response.raise_for_status()
 
 
-def fail(client: httpx.Client, work_id: str, error: str, *, retry: bool = False) -> None:
-    r = client.post(
+def fail(
+    client: httpx.Client, work_id: str, error: str, *, retry: bool = False
+) -> None:
+    response = client.post(
         f"/v1/internal/work/{work_id}/fail",
         json={"worker_id": worker_id(), "error": error, "retry": retry},
     )
-    r.raise_for_status()
+    response.raise_for_status()
 
 
 def heartbeat(client: httpx.Client, work_id: str) -> None:
-    r = client.post(
+    response = client.post(
         f"/v1/internal/work/{work_id}/heartbeat",
         json={"worker_id": worker_id(), "lease_seconds": lease_seconds()},
     )
-    r.raise_for_status()
+    response.raise_for_status()
 
 
 def progress(client: httpx.Client, work_id: str, progress_body: dict[str, Any]) -> None:
-    r = client.post(
+    response = client.post(
         f"/v1/internal/work/{work_id}/progress",
         json={"worker_id": worker_id(), "progress": progress_body},
     )
-    r.raise_for_status()
+    response.raise_for_status()
 
 
-def _payload_parts(item: dict[str, Any]) -> tuple[str | None, dict[str, Any], str | None, str | None]:
+def _payload_parts(item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """Read the canonical land_id and task extras from a claimed work item."""
     payload = dict(item.get("payload_json") or {})
-    field_id = payload.get("field_id")
     land_id = payload.get("land_id")
-    parcel_id = payload.get("parcel_id")
     extras = dict(payload.get("extras") or {})
     if not extras and payload.get("job_id"):
-        extras = {k: v for k, v in payload.items() if k not in ("field_id", "land_id", "parcel_id")}
-        field_id = field_id or payload.get("field_id")
-    if not field_id and extras.get("field_id"):
-        field_id = extras.get("field_id")
-    return (
-        str(field_id) if field_id else None,
-        extras,
-        str(land_id) if land_id else None,
-        str(parcel_id) if parcel_id else None,
-    )
+        extras = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("land_id", "task_id", "trace_id")
+        }
+    return (str(land_id) if land_id else None, extras)
 
 
-def _dispatch_report(wtype: str, work_id: str, field_id: str, extras: dict[str, Any]) -> dict[str, Any]:
+def _dispatch_report(
+    wtype: str,
+    work_id: str,
+    land_id: str,
+    extras: dict[str, Any],
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "land_id": land_id,
+        "work_item_id": work_id,
+    }
     job_id = extras.get("job_id")
-    if wtype == "assessment_report":
-        kwargs: dict[str, Any] = {
-            "field_id": str(field_id),
-            "work_item_id": work_id,
-        }
-        if job_id:
-            kwargs["job_id"] = str(job_id)
-        for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
-            if extras.get(key) is not None:
-                kwargs[key] = extras[key]
-        if extras.get("pull_data") is not None:
-            kwargs["pull_data"] = bool(extras.get("pull_data"))
-        if extras.get("wait_celery_ids"):
-            kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-        async_result = celery_client.send_task(
-            "app.tasks.assessment_report.generate_assessment_report",
-            kwargs=kwargs,
-            queue="ingest",
-        )
-        return {
-            "dispatched": ["app.tasks.assessment_report.generate_assessment_report"],
-            "celery_id": async_result.id,
-            "job_id": str(job_id) if job_id else None,
-        }
+    if job_id:
+        kwargs["job_id"] = str(job_id)
 
-    if wtype == "season_growth_report":
-        kwargs = {
-            "field_id": str(field_id),
-            "work_item_id": work_id,
-        }
-        if job_id:
-            kwargs["job_id"] = str(job_id)
-        for key in ("start_date", "end_date", "crops", "label", "material_keys"):
-            if extras.get(key) is not None:
-                kwargs[key] = extras[key]
-        if extras.get("pull_data") is not None:
-            kwargs["pull_data"] = bool(extras.get("pull_data"))
-        if extras.get("wait_celery_ids"):
-            kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-        async_result = celery_client.send_task(
-            "app.tasks.season_growth_report.generate_season_growth_report",
-            kwargs=kwargs,
-            queue="ingest",
-        )
-        return {
-            "dispatched": ["app.tasks.season_growth_report.generate_season_growth_report"],
-            "celery_id": async_result.id,
-            "job_id": str(job_id) if job_id else None,
-        }
+    keys = (
+        ("crop_type", "crop_name_zh", "date_from", "date_to", "years")
+        if wtype == "assessment_report"
+        else ("start_date", "end_date", "crops", "label", "material_keys")
+    )
+    for key in keys:
+        if extras.get(key) is not None:
+            kwargs[key] = extras[key]
+    if extras.get("pull_data") is not None:
+        kwargs["pull_data"] = bool(extras["pull_data"])
+    if extras.get("wait_celery_ids"):
+        kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
 
-    raise ValueError(f"unsupported report type: {wtype}")
+    task_name = (
+        "app.tasks.assessment_report.generate_assessment_report"
+        if wtype == "assessment_report"
+        else "app.tasks.season_growth_report.generate_season_growth_report"
+    )
+    async_result = celery_client.send_task(task_name, kwargs=kwargs, queue="ingest")
+    return {
+        "dispatched": [task_name],
+        "celery_id": async_result.id,
+        "job_id": str(job_id) if job_id else None,
+        "land_id": land_id,
+    }
 
 
 def _dispatch_via_handler(
     wtype: str,
     work_id: str,
-    field_id: str | None,
-    land_id: str | None,
-    parcel_id: str | None,
+    land_id: str,
     extras: dict[str, Any],
     task_id: str | None,
 ) -> dict[str, Any]:
-    """Reuse mq_consumer handler dispatch for bootstrap / satellite / weather / soil."""
+    """Reuse the MQ dispatch functions without introducing an identity mapper."""
     from app.handler import (
-        _dispatch_field_bootstrap,
+        _dispatch_land_bootstrap,
         _dispatch_satellite_analysis,
         _dispatch_soil_fetch,
         _dispatch_weather_backfill,
-        _resolve_field_and_land,
     )
 
-    tid = task_id or work_id
     task = TaskMessage(
-        task_id=str(tid),
-        type=wtype if wtype != "agri_bridge" else "satellite_analysis",
-        field_id=field_id,
-        parcel_id=parcel_id,
+        task_id=str(task_id or work_id),
+        type=wtype,
         land_id=land_id,
         extras=dict(extras),
+        trace_id=current_trace_id(),
     )
     if wtype == "agri_bridge":
-        task.extras = {**(task.extras or {}), "mode": "bridge_only"}
-
-    resolved_fid, resolved_lid = _resolve_field_and_land(
-        task.field_id, task.parcel_id, task.land_id
-    )
-    if not resolved_fid:
-        raise ValueError(
-            "field_id could not be resolved (provide field_id or agri-tagged parcel_id)"
-        )
+        task.extras = {**task.extras, "mode": "bridge_only"}
 
     if wtype in ("satellite_analysis", "agri_bridge"):
-        info = _dispatch_satellite_analysis(task, resolved_fid, resolved_lid)
+        info = _dispatch_satellite_analysis(task, land_id)
     elif wtype == "weather_backfill":
-        info = _dispatch_weather_backfill(task, resolved_fid)
+        info = _dispatch_weather_backfill(task, land_id)
     elif wtype == "soil_fetch":
-        info = _dispatch_soil_fetch(task, resolved_fid)
-    elif wtype == "field_bootstrap":
-        info = _dispatch_field_bootstrap(task, resolved_fid, resolved_lid)
+        info = _dispatch_soil_fetch(task, land_id)
+    elif wtype == "land_bootstrap":
+        info = _dispatch_land_bootstrap(task, land_id)
     else:
         raise ValueError(f"unsupported work type for claim agent: {wtype}")
 
-    out = dict(info or {})
-    out["field_id"] = resolved_fid
-    out["land_id"] = resolved_lid
-    out["work_item_id"] = work_id
-    return out
+    result = dict(info or {})
+    result["land_id"] = land_id
+    result["work_item_id"] = work_id
+    return result
 
 
 def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
-    """Map work_item → existing Celery ingest tasks (mirrors mq_consumer handler)."""
     wtype = item.get("type") or ""
     work_id = str(item.get("id"))
-    field_id, extras, land_id, parcel_id = _payload_parts(item)
-    task_id = None
+    land_id, extras = _payload_parts(item)
+    if not land_id:
+        raise ValueError("work item missing land_id")
+
     payload = dict(item.get("payload_json") or {})
     task_id = payload.get("task_id") or extras.get("task_id")
-
     if wtype in ("assessment_report", "season_growth_report"):
-        if not field_id:
-            raise ValueError("work item missing field_id")
-        return _dispatch_report(wtype, work_id, field_id, extras)
-
+        return _dispatch_report(wtype, work_id, land_id, extras)
     if wtype in COMPLETE_ON_DISPATCH_TYPES or wtype in DEFAULT_TYPES:
-        return _dispatch_via_handler(
-            wtype, work_id, field_id, land_id, parcel_id, extras, task_id
-        )
-
+        return _dispatch_via_handler(wtype, work_id, land_id, extras, task_id)
     raise ValueError(f"unsupported work type for claim agent: {wtype}")
 
 
 def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
-    """Dispatch Celery; complete lease for fan-out types, else leave leased for reports."""
+    """Dispatch Celery and complete the lease for fan-out data tasks."""
     work_id = str(item["id"])
     wtype = item.get("type") or ""
+    bind_trace_from_mapping(item.get("payload_json") or {})
+    get_or_create_trace_id()
     try:
         result = _dispatch_celery(item)
         progress(
@@ -320,12 +291,14 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                 "celery_ids": result.get("celery_ids"),
                 "dispatched": result.get("dispatched"),
                 "job_id": result.get("job_id"),
+                "land_id": result.get("land_id"),
             },
         )
         logger.info(
-            "work_item_dispatched id=%s type=%s celery=%s",
+            "work_item_dispatched id=%s type=%s land_id=%s celery=%s",
             work_id,
             wtype,
+            result.get("land_id"),
             result.get("celery_id") or result.get("celery_ids"),
         )
         if wtype in COMPLETE_ON_DISPATCH_TYPES:
@@ -338,7 +311,6 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                     "dispatched": result.get("dispatched"),
                     "celery_ids": result.get("celery_ids")
                     or ([result["celery_id"]] if result.get("celery_id") else []),
-                    "field_id": result.get("field_id"),
                     "land_id": result.get("land_id"),
                     "job_id": result.get("job_id"),
                 },
@@ -349,10 +321,12 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
             fail(client, work_id, str(exc), retry=False)
         except Exception:
             logger.exception("work_item_fail_report_failed id=%s", work_id)
+    finally:
+        clear_trace_id()
 
 
 def run_forever() -> None:
-    """Short-poll claim loop. Refuses to start unless WORK_QUEUE_MODE=claim."""
+    """Short-poll claim loop; only WORK_QUEUE_MODE=claim may start it."""
     if not should_run_claim_agent():
         raise RuntimeError(
             f"claim agent refused: WORK_QUEUE_MODE={work_queue_mode()!r} "
@@ -371,9 +345,9 @@ def run_forever() -> None:
                 items = claim_batch(client, limit=1)
                 if not items:
                     time.sleep(claim_interval_sec())
-                    continue
-                for item in items:
-                    process_item(client, item)
+                else:
+                    for item in items:
+                        process_item(client, item)
             except Exception:
                 logger.exception("work_agent_loop_error")
                 time.sleep(claim_interval_sec())

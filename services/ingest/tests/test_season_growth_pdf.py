@@ -111,7 +111,6 @@ def _rich_facts() -> dict:
         "field": {
             "field_name": "测试地块",
             "land_id": "LAND001",
-            "field_id": "00000000-0000-0000-0000-000000000001",
             "area_ha": 0.93,
             "crop_type": "corn",
         },
@@ -332,7 +331,6 @@ class SeasonGrowthPdfTests(unittest.TestCase):
             "field": {
                 "field_name": "测试地块",
                 "land_id": "LAND001",
-                "field_id": "00000000-0000-0000-0000-000000000001",
             },
             "window": {
                 "start_date": "2026-06-01",

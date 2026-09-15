@@ -28,15 +28,6 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  # MinIO only when started with --profile minio (see base compose)
-  minio:
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
-
   api:
     restart: unless-stopped
     deploy:
@@ -85,14 +76,6 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  tiler:
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 1G
-
   web:
     restart: unless-stopped
     deploy:
@@ -119,8 +102,6 @@ services:
       web:
         condition: service_started
       api:
-        condition: service_healthy
-      tiler:
         condition: service_healthy
     deploy:
       resources:

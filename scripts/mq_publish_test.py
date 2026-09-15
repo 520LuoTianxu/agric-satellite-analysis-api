@@ -4,12 +4,12 @@
 Usage (from repo root, with .env loaded or env exported):
 
   pip install -e packages/openfarm_common
-  python scripts/mq_publish_test.py --field-id <uuid>
-  python scripts/mq_publish_test.py --parcel-id <land_id> --mode bridge_only
-  python scripts/mq_publish_test.py --field-id <uuid> --type weather_backfill --days 30
-  python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
-  python scripts/mq_publish_test.py --field-id <uuid> --type field_bootstrap
-  python scripts/mq_publish_test.py --field-id <uuid> --type assessment_report --job-id <uuid>
+  python scripts/mq_publish_test.py --land-id <land_id>
+  python scripts/mq_publish_test.py --land-id <land_id> --mode bridge_only
+  python scripts/mq_publish_test.py --land-id <land_id> --type weather_backfill --days 30
+  python scripts/mq_publish_test.py --land-id <land_id> --type soil_fetch
+  python scripts/mq_publish_test.py --land-id <land_id> --type land_bootstrap
+  python scripts/mq_publish_test.py --land-id <land_id> --type assessment_report --job-id <uuid>
 
 Never prints CLOUDAMQP password (uses connection_label).
 """
@@ -39,9 +39,7 @@ def _load_dotenv() -> None:
 def main() -> int:
     _load_dotenv()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--field-id", default=None)
-    ap.add_argument("--parcel-id", default=None, help="agri land_id")
-    ap.add_argument("--land-id", default=None)
+    ap.add_argument("--land-id", required=True, help="canonical agric_satellite.land_parcels.land_id")
     ap.add_argument(
         "--type",
         default="satellite_analysis",
@@ -50,20 +48,17 @@ def main() -> int:
             "agri_bridge",
             "weather_backfill",
             "soil_fetch",
-            "field_bootstrap",
+            "land_bootstrap",
             "assessment_report",
         ),
     )
     ap.add_argument("--mode", default="full", choices=("full", "bridge_only"))
     ap.add_argument("--months", type=int, default=6)
     ap.add_argument("--days", type=int, default=None, help="weather_backfill days")
-    ap.add_argument("--skip-indices", action="store_true", help="field_bootstrap")
+    ap.add_argument("--skip-indices", action="store_true", help="land_bootstrap")
     ap.add_argument("--job-id", default=None, help="assessment_report Job UUID")
     ap.add_argument("--task-id", default=None)
     args = ap.parse_args()
-
-    if not args.field_id and not args.parcel_id and not args.land_id:
-        ap.error("provide --field-id and/or --parcel-id/--land-id")
 
     # Ensure repo packages importable when not installed
     root = Path(__file__).resolve().parents[1]
@@ -84,7 +79,7 @@ def main() -> int:
         extras["months"] = args.months
     if args.type == "weather_backfill" and args.days is not None:
         extras["days"] = args.days
-    if args.type == "field_bootstrap" and args.skip_indices:
+    if args.type == "land_bootstrap" and args.skip_indices:
         extras["skip_indices"] = True
     if args.type == "assessment_report" and args.job_id:
         extras["job_id"] = args.job_id
@@ -92,8 +87,6 @@ def main() -> int:
     msg = TaskMessage(
         task_id=task_id,
         type=args.type,
-        field_id=args.field_id,
-        parcel_id=args.parcel_id,
         land_id=args.land_id,
         extras=extras,
     )

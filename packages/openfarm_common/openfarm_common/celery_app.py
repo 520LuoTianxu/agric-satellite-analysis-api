@@ -131,9 +131,10 @@ def create_celery_app(
     default_queue: str = "ingest",
     with_beat_schedule: bool = False,
 ) -> Celery:
-    """Build a Celery app with shared broker/routes.
+    """构造共享 broker 与路由的 Celery app。
 
-    API uses this as a **client** (empty include). Workers pass their task modules.
+    API 当客户端用（include 为空）。ingest Beat 打开 with_beat_schedule，
+    include 仍为空。worker 传入各自的任务模块。
     """
     app = Celery(
         name,
@@ -157,6 +158,9 @@ def create_celery_app(
     if with_beat_schedule:
         conf["beat_schedule"] = BEAT_SCHEDULE
     app.conf.update(conf)
+    from openfarm_common.trace import install_trace_signals
+
+    install_trace_signals()
     return app
 
 

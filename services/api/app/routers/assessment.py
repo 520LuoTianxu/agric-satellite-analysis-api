@@ -18,12 +18,12 @@ from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
-from app.models.tables import Field, Job
+from app.models.tables import LandParcel, Job
 from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.window import resolve_assessment_window
 from app.schemas.monitoring import JobOut
 from app.services.cdfinance_report_prefetch import (
-    field_has_site_admission,
+    land_has_site_admission,
     normalize_optional_group_id,
     normalize_optional_hr_base_id,
     prefetch_cdfinance_for_report,
@@ -132,10 +132,10 @@ router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
 
 
-async def _get_field(field_id: uuid.UUID, org_id: uuid.UUID, db: AsyncSession) -> Field:
-    field = await db.get(Field, field_id)
+async def _get_field(land_id: str, org_id: uuid.UUID, db: AsyncSession) -> LandParcel:
+    field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Field not found")
+        raise HTTPException(status_code=404, detail="LandParcel not found")
     return field
 
 
@@ -143,7 +143,7 @@ async def _maybe_enqueue_assessment_work(
     db,
     *,
     job_id: str,
-    field_id: str,
+    land_id: str,
     extras: dict,
 ) -> str | None:
     """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
@@ -152,7 +152,7 @@ async def _maybe_enqueue_assessment_work(
     if not should_enqueue_work_items():
         return None
     payload = {
-        "field_id": field_id,
+        "land_id": land_id,
         "extras": dict(extras),
     }
     item = await enqueue_work_item(
@@ -167,14 +167,14 @@ async def _maybe_enqueue_assessment_work(
 
 
 @router.post(
-    "/fields/{field_id}/assessment-report",
+    "/lands/{land_id}/assessment-report",
     response_model=JobOut,
     status_code=status.HTTP_201_CREATED,
 )
 @limiter.limit("5/minute")
 async def create_assessment_report(
     request: Request,
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     body: AssessmentGenerateRequest | None = None,
@@ -185,7 +185,7 @@ async def create_assessment_report(
     Never refuses generation merely because weather / soil / RS are incomplete;
     missing series are scored with available data inside the PDF worker.
     """
-    field = await _get_field(field_id, ctx.org_id, db)
+    field = await _get_field(land_id, ctx.org_id, db)
 
     from app.core.crops import crop_name_zh, normalize_crop_key, require_crop_key
 
@@ -242,11 +242,11 @@ async def create_assessment_report(
             force=True,
         )
         await db.flush()
-    elif not await field_has_site_admission(db, field_id):
+    elif not await land_has_site_admission(db, land_id):
         # Soft hint only — UI may toast; generation still proceeds.
         logger.info(
             "assessment_site_admission_missing",
-            field_id=str(field_id),
+            land_id=str(land_id),
             hint="pass cdfinance_token + group_id to prefetch questionnaire",
         )
 
@@ -256,7 +256,7 @@ async def create_assessment_report(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == "assessment_report",
                 Job.status.in_(("pending", "running")),
             )
@@ -271,7 +271,7 @@ async def create_assessment_report(
         return existing
 
     job = Job(
-        field_id=field_id,
+        land_id=land_id,
         type="assessment_report",
         status="pending",
         params_json={
@@ -311,13 +311,13 @@ async def create_assessment_report(
             "group_id": group_id,
             "hr_base_id": hr_base_id,
         }
-        # pull_data → field_bootstrap(+followup) only. Do not also enqueue a naked
+        # pull_data → land_bootstrap(+followup) only. Do not also enqueue a naked
         # assessment_report work_item (claim would race PDF ahead of pulls).
         if not pull_data:
             work_id = await _maybe_enqueue_assessment_work(
                 db,
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 extras=assessment_extras,
             )
             if work_id:
@@ -330,8 +330,8 @@ async def create_assessment_report(
 
         if pull_data:
             # Do NOT publish assessment_report in parallel — that raced PDF ahead of
-            # weather/RS (soil-only reports). Bootstrap fans out pulls with allow_agri
-            # and enqueues assessment as followup after Celery ids are known.
+            # weather/RS (soil-only reports). Bootstrap fans out canonical pulls and
+            # enqueues assessment as followup after Celery ids are known.
             # publish_api_task also inserts work_items when dual|claim (D4).
             assessment_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
@@ -341,7 +341,6 @@ async def create_assessment_report(
                 "weather_days": weather_days,
                 "years": years_used,
                 "source": "assessment_one_click",
-                "allow_agri": True,
                 "with_bridge": True,
                 "followup_assessment": {
                     "job_id": str(job.id),
@@ -359,14 +358,14 @@ async def create_assessment_report(
                 },
             }
             bootstrap_task_id = publish_api_task(
-                type="field_bootstrap",
-                field_id=str(field_id),
+                type="land_bootstrap",
+                land_id=str(land_id),
                 extras=bootstrap_extras,
             )
             logger.info(
                 "assessment_bootstrap_dispatched",
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 mq_task_id=bootstrap_task_id,
                 assessment_mq_task_id=assessment_mq_task_id,
                 date_from=date_from,
@@ -377,13 +376,13 @@ async def create_assessment_report(
         else:
             mq_task_id = publish_api_task(
                 type="assessment_report",
-                field_id=str(field_id),
+                land_id=str(land_id),
                 extras=assessment_extras,
             )
             logger.info(
                 "assessment_job_dispatched",
                 job_id=str(job.id),
-                field_id=str(field_id),
+                land_id=str(land_id),
                 mq_task_id=mq_task_id,
                 date_from=date_from,
                 date_to=date_to,
@@ -404,21 +403,21 @@ async def create_assessment_report(
     return job
 
 
-@router.get("/fields/{field_id}/assessment-report/latest")
+@router.get("/lands/{land_id}/assessment-report/latest")
 async def get_latest_assessment_report(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Download the latest succeeded assessment PDF for a field."""
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
 
     job = (
         await db.execute(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == "assessment_report",
                 Job.status == "succeeded",
             )
@@ -463,7 +462,7 @@ async def _latest_report_job_for_meta(
     db: AsyncSession,
     *,
     ctx: OrgContext,
-    field_id: uuid.UUID,
+    land_id: str,
     job_type: str,
 ) -> Job | None:
     """Latest job for UI polling, without letting zombie failures shadow PDFs.
@@ -478,7 +477,7 @@ async def _latest_report_job_for_meta(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == job_type,
             )
             .order_by(Job.created_at.desc())
@@ -495,7 +494,7 @@ async def _latest_report_job_for_meta(
                 select(Job)
                 .where(
                     org_scope(None, ctx),
-                    Job.field_id == field_id,
+                    Job.land_id == land_id,
                     Job.type == job_type,
                     Job.status == "succeeded",
                 )
@@ -510,9 +509,9 @@ async def _latest_report_job_for_meta(
     return latest
 
 
-@router.get("/fields/{field_id}/assessment-report/latest/meta", response_model=JobOut)
+@router.get("/lands/{land_id}/assessment-report/latest/meta", response_model=JobOut)
 async def get_latest_assessment_meta(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -522,9 +521,9 @@ async def get_latest_assessment_meta(
     terminal failure/cancel but an earlier succeeded PDF exists, prefer that
     succeeded job so the UI is not shadowed by a zombie error.
     """
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
     job = await _latest_report_job_for_meta(
-        db, ctx=ctx, field_id=field_id, job_type="assessment_report"
+        db, ctx=ctx, land_id=land_id, job_type="assessment_report"
     )
     if not job:
         raise HTTPException(status_code=404, detail="No assessment report yet")
@@ -540,11 +539,11 @@ def _scorecard_from_job(job: Job) -> dict[str, Any] | None:
 
 
 @router.get(
-    "/fields/{field_id}/assessment-report/latest/scorecard",
+    "/lands/{land_id}/assessment-report/latest/scorecard",
     response_model=AssessmentScorecardOut,
 )
 async def get_latest_assessment_scorecard(
-    field_id: uuid.UUID,
+    land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -554,13 +553,13 @@ async def get_latest_assessment_scorecard(
     persisted return ``scorecard_unavailable`` so the UI can ask the user
     to regenerate rather than inventing numbers.
     """
-    await _get_field(field_id, ctx.org_id, db)
+    await _get_field(land_id, ctx.org_id, db)
     job = (
         await db.execute(
             select(Job)
             .where(
                 org_scope(None, ctx),
-                Job.field_id == field_id,
+                Job.land_id == land_id,
                 Job.type == "assessment_report",
                 Job.status == "succeeded",
             )
