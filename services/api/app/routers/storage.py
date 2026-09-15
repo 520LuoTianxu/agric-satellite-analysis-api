@@ -1,4 +1,4 @@
-"""Object storage admin / parcel-product APIs (MinIO or Aliyun OSS)."""
+"""Object storage admin / parcel-product APIs (Aliyun OSS)."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ async def pull_parcel_products(
     ctx: Annotated[OrgContext, Depends(_reader)],
     body: PullParcelProductsBody | None = None,
 ):
-    """Pull parcel-product JSON from the fixed OSS/MinIO prefix (summary only).
+    """Pull parcel-product JSON from the fixed OSS prefix (summary only).
 
     Fetches each object via get_bytes but does **not** dump payloads in the
     response — returns counts and a small sample of keys for later PG ingest.

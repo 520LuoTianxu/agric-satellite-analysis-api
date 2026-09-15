@@ -1,1 +1,1 @@
-"""agric-satellite-analysis storage Celery worker (OSS/MinIO uploads)."""
+"""agric-satellite-analysis storage Celery worker (Aliyun OSS uploads)."""

@@ -31,16 +31,8 @@ class CommonSettings(BaseSettings):
     # 数据库只保留 agric_satellite；应用表和扩展对象均在此 schema。
     database_schema: str = "agric_satellite"
 
-    # Object storage backend: oss | minio
+    # Production object storage backend is Aliyun OSS.
     storage_backend: str = "oss"
-
-    # MinIO
-    minio_endpoint: str = "minio:9000"
-    minio_public_endpoint: str = ""
-    minio_access_key: str = "openfarm"
-    minio_secret_key: str = "openfarm_dev_secret"
-    minio_bucket: str = "openfarm"
-    minio_secure: bool = False
 
     # Aliyun OSS
     oss_region: str = "oss-cn-beijing"

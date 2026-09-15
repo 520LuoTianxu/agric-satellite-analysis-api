@@ -7,14 +7,14 @@ Use this module when you already have ``cogs/{org_id}/{field_id}/{date}/*.tif``
 and need a one-shot convert (MQ type ``agri_bridge`` / ``mode=bridge_only``).
 
 Discovers dates under ``cogs/{org_id}/{field_id}/`` on the **configured**
-backend (``STORAGE_BACKEND=oss|minio``, default OSS) via ``exists`` probes
+backend (``STORAGE_BACKEND=oss``) via ``exists`` probes
 (no ListObjects — many OSS bucket policies deny listing), samples the six agri
 optical indices (NDVI/EVI/NDMI/NDRE/CIre/MNDWI; NDWI COG only as MNDWI fallback)
 inside the field polygon at native COG resolution, and upserts one S2 row per
 date with ``pixel_data.format = lonlat_v1``.
 
 COGs are opened via GDAL ``/vsis3/`` using ``app.core.storage.configure_gdal_vsis3``
-(same path as index pipeline uploads). Happy path does **not** require MinIO.
+(same path as index pipeline uploads).
 
 Usage (api / processor container)::
 

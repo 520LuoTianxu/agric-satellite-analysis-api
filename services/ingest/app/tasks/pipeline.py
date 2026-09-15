@@ -67,28 +67,6 @@ RETRY_DELAYS = [60, 300, 900]  # Per PRD Section 7.4
 # ── Storage / DB helpers ─────────────────────────────────────────────
 
 
-def get_minio_client():
-    """Deprecated: prefer ``get_storage()``. Thin wrapper for MinIO only."""
-    import warnings
-    from minio import Minio
-
-    warnings.warn(
-        "get_minio_client is deprecated; use app.core.storage.get_storage()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return Minio(
-        settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-    )
-
-
-# Deprecated alias kept for callers that still import MINIO_BUCKET.
-MINIO_BUCKET = settings.minio_bucket
-
-
 def get_db_session():
     from app.core.database_sync import SyncSession
 
