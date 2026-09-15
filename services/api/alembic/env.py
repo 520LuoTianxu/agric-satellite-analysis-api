@@ -58,8 +58,6 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        # 原生 SQL、历史迁移和自动生成的 DDL 都必须解析到统一业务 schema。
-        connection.execute(text(f"SET search_path TO {APP_DB_SCHEMA}, public"))
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
@@ -68,6 +66,8 @@ def run_migrations_online() -> None:
             include_name=include_name,
         )
         with context.begin_transaction():
+            # 放在 Alembic 事务内，避免 SQLAlchemy 预先自动开启事务后在连接关闭时回滚。
+            connection.execute(text(f"SET LOCAL search_path TO {APP_DB_SCHEMA}, public"))
             context.run_migrations()
 
 
