@@ -32,6 +32,7 @@ from app.models.tables import Field, Job
 from app.schemas.monitoring import JobOut
 from app.services.cdfinance_report_prefetch import (
     normalize_optional_group_id,
+    normalize_optional_hr_base_id,
     prefetch_cdfinance_for_report,
     resolve_request_token,
 )
@@ -58,6 +59,10 @@ class SeasonGrowthGenerateRequest(BaseModel):
     group_id: str | int | None = PydanticField(
         default=None,
         description="cdfinance groupId for groupSiteAdmission questionnaire",
+    )
+    hr_base_id: str | int | None = PydanticField(
+        default=None,
+        description="Override CDFINANCE_HR_BASE_ID for site-admission / NPK headers",
     )
 
     @field_validator("start_date", "end_date")
@@ -158,6 +163,7 @@ async def create_season_growth_report(
         authorization=authorization,
     )
     group_id = normalize_optional_group_id(body.group_id)
+    hr_base_id = normalize_optional_hr_base_id(body.hr_base_id)
     cdfinance_prefetch: dict[str, Any] | None = None
     if cdfinance_token:
         cdfinance_prefetch = await prefetch_cdfinance_for_report(
@@ -165,6 +171,7 @@ async def create_season_growth_report(
             field,
             token=cdfinance_token,
             group_id=group_id,
+            hr_base_id=hr_base_id,
             force=True,
         )
         await db.flush()
@@ -200,6 +207,7 @@ async def create_season_growth_report(
         "weather_days": weather_days,
         "cdfinance_prefetch": cdfinance_prefetch,
         "group_id": group_id,
+        "hr_base_id": hr_base_id,
     }
     job = Job(
         field_id=field_id,
@@ -226,6 +234,7 @@ async def create_season_growth_report(
                 cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
             ),
             "group_id": group_id,
+            "hr_base_id": hr_base_id,
         }
         # pull_data → field_bootstrap(+followup) only (same race fix as assessment).
         if not pull_data:
@@ -269,6 +278,7 @@ async def create_season_growth_report(
                         cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
                     ),
                     "group_id": group_id,
+                    "hr_base_id": hr_base_id,
                 },
             }
             bootstrap_task_id = publish_api_task(

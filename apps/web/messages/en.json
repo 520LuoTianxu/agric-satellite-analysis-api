@@ -817,7 +817,9 @@
     "siteAdmissionScore": "Site score",
     "siteAdmissionArea": "Assessed area (mu)",
     "siteAdmissionCrops": "Planned crops",
-    "siteAdmissionKeyAnswers": "Key plot conditions"
+    "siteAdmissionKeyAnswers": "Key plot conditions",
+    "siteAdmissionHrBaseId": "hr-base-id (optional)",
+    "siteAdmissionHrBaseIdPlaceholder": "e.g. 10; blank uses server default"
   },
   "seo": {
     "title": "OpenFarm: Open Source Crop Intelligence Platform",
@@ -1060,12 +1062,14 @@
     "legacyNoScorecardHint": "Generate a new land report to fill the hexagon.",
     "scoreOutOf": "{score} / 100",
     "cdfinancePanelTitle": "cdfinance credentials (shared by assessment & season growth)",
-    "cdfinancePanelHint": "Optionally paste a temporary Bearer token and groupId before generate to refresh site-admission questionnaire and NPK. Leave empty to use cached DB data.",
+    "cdfinancePanelHint": "Optionally paste a temporary Bearer token, groupId, and hr-base-id before generate to refresh site-admission questionnaire and NPK. Leave empty to use cached DB data / server default hr-base-id.",
     "cdfinanceGroupId": "groupId (site questionnaire)",
     "cdfinanceGroupPlaceholder": "e.g. 3232; leave blank to resolve from agri tags",
     "cdfinanceToken": "Bearer Token (temporary; not stored in server config)",
     "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
-    "siteAdmissionMissingHint": "No cached site-admission questionnaire. Fill Token + groupId if you want it pulled into this report."
+    "siteAdmissionMissingHint": "No cached site-admission questionnaire. Fill Token + groupId if you want it pulled into this report.",
+    "cdfinanceHrBaseId": "hr-base-id (optional override)",
+    "cdfinanceHrBaseIdPlaceholder": "e.g. 10; leave blank for server CDFINANCE_HR_BASE_ID"
   },
   "overviewPage": {
     "fitRegion": "Fit region",
@@ -1158,6 +1162,6 @@
     "generatedAt": "Generated at: {time}",
     "noteFacts": "Facts (scene counts, NDVI/NDMI, drought/flood, harvest) are computed from products — never invented by the LLM.",
     "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts.",
-    "cdfinanceReuseHint": "Uses the cdfinance Token / groupId above (if filled) to refresh questionnaire and NPK before generate."
+    "cdfinanceReuseHint": "Uses the cdfinance Token / groupId / hr-base-id above (if filled) to refresh questionnaire and NPK before generate."
   }
 }

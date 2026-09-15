@@ -106,3 +106,98 @@ class CdfinanceSiteAdmissionHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CdfinanceSiteAdmissionHeaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hr_base_id_override_sent_in_headers(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from app.core import cdfinance_site_admission as mod
+
+        captured: dict = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": 200, "data": {"groupId": 7071, "score": 1.0}}
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def get(self, url, headers=None):
+                captured["url"] = url
+                captured["headers"] = dict(headers or {})
+                return FakeResp()
+
+            async def aclose(self):
+                return None
+
+        with (
+            patch.object(mod, "httpx") as httpx_mod,
+            patch.object(mod.settings, "cdfinance_hr_base_id", "37"),
+            patch.object(
+                mod.settings,
+                "cdfinance_soil_base_url",
+                "https://example.test/agric-api",
+            ),
+            patch.object(mod.settings, "cdfinance_app_key", "app-key"),
+            patch.object(mod.settings, "cdfinance_origin", "https://origin"),
+            patch.object(mod.settings, "cdfinance_referer", "https://referer"),
+            patch.object(mod.settings, "cdfinance_channel_net", "H5"),
+            patch.object(mod.settings, "cdfinance_soil_timeout_seconds", 5),
+        ):
+            httpx_mod.AsyncClient = FakeClient
+            data = await mod.fetch_group_site_admission(
+                group_id=7071,
+                bearer_token="tok",
+                hr_base_id="10",
+            )
+        self.assertEqual(captured["headers"].get("hr-base-id"), "10")
+        self.assertEqual(captured["headers"].get("authorization"), "Bearer tok")
+        self.assertEqual(data.get("groupId"), 7071)
+
+    async def test_hr_base_id_falls_back_to_settings(self):
+        from unittest.mock import patch
+
+        from app.core import cdfinance_site_admission as mod
+
+        captured: dict = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": 200, "data": {"groupId": 1}}
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def get(self, url, headers=None):
+                captured["headers"] = dict(headers or {})
+                return FakeResp()
+
+            async def aclose(self):
+                return None
+
+        with (
+            patch.object(mod, "httpx") as httpx_mod,
+            patch.object(mod.settings, "cdfinance_hr_base_id", "37"),
+            patch.object(
+                mod.settings,
+                "cdfinance_soil_base_url",
+                "https://example.test/agric-api",
+            ),
+            patch.object(mod.settings, "cdfinance_app_key", "app-key"),
+            patch.object(mod.settings, "cdfinance_origin", "https://origin"),
+            patch.object(mod.settings, "cdfinance_referer", "https://referer"),
+            patch.object(mod.settings, "cdfinance_channel_net", "H5"),
+            patch.object(mod.settings, "cdfinance_soil_timeout_seconds", 5),
+        ):
+            httpx_mod.AsyncClient = FakeClient
+            await mod.fetch_group_site_admission(group_id=1, bearer_token="tok")
+        self.assertEqual(captured["headers"].get("hr-base-id"), "37")

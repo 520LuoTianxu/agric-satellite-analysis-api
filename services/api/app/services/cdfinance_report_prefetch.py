@@ -36,6 +36,14 @@ def normalize_optional_group_id(group_id: str | int | None) -> str | None:
     return s or None
 
 
+def normalize_optional_hr_base_id(hr_base_id: str | int | None) -> str | None:
+    """Empty / whitespace → None so env CDFINANCE_HR_BASE_ID remains the fallback."""
+    if hr_base_id is None:
+        return None
+    s = str(hr_base_id).strip()
+    return s or None
+
+
 def resolve_request_token(
     *,
     cdfinance_token: str | None = None,
@@ -121,6 +129,7 @@ async def prefetch_site_admission(
     *,
     bearer_token: str,
     group_id: str | None = None,
+    hr_base_id: str | None = None,
     force: bool = True,
     link_field_tag: bool = True,
 ) -> dict[str, Any]:
@@ -164,6 +173,7 @@ async def prefetch_site_admission(
     record = await fetch_group_site_admission(
         group_id=gid,
         bearer_token=bearer_token,
+        hr_base_id=hr_base_id,
     )
     summary = normalize_admission_payload(record)
     now = datetime.now(timezone.utc)
@@ -209,6 +219,7 @@ async def prefetch_soil_npk(
     field: Field,
     *,
     bearer_token: str,
+    hr_base_id: str | None = None,
     force: bool = True,
 ) -> dict[str, Any]:
     """Fetch+upsert vendor NPK. Raises on hard failures (caller soft-catches)."""
@@ -256,7 +267,9 @@ async def prefetch_soil_npk(
         land_id=land_id,
         source=2,
     )
-    payload = await analyze_soil_v2(bearer_token=bearer_token, body=req_body)
+    payload = await analyze_soil_v2(
+        bearer_token=bearer_token, body=req_body, hr_base_id=hr_base_id
+    )
     norm = normalize_vendor_payload(payload)
     now = datetime.now(timezone.utc)
 
@@ -298,6 +311,7 @@ async def prefetch_cdfinance_for_report(
     *,
     token: str | None,
     group_id: str | int | None = None,
+    hr_base_id: str | int | None = None,
     force: bool = True,
 ) -> dict[str, Any]:
     """Soft prefetch: never raises; returns status map for logging / job params.
@@ -305,14 +319,19 @@ async def prefetch_cdfinance_for_report(
     - token + resolvable group_id → site admission upsert
     - token → NPK upsert (best-effort)
     Token is never returned or persisted.
+    Request ``hr_base_id`` overrides env ``CDFINANCE_HR_BASE_ID`` when set.
     """
     out: dict[str, Any] = {
         "token_provided": False,
         "site_admission": None,
         "soil_npk": None,
+        "hr_base_id": None,
     }
     bearer = normalize_optional_token(token)
     gid = normalize_optional_group_id(group_id)
+    hid = normalize_optional_hr_base_id(hr_base_id)
+    if hid:
+        out["hr_base_id"] = hid
     if not bearer:
         return out
     out["token_provided"] = True
@@ -325,6 +344,7 @@ async def prefetch_cdfinance_for_report(
                 field,
                 bearer_token=bearer,
                 group_id=gid,
+                hr_base_id=hid,
                 force=force,
             )
         else:
@@ -346,7 +366,7 @@ async def prefetch_cdfinance_for_report(
 
     try:
         out["soil_npk"] = await prefetch_soil_npk(
-            db, field, bearer_token=bearer, force=force
+            db, field, bearer_token=bearer, hr_base_id=hid, force=force
         )
     except httpx.HTTPError as e:
         logger.warning(

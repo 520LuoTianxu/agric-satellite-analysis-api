@@ -6,6 +6,7 @@ import unittest
 
 from app.services.cdfinance_report_prefetch import (
     normalize_optional_group_id,
+    normalize_optional_hr_base_id,
     normalize_optional_token,
     resolve_request_token,
 )
@@ -24,6 +25,12 @@ class TestNormalizeHelpers(unittest.TestCase):
         self.assertIsNone(normalize_optional_group_id("  "))
         self.assertEqual(normalize_optional_group_id(3232), "3232")
         self.assertEqual(normalize_optional_group_id(" 99 "), "99")
+
+    def test_normalize_hr_base_id(self):
+        self.assertIsNone(normalize_optional_hr_base_id(None))
+        self.assertIsNone(normalize_optional_hr_base_id("  "))
+        self.assertEqual(normalize_optional_hr_base_id(10), "10")
+        self.assertEqual(normalize_optional_hr_base_id(" 10 "), "10")
 
     def test_resolve_request_token_precedence(self):
         self.assertEqual(

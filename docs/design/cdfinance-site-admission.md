@@ -40,6 +40,7 @@
 
 - `cdfinance_token` (alias `token`) — temporary H5 Bearer
 - `group_id` — questionnaire groupId
+- `hr_base_id` — optional override for `hr-base-id` header (falls back to `CDFINANCE_HR_BASE_ID`)
 
 When token is present, API host **soft-prefetches** (never blocks PDF):
 

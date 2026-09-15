@@ -81,3 +81,52 @@ class CdfinanceSoilHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CdfinanceSoilHeaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hr_base_id_override_sent_in_headers(self):
+        from unittest.mock import patch
+
+        from app.core import cdfinance_soil as mod
+
+        captured: dict = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"indicators": [], "sqi": {}, "texture": {}}
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def post(self, url, headers=None, content=None):
+                captured["headers"] = dict(headers or {})
+                return FakeResp()
+
+            async def aclose(self):
+                return None
+
+        with (
+            patch.object(mod, "httpx") as httpx_mod,
+            patch.object(mod.settings, "cdfinance_hr_base_id", "37"),
+            patch.object(
+                mod.settings,
+                "cdfinance_soil_base_url",
+                "https://example.test/agric-api",
+            ),
+            patch.object(mod.settings, "cdfinance_app_key", "app-key"),
+            patch.object(mod.settings, "cdfinance_origin", "https://origin"),
+            patch.object(mod.settings, "cdfinance_referer", "https://referer"),
+            patch.object(mod.settings, "cdfinance_channel_net", "H5"),
+            patch.object(mod.settings, "cdfinance_soil_timeout_seconds", 5),
+        ):
+            httpx_mod.AsyncClient = FakeClient
+            await mod.analyze_soil_v2(
+                bearer_token="tok",
+                body={"coords": "1,2"},
+                hr_base_id="10",
+            )
+        self.assertEqual(captured["headers"].get("hr-base-id"), "10")

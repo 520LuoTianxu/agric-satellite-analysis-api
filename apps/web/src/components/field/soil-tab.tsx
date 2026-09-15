@@ -125,11 +125,13 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
     const [samplingZones, setSamplingZones] = useState<SamplingZonesResponse | null>(null);
     const [npk, setNpk] = useState<SoilNpk | null>(null);
     const [npkToken, setNpkToken] = useState("");
+    const [npkHrBaseId, setNpkHrBaseId] = useState("");
     const [npkLoading, setNpkLoading] = useState(false);
     const [npkForce, setNpkForce] = useState(false);
     const [siteAdmission, setSiteAdmission] = useState<SiteAdmission | null>(null);
     const [siteGroupId, setSiteGroupId] = useState("");
     const [siteToken, setSiteToken] = useState("");
+    const [siteHrBaseId, setSiteHrBaseId] = useState("");
     const [siteLoading, setSiteLoading] = useState(false);
     const [siteForce, setSiteForce] = useState(false);
 
@@ -144,6 +146,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
             const res = await soilApi.fetchNpk(fieldId, {
                 token,
                 force: npkForce || !!npk,
+                hr_base_id: npkHrBaseId.trim() || undefined,
             });
             setNpk(res.npk);
             toast.success(res.message || t("npkFetchOk"));
@@ -153,7 +156,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         } finally {
             setNpkLoading(false);
         }
-    }, [fieldId, npkToken, npkForce, npk, t]);
+    }, [fieldId, npkToken, npkHrBaseId, npkForce, npk, t]);
 
     const handleFetchSiteAdmission = useCallback(async () => {
         const token = siteToken.trim();
@@ -167,6 +170,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                 token,
                 group_id: siteGroupId.trim() || undefined,
                 force: siteForce || !!siteAdmission,
+                hr_base_id: siteHrBaseId.trim() || undefined,
             });
             setSiteAdmission(res.admission);
             if (res.admission.group_id) {
@@ -179,7 +183,7 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
         } finally {
             setSiteLoading(false);
         }
-    }, [fieldId, siteToken, siteGroupId, siteForce, siteAdmission, t]);
+    }, [fieldId, siteToken, siteGroupId, siteHrBaseId, siteForce, siteAdmission, t]);
 
 
     /* ── Sampling zone map markers (target / bullseye style) ── */
@@ -890,6 +894,15 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                             onChange={(e) => setNpkToken(e.target.value)}
                             autoComplete="off"
                         />
+                        <label className="text-[10px] text-muted-foreground">{t("siteAdmissionHrBaseId")}</label>
+                        <input
+                            type="text"
+                            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                            placeholder={t("siteAdmissionHrBaseIdPlaceholder")}
+                            value={npkHrBaseId}
+                            onChange={(e) => setNpkHrBaseId(e.target.value)}
+                            autoComplete="off"
+                        />
                         <div className="flex items-center gap-2">
                             <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
                                 <input
@@ -987,6 +1000,15 @@ export default function SoilTab({ fieldId, mapInstance, activeTab }: SoilTabProp
                             placeholder={t("siteAdmissionTokenPlaceholder")}
                             value={siteToken}
                             onChange={(e) => setSiteToken(e.target.value)}
+                            autoComplete="off"
+                        />
+                        <label className="text-[10px] text-muted-foreground">{t("siteAdmissionHrBaseId")}</label>
+                        <input
+                            type="text"
+                            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                            placeholder={t("siteAdmissionHrBaseIdPlaceholder")}
+                            value={siteHrBaseId}
+                            onChange={(e) => setSiteHrBaseId(e.target.value)}
                             autoComplete="off"
                         />
                         <div className="flex items-center gap-2">

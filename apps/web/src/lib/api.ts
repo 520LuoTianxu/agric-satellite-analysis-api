@@ -677,6 +677,8 @@ export interface AssessmentGenerateBody {
     token?: string;
     /** cdfinance groupId for groupSiteAdmission */
     group_id?: string | number;
+    /** Override CDFINANCE_HR_BASE_ID for site-admission / NPK headers */
+    hr_base_id?: string | number;
 }
 
 export const assessmentApi = {
@@ -729,6 +731,8 @@ export interface SeasonGrowthGenerateBody {
     cdfinance_token?: string;
     token?: string;
     group_id?: string | number;
+    /** Override CDFINANCE_HR_BASE_ID for site-admission / NPK headers */
+    hr_base_id?: string | number;
 }
 
 export interface SeasonGrowthMaterialUpload {

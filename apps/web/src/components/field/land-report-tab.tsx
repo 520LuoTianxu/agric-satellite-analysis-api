@@ -144,6 +144,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
     // Shared cdfinance credentials for assessment + season-growth generate
     const [cdfinanceToken, setCdfinanceToken] = useState("");
     const [cdfinanceGroupId, setCdfinanceGroupId] = useState("");
+    const [cdfinanceHrBaseId, setCdfinanceHrBaseId] = useState("");
 
     useEffect(() => {
         const next = isUsableCrop(cropType) ? String(cropType).trim() : "";
@@ -246,12 +247,16 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
             const cdfinanceBody: {
                 cdfinance_token?: string;
                 group_id?: string;
+                hr_base_id?: string;
             } = {};
             if (cdfinanceToken.trim()) {
                 cdfinanceBody.cdfinance_token = cdfinanceToken.trim();
             }
             if (cdfinanceGroupId.trim()) {
                 cdfinanceBody.group_id = cdfinanceGroupId.trim();
+            }
+            if (cdfinanceHrBaseId.trim()) {
+                cdfinanceBody.hr_base_id = cdfinanceHrBaseId.trim();
             }
             const job = await seasonGrowthApi.generate(fieldId, {
                 start_date: sgStart,
@@ -338,6 +343,7 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                 pull_data: boolean;
                 cdfinance_token?: string;
                 group_id?: string;
+                hr_base_id?: string;
             } = { pull_data: true };
             if (cropKey) body.crop_type = cropKey;
             if (dateFrom.trim()) {
@@ -350,6 +356,9 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
             }
             if (cdfinanceGroupId.trim()) {
                 body.group_id = cdfinanceGroupId.trim();
+            }
+            if (cdfinanceHrBaseId.trim()) {
+                body.hr_base_id = cdfinanceHrBaseId.trim();
             }
             // Soft prompt when no token and no cached site admission
             if (!body.cdfinance_token) {
@@ -556,6 +565,16 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                                 value={cdfinanceToken}
                                 placeholder={t("cdfinanceTokenPlaceholder")}
                                 onChange={(e) => setCdfinanceToken(e.target.value)}
+                                autoComplete="off"
+                            />
+                        </label>
+                        <label className="text-xs space-y-1 block">
+                            <span className="text-muted-foreground">{t("cdfinanceHrBaseId")}</span>
+                            <Input
+                                className="h-9"
+                                value={cdfinanceHrBaseId}
+                                placeholder={t("cdfinanceHrBaseIdPlaceholder")}
+                                onChange={(e) => setCdfinanceHrBaseId(e.target.value)}
                                 autoComplete="off"
                             />
                         </label>

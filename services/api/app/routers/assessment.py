@@ -25,6 +25,7 @@ from app.schemas.monitoring import JobOut
 from app.services.cdfinance_report_prefetch import (
     field_has_site_admission,
     normalize_optional_group_id,
+    normalize_optional_hr_base_id,
     prefetch_cdfinance_for_report,
     resolve_request_token,
 )
@@ -63,6 +64,10 @@ class AssessmentGenerateRequest(BaseModel):
     group_id: str | int | None = PydanticField(
         default=None,
         description="cdfinance groupId for groupSiteAdmission questionnaire",
+    )
+    hr_base_id: str | int | None = PydanticField(
+        default=None,
+        description="Override CDFINANCE_HR_BASE_ID for site-admission / NPK headers",
     )
 
     @field_validator("date_from", mode="before")
@@ -214,6 +219,7 @@ async def create_assessment_report(
         authorization=authorization,
     )
     group_id = normalize_optional_group_id(req.group_id)
+    hr_base_id = normalize_optional_hr_base_id(req.hr_base_id)
     cdfinance_prefetch: dict[str, Any] | None = None
     if cdfinance_token:
         cdfinance_prefetch = await prefetch_cdfinance_for_report(
@@ -221,6 +227,7 @@ async def create_assessment_report(
             field,
             token=cdfinance_token,
             group_id=group_id,
+            hr_base_id=hr_base_id,
             force=True,
         )
         await db.flush()
@@ -268,6 +275,7 @@ async def create_assessment_report(
             # Never store Bearer token; only soft status for debugging.
             "cdfinance_prefetch": cdfinance_prefetch,
             "group_id": group_id,
+            "hr_base_id": hr_base_id,
         },
     )
     db.add(job)
@@ -290,6 +298,7 @@ async def create_assessment_report(
                 cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
             ),
             "group_id": group_id,
+            "hr_base_id": hr_base_id,
         }
         # pull_data → field_bootstrap(+followup) only. Do not also enqueue a naked
         # assessment_report work_item (claim would race PDF ahead of pulls).
@@ -335,6 +344,7 @@ async def create_assessment_report(
                         cdfinance_prefetch and cdfinance_prefetch.get("token_provided")
                     ),
                     "group_id": group_id,
+                    "hr_base_id": hr_base_id,
                 },
             }
             bootstrap_task_id = publish_api_task(

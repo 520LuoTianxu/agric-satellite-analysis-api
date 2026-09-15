@@ -817,7 +817,9 @@
     "siteAdmissionScore": "Puntuación",
     "siteAdmissionArea": "Área (mu)",
     "siteAdmissionCrops": "Cultivos previstos",
-    "siteAdmissionKeyAnswers": "Condiciones clave"
+    "siteAdmissionKeyAnswers": "Condiciones clave",
+    "siteAdmissionHrBaseId": "hr-base-id (opcional)",
+    "siteAdmissionHrBaseIdPlaceholder": "p. ej. 10; vacío = valor del servidor"
   },
   "seo": {
     "title": "OpenFarm: plataforma de inteligencia de cultivos de código abierto",
@@ -1060,12 +1062,14 @@
     "legacyNoScorecardHint": "Genere un informe nuevo para ver el hexágono.",
     "scoreOutOf": "{score} / 100",
     "cdfinancePanelTitle": "Credenciales cdfinance (evaluación y crecimiento)",
-    "cdfinancePanelHint": "Opcionalmente pegue Bearer Token y groupId antes de generar para actualizar el cuestionario y NPK. Vacío = datos en caché.",
+    "cdfinancePanelHint": "Opcionalmente pegue Bearer temporal, groupId y hr-base-id antes de generar para actualizar cuestionario y NPK. Vacío usa datos en caché / valor por defecto del servidor.",
     "cdfinanceGroupId": "groupId (cuestionario)",
     "cdfinanceGroupPlaceholder": "p. ej. 3232; vacío = resolver desde agri",
     "cdfinanceToken": "Bearer Token (temporal; no se guarda en el servidor)",
     "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
-    "siteAdmissionMissingHint": "Sin cuestionario en caché. Complete Token + groupId si desea incluirlo."
+    "siteAdmissionMissingHint": "Sin cuestionario en caché. Complete Token + groupId si desea incluirlo.",
+    "cdfinanceHrBaseId": "hr-base-id (opcional)",
+    "cdfinanceHrBaseIdPlaceholder": "p. ej. 10; vacío = CDFINANCE_HR_BASE_ID del servidor"
   },
   "overviewPage": {
     "fitRegion": "Ajustar región",
@@ -1158,6 +1162,6 @@
     "generatedAt": "Generated at: {time}",
     "noteFacts": "Facts (scene counts, NDVI/NDMI, drought/flood, harvest) are computed from products — never invented by the LLM.",
     "noteLlm": "AI narrative needs BAILIAN_API_KEY; without it the PDF still includes facts and charts.",
-    "cdfinanceReuseHint": "Usa el Token / groupId de arriba (si está relleno) para actualizar cuestionario y NPK antes de generar."
+    "cdfinanceReuseHint": "Usa Token / groupId / hr-base-id de arriba (si están) para refrescar cuestionario y NPK antes de generar."
   }
 }
