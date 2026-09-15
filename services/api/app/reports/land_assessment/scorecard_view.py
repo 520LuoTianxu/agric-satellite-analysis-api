@@ -25,12 +25,19 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def scorecard_public_view(scorecard: dict[str, Any] | None) -> dict[str, Any] | None:
+def scorecard_public_view(
+    scorecard: dict[str, Any] | None,
+    *,
+    ai: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Return a compact 6-dimension scorecard for JSON clients.
 
     Accepts the full scoring payload or an already-slim copy. Returns None
     when overall score or any of the six dimensions is missing so the UI
     never invents a partial hexagon.
+
+    When ``ai`` carries a valid ``ai_reference_score``, attach an
+    ``ai_reference`` block (reference only — never overwrites program overall).
     """
     if not isinstance(scorecard, dict):
         return None
@@ -79,4 +86,37 @@ def scorecard_public_view(scorecard: dict[str, Any] | None) -> dict[str, Any] | 
         conf_score = _as_float(conf.get("score"))
         if conf_score is not None:
             out["confidence"] = {"score": round(conf_score, 1)}
+
+    # Prefer explicit ai=; also accept already-slim scorecard with ai_reference.
+    ref_src = ai if isinstance(ai, dict) else None
+    if ref_src is None and isinstance(scorecard.get("ai_reference"), dict):
+        ref_src = {
+            "ai_reference_score": (scorecard.get("ai_reference") or {}).get("score"),
+            "ai_reference_grade": (scorecard.get("ai_reference") or {}).get("grade"),
+            "ai_reference_light": (scorecard.get("ai_reference") or {}).get("light"),
+            "ai_reference_rationale": (scorecard.get("ai_reference") or {}).get(
+                "rationale"
+            ),
+            "ai_reference_disclaimer": (scorecard.get("ai_reference") or {}).get(
+                "disclaimer"
+            ),
+        }
+    elif ref_src is None and scorecard.get("ai_reference_score") is not None:
+        ref_src = scorecard
+
+    if isinstance(ref_src, dict):
+        ref_score = _as_float(ref_src.get("ai_reference_score"))
+        if ref_score is not None:
+            ref_score = max(0.0, min(100.0, round(ref_score, 1)))
+            disclaimer = (
+                ref_src.get("ai_reference_disclaimer")
+                or "AI参考分 · 不可作为准入结论"
+            )
+            out["ai_reference"] = {
+                "score": ref_score,
+                "grade": ref_src.get("ai_reference_grade"),
+                "light": ref_src.get("ai_reference_light"),
+                "rationale": ref_src.get("ai_reference_rationale"),
+                "disclaimer": disclaimer,
+            }
     return out

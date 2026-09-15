@@ -107,6 +107,16 @@ class AssessmentConfidenceOut(BaseModel):
     score: float
 
 
+class AssessmentAiReferenceOut(BaseModel):
+    """Optional AI reference score — never an admission / program overall."""
+
+    score: float
+    grade: str | None = None
+    light: str | None = None
+    rationale: str | None = None
+    disclaimer: str = "AI参考分 · 不可作为准入结论"
+
+
 class AssessmentScorecardOut(BaseModel):
     """Six-dimension land-assessment scorecard from a succeeded report job."""
 
@@ -114,6 +124,7 @@ class AssessmentScorecardOut(BaseModel):
     overall: AssessmentOverallOut
     dimensions: list[AssessmentDimensionOut]
     confidence: AssessmentConfidenceOut | None = None
+    ai_reference: AssessmentAiReferenceOut | None = None
     generated_at: datetime | None = None
 
 
@@ -575,6 +586,7 @@ async def get_latest_assessment_scorecard(
                 "job_id": str(job.id),
             },
         )
+    ai_ref = view.get("ai_reference")
     return AssessmentScorecardOut(
         job_id=job.id,
         overall=AssessmentOverallOut(**view["overall"]),
@@ -583,6 +595,9 @@ async def get_latest_assessment_scorecard(
             AssessmentConfidenceOut(**view["confidence"])
             if view.get("confidence")
             else None
+        ),
+        ai_reference=(
+            AssessmentAiReferenceOut(**ai_ref) if isinstance(ai_ref, dict) else None
         ),
         generated_at=job.finished_at or job.created_at,
     )

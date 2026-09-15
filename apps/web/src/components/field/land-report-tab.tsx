@@ -647,6 +647,42 @@ export default function LandReportTab({ fieldId, cropType, onCropBound }: LandRe
                                 </div>
                             </div>
 
+                            {scorecard.ai_reference &&
+                                typeof scorecard.ai_reference.score === "number" && (
+                                <div className="rounded-md border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 space-y-1">
+                                    <div className="flex items-baseline gap-2 flex-wrap">
+                                        <span className="text-xs font-medium">
+                                            {t("aiReferenceScore")}
+                                        </span>
+                                        <span className="font-mono text-lg font-semibold tabular-nums">
+                                            {scorecard.ai_reference.score}
+                                        </span>
+                                        {(scorecard.ai_reference.grade ||
+                                            scorecard.ai_reference.light) && (
+                                            <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                                                {lightLabel(
+                                                    t,
+                                                    scorecard.ai_reference.light,
+                                                    scorecard.ai_reference.grade,
+                                                )}
+                                            </span>
+                                        )}
+                                    </div>
+                                    {scorecard.ai_reference.rationale && (
+                                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                            {scorecard.ai_reference.rationale}
+                                        </p>
+                                    )}
+                                    <p className="text-[10px] font-medium text-amber-800 dark:text-amber-200">
+                                        {scorecard.ai_reference.disclaimer ||
+                                            t("aiReferenceDisclaimer")}
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                                        {t("aiReferenceHint")}
+                                    </p>
+                                </div>
+                            )}
+
                             <LandScorecardRadar scorecard={scorecard} />
 
                             <ul className="grid grid-cols-1 gap-2">

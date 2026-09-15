@@ -631,7 +631,9 @@ def generate_assessment_report(
                     for s in (flood.get("scenes") or [])
                 ],
             }
-        public_scorecard = scorecard_public_view(result.get("scorecard"))
+        public_scorecard = scorecard_public_view(
+            result.get("scorecard"), ai=result.get("ai")
+        )
         progress = {
             "stage": "done",
             "percent": 100,

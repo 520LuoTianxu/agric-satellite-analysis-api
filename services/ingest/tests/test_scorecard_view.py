@@ -104,5 +104,34 @@ class ScorecardPublicViewTests(unittest.TestCase):
         self.assertIsNone(scorecard_public_view("nope"))  # type: ignore[arg-type]
 
 
+    def test_ai_reference_attached_when_present(self):
+        ai = {
+            "ai_reference_score": 68.2,
+            "ai_reference_grade": "一般",
+            "ai_reference_light": "黄",
+            "ai_reference_rationale": "问卷排水偏弱，与遥感略有冲突。",
+            "ai_reference_disclaimer": "AI参考分 · 不可作为准入结论",
+        }
+        view = scorecard_public_view(_full_scorecard(), ai=ai)
+        self.assertEqual(view["overall"]["score"], 76.5)
+        self.assertEqual(view["ai_reference"]["score"], 68.2)
+        self.assertEqual(view["ai_reference"]["light"], "黄")
+        self.assertIn("不可作为准入", view["ai_reference"]["disclaimer"])
+
+    def test_ai_fail_omits_reference(self):
+        view = scorecard_public_view(
+            _full_scorecard(),
+            ai={"ai_reference_score": None, "error": "missing_api_key"},
+        )
+        self.assertEqual(view["overall"]["score"], 76.5)
+        self.assertNotIn("ai_reference", view)
+
+    def test_slim_copy_keeps_ai_reference(self):
+        ai = {"ai_reference_score": 70, "ai_reference_rationale": "ok"}
+        first = scorecard_public_view(_full_scorecard(), ai=ai)
+        second = scorecard_public_view(first)
+        self.assertEqual(first["ai_reference"]["score"], second["ai_reference"]["score"])
+
+
 if __name__ == "__main__":
     unittest.main()

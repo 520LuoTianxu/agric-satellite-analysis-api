@@ -653,6 +653,14 @@ export interface AssessmentScorecardDimension {
     weight: string | null;
 }
 
+export interface AssessmentAiReference {
+    score: number;
+    grade: string | null;
+    light: string | null;
+    rationale: string | null;
+    disclaimer: string;
+}
+
 export interface AssessmentScorecard {
     job_id: string;
     overall: {
@@ -663,6 +671,7 @@ export interface AssessmentScorecard {
     };
     dimensions: AssessmentScorecardDimension[];
     confidence: { score: number } | null;
+    ai_reference?: AssessmentAiReference | null;
     generated_at: string | null;
 }
 

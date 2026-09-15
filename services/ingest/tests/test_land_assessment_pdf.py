@@ -162,5 +162,74 @@ class LandAssessmentPdfSmoke(unittest.TestCase):
             self.assertIn("十、经营分析", text)
 
 
+    def test_ai_reference_score_on_cover_with_disclaimer(self) -> None:
+        from app.reports.land_assessment.ai_analysis import AI_REFERENCE_DISCLAIMER
+        from app.reports.land_assessment.pdf_render import render_pdf
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = render_pdf(
+                out_path=Path(folder) / "ai_ref.pdf",
+                field={"name": "参考分测试", "area_ha": 1.0},
+                scorecard={
+                    "overall": {
+                        "score": 76.5,
+                        "light": "绿",
+                        "grade": "较好",
+                        "one_liner": "程序综合分不变",
+                    },
+                    "dimensions": [],
+                    "confidence": {"plain": "测"},
+                },
+                rs={},
+                risk={},
+                soil={},
+                weather_summary={},
+                ai={
+                    "overall": {
+                        "evaluation": "综合解读正常",
+                        "strengths": ["长势"],
+                        "main_risks": [],
+                        "core_advice": ["常规"],
+                    },
+                    "ai_reference_score": 68.0,
+                    "ai_reference_grade": "一般",
+                    "ai_reference_light": "黄",
+                    "ai_reference_rationale": "问卷排水偏弱，与遥感略有冲突。",
+                    "ai_reference_disclaimer": AI_REFERENCE_DISCLAIMER,
+                    "yield_potential": {"level": "中", "rationale": "无模型"},
+                },
+            )
+            text = "".join(p.extract_text() or "" for p in PdfReader(path).pages[:3])
+            self.assertTrue("76.5" in text or "76" in text)
+            self.assertIn("程序计算", text)
+            self.assertIn("AI 参考分", text)
+            self.assertIn("不可作为准入", text)
+            self.assertIn("问卷排水偏弱", text)
+
+    def test_ai_fail_marks_reference_absent(self) -> None:
+        from app.reports.land_assessment.ai_analysis import empty_ai_payload
+        from app.reports.land_assessment.pdf_render import render_pdf
+
+        ai = empty_ai_payload(error="missing_api_key", note="AI 分析失败")
+        with tempfile.TemporaryDirectory() as folder:
+            path = render_pdf(
+                out_path=Path(folder) / "ai_fail.pdf",
+                field={"name": "失败占位"},
+                scorecard={
+                    "overall": {"score": 70, "light": "绿", "grade": "较好"},
+                    "dimensions": [],
+                },
+                rs={},
+                risk={},
+                soil={},
+                weather_summary={},
+                ai=ai,
+            )
+            text = "".join(p.extract_text() or "" for p in PdfReader(path).pages[:2])
+            self.assertIn("70", text)
+            self.assertIn("AI 参考分：缺失", text)
+            self.assertIn("程序综合分不受影响", text)
+
+
 if __name__ == "__main__":
     unittest.main()

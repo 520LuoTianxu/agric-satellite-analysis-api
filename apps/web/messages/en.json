@@ -1069,7 +1069,10 @@
     "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
     "siteAdmissionMissingHint": "No cached site-admission questionnaire. Fill Token + groupId if you want it pulled into this report.",
     "cdfinanceHrBaseId": "hr-base-id (optional override)",
-    "cdfinanceHrBaseIdPlaceholder": "e.g. 10; leave blank for server CDFINANCE_HR_BASE_ID"
+    "cdfinanceHrBaseIdPlaceholder": "e.g. 10; leave blank for server CDFINANCE_HR_BASE_ID",
+    "aiReferenceScore": "AI reference score",
+    "aiReferenceDisclaimer": "AI reference only · not an admission decision",
+    "aiReferenceHint": "For discussion only. Does not replace the program overall score and must not be used as a site-admission conclusion."
   },
   "overviewPage": {
     "fitRegion": "Fit region",

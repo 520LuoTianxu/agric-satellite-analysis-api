@@ -74,6 +74,7 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertIn("yield_potential", out)
         self.assertFalse(out["business"]["available"])
         self.assertEqual(out["business"]["note"], "数据不足")
+        self.assertIsNone(out.get("ai_reference_score"))
 
     def test_normalize_anomaly_card_schema(self) -> None:
         payload = {
@@ -209,6 +210,10 @@ class LandAssessmentAiTests(unittest.TestCase):
                 "strengths": ["长势"],
                 "main_risks": ["偏碱"],
                 "core_advice": ["耐碱品种因 pH 偏高"],
+                "ai_reference_score": 72.0,
+                "ai_reference_grade": "较好",
+                "ai_reference_light": "绿",
+                "ai_reference_rationale": "程序分与长势一致。",
             },
             "portrait": {
                 "regional_ag_traits": "华北",
@@ -276,6 +281,10 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertIn("适合玉米", out["overall"]["evaluation"])
         self.assertEqual(out["yield_potential"]["level"], "中")
         self.assertIsNone(out["error"])
+        self.assertEqual(out["ai_reference_score"], 72.0)
+        self.assertEqual(
+            out["ai_reference_disclaimer"], ai_analysis.AI_REFERENCE_DISCLAIMER
+        )
 
     def test_parallel_section_soft_fail(self) -> None:
         """One section HTTP-fails; others still assemble."""
@@ -439,6 +448,81 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertEqual(facts["soil"]["dominant_texture"], "黏壤土")
         self.assertEqual(facts["soil"]["drainage_class"], "排水良好")
         self.assertIn("根系层有效持水量", facts["soil"]["rootzone_awc_label"])
+
+
+    def test_normalize_ai_reference_fields(self) -> None:
+        out = ai_analysis.normalize_ai(
+            {
+                "overall": {
+                    "evaluation": "综合条件中等偏好。",
+                    "strengths": ["长势"],
+                    "main_risks": [],
+                    "core_advice": ["常规管理"],
+                    "ai_reference_score": 73.4,
+                    "ai_reference_grade": "较好",
+                    "ai_reference_light": "绿",
+                    "ai_reference_rationale": "程序分项与问卷基本一致，渍涝证据偏弱。",
+                }
+            }
+        )
+        self.assertEqual(out["ai_reference_score"], 73.4)
+        self.assertEqual(out["ai_reference_grade"], "较好")
+        self.assertEqual(out["ai_reference_light"], "绿")
+        self.assertIn("问卷", out["ai_reference_rationale"])
+        self.assertEqual(
+            out["ai_reference_disclaimer"], ai_analysis.AI_REFERENCE_DISCLAIMER
+        )
+        # Must not leak into narrative overall keys
+        self.assertNotIn("ai_reference_score", out["overall"])
+
+    def test_ai_reference_clamped_and_fail_omits(self) -> None:
+        high = ai_analysis.normalize_ai(
+            {"overall": {"evaluation": "ok", "ai_reference_score": 140}}
+        )
+        self.assertEqual(high["ai_reference_score"], 100.0)
+        miss = ai_analysis.empty_ai_payload(error="missing_api_key", note="AI 分析失败")
+        self.assertIsNone(miss["ai_reference_score"])
+        self.assertIsNone(miss["ai_reference_disclaimer"])
+        failed = ai_analysis.failed_llm_sections("boom")
+        self.assertIsNone(failed["ai_reference_score"])
+
+    def test_program_overall_untouched_by_ai_reference(self) -> None:
+        """AI reference must not rewrite a program scorecard overall."""
+        from app.reports.land_assessment.scorecard_view import scorecard_public_view
+
+        program = {
+            "overall": {
+                "score": 76.5,
+                "grade": "较好",
+                "light": "绿",
+                "one_liner": "程序一句话",
+            },
+            "dimensions": [
+                {"key": k, "score": 70.0, "light": "绿", "weight": "10%"}
+                for k in (
+                    "crop",
+                    "soil",
+                    "vigor",
+                    "weather",
+                    "wet_safety",
+                    "drought_safety",
+                )
+            ],
+        }
+        ai = ai_analysis.normalize_ai(
+            {
+                "overall": {
+                    "evaluation": "ok",
+                    "ai_reference_score": 61,
+                    "ai_reference_rationale": "问卷偏弱",
+                }
+            }
+        )
+        view = scorecard_public_view(program, ai=ai)
+        self.assertEqual(view["overall"]["score"], 76.5)
+        self.assertEqual(view["ai_reference"]["score"], 61.0)
+        self.assertIn("不可作为准入", view["ai_reference"]["disclaimer"])
+
 
 
 class QuestionnaireAnalysisTests(unittest.TestCase):

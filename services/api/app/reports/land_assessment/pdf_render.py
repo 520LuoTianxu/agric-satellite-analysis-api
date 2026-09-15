@@ -248,6 +248,58 @@ class ScoreBadge(Flowable):
         )
 
 
+class AiReferenceCard(Flowable):
+    """Secondary AI reference score — clearly not admission / program score."""
+
+    def __init__(
+        self,
+        score,
+        light,
+        grade,
+        disclaimer="AI参考分 · 不可作为准入结论",
+        width=168 * mm,
+        height=22 * mm,
+    ):
+        Flowable.__init__(self)
+        self.score = score
+        self.light = light
+        self.grade = grade
+        self.disclaimer = disclaimer
+        self.width = width
+        self.height = height
+
+    def wrap(self, aw, ah):
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        bg = HexColor("#f4f7fb")
+        border = HexColor("#7a8fa8")
+        c.setFillColor(bg)
+        c.roundRect(0, 0, self.width, self.height, 6, fill=1, stroke=0)
+        c.setStrokeColor(border)
+        c.setLineWidth(1)
+        c.setDash(2, 2)
+        c.roundRect(0.5, 0.5, self.width - 1, self.height - 1, 6, fill=0, stroke=1)
+        c.setDash()
+        fg = HexColor(LIGHT_COLOR.get(self.light, "#445566"))
+        c.setFillColor(fg)
+        c.setFont("CNB", 18)
+        c.drawString(6 * mm, self.height / 2 + 1 * mm, f"{self.score}")
+        c.setFont("CN", 9)
+        c.setFillColor(HexColor("#334455"))
+        grade = f"{self.grade} · " if self.grade else ""
+        light_word = LIGHT_WORD.get(self.light, self.light or "")
+        c.drawString(
+            28 * mm,
+            self.height / 2 + 3 * mm,
+            f"AI 参考分  {grade}{light_word}".strip(),
+        )
+        c.setFillColor(HexColor("#8a4b08"))
+        c.setFont("CN", 8)
+        c.drawString(28 * mm, 5 * mm, self.disclaimer)
+
+
 def _esc(text: Any) -> str:
     s = "" if text is None else str(text)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -553,6 +605,55 @@ def render_pdf(
     story.append(Spacer(1, 2 * mm))
     story.append(p(f"<b>程序一句话：</b>{_esc(ov.get('one_liner') or '')}", "body"))
     story.append(Spacer(1, 2 * mm))
+    # Dual-track: secondary AI reference score (never replaces program overall)
+    ai_ref_score = ai.get("ai_reference_score") if isinstance(ai, dict) else None
+    if ai_ref_score is not None:
+        try:
+            ai_ref_score_f = float(ai_ref_score)
+        except (TypeError, ValueError):
+            ai_ref_score_f = None
+        if ai_ref_score_f is not None:
+            disclaimer = (
+                ai.get("ai_reference_disclaimer")
+                or "AI参考分 · 不可作为准入结论"
+            )
+            story.append(p("AI 参考分（独立于程序综合分）", "center"))
+            story.append(Spacer(1, 1 * mm))
+            story.append(
+                AiReferenceCard(
+                    round(ai_ref_score_f, 1),
+                    ai.get("ai_reference_light") or ov.get("light"),
+                    ai.get("ai_reference_grade"),
+                    disclaimer=disclaimer,
+                )
+            )
+            story.append(Spacer(1, 1.5 * mm))
+            rationale = (ai.get("ai_reference_rationale") or "").strip()
+            if rationale:
+                story.append(
+                    p(
+                        f"<b>参考依据：</b>{_esc(rationale)}",
+                        "small",
+                    )
+                )
+                story.append(Spacer(1, 1.5 * mm))
+            story.append(
+                p(
+                    f"<font color='#8a4b08'><b>{_esc(disclaimer)}</b></font>"
+                    " — 仅供农技讨论参考，不得作为现场准入或选地准入结论。",
+                    "small",
+                )
+            )
+            story.append(Spacer(1, 2 * mm))
+    elif ai_fail:
+        story.append(
+            p(
+                "<font color='#7a3a00'>AI 参考分：缺失（AI 分析失败或未返回）</font>"
+                " — 程序综合分不受影响。",
+                "small",
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
     story.append(ai_block("AI 总体评价", _ai_text(overall_ai.get("evaluation"))))
     # 综合结论与详细建议分层呈现，避免封面末段溢出形成只有几行的续页。
     story.append(PageBreak())

@@ -1069,7 +1069,10 @@
     "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
     "siteAdmissionMissingHint": "暂无现场准入问卷缓存。如需写入问卷，请先填写 Token 与 groupId 再生成。",
     "cdfinanceHrBaseId": "hr-base-id（可选，覆盖服务端默认）",
-    "cdfinanceHrBaseIdPlaceholder": "例如 10；留空则用服务端 CDFINANCE_HR_BASE_ID"
+    "cdfinanceHrBaseIdPlaceholder": "例如 10；留空则用服务端 CDFINANCE_HR_BASE_ID",
+    "aiReferenceScore": "AI 参考分",
+    "aiReferenceDisclaimer": "AI参考分 · 不可作为准入结论",
+    "aiReferenceHint": "仅供讨论参考，不能替代程序综合分，也不可作为现场准入结论。"
   },
   "overviewPage": {
     "fitRegion": "适配视野",

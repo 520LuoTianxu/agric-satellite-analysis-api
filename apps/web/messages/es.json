@@ -1069,7 +1069,10 @@
     "cdfinanceTokenPlaceholder": "Bearer eyJhbGciOi...",
     "siteAdmissionMissingHint": "Sin cuestionario en caché. Complete Token + groupId si desea incluirlo.",
     "cdfinanceHrBaseId": "hr-base-id (opcional)",
-    "cdfinanceHrBaseIdPlaceholder": "p. ej. 10; vacío = CDFINANCE_HR_BASE_ID del servidor"
+    "cdfinanceHrBaseIdPlaceholder": "p. ej. 10; vacío = CDFINANCE_HR_BASE_ID del servidor",
+    "aiReferenceScore": "Puntuación de referencia IA",
+    "aiReferenceDisclaimer": "Solo referencia IA · no es conclusión de admisión",
+    "aiReferenceHint": "Solo para debate. No sustituye la puntuación del programa ni sirve como conclusión de admisión del sitio."
   },
   "overviewPage": {
     "fitRegion": "Ajustar región",
