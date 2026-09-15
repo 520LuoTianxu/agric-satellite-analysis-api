@@ -44,7 +44,7 @@ uvicorn app.main:app --reload --port 8000
 ruff check .              # must pass before PR
 ruff format --check .     # must pass before PR
 ```
-Python 3.11 (CI pins it; CI also apt-installs gdal-bin).
+Python 3.11 (CI pins it). Raster/GDAL deps belong to ingest, not the API image.
 
 ### Migrations
 ```bash

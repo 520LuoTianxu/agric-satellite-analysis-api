@@ -6,8 +6,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# curl is used by the compose healthcheck against /healthz.
+# Raster/GDAL libs live in the ingest image, not here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgdal-dev gcc g++ curl && \
+    curl && \
     rm -rf /var/lib/apt/lists/*
 
 ENV MPLCONFIGDIR=/tmp/matplotlib
