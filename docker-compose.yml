@@ -66,7 +66,6 @@ services:
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
       CORS_ORIGINS: ${CORS_ORIGINS}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
-      TITILER_PUBLIC_URL: ${TITILER_PUBLIC_URL:-http://localhost:8080}
       STAC_API_URL: ${STAC_API_URL}
       S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -232,27 +231,6 @@ services:
       redis:
         condition: service_healthy
 
-  # ── TiTiler ────────────────────────────────────────────────────────
-  # S3-compatible access to Aliyun OSS (same keys as OSS_*).
-  tiler:
-    build:
-      context: ./services/tiler
-      dockerfile: Dockerfile
-    environment:
-      OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
-      AWS_ACCESS_KEY_ID: ${TILER_AWS_ACCESS_KEY_ID:-${OSS_ACCESS_KEY_ID}}
-      AWS_SECRET_ACCESS_KEY: ${TILER_AWS_SECRET_ACCESS_KEY:-${OSS_ACCESS_KEY_SECRET}}
-      AWS_S3_ENDPOINT: ${TILER_S3_ENDPOINT:-oss-cn-beijing.aliyuncs.com}
-      AWS_VIRTUAL_HOSTING: ${TILER_AWS_VIRTUAL_HOSTING:-TRUE}
-      AWS_HTTPS: ${TILER_AWS_HTTPS:-YES}
-      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
-      TITILER_API_CORS_ORIGINS: ${CORS_ORIGINS}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # ── Next.js (Web UI) ──────────────────────────────────────────────
   web:
     build:
@@ -260,7 +238,6 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
-        NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
@@ -278,7 +255,6 @@ services:
       NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
       OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
-      NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
       NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
       NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
       NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}

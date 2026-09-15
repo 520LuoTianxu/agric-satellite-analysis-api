@@ -22,10 +22,6 @@ services:
     ports:
       - "8000:8000"
 
-  tiler:
-    ports:
-      - "8080:80"
-
   web:
     ports:
       - "3000:3000"

@@ -6,7 +6,7 @@
 # Usage (legacy MQ still default until WORK_QUEUE_MODE=claim):
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 #     -f docker-compose.download-machine.yml --profile consumer \
-#     up -d --build ingest storage beat tiler mq_consumer decloud
+#     up -d --build ingest storage beat mq_consumer decloud
 #
 # REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
 # Internal HTTP (D2 reads + optional D1 claim) — set in .env:
@@ -128,9 +128,3 @@ services:
       WORK_LEASE_SECONDS: ${WORK_LEASE_SECONDS:-600}
       # Celery broker must be local Redis on download host (not API Redis).
       REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
-  tiler:
-    network_mode: host
-    ports: !reset []
-    depends_on: !reset []
-    restart: unless-stopped
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
