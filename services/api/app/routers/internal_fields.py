@@ -213,7 +213,7 @@ async def field_geom(
 
 
 class FieldTagsPatch(BaseModel):
-    """Set agri / cdfinance tags without requiring agri.land_parcels."""
+    """Set agri / cdfinance tags; upserts agri.land_parcels when land_id + geom."""
 
     land_id: str | None = None
     group_id: str | None = None
@@ -230,7 +230,8 @@ async def patch_field_tags(
     """Merge agri / cdfinance group tags into ``fields.tags_json``.
 
     Ops / download-machine can fix tagging without a user JWT.
-    Does not require an ``agri.land_parcels`` row.
+    When ``land_id`` is set and the field has geometry, also upserts
+    ``agri.land_parcels`` (does not enqueue RS backfill).
     """
     from app.core.agri_tags import (
         ensure_agri_land_tag,
@@ -271,6 +272,16 @@ async def patch_field_tags(
 
     row.tags_json = tags
     row.updated_at = datetime.now(timezone.utc)
+
+    # When land_id is present, provision agri.land_parcels from field geom.
+    land_id_for_parcel = parse_agri_land_id(tags)
+    if land_id_for_parcel and row.geom is not None:
+        from app.services.agri_land_parcels import ensure_agri_land_parcel_for_field
+
+        await ensure_agri_land_parcel_for_field(
+            db, row, land_id=str(land_id_for_parcel)
+        )
+
     await db.commit()
     await db.refresh(row)
     out_tags = row.tags_json if isinstance(row.tags_json, list) else tags

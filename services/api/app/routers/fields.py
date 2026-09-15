@@ -134,9 +134,17 @@ async def create_field(
         )
     )
     from app.core.agri_tags import is_agri_tagged, parse_agri_land_id
+    from app.services.agri_land_parcels import ensure_agri_land_parcel_for_field
 
     agri_field = is_agri_tagged(body.tags)
     agri_land_id = parse_agri_land_id(body.tags) if agri_field else None
+
+    # Provision agri.land_parcels so RS/UI can resolve the parcel later.
+    # Bootstrap still skips classic COG indices (user triggers 补数 separately).
+    if agri_field and agri_land_id:
+        await ensure_agri_land_parcel_for_field(
+            db, field, land_id=str(agri_land_id)
+        )
 
     # Sentinel job only for classic COG index backfill progress tracking.
     # Agri fields skip RS backfill (truth = agri.parcel_scene_products).
@@ -213,6 +221,12 @@ async def update_field(
     if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Field not found")
 
+    from app.core.agri_tags import parse_agri_land_id
+    from app.services.agri_land_parcels import ensure_agri_land_parcel_for_field
+
+    geom_changed = body.geom is not None
+    tags_changed = body.tags is not None
+
     if body.name is not None:
         field.name = body.name
     if body.crop_type is not None:
@@ -252,6 +266,15 @@ async def update_field(
         field.area_ha = round(area_m2 / 10_000, 4)
 
     await db.flush()
+
+    new_land_id = parse_agri_land_id(field.tags_json)
+    # Re-upsert when geom changes or tags change on an agri-tagged field.
+    # Name-only edits do not touch land_parcels / do not enqueue RS.
+    if new_land_id and (geom_changed or tags_changed):
+        await ensure_agri_land_parcel_for_field(
+            db, field, land_id=str(new_land_id)
+        )
+
     return _field_to_out(field)
 
 
