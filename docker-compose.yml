@@ -47,41 +47,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # ── MinIO (optional local object storage) ──────────────────────────
-  # Not started by default. Enable with:
-  #   docker compose --profile minio up
-  # and set STORAGE_BACKEND=minio (plus TILER_* / AWS_* for TiTiler).
-  minio:
-    profiles: ["minio"]
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - miniodata:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── MinIO Bootstrap (create bucket) ────────────────────────────────
-  minio-init:
-    profiles: ["minio"]
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
-      mc mb --ignore-existing local/${MINIO_BUCKET};
-      mc anonymous set download local/${MINIO_BUCKET}/basemap;
-      mc anonymous set download local/${MINIO_BUCKET}/photos;
-      exit 0;
-      "
-
   # ── FastAPI (API service) ──────────────────────────────────────────
   api:
     build:
@@ -92,11 +57,6 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
       OSS_REGION: ${OSS_REGION:-}
       OSS_ENDPOINT: ${OSS_ENDPOINT:-}
@@ -163,10 +123,6 @@ services:
       <<: *celery-redis-env
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
       OSS_REGION: ${OSS_REGION:-}
       OSS_ENDPOINT: ${OSS_ENDPOINT:-}
@@ -222,7 +178,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── Celery storage (OSS/MinIO uploads only) ───────────────────────
+  # ── Celery storage (Aliyun OSS uploads only) ──────────────────────
   storage:
     build:
       context: .
@@ -235,10 +191,6 @@ services:
     environment:
       <<: *celery-redis-env
       REDIS_URL: ${REDIS_URL}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-oss}
       OSS_REGION: ${OSS_REGION:-}
       OSS_ENDPOINT: ${OSS_ENDPOINT:-}
@@ -281,10 +233,7 @@ services:
         condition: service_healthy
 
   # ── TiTiler ────────────────────────────────────────────────────────
-  # Default: S3-compatible access to Aliyun OSS (same keys as OSS_*).
-  # For local MinIO: --profile minio and set
-  #   TILER_AWS_ACCESS_KEY_ID / TILER_AWS_SECRET_ACCESS_KEY /
-  #   TILER_S3_ENDPOINT=minio:9000 TILER_AWS_VIRTUAL_HOSTING=FALSE TILER_AWS_HTTPS=NO
+  # S3-compatible access to Aliyun OSS (same keys as OSS_*).
   tiler:
     build:
       context: ./services/tiler
@@ -314,7 +263,6 @@ services:
         NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
-        NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
         NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
         INTERNAL_API_URL: http://api:8000
@@ -333,7 +281,6 @@ services:
       NEXT_PUBLIC_TITILER_URL: ${NEXT_PUBLIC_TITILER_URL}
       NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
       NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
-      NEXT_PUBLIC_MINIO_URL: ${NEXT_PUBLIC_MINIO_URL}
       NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
       DATABASE_URL: ${DATABASE_URL_SYNC}
       INTERNAL_API_URL: http://api:8000
@@ -372,10 +319,6 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
     depends_on:
       redis:
         condition: service_healthy
@@ -402,10 +345,6 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
     depends_on:
       db:
         condition: service_healthy
@@ -414,5 +353,4 @@ services:
 volumes:
   pgdata:
   redisdata:
-  miniodata:
   scratch:

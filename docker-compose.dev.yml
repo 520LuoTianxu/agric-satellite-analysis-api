@@ -3,8 +3,7 @@
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-# Default object store: Aliyun OSS (no MinIO). Optional:
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile minio up --build
+# Default object store: Aliyun OSS.
 #
 # Exposes service ports to localhost for local development and debugging.
 # Not used in production - see docker-compose.prod.yml instead.
@@ -19,17 +18,9 @@ services:
     ports:
       - "6379:6379"
 
-  # Requires: docker compose --profile minio -f docker-compose.yml -f docker-compose.dev.yml up
-  minio:
-    ports:
-      - "9000:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-
   api:
     ports:
       - "8000:8000"
-    environment:
-      MINIO_PUBLIC_ENDPOINT: localhost:9000
 
   tiler:
     ports:
