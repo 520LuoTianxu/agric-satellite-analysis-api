@@ -274,7 +274,11 @@ def publish_api_task(
         enqueue_work_item_sync = None  # type: ignore
         work_item_idempotency_key = None  # type: ignore
 
-    if should_enqueue_work_items() and type in CLAIMABLE_TYPES and enqueue_work_item_sync:
+    if (
+        should_enqueue_work_items()
+        and type in CLAIMABLE_TYPES
+        and enqueue_work_item_sync
+    ):
         try:
             idem = work_item_idempotency_key(type, task_id=tid, extras=extras)
             payload = {

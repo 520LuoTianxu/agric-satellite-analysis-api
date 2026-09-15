@@ -147,9 +147,7 @@ def build_land_parcel_upsert_params(
 
     geom = shape(boundary_geojson)
     if geom.geom_type not in ("Polygon", "MultiPolygon"):
-        raise ValueError(
-            f"boundary must be Polygon/MultiPolygon, got {geom.geom_type}"
-        )
+        raise ValueError(f"boundary must be Polygon/MultiPolygon, got {geom.geom_type}")
     if geom.is_empty:
         raise ValueError("boundary geometry is empty")
 

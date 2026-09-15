@@ -372,7 +372,6 @@ def _normalize_soil_rows(value: Any) -> list[dict[str, str]]:
     return rows
 
 
-
 def _ai_reference_light_from_score(score: float) -> str:
     if score >= 70:
         return "绿"

@@ -122,7 +122,7 @@ if __name__ == "__main__":
 
 class CdfinanceSiteAdmissionHeaderTests(unittest.IsolatedAsyncioTestCase):
     async def test_hr_base_id_override_sent_in_headers(self):
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import patch
 
         from app.core import cdfinance_site_admission as mod
 

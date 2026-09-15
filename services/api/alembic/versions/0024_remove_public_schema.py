@@ -50,9 +50,7 @@ def _extension_info(
     return str(row[0]), str(row[1]), bool(row[2])
 
 
-def _installed_in_schema(
-    bind: sa.engine.Connection, schema: str
-) -> list[str]:
+def _installed_in_schema(bind: sa.engine.Connection, schema: str) -> list[str]:
     rows = bind.execute(
         sa.text(
             """
@@ -105,16 +103,15 @@ def _update_extension_in_place(
         raise RuntimeError(f"unsafe extension version returned: {dummy_version!r}")
     quoted_name = _quote(bind, extension_name)
     quoted_version = _quote(bind, dummy_version)
-    bind.execute(
-        sa.text(
-            f"ALTER EXTENSION {quoted_name} UPDATE TO {quoted_version}"
-        )
-    )
+    bind.execute(sa.text(f"ALTER EXTENSION {quoted_name} UPDATE TO {quoted_version}"))
     bind.execute(sa.text(f"ALTER EXTENSION {quoted_name} UPDATE"))
 
 
 def _move_postgis_extension(
-    bind: sa.engine.Connection, extension_name: str, source_schema: str, target_schema: str
+    bind: sa.engine.Connection,
+    extension_name: str,
+    source_schema: str,
+    target_schema: str,
 ) -> None:
     info = _extension_info(bind, extension_name)
     if info is None or info[0] == target_schema:
@@ -140,8 +137,7 @@ def _move_postgis_extension(
     quoted_name = _quote(bind, extension_name)
     bind.execute(
         sa.text(
-            f"ALTER EXTENSION {quoted_name} SET SCHEMA "
-            f"{_quote(bind, target_schema)}"
+            f"ALTER EXTENSION {quoted_name} SET SCHEMA {_quote(bind, target_schema)}"
         )
     )
     _update_extension_in_place(bind, extension_name, current_version)
@@ -156,7 +152,10 @@ def _move_postgis_extension(
 
 
 def _move_relocatable_extension(
-    bind: sa.engine.Connection, extension_name: str, source_schema: str, target_schema: str
+    bind: sa.engine.Connection,
+    extension_name: str,
+    source_schema: str,
+    target_schema: str,
 ) -> None:
     info = _extension_info(bind, extension_name)
     if info is None or info[0] == target_schema:
@@ -189,8 +188,12 @@ def _move_extensions(
         if extension_name == POSTGIS_EXTENSION or extension_name.startswith("postgis_"):
             _move_postgis_extension(bind, extension_name, source_schema, target_schema)
     for extension_name in installed:
-        if extension_name != POSTGIS_EXTENSION and not extension_name.startswith("postgis_"):
-            _move_relocatable_extension(bind, extension_name, source_schema, target_schema)
+        if extension_name != POSTGIS_EXTENSION and not extension_name.startswith(
+            "postgis_"
+        ):
+            _move_relocatable_extension(
+                bind, extension_name, source_schema, target_schema
+            )
 
 
 def upgrade() -> None:

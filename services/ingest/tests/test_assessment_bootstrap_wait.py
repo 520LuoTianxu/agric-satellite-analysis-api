@@ -14,36 +14,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # Lightweight stubs so importing assessment_report does not need full stack.
-sys.modules.setdefault(
-    "app.core.database_sync", SimpleNamespace(SyncSession=MagicMock())
-)
-sys.modules.setdefault("app.core.logging", SimpleNamespace(logger=MagicMock()))
-sys.modules.setdefault(
-    "app.tasks.storage_tasks",
-    SimpleNamespace(upload_file_via_storage=MagicMock()),
-)
-sys.modules.setdefault(
-    "app.models.tables",
-    SimpleNamespace(Job=object, SoilProfile=object, WeatherDaily=object, Field=object),
-)
-sys.modules.setdefault(
-    "app.reports.land_assessment.scorecard_view",
-    SimpleNamespace(scorecard_public_view=lambda x: x),
-)
-sys.modules.setdefault(
-    "app.reports.land_assessment.service",
-    SimpleNamespace(generate_assessment_pdf=MagicMock()),
-)
-sys.modules.setdefault("app.worker", SimpleNamespace(celery_app=MagicMock()))
-sys.modules.setdefault(
-    "sqlalchemy", SimpleNamespace(func=MagicMock(), select=MagicMock())
-)
-sys.modules.setdefault(
-    "sqlalchemy.orm.attributes",
-    SimpleNamespace(flag_modified=MagicMock()),
-)
+_TEST_STUBS = {
+    "app.core.database_sync": SimpleNamespace(SyncSession=MagicMock()),
+    "app.core.logging": SimpleNamespace(logger=MagicMock()),
+    "app.tasks.storage_tasks": SimpleNamespace(upload_file_via_storage=MagicMock()),
+    "app.models.tables": SimpleNamespace(
+        Job=object, SoilProfile=object, WeatherDaily=object, Field=object
+    ),
+    "app.reports.land_assessment.scorecard_view": SimpleNamespace(
+        scorecard_public_view=lambda x: x
+    ),
+    "app.reports.land_assessment.service": SimpleNamespace(
+        generate_assessment_pdf=MagicMock()
+    ),
+    "app.worker": SimpleNamespace(celery_app=MagicMock()),
+    "sqlalchemy": SimpleNamespace(func=MagicMock(), select=MagicMock()),
+    "sqlalchemy.orm.attributes": SimpleNamespace(flag_modified=MagicMock()),
+}
 
-from app.tasks import assessment_report as ar  # noqa: E402
+# 只在导入被测模块时注入轻量替身，导入完成后立即恢复 sys.modules，避免污染其他测试。
+with patch.dict(sys.modules, _TEST_STUBS):
+    from app.tasks import assessment_report as ar  # noqa: E402
 
 
 class BootstrapPullsReadyTests(unittest.TestCase):
@@ -143,7 +134,6 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         self.assertTrue(status["rs_coverage_ok"])
         self.assertEqual(status["active_rs_jobs"], 26)
 
-
     def test_require_rs_coverage_blocks_empty_coverage(self) -> None:
         session = MagicMock()
         with (
@@ -161,7 +151,8 @@ class BootstrapPullsReadyTests(unittest.TestCase):
                 date_to="2024-12-31",
                 wait_celery_ids=["c1"],
                 wave_cutoff=datetime.now(timezone.utc),
-                started_at=datetime.now(timezone.utc) - __import__("datetime").timedelta(seconds=60),
+                started_at=datetime.now(timezone.utc)
+                - __import__("datetime").timedelta(seconds=60),
                 min_wait_seconds=45,
                 require_rs_coverage=True,
             )

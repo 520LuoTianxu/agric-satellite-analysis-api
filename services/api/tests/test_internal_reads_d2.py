@@ -55,9 +55,7 @@ class JobPatchMergeTests(unittest.TestCase):
             },
         )
 
-        out = asyncio.get_event_loop().run_until_complete(
-            jobs_mod.patch_job(job.id, body, None, db)
-        )
+        out = asyncio.run(jobs_mod.patch_job(job.id, body, None, db))
         self.assertEqual(job.status, "running")
         self.assertIsNotNone(job.started_at)
         steps = job.progress_json["steps"]
@@ -79,7 +77,7 @@ class ResolveBothIdsTests(unittest.TestCase):
         result.scalar_one_or_none = MagicMock(return_value=field)
         db.execute = AsyncMock(return_value=result)
 
-        out = asyncio.get_event_loop().run_until_complete(
+        out = asyncio.run(
             fields_mod.resolve_field(
                 None,
                 db,
@@ -90,7 +88,6 @@ class ResolveBothIdsTests(unittest.TestCase):
         )
         self.assertEqual(out.field_id, str(field.id))
         self.assertEqual(out.land_id, "L1")
-
 
 
 class EnsureAgriLandTagTests(unittest.TestCase):
@@ -124,9 +121,7 @@ class PatchFieldTagsTests(unittest.TestCase):
         db.refresh = AsyncMock()
 
         body = fields_mod.FieldTagsPatch(land_id="25107", group_id="7694")
-        out = asyncio.get_event_loop().run_until_complete(
-            fields_mod.patch_field_tags(str(field.id), body, None, db)
-        )
+        out = asyncio.run(fields_mod.patch_field_tags(str(field.id), body, None, db))
         self.assertEqual(out.land_id, "25107")
         self.assertIn("agri:25107", out.tags or [])
         self.assertIn("cdfinance_group:7694", out.tags or [])

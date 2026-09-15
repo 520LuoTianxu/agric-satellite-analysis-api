@@ -142,9 +142,7 @@ async def create_field(
     # Provision agric_satellite.land_parcels so RS/UI can resolve the parcel later.
     # Bootstrap still skips classic COG indices (user triggers 补数 separately).
     if agri_field and agri_land_id:
-        await ensure_agri_land_parcel_for_field(
-            db, field, land_id=str(agri_land_id)
-        )
+        await ensure_agri_land_parcel_for_field(db, field, land_id=str(agri_land_id))
 
     # Sentinel job only for classic COG index backfill progress tracking.
     # Agri fields skip RS backfill (truth = agric_satellite.parcel_scene_products).
@@ -271,9 +269,7 @@ async def update_field(
     # Re-upsert when geom changes or tags change on an agri-tagged field.
     # Name-only edits do not touch land_parcels / do not enqueue RS.
     if new_land_id and (geom_changed or tags_changed):
-        await ensure_agri_land_parcel_for_field(
-            db, field, land_id=str(new_land_id)
-        )
+        await ensure_agri_land_parcel_for_field(db, field, land_id=str(new_land_id))
 
     return _field_to_out(field)
 

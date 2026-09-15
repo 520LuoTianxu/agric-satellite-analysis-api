@@ -109,8 +109,7 @@ def scorecard_public_view(
         if ref_score is not None:
             ref_score = max(0.0, min(100.0, round(ref_score, 1)))
             disclaimer = (
-                ref_src.get("ai_reference_disclaimer")
-                or "AI参考分 · 不可作为准入结论"
+                ref_src.get("ai_reference_disclaimer") or "AI参考分 · 不可作为准入结论"
             )
             out["ai_reference"] = {
                 "score": ref_score,

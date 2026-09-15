@@ -866,8 +866,6 @@ def load_field_bundle(
     }
 
 
-
-
 def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     """Load JSON/CSV fixtures (legacy report-hebei style) for CLI offline runs."""
     data_dir = Path(data_dir)

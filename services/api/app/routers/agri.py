@@ -349,7 +349,10 @@ async def list_project_areas(
 
     total = (
         await db.execute(
-            text(f"SELECT count(*) FROM agric_satellite.virtual_project_areas WHERE {wh}"), params
+            text(
+                f"SELECT count(*) FROM agric_satellite.virtual_project_areas WHERE {wh}"
+            ),
+            params,
         )
     ).scalar() or 0
 
@@ -420,7 +423,9 @@ async def list_project_area_lands(
     await _agri_ready(db)
     exists = (
         await db.execute(
-            text("SELECT 1 FROM agric_satellite.virtual_project_areas WHERE tile_id = :tile_id"),
+            text(
+                "SELECT 1 FROM agric_satellite.virtual_project_areas WHERE tile_id = :tile_id"
+            ),
             {"tile_id": tile_id},
         )
     ).scalar()
@@ -544,7 +549,10 @@ async def list_land_scenes(
 
     total = (
         await db.execute(
-            text(f"SELECT count(*) FROM agric_satellite.parcel_scene_products WHERE {wh}"), params
+            text(
+                f"SELECT count(*) FROM agric_satellite.parcel_scene_products WHERE {wh}"
+            ),
+            params,
         )
     ).scalar() or 0
 
@@ -729,7 +737,9 @@ async def harvest_detect_for_land(
         await _agri_ready(db)
         exists = (
             await db.execute(
-                text("SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"),
+                text(
+                    "SELECT 1 FROM agric_satellite.land_parcels WHERE land_id = :land_id"
+                ),
                 {"land_id": land_id},
             )
         ).scalar()

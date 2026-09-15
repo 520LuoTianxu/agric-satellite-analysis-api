@@ -614,8 +614,7 @@ def render_pdf(
             ai_ref_score_f = None
         if ai_ref_score_f is not None:
             disclaimer = (
-                ai.get("ai_reference_disclaimer")
-                or "AI参考分 · 不可作为准入结论"
+                ai.get("ai_reference_disclaimer") or "AI参考分 · 不可作为准入结论"
             )
             story.append(p("AI 参考分（独立于程序综合分）", "center"))
             story.append(Spacer(1, 1 * mm))

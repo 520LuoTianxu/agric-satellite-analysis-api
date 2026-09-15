@@ -6,7 +6,7 @@ import asyncio
 import unittest
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.services import work_items as wi
 
@@ -49,7 +49,7 @@ class CompleteApplyTests(unittest.TestCase):
             "openfarm_common.result_apply.apply_complete_result",
             return_value={"domain": {"assessment_report": {"job_updated": True}}},
         ) as apply_mock:
-            out = asyncio.get_event_loop().run_until_complete(
+            out = asyncio.run(
                 wi.complete_work_item(db, item.id, result=result, worker_id="w1")
             )
 
@@ -71,7 +71,7 @@ class CompleteApplyTests(unittest.TestCase):
             "openfarm_common.result_apply.apply_complete_result",
             return_value={"skipped": True, "reason": "dispatch_ack"},
         ) as apply_mock:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 wi.complete_work_item(
                     db,
                     item.id,

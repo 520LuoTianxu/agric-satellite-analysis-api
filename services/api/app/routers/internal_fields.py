@@ -211,7 +211,6 @@ async def field_geom(
     )
 
 
-
 class FieldTagsPatch(BaseModel):
     """Set agri / cdfinance tags; upserts agric_satellite.land_parcels when land_id + geom."""
 

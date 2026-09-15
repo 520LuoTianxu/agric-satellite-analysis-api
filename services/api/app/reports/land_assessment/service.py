@@ -421,9 +421,15 @@ def generate_assessment_pdf(
         "light": ov["light"],
         "one_liner": ov.get("one_liner"),
         # Dual-track: program overall above; AI reference never replaces it.
-        "ai_reference_score": ai.get("ai_reference_score") if isinstance(ai, dict) else None,
-        "ai_reference_grade": ai.get("ai_reference_grade") if isinstance(ai, dict) else None,
-        "ai_reference_light": ai.get("ai_reference_light") if isinstance(ai, dict) else None,
+        "ai_reference_score": ai.get("ai_reference_score")
+        if isinstance(ai, dict)
+        else None,
+        "ai_reference_grade": ai.get("ai_reference_grade")
+        if isinstance(ai, dict)
+        else None,
+        "ai_reference_light": ai.get("ai_reference_light")
+        if isinstance(ai, dict)
+        else None,
         "ai_reference_rationale": (
             ai.get("ai_reference_rationale") if isinstance(ai, dict) else None
         ),
