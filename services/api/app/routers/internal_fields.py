@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid as _uuid
+from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -269,8 +270,9 @@ async def data_readiness(
     field_id: str,
     _: InternalAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
-    date_from: str | None = Query(default=None),
-    date_to: str | None = Query(default=None),
+    # 让 FastAPI 先完成 ISO 日期校验并传递 date，避免 asyncpg 将字符串绑定到 DATE 参数时失败。
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
 ):
     """Weather row count + soil profile + agri S2/S1 coverage for bootstrap wait."""
     fid = _parse_field_uuid(field_id)
@@ -287,15 +289,13 @@ async def data_readiness(
     land_id = _tag_land_id(field_row.tags_json)
 
     weather_params: dict[str, Any] = {"fid": str(fid)}
-    weather_sql = (
-        "SELECT count(*)::int AS n FROM weather_daily WHERE field_id = CAST(:fid AS uuid)"
-    )
+    weather_sql = "SELECT count(*)::int AS n FROM weather_daily WHERE field_id = CAST(:fid AS uuid)"
     if date_from:
         weather_sql += " AND date >= CAST(:d0 AS date)"
-        weather_params["d0"] = date_from[:10]
+        weather_params["d0"] = date_from
     if date_to:
         weather_sql += " AND date <= CAST(:d1 AS date)"
-        weather_params["d1"] = date_to[:10]
+        weather_params["d1"] = date_to
     weather_rows = int(
         (await db.execute(text(weather_sql), weather_params)).scalar() or 0
     )
@@ -315,39 +315,36 @@ async def data_readiness(
     s1_dates = 0
     span_days = None
     if land_id and date_from and date_to:
-        try:
-            from datetime import date as _date
-
-            d0 = _date.fromisoformat(date_from[:10])
-            d1 = _date.fromisoformat(date_to[:10])
-            if d1 >= d0:
-                span_days = (d1 - d0).days + 1
-                cov = (
+        if date_to >= date_from:
+            span_days = (date_to - date_from).days + 1
+            cov = (
+                (
                     await db.execute(
                         text(
                             """
-                            SELECT
-                              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
-                              COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
-                            FROM agri.parcel_scene_products
-                            WHERE land_id = :land_id
-                              AND date >= CAST(:d0 AS date)
-                              AND date <= CAST(:d1 AS date)
-                              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
-                              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
-                            """
+                        SELECT
+                          COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
+                          COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
+                        FROM agri.parcel_scene_products
+                        WHERE land_id = :land_id
+                          AND date >= CAST(:d0 AS date)
+                          AND date <= CAST(:d1 AS date)
+                          AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
+                          AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+                        """
                         ),
                         {
                             "land_id": land_id,
-                            "d0": date_from[:10],
-                            "d1": date_to[:10],
+                            "d0": date_from,
+                            "d1": date_to,
                         },
                     )
-                ).mappings().first()
-                s2_dates = int((cov or {}).get("s2_dates") or 0)
-                s1_dates = int((cov or {}).get("s1_dates") or 0)
-        except ValueError:
-            pass
+                )
+                .mappings()
+                .first()
+            )
+            s2_dates = int((cov or {}).get("s2_dates") or 0)
+            s1_dates = int((cov or {}).get("s1_dates") or 0)
 
     return DataReadinessOut(
         field_id=str(fid),
