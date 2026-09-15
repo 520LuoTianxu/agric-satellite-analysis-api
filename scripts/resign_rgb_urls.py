@@ -9,7 +9,7 @@ url = (os.environ.get("DATABASE_URL_SYNC") or os.environ["DATABASE_URL"]).replac
     "postgresql+asyncpg://", "postgresql://"
 ).replace("postgresql+psycopg://", "postgresql://")
 eng = create_engine(
-    url, connect_args={"options": "-csearch_path=agric_satellite,public"}
+    url, connect_args={"options": "-csearch_path=agric_satellite"}
 )
 st = get_storage()
 print("backend", st.backend, "expire", signed_get_expire_sec(years=20))

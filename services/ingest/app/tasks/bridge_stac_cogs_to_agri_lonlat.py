@@ -613,7 +613,7 @@ def bridge_field_stac_to_agri(
     bucket = storage.bucket
     # 该 CLI 直接创建 psycopg2 连接，必须显式对齐应用连接的业务 schema。
     conn = psycopg2.connect(
-        _dsn(), options="-csearch_path=agric_satellite,public"
+        _dsn(), options="-csearch_path=agric_satellite"
     )
     conn.autocommit = False
 

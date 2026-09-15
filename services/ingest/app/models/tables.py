@@ -28,7 +28,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
-    # 统一应用业务表的命名空间；public 仅保留 PostGIS 和数据库系统对象。
+    # 统一应用表与扩展对象的命名空间，代码不再依赖 PostgreSQL 默认 public schema。
     metadata = MetaData(schema="agric_satellite")
 
 

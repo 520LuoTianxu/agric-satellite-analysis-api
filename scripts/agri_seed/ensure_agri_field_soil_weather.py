@@ -44,7 +44,7 @@ def psql(sql: str) -> str:
             "exec",
             "-i",
             "-e",
-            "PGOPTIONS=-csearch_path=agric_satellite,public",
+            "PGOPTIONS=-csearch_path=agric_satellite",
             DB_CONTAINER,
             "psql",
             "-U",

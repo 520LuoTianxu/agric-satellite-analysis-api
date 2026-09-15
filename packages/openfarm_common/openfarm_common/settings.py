@@ -28,7 +28,7 @@ class CommonSettings(BaseSettings):
     # Sync DB (ingest Celery tasks)
     database_url: str = "postgresql+asyncpg://openfarm:openfarm_dev@db:5432/openfarm"
     database_url_sync: str = ""
-    # All application tables share this schema; public is reserved for extensions.
+    # 数据库只保留 agric_satellite；应用表和扩展对象均在此 schema。
     database_schema: str = "agric_satellite"
 
     # Object storage backend: oss | minio

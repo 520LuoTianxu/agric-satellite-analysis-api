@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from openfarm_common.settings import settings, sync_database_url
@@ -25,10 +25,10 @@ sync_engine = create_engine(
     max_overflow=_max_overflow,
     pool_timeout=60,
     pool_recycle=_pool_recycle,
-    # 任务 SQL 同时包含 ORM 和原生查询，统一设置搜索路径避免落到 public。
+    # 任务 SQL 同时包含 ORM 和原生查询，统一设置唯一业务搜索路径。
     connect_args={
         "application_name": _app_name,
-        "options": f"-csearch_path={settings.database_schema},public",
+        "options": f"-csearch_path={settings.database_schema}",
     },
 )
 SyncSession = sessionmaker(sync_engine, class_=Session, expire_on_commit=False)

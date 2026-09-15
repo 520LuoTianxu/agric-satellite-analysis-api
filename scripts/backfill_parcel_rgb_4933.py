@@ -90,7 +90,7 @@ def asset_href(item, *names: str) -> str | None:
 
 def main() -> int:
     eng = create_engine(
-        db_url(), connect_args={"options": "-csearch_path=agric_satellite,public"}
+        db_url(), connect_args={"options": "-csearch_path=agric_satellite"}
     )
     storage = get_storage()
     with eng.connect() as conn:

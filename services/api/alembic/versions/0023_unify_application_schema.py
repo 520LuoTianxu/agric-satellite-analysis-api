@@ -1,9 +1,9 @@
 """Move all application tables into the single ``agric_satellite`` schema.
 
-PostGIS-owned objects (for example ``public.spatial_ref_sys``) and the
-Alembic version table intentionally remain in ``public``.  The migration only
-changes PostgreSQL namespaces, so table data, indexes, constraints, and OIDs
-are preserved without a bulk copy.
+At this step PostGIS-owned objects and the Alembic version table remain in
+``public``; revision 0024 completes their move and removes that schema.  This
+migration only changes PostgreSQL namespaces, so table data, indexes,
+constraints, and OIDs are preserved without a bulk copy.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ APP_SCHEMA = "agric_satellite"
 LEGACY_AGRI_SCHEMA = "agri"
 
 # OpenFarm's former public application tables.  Keep this allowlist explicit
-# so PostGIS metadata in public can never be moved by accident.
+# so PostGIS metadata in public can never be moved by accident at this step.
 PUBLIC_APPLICATION_TABLES = (
     "farms",
     "fields",

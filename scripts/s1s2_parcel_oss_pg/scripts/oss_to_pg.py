@@ -135,7 +135,7 @@ def pg_connect():
         user=os.environ["PGUSER"],
         password=os.environ.get("PGPASSWORD", ""),
         dbname=os.environ.get("PGDATABASE", "postgres"),
-        options="-csearch_path=agric_satellite,public",
+        options="-csearch_path=agric_satellite",
     )
     return psycopg.connect(**kwargs)
 

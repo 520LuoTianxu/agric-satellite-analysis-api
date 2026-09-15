@@ -19,7 +19,7 @@ sync_engine = create_engine(
     echo=False,
     pool_pre_ping=True,
     # Celery 任务包含未限定 SQL；每个连接都显式使用统一业务 schema。
-    connect_args={"options": f"-csearch_path={_database_schema},public"},
+    connect_args={"options": f"-csearch_path={_database_schema}"},
 )
 SyncSession = sessionmaker(sync_engine, class_=Session, expire_on_commit=False)
 

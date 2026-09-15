@@ -11,7 +11,7 @@ engine = create_async_engine(
     # 原生 SQL 仍有未限定表名；固定搜索路径保证其与 ORM 指向同一业务 schema。
     connect_args={
         "server_settings": {
-            "search_path": f"{settings.database_schema},public",
+            "search_path": settings.database_schema,
         }
     },
 )

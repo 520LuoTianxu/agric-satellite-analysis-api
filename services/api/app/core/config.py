@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://openfarm:openfarm_dev@db:5432/openfarm"
-    # Application tables live in one schema; public is reserved for extensions/system objects.
+    # 数据库只保留 agric_satellite；应用表、扩展和 Alembic 版本表均在此 schema。
     database_schema: str = "agric_satellite"
 
     # Redis

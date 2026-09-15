@@ -19,13 +19,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # 新数据库从第一版开始就使用唯一业务 schema，避免后续再产生 public 业务表。
+    # 新数据库从第一版开始就只使用 agric_satellite，避免后续再产生 public 对象。
     op.execute("CREATE SCHEMA IF NOT EXISTS agric_satellite")
-    op.execute("SET search_path TO agric_satellite, public")
+    op.execute("SET LOCAL search_path TO agric_satellite")
 
     # ── Extensions ────────────────────────────────────────────────────
-    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public')
-    op.execute('CREATE EXTENSION IF NOT EXISTS "postgis" WITH SCHEMA public')
+    # 扩展与应用表放在同一 schema，彻底移除对 PostgreSQL 默认 public schema 的依赖。
+    op.execute(
+        'CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch" WITH SCHEMA agric_satellite'
+    )
+    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA agric_satellite')
+    op.execute('CREATE EXTENSION IF NOT EXISTS "postgis" WITH SCHEMA agric_satellite')
 
     # ── updated_at trigger function ───────────────────────────────────
     op.execute("""
@@ -552,7 +556,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("SET search_path TO agric_satellite, public")
+    op.execute("SET LOCAL search_path TO agric_satellite")
     op.drop_table("share_links")
     op.drop_table("audit_events")
     op.drop_table("jobs")

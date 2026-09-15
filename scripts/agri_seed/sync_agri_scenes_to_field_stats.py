@@ -190,7 +190,7 @@ def run_via_docker(sql: str, container: str) -> int:
         "exec",
         "-i",
         "-e",
-        "PGOPTIONS=-csearch_path=agric_satellite,public",
+        "PGOPTIONS=-csearch_path=agric_satellite",
         container,
         "psql",
         "-U",
@@ -206,7 +206,7 @@ def run_via_docker(sql: str, container: str) -> int:
         input=sql,
         text=True,
         # SQL 同时写入 OpenFarm 监控表和遥感表，统一走业务 schema。
-        env={**os.environ, "PGOPTIONS": "-csearch_path=agric_satellite,public"},
+        env={**os.environ, "PGOPTIONS": "-csearch_path=agric_satellite"},
     )
     return proc.returncode
 
@@ -239,7 +239,7 @@ def main() -> int:
     password = os.environ.get("POSTGRES_PASSWORD", "openfarm_dev")
     env = os.environ.copy()
     env["PGPASSWORD"] = password
-    env["PGOPTIONS"] = "-csearch_path=agric_satellite,public"
+    env["PGOPTIONS"] = "-csearch_path=agric_satellite"
     cmd = [
         "psql",
         "-h",

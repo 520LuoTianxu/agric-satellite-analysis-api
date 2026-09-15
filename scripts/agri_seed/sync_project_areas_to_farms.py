@@ -40,7 +40,7 @@ def connect():
         user=os.environ["PGUSER"],
         password=os.environ.get("PGPASSWORD", ""),
         dbname=os.environ.get("PGDATABASE", "openfarm"),
-        options="-csearch_path=agric_satellite,public",
+        options="-csearch_path=agric_satellite",
     )
 
 
