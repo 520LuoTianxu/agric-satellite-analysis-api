@@ -17,8 +17,6 @@ ENV PYTHONUNBUFFERED=1
 
 COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/api/pyproject.toml .
-COPY services/api/alembic.ini .
-COPY services/api/alembic ./alembic
 COPY services/api/app ./app
 
 RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
@@ -28,5 +26,5 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
     && chown -R appuser:appgroup /app
 USER appuser
 
-# 数据库结构由外部流程维护，容器启动只运行 API，不触发历史迁移中的空间操作。
+# 镜像不包含数据库迁移工具。容器启动只运行 API；结构变更用 scripts/*.sql 在容器外执行。
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

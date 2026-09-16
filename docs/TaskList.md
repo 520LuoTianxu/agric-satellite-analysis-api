@@ -25,7 +25,7 @@
 | # | Task | Status | Notes |
 |---|------|--------|-------|
 | 0.7 | Postgres + PostGIS setup | [x] | `postgis/postgis:16-3.4` |
-| 0.8 | Alembic migration framework | [x] | Auto-runs on API startup |
+| 0.8 | Alembic migration framework | [x] | Historical; API startup no longer runs schema changes |
 | 0.9 | Initial schema migration - all 13 tables | [x] | `0001_initial_schema.py` |
 | 0.10 | `users` table (id, email, name, avatar_url) | [x] | |
 | 0.11 | `orgs` table (id, name, created_by) | [x] | |
@@ -978,8 +978,8 @@
 | 21.5 | Add `SoilProfile` model to `services/api/app/models/tables.py` - `id`, `org_id` (FK orgs), `field_id` (FK fields), `source` (varchar 20), `source_resolution_m`, `fetched_at`, `metadata_json` (JSONB), `created_at` | [x] | UUID PK, `server_default=uuid_generate_v4()`, follows existing table pattern |
 | 21.6 | Add `SoilLayer` model to `tables.py` - `id`, `profile_id` (FK soil_profiles, CASCADE), `depth_top_cm`, `depth_bottom_cm`, baseline properties (sand/silt/clay/ph/soc/bd/cec/nitrogen/cfvo as REAL), water retention (fc/wp/awc/ksat as REAL), `texture_class` (varchar 20), uncertainty fields (sand/clay/ph/soc Q05/Q95 as REAL), UNIQUE(profile_id, depth_top_cm) | [x] | 6 rows per profile (6 GlobalSoilMap depths); 26 columns |
 | 21.7 | Add `SoilFieldSummary` model to `tables.py` - `id`, `field_id` (FK fields, UNIQUE), `profile_id` (FK soil_profiles), aggregated properties (dominant_texture, avg_ph, total_soc_stock_t_ha, rootzone_awc_mm, drainage_class), risk scores (acidification/compaction/leaching/rooting as REAL 0–1), `data_quality_score`, `computed_at` | [x] | One row per field, recomputed on profile update |
-| 21.8 | Generate Alembic migration `0011_add_soil_tables.py` - `cd services/api && alembic revision --autogenerate -m "add soil tables"` | [x] | Manual migration to avoid PostGIS tiger table detection |
-| 21.9 | Run migration - `alembic upgrade head` | [x] | Auto-runs on API container startup |
+| 21.8 | Generate Alembic migration `0011_add_soil_tables.py` - `cd services/api && alembic revision --autogenerate -m "add soil tables"` | [x] | Historical; schema changes now use `scripts/*.sql` |
+| 21.9 | Run migration - `alembic upgrade head` | [x] | Historical; API startup no longer runs schema changes |
 | 21.10 | Add FK indexes on `soil_layers.profile_id`, `soil_profiles.field_id`, `soil_profiles.org_id` | [x] | Included in migration 0011 |
 
 **Verify:** `docker compose exec db psql -U openfarm -c "\dt soil_*"` shows 3 tables; `\d soil_layers` shows all columns + unique constraint

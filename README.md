@@ -211,7 +211,8 @@ npm run build        # production build
 ```bash
 cd services/api
 pip install -e ".[dev]"
-alembic upgrade head
+# Schema changes are SQL files under scripts/, never run on API startup.
+psql "$DATABASE_URL_SYNC" -v ON_ERROR_STOP=1 -f ../../scripts/convert_postgis_geometry_to_jsonb.sql
 uvicorn app.main:app --reload --port 8000
 
 ruff check .

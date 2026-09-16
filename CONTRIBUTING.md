@@ -35,7 +35,8 @@ pip install -e packages/agric_satellite_analysis_common
 pip install -e "services/api[dev]"
 
 cd services/api
-alembic upgrade head
+# Schema changes are SQL files under scripts/, never run on API startup.
+psql "$DATABASE_URL_SYNC" -v ON_ERROR_STOP=1 -f ../../scripts/convert_postgis_geometry_to_jsonb.sql
 ruff check .
 ruff format --check .
 python -m unittest discover -s tests -v

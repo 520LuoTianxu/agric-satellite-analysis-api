@@ -1,6 +1,6 @@
 # agric-satellite-analysis backend
 
-This repository owns the FastAPI API, Celery workers, database migrations,
+This repository owns the FastAPI API, Celery workers, SQL schema scripts,
 Docker Compose stack and deployment scripts for agric-satellite-analysis. The
 Next.js application is maintained in the sibling repository
 `agric-satellite-analysis-web`.
@@ -25,7 +25,8 @@ repository.
 ```bash
 cd services/api
 pip install -e "[dev]"
-alembic upgrade head
+# Schema changes are SQL files under scripts/, never run on API startup.
+psql "$DATABASE_URL_SYNC" -v ON_ERROR_STOP=1 -f ../../scripts/convert_postgis_geometry_to_jsonb.sql
 uvicorn app.main:app --reload --port 8000
 ruff check .
 ruff format --check .
