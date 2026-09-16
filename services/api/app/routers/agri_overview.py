@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections import defaultdict
 from urllib.parse import quote
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
@@ -21,7 +22,7 @@ from app.core.agri_classify import (
     WEAK_NDVI_LT,
     classify_drought,
     classify_drought_from_pixels,
-    classify_flood,
+    classify_flood_series,
     is_drought_season,
     is_flood_alert,
     is_open_water_flood,
@@ -31,6 +32,7 @@ from app.core.agri_classify import (
 from app.core.crops import get_crop_season, normalize_crop_key
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
+from app.models.tables import Job
 from app.schemas.agri import (
     OverviewChildOut,
     OverviewDroughtCounts,
@@ -42,6 +44,13 @@ from app.schemas.agri import (
     OverviewWeakGrowth,
     OverviewWeakParcelOut,
     OverviewWeakParcelsOut,
+)
+from app.services.overview_daily import (
+    business_today,
+    read_daily_snapshot,
+    read_daily_history,
+    run_id_for,
+    run_summary,
 )
 
 router = APIRouter(tags=["agri-overview"])
@@ -161,7 +170,7 @@ def _region_where(
 ) -> str:
     """Build WHERE for parcels in the selected region (code preferred, else exact name)."""
     if level == "country":
-        return "TRUE"
+        return "p.deleted_at IS NULL"
     code_col = _LEVEL_CODE_COL[level]
     name_col = _LEVEL_NAME_COL[level]
     clauses: list[str] = []
@@ -184,8 +193,8 @@ def _region_where(
             detail=f"level={level} requires code or name",
         )
     if len(clauses) == 1:
-        return clauses[0]
-    return " AND ".join(clauses)
+        return f"({clauses[0]}) AND p.deleted_at IS NULL"
+    return " AND ".join(clauses + ["p.deleted_at IS NULL"])
 
 
 async def _resolve_region_label(
@@ -353,6 +362,7 @@ async def _compute_live_stats(
     to_d: date,
     crop: str | None,
     allow_pixels: bool,
+    parcel_facts: dict[str, dict[str, Any]] | None = None,
 ) -> OverviewStatsOut:
     """Compute live overview stats; pixel drought when allow_pixels and data exists."""
     crop_key = normalize_crop_key(crop) if crop else None
@@ -387,6 +397,18 @@ async def _compute_live_stats(
     area_by_land = {r.land_id: float(r.area_mu or 0) for r in parcels}
     total_area = sum(area_by_land.values())
     total_count = len(parcels)
+
+    # 每日批次复用同一次分类构建各级快照，保留当时区划与面积，避免历史受地块修改影响。
+    if parcel_facts is not None:
+        for row in parcels:
+            parcel_facts[row.land_id] = {
+                **dict(row._mapping),
+                "drought": "unknown",
+                "flood": "unknown",
+                "weak": False,
+                "s1_date": None,
+                "s2_date": None,
+            }
 
     drought_counts = {"severe": 0, "moderate": 0, "mild": 0, "normal": 0, "unknown": 0}
     drought_area = {k: 0.0 for k in drought_counts}
@@ -457,7 +479,7 @@ async def _compute_live_stats(
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
                       AND {official_s2_sql("s")}
-                    ORDER BY s.land_id, s.date DESC
+                    ORDER BY s.land_id, s.date DESC, s.scene_id
                     """
                 ),
                 params,
@@ -492,6 +514,8 @@ async def _compute_live_stats(
             if cls is None:
                 continue
             drought_counts[cls] += 1
+            if parcel_facts is not None:
+                parcel_facts[r.land_id].update(drought=cls, s2_date=date_str)
             drought_area[cls] += area_by_land.get(r.land_id, 0.0)
             ck = land_to_child.get(r.land_id)
             if ck and ck in child_agg:
@@ -503,33 +527,57 @@ async def _compute_live_stats(
         if allow_pixels and pixels_parcels > 0:
             drought_source = "pixels"
 
-        # Latest S1 per parcel (scene averages; flood tiers)
+        # 洪涝必须比较近期历史基线；只取最新单景会永远只能给出watch，不能确认洪涝。
         s1_rows = (
             await db.execute(
                 text(
                     f"""
-                    SELECT DISTINCT ON (s.land_id)
-                           s.land_id, s.vv_avg, s.vh_avg
+                    SELECT s.land_id, s.date, s.vv_avg, s.vh_avg, s.scene_id,
+                           s.pixel_data->>'relative_orbit' AS relative_orbit
                     FROM agric_satellite.parcel_scene_products s
                     JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {region_wh}
                       AND s.sensor = 'S1'
                       AND s.date >= :from_d AND s.date <= :to_d
-                    ORDER BY s.land_id, s.date DESC
+                    ORDER BY s.land_id, s.date, s.scene_id
                     """
                 ),
                 params,
             )
         ).fetchall()
 
-        for r in s1_rows:
-            cls = classify_flood(r.vv_avg, r.vh_avg)
+        s1_by_land = defaultdict(list)
+        for row in s1_rows:
+            s1_by_land[row.land_id].append(
+                {
+                    "date": str(row.date)[:10],
+                    "vv": row.vv_avg,
+                    "vh": row.vh_avg,
+                    "scene_id": getattr(row, "scene_id", None),
+                    "relative_orbit": getattr(row, "relative_orbit", None),
+                }
+            )
+        ranks = {None: -1, "dry": 0, "watch": 1, "flood_moderate": 2, "flood_severe": 3}
+        for land_id, observations in s1_by_land.items():
+            classified = [
+                (day, cls)
+                for day, cls in classify_flood_series(observations)
+                if cls is not None
+            ]
+            if not classified:
+                continue
+            # 同日多轨道景使用最高关注等级；基线和待判景都限制在统计日之前，避免未来观测泄漏。
+            scene_date, cls = max(
+                classified, key=lambda item: (item[0], ranks[item[1]])
+            )
             bucket = overview_flood_bucket(cls)
             if bucket is None:
                 continue
             flood_counts[bucket] += 1
-            flood_area[bucket] += area_by_land.get(r.land_id, 0.0)
-            ck = land_to_child.get(r.land_id)
+            if parcel_facts is not None:
+                parcel_facts[land_id].update(flood=bucket, s1_date=scene_date)
+            flood_area[bucket] += area_by_land.get(land_id, 0.0)
+            ck = land_to_child.get(land_id)
             if ck and ck in child_agg:
                 if is_open_water_flood(cls):
                     child_agg[ck]["flood"] += 1
@@ -560,6 +608,8 @@ async def _compute_live_stats(
 
         for r in weak_rows:
             weak_lands.add(r.land_id)
+            if parcel_facts is not None:
+                parcel_facts[r.land_id]["weak"] = True
             ck = land_to_child.get(r.land_id)
             if ck and ck in child_agg:
                 child_agg[ck]["weak_growth"] += 1
@@ -722,6 +772,77 @@ async def overview_stats(
     )
 
 
+@router.get("/overview/daily")
+async def overview_daily(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    as_of: date | None = Query(None),
+) -> dict[str, Any]:
+    """今日/历史快照及该统计日的下载进度，不将旧观测标为当天数据。"""
+    if as_of and as_of > business_today():
+        raise HTTPException(400, "统计日期不能晚于当天")
+    stats = await read_daily_snapshot(
+        db, level=level, code=code, name=name, as_of=as_of
+    )
+    run = await db.get(Job, run_id_for(as_of or business_today()))
+    summary = run_summary(run) if run else None
+    if summary:
+        # 公共页面只展示批次进度，庞大的派发编号和内部地块列表留在Internal接口。
+        summary = {
+            key: summary[key]
+            for key in (
+                "run_id",
+                "as_of_date",
+                "status",
+                "phase",
+                "lands_checked",
+                "group_count",
+                "job_count",
+                "pending_jobs",
+                "failed_jobs",
+                "results_pending",
+                "error",
+            )
+            if key in summary
+        }
+    from agric_satellite_analysis_common.settings import settings as common_settings
+
+    return {
+        "stats": stats.model_dump(mode="json") if stats else None,
+        "run": summary,
+        "today": business_today().isoformat(),
+        "schedule": {
+            "enabled": common_settings.schedule_daily_satellite_enabled,
+            "time": "23:00",
+            "timezone": "Asia/Shanghai",
+        },
+    }
+
+
+@router.get("/overview/history")
+async def overview_history(
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    level: OverviewLevel = Query("country"),
+    code: str | None = Query(None),
+    name: str | None = Query(None),
+    from_: date | None = Query(None, alias="from"),
+    to: date | None = Query(None),
+) -> dict[str, Any]:
+    """每日保存结果的趋势；缺失的快照日期不补零。"""
+    end = to or business_today()
+    start = from_ or end - timedelta(days=30)
+    if start > end or (end - start).days > 366:
+        raise HTTPException(400, "历史查询范围须在0～366天之间")
+    items = await read_daily_history(
+        db, level=level, code=code, name=name, from_d=start, to_d=end
+    )
+    return {"items": items, "from": start.isoformat(), "to": end.isoformat()}
+
+
 def _csv_response(filename: str, rows: list[dict[str, Any]]) -> Response:
     buf = io.StringIO()
     # UTF-8 BOM for Excel
@@ -756,20 +877,29 @@ async def overview_export_stats_csv(
     to: date | None = Query(None),
     crop: str | None = Query(None),
     live: int = Query(0, ge=0, le=1),
+    daily: bool = Query(False),
+    as_of: date | None = Query(None),
 ):
     """CSV of children rows from overview stats (UTF-8 BOM)."""
-    stats = await overview_stats(
-        ctx=ctx,
-        db=db,
-        level=level,
-        code=code,
-        name=name,
-        from_=from_,
-        to=to,
-        crop=crop,
-        use_cache=None,
-        live=live,
-    )
+    if daily:
+        stats = await read_daily_snapshot(
+            db, level=level, code=code, name=name, as_of=as_of
+        )
+        if stats is None:
+            raise HTTPException(404, "该日期没有保存的态势快照")
+    else:
+        stats = await overview_stats(
+            ctx=ctx,
+            db=db,
+            level=level,
+            code=code,
+            name=name,
+            from_=from_,
+            to=to,
+            crop=crop,
+            use_cache=None,
+            live=live,
+        )
     rows = [
         {
             "level": c.level,

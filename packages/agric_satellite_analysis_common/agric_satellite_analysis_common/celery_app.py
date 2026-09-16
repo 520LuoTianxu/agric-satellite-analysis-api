@@ -40,11 +40,36 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         "task": "app.tasks.weather.schedule_daily_weather_fetch",
         "schedule": crontab(hour=8, minute=0),
     },
+    "refresh-satellite-overview-daily": {
+        "task": "app.tasks.overview_preagg.refresh_daily_satellite",
+        # Celery显式使用UTC；15:00对应北京时间23:00，为当日光学影像发布预留时间。
+        "schedule": crontab(hour=15, minute=0),
+    },
     "refresh-overview-stats-daily": {
         "task": "app.tasks.overview_preagg.refresh_overview_stats",
         "schedule": crontab(hour=18, minute=30),
     },
 }
+
+BEAT_SWITCHES = {
+    "compute-indices-weekly": "schedule_weekly_index_enabled",
+    "fetch-weather-daily": "schedule_daily_weather_enabled",
+    "refresh-satellite-overview-daily": "schedule_daily_satellite_enabled",
+    "refresh-overview-stats-daily": "schedule_overview_refresh_enabled",
+}
+
+
+def enabled_beat_schedule(
+    cfg: CommonSettings | None = None,
+) -> dict[str, dict[str, Any]]:
+    """按env逐项注册周期任务，启动Beat本身不代表开启下载、天气或统计刷新。"""
+    cfg = cfg or settings
+    return {
+        name: dict(entry)
+        for name, entry in BEAT_SCHEDULE.items()
+        if getattr(cfg, BEAT_SWITCHES[name])
+    }
+
 
 # Linux default TCP_KEEPIDLE is 7200s. Remote Redis and nested Docker NAT
 # often drop idle sockets much sooner; these probes surface a dead
@@ -143,6 +168,8 @@ def create_celery_app(
         backend=settings.redis_url,
     )
     conf: dict[str, Any] = {
+        "timezone": "UTC",
+        "enable_utc": True,
         "task_acks_late": True,
         "task_reject_on_worker_lost": True,
         "worker_concurrency": 4,
@@ -157,7 +184,7 @@ def create_celery_app(
     }
     conf.update(celery_app_config())
     if with_beat_schedule:
-        conf["beat_schedule"] = BEAT_SCHEDULE
+        conf["beat_schedule"] = enabled_beat_schedule()
     app.conf.update(conf)
     from agric_satellite_analysis_common.trace import install_trace_signals
 

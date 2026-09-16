@@ -27,6 +27,8 @@ __all__ = [
     "assessment_bundle",
     "complete_work",
     "data_readiness",
+    "daily_satellite_prepare",
+    "daily_satellite_finalize",
     "fail_work",
     "land_geom",
     "get_job",
@@ -491,6 +493,46 @@ def season_growth_inputs(
         return _do(client)
     with internal_client(timeout=timeout) as c:
         return _do(c)
+
+
+def daily_satellite_prepare(
+    *, as_of: str | None = None, client: httpx.Client | None = None
+) -> dict[str, Any]:
+    """通过API发现并派发每日全国下载，下载机不读取Postgres。"""
+    return _daily_satellite_request(
+        "/v1/internal/schedule/daily-satellite",
+        params={"as_of": as_of} if as_of else None,
+        client=client,
+    )
+
+
+def daily_satellite_finalize(
+    run_id: str, *, client: httpx.Client | None = None
+) -> dict[str, Any]:
+    """API确认结果入库后保存快照；未完成时返回阶段供Celery延时重试。"""
+    return _daily_satellite_request(
+        f"/v1/internal/schedule/daily-satellite/{run_id}/finalize", client=client
+    )
+
+
+def _daily_satellite_request(
+    path: str,
+    *,
+    params: dict[str, str] | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    def request(c: httpx.Client) -> dict[str, Any]:
+        response = c.post(path, params=params)
+        _raise_for_status(response, context="schedule/daily-satellite")
+        result = response.json()
+        if not isinstance(result, dict):
+            raise InternalApiError("daily-satellite returned non-object")
+        return result
+
+    if client is not None:
+        return request(client)
+    with internal_client(timeout=300.0) as connection:
+        return request(connection)
 
 
 def weekly_index_prepare(

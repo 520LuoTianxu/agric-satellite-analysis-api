@@ -46,13 +46,39 @@ class InternalApiClientTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.env.stop()
 
+    def test_daily_satellite_discovery_passes_fixed_day(self):
+        def handler(request):
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/v1/internal/schedule/daily-satellite")
+            self.assertEqual(request.url.params["as_of"], "2026-09-16")
+            return httpx.Response(200, json={"run_id": "run-1"})
+
+        with httpx.Client(
+            base_url="http://api.test", transport=httpx.MockTransport(handler)
+        ) as client:
+            self.assertEqual(
+                ia.daily_satellite_prepare(as_of="2026-09-16", client=client)["run_id"],
+                "run-1",
+            )
+
+    def test_daily_satellite_finalization_http_failure_is_visible(self):
+        def handler(request):
+            self.assertEqual(
+                request.url.path, "/v1/internal/schedule/daily-satellite/run-1/finalize"
+            )
+            return httpx.Response(503, json={"detail": "database unavailable"})
+
+        with httpx.Client(
+            base_url="http://api.test", transport=httpx.MockTransport(handler)
+        ) as client:
+            with self.assertRaises(ia.InternalApiError):
+                ia.daily_satellite_finalize("run-1", client=client)
+
     def test_resolve_land(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/v1/internal/lands/resolve")
             self.assertIn("Bearer tok", request.headers.get("Authorization", ""))
-            return httpx.Response(
-                200, json={"land_id": "L1", "tile_id": "tile-1"}
-            )
+            return httpx.Response(200, json={"land_id": "L1", "tile_id": "tile-1"})
 
         transport = httpx.MockTransport(handler)
         client = httpx.Client(
