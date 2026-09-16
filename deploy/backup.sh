@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
-COMPOSE_DIR="${COMPOSE_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis}"
+COMPOSE_DIR="${COMPOSE_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 DB_SERVICE="${DB_SERVICE:-db}"
