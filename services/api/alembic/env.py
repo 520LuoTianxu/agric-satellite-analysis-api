@@ -22,7 +22,8 @@ db_url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL", "
 # Convert asyncpg URL to sync for Alembic
 if "+asyncpg" in db_url:
     db_url = db_url.replace("+asyncpg", "")
-config.set_main_option("sqlalchemy.url", db_url)
+# ConfigParser 会将百分号当作插值标记；密码中的 URL 编码（如 %23）需要先转义。
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 from app.models.tables import Base  # noqa: E402
 
