@@ -7,14 +7,14 @@
 #   RETENTION_DAYS=14 ./backup.sh   # Override retention
 #
 # Cron (daily at 02:00 UTC):
-#   0 2 * * * /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
+#   0 2 * * * /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 # ─────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
-COMPOSE_DIR="${COMPOSE_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/backups}"
+COMPOSE_DIR="${COMPOSE_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 DB_SERVICE="${DB_SERVICE:-db}"
 DB_USER="${DB_USER:-openfarm}"

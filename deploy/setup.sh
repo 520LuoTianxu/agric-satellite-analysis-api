@@ -6,14 +6,14 @@
 # Run as root or with sudo on the target server.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis/main/deploy/setup.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis-api/main/deploy/setup.sh | bash
 #   # or
 #   sudo bash deploy/setup.sh
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis.git"
+REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis-api.git"
 WEB_REPO_URL="https://github.com/520LuoTianxu/agric-satellite-analysis-web.git"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 WORKSPACE_DIR="/opt/agric-satellite-analysis-workspace"

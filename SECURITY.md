@@ -6,7 +6,7 @@ We currently support security fixes on the `main` branch. If you are running a f
 
 ## Reporting a Vulnerability
 
-- Use [GitHub private vulnerability reporting](https://github.com/520LuoTianxu/agric-satellite-analysis/security/advisories/new) (Security → Report a vulnerability).
+- Use [GitHub private vulnerability reporting](https://github.com/520LuoTianxu/agric-satellite-analysis-api/security/advisories/new) (Security → Report a vulnerability).
 - Please include a detailed description, steps to reproduce, and the potential impact.
 - **Do not** open public GitHub issues or Discord posts for security reports.
 

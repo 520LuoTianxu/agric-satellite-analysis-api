@@ -59,7 +59,7 @@ SSH into your new VM and run the setup script:
 ssh ubuntu@<your-vm-ip>
 
 # Download and run setup script
-curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis/main/deploy/setup.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis-api/main/deploy/setup.sh | sudo bash
 ```
 
 This installs Docker, configures the firewall, creates swap, clones both
@@ -232,7 +232,7 @@ agric-satellite-analysis includes an automated backup script at `deploy/backup.s
 sudo docker compose exec db pg_dump -U openfarm openfarm | gzip > backup_$(date +%Y%m%d).sql.gz
 
 # Using the backup script (recommended)
-sudo /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh
+sudo /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/deploy/backup.sh
 ```
 
 **Automated daily backups (cron):**
@@ -242,14 +242,14 @@ sudo /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/bac
 sudo crontab -e
 
 # Daily at 02:00 UTC, 7-day retention (default)
-0 2 * * * /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
+0 2 * * * /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 ```
 
 **Configuration (environment variables):**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BACKUP_DIR` | `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/backups` | Local backup directory |
+| `BACKUP_DIR` | `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/backups` | Local backup directory |
 | `RETENTION_DAYS` | `7` | Days to keep local backups |
 | `UPLOAD_TO_MINIO` | `false` | Upload backups to MinIO/S3 |
 | `MINIO_ALIAS` | `local` | mc alias for MinIO |
@@ -299,8 +299,8 @@ For production deployments requiring point-in-time recovery (PITR), enable Postg
 **1. Create archive directory:**
 
 ```bash
-sudo mkdir -p /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive
-sudo chown 999:999 /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive  # postgres container UID
+sudo mkdir -p /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/wal-archive
+sudo chown 999:999 /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/wal-archive  # postgres container UID
 ```
 
 **2. Add PostgreSQL config overrides** - create `deploy/postgresql.conf`:
@@ -319,7 +319,7 @@ archive_timeout = 300
 db:
   volumes:
     - ./deploy/postgresql.conf:/etc/postgresql/conf.d/wal.conf:ro
-    - /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive:/var/lib/postgresql/wal-archive
+    - /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/wal-archive:/var/lib/postgresql/wal-archive
   command: >
     postgres
     -c config_file=/etc/postgresql/postgresql.conf
@@ -350,11 +350,11 @@ sudo docker compose up -d
 
 ```bash
 # Check archive size
-du -sh /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive/
+du -sh /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/wal-archive/
 
 # Prune WAL files older than the oldest base backup (manual)
 # Keep at minimum 7 days of WAL for PITR window
-find /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive/ -name "*.gz" -mtime +7 -delete
+find /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/wal-archive/ -name "*.gz" -mtime +7 -delete
 ```
 
 ### Restart a Service
