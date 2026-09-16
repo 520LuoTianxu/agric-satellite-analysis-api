@@ -30,6 +30,7 @@ DEFAULT_TYPES = [
     "season_growth_report",
     "land_bootstrap",
     "satellite_analysis",
+    "satellite_batch",
     "agri_bridge",
     "weather_backfill",
     "soil_fetch",
@@ -39,6 +40,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
         "land_bootstrap",
         "satellite_analysis",
+        "satellite_batch",
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
@@ -227,6 +229,7 @@ def _dispatch_via_handler(
     from app.handler import (
         _dispatch_land_bootstrap,
         _dispatch_satellite_analysis,
+        _dispatch_satellite_batch,
         _dispatch_soil_fetch,
         _dispatch_weather_backfill,
     )
@@ -243,6 +246,8 @@ def _dispatch_via_handler(
 
     if wtype in ("satellite_analysis", "agri_bridge"):
         info = _dispatch_satellite_analysis(task, land_id)
+    elif wtype == "satellite_batch":
+        info = _dispatch_satellite_batch(task, land_id)
     elif wtype == "weather_backfill":
         info = _dispatch_weather_backfill(task, land_id)
     elif wtype == "soil_fetch":

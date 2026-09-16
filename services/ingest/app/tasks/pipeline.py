@@ -363,6 +363,8 @@ def search_scenes_for_defs(
                     "date": entry["date"],
                     "cloud_cover": entry["cloud"],
                     "band_hrefs": band_hrefs,
+                    # 聚合下载需要按景覆盖范围筛选地块，避免写入景外的填充值。
+                    "geometry": item.geometry,
                 }
             )
         else:

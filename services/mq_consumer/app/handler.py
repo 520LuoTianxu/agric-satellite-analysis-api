@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_TYPES = {
     "satellite_analysis",
+    "satellite_batch",
     "agri_bridge",
     "weather_backfill",
     "soil_fetch",
@@ -122,6 +123,20 @@ def _dispatch_satellite_analysis(
         "months": months,
         "with_bridge": with_bridge,
     }
+
+
+def _dispatch_satellite_batch(task: TaskMessage, land_id: str) -> dict[str, Any]:
+    """下载机按API创建的组任务处理，避免再展开成逐地块重复下载。"""
+    job_id = (task.extras or {}).get("job_id")
+    if not job_id:
+        raise ValueError("satellite_batch requires extras.job_id")
+    name = "app.tasks.satellite_batch.process_satellite_batch"
+    result = celery_client.send_task(
+        name,
+        kwargs={"job_id": str(job_id), "mq_task_id": task.task_id},
+        queue="ingest",
+    )
+    return {"dispatched": [name], "celery_ids": [result.id], "job_id": str(job_id)}
 
 
 def _dispatch_weather_backfill(
@@ -432,6 +447,8 @@ def _handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
             if task.type == "agri_bridge":
                 task.extras = {**(task.extras or {}), "mode": "bridge_only"}
             info = _dispatch_satellite_analysis(task, land_id)
+        elif task.type == "satellite_batch":
+            info = _dispatch_satellite_batch(task, land_id)
         elif task.type == "weather_backfill":
             info = _dispatch_weather_backfill(task, land_id)
         elif task.type == "soil_fetch":

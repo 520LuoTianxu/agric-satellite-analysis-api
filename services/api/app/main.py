@@ -40,6 +40,7 @@ from app.routers import (
     internal_agri,
     internal_results,
     internal_schedule,
+    satellite_batch,
 )
 
 
@@ -100,6 +101,7 @@ app.include_router(users.router, prefix=PREFIX, tags=["users"])
 app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(lands.router, prefix=PREFIX, tags=["lands"])
+app.include_router(satellite_batch.router, prefix=PREFIX, tags=["lands"])
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])

@@ -33,7 +33,13 @@ def _fallback_celery(
     """Best-effort direct Celery dispatch for local/dev fallback."""
     from app.celery_client import send_task
 
-    if type == "weather_backfill":
+    if type == "satellite_batch":
+        send_task(
+            "app.tasks.satellite_batch.process_satellite_batch",
+            kwargs={"job_id": str(extras["job_id"])},
+            queue="ingest",
+        )
+    elif type == "weather_backfill":
         days = extras.get("days") or extras.get("weather_days")
         kwargs = {"days": int(days)} if days is not None else {}
         send_task(

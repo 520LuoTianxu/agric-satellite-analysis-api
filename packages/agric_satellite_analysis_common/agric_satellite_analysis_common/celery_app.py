@@ -16,6 +16,7 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "app.tasks.soil.*": {"queue": "ingest"},
     "app.tasks.pipeline.*": {"queue": "ingest"},
     "app.tasks.sentinel1.*": {"queue": "ingest"},
+    "app.tasks.satellite_batch.*": {"queue": "ingest"},
     "app.tasks.vegetation.*": {"queue": "ingest"},
     "app.tasks.ndvi.*": {"queue": "ingest"},
     "app.tasks.indices.*": {"queue": "ingest"},
