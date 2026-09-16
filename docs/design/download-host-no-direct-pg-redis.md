@@ -33,7 +33,7 @@
 | **decloud** | 是 | 是 | 同上 | 去云队列 |
 | **mq_consumer** | 是 | 是 | 同上 | canonical land_id；`celery send_task` |
 | **tiler** | 通常无 | 无 | — | 出图 |
-| **本地 db/redis** | 本机 | 本机 | 与远程库不是一套 | 易混淆；PostGIS 应停，Redis 可留作 Celery |
+| **本地 db/redis** | 本机 | 本机 | 与远程库不是一套 | 易混淆；本地 PostgreSQL 应停，Redis 可留作 Celery |
 
 ### 1.2 要解决的点
 
@@ -225,7 +225,7 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 
 | 阶段 | 内容 | 成功标准 |
 |------|------|----------|
-| **D0** | 文档/配置约定；下载机 Redis 改本机；停误起 PostGIS | 无通往 API `:6379` 的连接 |
+| **D0** | 文档/配置约定；下载机 Redis 改本机；停误起本地 PostgreSQL | 无通往 API `:6379` 的连接 |
 | **D1** | 迁移 `work_items`；实现 claim/heartbeat/progress/complete/fail；API 入队接线（先 1–2 类任务，如 assessment / season_growth） | 多 worker 不重复领；无公网出站可跑通 |
 | **D2** | Internal resolve + jobs get/patch + agri scene dates；mq_consumer/ingest 热读改 HTTP（`API_BASE_URL` 未设则 DB 回退） | 配置 HTTP 后下载机热读不经 PG；写路径仍 DB（D3） |
 | **D3** | complete / `results/apply` 落库（复用 mq_result_writer 逻辑）；ingest 报告 job 可走 HTTP PATCH；`INGEST_PG_WRITES` 开关；**不**一键切断 prod PG | 代码+flag；cutover 见下文 |

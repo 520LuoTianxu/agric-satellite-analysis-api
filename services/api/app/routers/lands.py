@@ -21,7 +21,6 @@ from fastapi import (
     UploadFile,
     status,
 )
-from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiPolygon, mapping, shape
 from shapely.ops import transform
 from shapely.validation import explain_validity
@@ -30,10 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crops import normalize_crop_key
 from app.core.database import get_db
-from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
 from app.core.rate_limit import limiter
-from app.middleware.auth import OrgContext, get_org_context, require_roles
+from app.middleware.auth import OrgContext, require_roles
 from app.models.tables import (
     AuditEvent,
     Farm,
@@ -90,9 +88,7 @@ def _geometry_values(
 
 def _land_to_out(land: LandParcel) -> LandParcelOut:
     """Serialize the canonical parcel row without manufacturing another ID."""
-    boundary = land.boundary_geojson
-    if not isinstance(boundary, dict):
-        boundary = wkb_to_geojson(land.geom) or {}
+    boundary = land.boundary_geojson if isinstance(land.boundary_geojson, dict) else {}
     return LandParcelOut(
         land_id=land.land_id,
         source_parcel_id=land.source_parcel_id,
@@ -124,7 +120,8 @@ def _land_to_out(land: LandParcel) -> LandParcelOut:
         min_lat=land.min_lat,
         max_lon=land.max_lon,
         max_lat=land.max_lat,
-        geom=wkb_to_geojson(land.geom),
+        # 旧客户端仍读取 geom；这里返回同一份 JSONB 边界作为兼容别名。
+        geom=boundary or None,
         area_ha=float(land.area_ha) if land.area_ha is not None else None,
         crop_type=land.crop_type,
         season=land.season,
@@ -239,7 +236,6 @@ async def create_land(
         min_lat=min_lat,
         max_lon=max_lon,
         max_lat=max_lat,
-        geom=from_shape(multi, srid=4326),
         area_ha=area_ha,
         crop_type=_normalized_crop(body.crop_type),
         season=body.season,
@@ -323,7 +319,6 @@ async def update_land(
         land.boundary_geojson = boundary
         land.boundary_srid = 4326
         land.min_lon, land.min_lat, land.max_lon, land.max_lat = bounds
-        land.geom = from_shape(multi, srid=4326)
         land.area_ha = area_ha
     land.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -401,7 +396,6 @@ async def import_lands(
             land.boundary_geojson = boundary
             land.boundary_srid = 4326
             land.min_lon, land.min_lat, land.max_lon, land.max_lat = bounds
-            land.geom = from_shape(multi, srid=4326)
             land.area_ha = area_ha
             land.crop_type = _normalized_crop(props.get("crop_type"))
             land.season = props.get("season")

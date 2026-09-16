@@ -19,7 +19,6 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import structlog
-from geoalchemy2.shape import to_shape
 from rasterio.warp import Resampling
 from shapely.geometry import mapping
 from sqlalchemy import text
@@ -36,7 +35,8 @@ from app.core.agri_classify import (
 )
 from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
-from app.core.index_cogs import upload_scene_json_enabled, write_index_cogs_enabled
+from app.core.geo import geojson_to_shape
+from app.core.index_cogs import write_index_cogs_enabled
 from app.core.job_progress_redis import (
     flush_to_job,
     incr_done,
@@ -1044,15 +1044,21 @@ def process_agri_optical_lonlat(
         session.commit()
 
         land = session.get(LandParcel, job.land_id)
-        if not land or land.geom is None or land.deleted_at is not None:
+        if not land or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Land parcel not found or missing geometry"
+            job.error = "Land parcel not found"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
         agri_meta = _load_land_meta(session, land.land_id)
-        land_geom = to_shape(land.geom)
+        land_geom = geojson_to_shape(land.boundary_geojson)
+        if land_geom is None:
+            job.status = "failed"
+            job.error = "Land parcel boundary is missing or invalid"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "failed"}
         land_geom_geojson = mapping(land_geom)
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])

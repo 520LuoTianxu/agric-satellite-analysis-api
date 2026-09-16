@@ -1,8 +1,8 @@
 """Move all application tables into the single ``agric_satellite`` schema.
 
-At this step PostGIS-owned objects and the Alembic version table remain in
-``public``; revision 0024 completes their move and removes that schema.  This
-migration only changes PostgreSQL namespaces, so table data, indexes,
+At this step database extension objects and the Alembic version table remain
+in ``public``; revision 0024 completes their move and removes that schema.
+This migration only changes PostgreSQL namespaces, so table data, indexes,
 constraints, and OIDs are preserved without a bulk copy.
 """
 
@@ -22,7 +22,7 @@ APP_SCHEMA = "agric_satellite"
 LEGACY_AGRI_SCHEMA = "agri"
 
 # Former public application tables.  Keep this allowlist explicit
-# so PostGIS metadata in public can never be moved by accident at this step.
+# so extension metadata in public can never be moved by accident at this step.
 PUBLIC_APPLICATION_TABLES = (
     "farms",
     "fields",

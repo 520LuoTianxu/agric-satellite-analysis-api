@@ -399,15 +399,15 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     if not field:
         raise HTTPException(status_code=404, detail="Land parcel not found")
 
-    from geoalchemy2.shape import to_shape
-    from shapely.geometry import mapping
-
     field_data = {
         "id": str(field.land_id),
         "name": field.land_name,
         "area_ha": float(field.area_ha) if field.area_ha else None,
         "crop_type": field.crop_type,
-        "geom": mapping(to_shape(field.geom)) if field.geom else None,
+        # 保留旧报告字段名，内容直接来自 JSONB 边界。
+        "geom": field.boundary_geojson
+        if isinstance(field.boundary_geojson, dict)
+        else None,
     }
 
     land_id = field.land_id
@@ -488,15 +488,12 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     )
     scouting_entries = scouting_result.scalars().all()
 
-    # Convert scouting WKBElement geom_point → GeoJSON dict (same as _obs_to_out in scouting router)
+    # 观测点已经以 GeoJSON JSONB 保存，直接返回即可。
     scouting_out = []
     for obs in scouting_entries:
         geom_json = None
-        if obs.geom_point is not None:
-            try:
-                geom_json = mapping(to_shape(obs.geom_point))
-            except Exception:
-                pass
+        if isinstance(obs.geom_point, dict):
+            geom_json = obs.geom_point
         scouting_out.append(
             ScoutingOut(
                 id=obs.id,

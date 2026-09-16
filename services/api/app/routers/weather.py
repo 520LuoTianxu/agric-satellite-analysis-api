@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.geo import geojson_centroid
 from app.core.logging import logger
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import LandParcel, WeatherDaily
@@ -122,7 +123,7 @@ async def get_field_weather(
     include_forecast: bool = Query(True, description="Include 7-day forecast"),
 ):
     """Get weather data for a field within a date range."""
-    await _get_field_or_404(land_id, ctx.org_id, db)
+    land = await _get_field_or_404(land_id, ctx.org_id, db)
 
     # Validate date range (max 365 days)
     if (end_date - start_date).days > 365:
@@ -143,15 +144,11 @@ async def get_field_weather(
     rows = result.scalars().all()
     data = [WeatherDailyOut.model_validate(r) for r in rows]
 
-    # Get centroid for forecast + location
-    centroid_result = await db.execute(
-        select(
-            func.ST_Y(func.ST_Centroid(LandParcel.geom)).label("lat"),
-            func.ST_X(func.ST_Centroid(LandParcel.geom)).label("lon"),
-        ).where(LandParcel.land_id == land_id)
-    )
-    centroid_row = centroid_result.one()
-    lat, lon = float(centroid_row.lat), float(centroid_row.lon)
+    # 使用 JSONB GeoJSON 在应用内计算中心点，避免依赖数据库空间函数。
+    centroid = geojson_centroid(land.boundary_geojson)
+    if centroid is None:
+        raise HTTPException(status_code=400, detail="Land parcel boundary is invalid")
+    lat, lon = centroid
 
     # Fetch forecast if requested
     forecast: list[WeatherForecastDay] = []

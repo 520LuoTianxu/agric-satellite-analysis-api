@@ -84,21 +84,11 @@ async def _resolve_group_id(
 def _land_coords_string_soft(land: LandParcel) -> str | None:
     from app.core.cdfinance_soil import geojson_to_coords_string
 
-    # 供应商请求优先使用规范地块的 GeoJSON 边界，避免再从另一套地块表取形状。
-    if isinstance(land.boundary_geojson, dict):
-        try:
-            return geojson_to_coords_string(land.boundary_geojson)
-        except Exception:
-            return None
-
-    if land.geom is None:
+    # 供应商请求直接使用规范地块的 JSONB GeoJSON 边界。
+    if not isinstance(land.boundary_geojson, dict):
         return None
-
     try:
-        from geoalchemy2.shape import to_shape
-        from shapely.geometry import mapping
-
-        return geojson_to_coords_string(mapping(to_shape(land.geom)))
+        return geojson_to_coords_string(land.boundary_geojson)
     except Exception:
         return None
 

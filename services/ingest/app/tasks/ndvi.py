@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timezone
 
-from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
@@ -20,6 +19,7 @@ import structlog
 from app.worker import celery_app
 from app.tasks.indices import get_index
 from app.core.config import scene_max_workers
+from app.core.geo import geojson_to_shape
 from app.tasks.pipeline import (
     RETRY_DELAYS,
     get_db_session,
@@ -65,7 +65,13 @@ def process_ndvi(self, job_id: str) -> dict:
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        land_geom = to_shape(land.geom)
+        land_geom = geojson_to_shape(land.boundary_geojson)
+        if land_geom is None:
+            job.status = "failed"
+            job.error = "Land parcel boundary is missing or invalid"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "failed"}
         land_geom_geojson = mapping(land_geom)
 
         params = job.params_json or {}

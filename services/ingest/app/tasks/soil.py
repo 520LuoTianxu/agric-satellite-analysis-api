@@ -16,10 +16,10 @@ import httpx
 import rasterio
 import structlog
 from pyproj import Transformer
-from geoalchemy2.shape import to_shape
 from sqlalchemy import delete, select
 
 from app.core.config import settings
+from app.core.geo import geojson_to_shape
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.tables import (
@@ -137,7 +137,7 @@ def _soil_http_only() -> bool:
 def _resolve_land_lat_lon_soil(
     land_id: str, session=None
 ) -> tuple[float, float] | None:
-    """Return (lat, lon) via internal geom API or SyncSession LandParcel.geom."""
+    """Return (lat, lon) via internal JSONB boundary API or local data."""
     try:
         from agric_satellite_analysis_common.internal_api import land_geom, internal_api_enabled
 
@@ -161,9 +161,11 @@ def _resolve_land_lat_lon_soil(
     if session is None:
         return None
     land = session.get(LandParcel, land_id)
-    if not land or land.deleted_at is not None or land.geom is None:
+    if not land or land.deleted_at is not None:
         return None
-    geom = to_shape(land.geom)
+    geom = geojson_to_shape(land.boundary_geojson)
+    if geom is None:
+        return None
     c = geom.centroid
     return float(c.y), float(c.x)
 
@@ -1209,7 +1211,6 @@ def fetch_soil_for_land(
             _publish_soil_mq("failed", error="LandParcel not found")
             return {"status": "error", "message": "LandParcel not found"}
         lat, lon = coords
-        land = None if http_only else session.get(LandParcel, land_id)
 
         # Step 1: Determine source
         if not http_only:

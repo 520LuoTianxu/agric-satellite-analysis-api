@@ -240,7 +240,6 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
                 ADD COLUMN IF NOT EXISTS town_name text,
                 ADD COLUMN IF NOT EXISTS village_code text,
                 ADD COLUMN IF NOT EXISTS village_name text,
-                ADD COLUMN IF NOT EXISTS geom geometry(MULTIPOLYGON,4326),
                 ADD COLUMN IF NOT EXISTS area_ha numeric(12,4),
                 ADD COLUMN IF NOT EXISTS crop_type text,
                 ADD COLUMN IF NOT EXISTS season text,
@@ -322,9 +321,62 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
     missing_geom = bind.execute(
         sa.text(
             """
+            WITH RECURSIVE geometry_nodes(land_id, node) AS (
+                SELECT land_id, geom -> 'coordinates'
+                FROM _legacy_land_sources
+                UNION ALL
+                SELECT n.land_id, item.child
+                FROM geometry_nodes n
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(n.node) = 'array' THEN n.node
+                        ELSE '[]'::jsonb
+                    END
+                ) AS item(child)
+            ), coordinate_bounds AS (
+                SELECT
+                    land_id,
+                    min(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 0) = 'number'
+                            THEN (node ->> 0)::double precision
+                        END
+                    ) AS min_lon,
+                    min(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 1) = 'number'
+                            THEN (node ->> 1)::double precision
+                        END
+                    ) AS min_lat,
+                    max(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 0) = 'number'
+                            THEN (node ->> 0)::double precision
+                        END
+                    ) AS max_lon,
+                    max(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 1) = 'number'
+                            THEN (node ->> 1)::double precision
+                        END
+                    ) AS max_lat
+                FROM geometry_nodes
+                GROUP BY land_id
+            )
             SELECT count(*)
-            FROM _legacy_land_sources
-            WHERE geom IS NULL OR ST_IsEmpty(geom)
+            FROM _legacy_land_sources s
+            LEFT JOIN coordinate_bounds b ON b.land_id = s.land_id
+            WHERE s.geom IS NULL
+               OR jsonb_typeof(s.geom) <> 'object'
+               OR jsonb_typeof(s.geom -> 'coordinates') <> 'array'
+               OR b.min_lon IS NULL
+               OR b.min_lat IS NULL
+               OR b.max_lon IS NULL
+               OR b.max_lat IS NULL
             """
         )
     ).scalar()
@@ -338,6 +390,52 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
     bind.execute(
         sa.text(
             """
+            WITH RECURSIVE geometry_nodes(land_id, node) AS (
+                SELECT land_id, geom -> 'coordinates'
+                FROM _legacy_land_sources
+                UNION ALL
+                SELECT n.land_id, item.child
+                FROM geometry_nodes n
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(n.node) = 'array' THEN n.node
+                        ELSE '[]'::jsonb
+                    END
+                ) AS item(child)
+            ), coordinate_bounds AS (
+                SELECT
+                    land_id,
+                    min(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 0) = 'number'
+                            THEN (node ->> 0)::double precision
+                        END
+                    ) AS min_lon,
+                    min(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 1) = 'number'
+                            THEN (node ->> 1)::double precision
+                        END
+                    ) AS min_lat,
+                    max(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 0) = 'number'
+                            THEN (node ->> 0)::double precision
+                        END
+                    ) AS max_lon,
+                    max(
+                        CASE
+                            WHEN jsonb_typeof(node) = 'array'
+                                 AND jsonb_typeof(node -> 1) = 'number'
+                            THEN (node ->> 1)::double precision
+                        END
+                    ) AS max_lat
+                FROM geometry_nodes
+                GROUP BY land_id
+            )
             INSERT INTO agric_satellite.land_parcels (
                 land_id, source_parcel_id, tile_id, land_name, farm_id,
                 original_area_mu, land_area_mu, boundary_geojson, boundary_srid,
@@ -352,12 +450,12 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
                 s.farm_id,
                 round((s.area_ha * 15.0)::numeric, 4),
                 round((s.area_ha * 15.0)::numeric, 4),
-                ST_AsGeoJSON(ST_Multi(ST_Force2D(s.geom)))::jsonb,
+                s.geom,
                 4326,
-                ST_XMin(ST_Envelope(s.geom)::box3d),
-                ST_YMin(ST_Envelope(s.geom)::box3d),
-                ST_XMax(ST_Envelope(s.geom)::box3d),
-                ST_YMax(ST_Envelope(s.geom)::box3d),
+                b.min_lon,
+                b.min_lat,
+                b.max_lon,
+                b.max_lat,
                 jsonb_build_object(
                     'source', 'legacy_fields_migration',
                     'legacy_tags', COALESCE(s.tags_json, '[]'::jsonb)
@@ -367,6 +465,7 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
                 now(),
                 now()
             FROM _legacy_land_sources s
+            JOIN coordinate_bounds b ON b.land_id = s.land_id
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM agric_satellite.land_parcels p
@@ -388,31 +487,12 @@ def _merge_legacy_parcel_attributes(bind: sa.engine.Connection) -> None:
                 crop_type = COALESCE(p.crop_type, s.crop_type),
                 season = COALESCE(p.season, s.season),
                 tags_json = COALESCE(p.tags_json, s.tags_json),
-                geom = COALESCE(
-                    p.geom,
-                    ST_Multi(ST_SetSRID(
-                        ST_GeomFromGeoJSON(p.boundary_geojson::text), 4326
-                    ))
-                ),
                 updated_at = now()
             FROM _legacy_land_sources s
             WHERE p.land_id = s.land_id
             """
         )
     )
-    bind.execute(
-        sa.text(
-            """
-            UPDATE agric_satellite.land_parcels p
-            SET geom = ST_Multi(ST_SetSRID(
-                    ST_GeomFromGeoJSON(p.boundary_geojson::text), 4326
-                )),
-                updated_at = now()
-            WHERE p.geom IS NULL
-            """
-        )
-    )
-
     # This is a transaction-local conversion relation, never an application
     # table.  It is used only while child rows are being re-keyed.
     bind.execute(
@@ -773,13 +853,6 @@ def _finish_child_schema(bind: sa.engine.Connection) -> None:
     _add_index(bind, "idx_soil_nutrient_npk_land_id", "soil_nutrient_npk", "land_id")
     _add_index(bind, "idx_group_site_admission_land_id", "group_site_admission", "land_id")
     _add_index(bind, "idx_land_parcels_farm_id", "land_parcels", "farm_id")
-
-    bind.execute(
-        sa.text(
-            "CREATE INDEX IF NOT EXISTS land_parcels_geom_idx "
-            "ON agric_satellite.land_parcels USING GIST (geom)"
-        )
-    )
 
     # Keep updated_at in the same schema as the canonical master when the
     # shared trigger function is available.

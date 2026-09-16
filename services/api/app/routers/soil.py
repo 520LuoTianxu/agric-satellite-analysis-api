@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
+from app.core.geo import geojson_centroid
 from app.core.logging import logger
 from app.core.rate_limit import limiter
 from app.core.soil_intelligence import (
@@ -257,16 +258,15 @@ async def get_sampling_zones(
 
     layer_dicts = _layers_to_dicts(profile.layers)
 
-    # Get centroid from profile metadata or field geometry
+    # 优先使用土壤档案缓存的中心点；缺失时从 JSONB 边界在应用内计算。
     meta = profile.metadata_json or {}
     centroid_lat = meta.get("centroid_lat")
     centroid_lon = meta.get("centroid_lon")
     if centroid_lat is None or centroid_lon is None:
-        from geoalchemy2.shape import to_shape
-
-        geom = to_shape(land.geom)
-        centroid = geom.centroid
-        centroid_lat, centroid_lon = centroid.y, centroid.x
+        centroid = geojson_centroid(land.boundary_geojson)
+        if centroid is None:
+            raise HTTPException(status_code=400, detail="Land parcel boundary is invalid")
+        centroid_lat, centroid_lon = centroid
 
     area_ha = float(land.area_ha) if land.area_ha else None
 
@@ -582,20 +582,10 @@ async def _load_agri_admin_and_boundary(db: AsyncSession, land_id: str) -> dict:
 def _land_coords_string(land: LandParcel) -> str:
     from app.core.cdfinance_soil import geojson_to_coords_string
 
-    if isinstance(land.boundary_geojson, dict):
-        try:
-            return geojson_to_coords_string(land.boundary_geojson)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # 兼容历史导入的 geometry 列；新写入地块优先使用 boundary_geojson。
-    if land.geom is None:
-        raise HTTPException(status_code=400, detail="Land parcel has no geometry")
-    from geoalchemy2.shape import to_shape
-    from shapely.geometry import mapping
-
+    if not isinstance(land.boundary_geojson, dict):
+        raise HTTPException(status_code=400, detail="Land parcel has no boundary")
     try:
-        return geojson_to_coords_string(mapping(to_shape(land.geom)))
+        return geojson_to_coords_string(land.boundary_geojson)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

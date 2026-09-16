@@ -10,11 +10,10 @@ x-celery-redis-env: &celery-redis-env
   CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-0}
 
 services:
-  # ── Postgres + PostGIS ──────────────────────────────────────────────
+  # ── PostgreSQL ──────────────────────────────────────────────────────
   db:
-    # imresamu/postgis = multi-arch (amd64 + arm64) build of postgis/postgis,
-    # which publishes amd64 only and cannot run on ARM hosts (Ampere/Apple)
-    image: imresamu/postgis:16-3.4
+    # 地块边界和观察点均使用 JSONB，开发数据库不需要空间扩展镜像。
+    image: postgres:16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

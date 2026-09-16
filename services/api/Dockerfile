@@ -28,4 +28,5 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
     && chown -R appuser:appgroup /app
 USER appuser
 
-CMD ["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do alembic upgrade head && break || echo \"Waiting for DB... attempt $i\" && sleep 3; done && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# 数据库结构由外部流程维护，容器启动只运行 API，不触发历史迁移中的空间操作。
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

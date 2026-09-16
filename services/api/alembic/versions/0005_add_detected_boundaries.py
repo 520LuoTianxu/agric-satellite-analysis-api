@@ -6,7 +6,7 @@ Revises: 0003
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "0005"
 down_revision = "0004"
@@ -56,10 +56,10 @@ def upgrade() -> None:
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    # Add PostGIS geometry column (GeoAlchemy2 doesn't work cleanly in Alembic ops)
-    op.execute(
-        "ALTER TABLE detected_boundaries "
-        "ADD COLUMN geom geometry(MULTIPOLYGON, 4326) NOT NULL"
+    # 边界检测结果直接保存为 GeoJSON JSONB，不创建数据库空间列。
+    op.add_column(
+        "detected_boundaries",
+        sa.Column("geom", JSONB, nullable=False),
     )
 
     op.create_index(
@@ -76,12 +76,6 @@ def upgrade() -> None:
         "ix_detected_boundaries_status",
         "detected_boundaries",
         ["status"],
-    )
-    op.create_index(
-        "ix_detected_boundaries_geom",
-        "detected_boundaries",
-        ["geom"],
-        postgresql_using="gist",
     )
 
     # Soft-delete trigger (same pattern as other tables)

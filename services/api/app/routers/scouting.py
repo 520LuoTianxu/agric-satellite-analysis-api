@@ -7,13 +7,11 @@ from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from geoalchemy2.shape import from_shape
-from shapely.geometry import shape
+from shapely.geometry import mapping, shape
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.geo import wkb_to_geojson
 from app.core.logging import logger
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import LandParcel, ScoutingObservation, WeatherDaily
@@ -71,7 +69,7 @@ def _obs_to_out(obs: ScoutingObservation) -> ScoutingOut:
         id=obs.id,
         land_id=obs.land_id,
         alert_id=obs.alert_id,
-        geom_point=wkb_to_geojson(obs.geom_point),
+        geom_point=obs.geom_point if isinstance(obs.geom_point, dict) else None,
         title=obs.title,
         note=obs.note,
         tags=obs.tags_json,
@@ -136,7 +134,8 @@ async def create_scouting(
     obs = ScoutingObservation(
         land_id=land_id,
         alert_id=body.alert_id,
-        geom_point=from_shape(point, srid=4326),
+        # 只在应用内用 Shapely 校验，落库时直接保存 GeoJSON JSONB。
+        geom_point=mapping(point),
         title=body.title,
         note=body.note,
         tags_json=body.tags,

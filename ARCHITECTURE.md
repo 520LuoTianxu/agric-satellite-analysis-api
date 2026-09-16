@@ -67,7 +67,7 @@ Compose builds api/ingest/storage from **repo root** context. Design:
 ### Field & Spatial Context
 - Manual & imported boundaries (GeoJSON/KML)
 - Terrain layers: elevation, slope, aspect
-- Spatial indexing (PostGIS)
+- GeoJSON boundaries in JSONB; Shapely is used only for in-process calculations
 
 ### Extensible Inputs (Future)
 - IoT sensors (soil moisture, EC, pH)

@@ -167,7 +167,7 @@ Internet
     └── /*             → web:80        (Nginx static frontend)
 
 Internal network (not exposed):
-    ├── db:5432        (PostgreSQL + PostGIS)
+    ├── db:5432        (PostgreSQL; boundaries stored as JSONB)
     ├── redis:6379     (Celery broker + cache)
     ├── object storage (Aliyun OSS)
     ├── ingest        (Celery -Q ingest: STAC/weather/soil/compute)

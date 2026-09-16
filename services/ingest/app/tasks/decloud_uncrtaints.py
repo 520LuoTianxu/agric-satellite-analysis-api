@@ -24,7 +24,6 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import structlog
-from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import text
 
@@ -54,6 +53,7 @@ from app.core.decloud import (
     should_persist_decloud_product,
     should_trigger_decloud,
 )
+from app.core.geo import geojson_to_shape
 from app.core.decloud_cache import (
     list_cached_s2,
     neighbor_counts_for_dates,
@@ -940,9 +940,11 @@ def _land_context(session, land_id: str):
     from app.models.tables import LandParcel
 
     land = session.get(LandParcel, str(land_id))
-    if land is None or land.geom is None:
+    if land is None or land.deleted_at is not None:
         return None
-    land_geom = to_shape(land.geom)
+    land_geom = geojson_to_shape(land.boundary_geojson)
+    if land_geom is None:
+        return None
     land_geom_geojson = mapping(land_geom)
     target_transform, target_shape, land_mask, bounds = compute_target_grid(
         land_geom.bounds, land_geom

@@ -1,18 +1,37 @@
-"""Geometry helpers shared across routers."""
+"""GeoJSON helpers shared across routers.
+
+The database stores parcel and observation geometries as JSONB.  Shapely is
+used only in application memory for validation and calculations; no database
+spatial extension or binary geometry conversion is involved.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from geoalchemy2.shape import to_shape
-from shapely.geometry import mapping
+from shapely.geometry import shape as shapely_shape
+from shapely.geometry.base import BaseGeometry
 
 
-def wkb_to_geojson(wkb_element) -> dict[str, Any] | None:
-    """Convert a GeoAlchemy2 WKB element to a GeoJSON dict, or None on failure."""
-    if wkb_element is None:
+def geojson_to_shape(
+    geojson: Mapping[str, Any] | None,
+) -> BaseGeometry | None:
+    """Convert a JSONB GeoJSON object to an in-memory Shapely geometry."""
+    if not isinstance(geojson, Mapping):
         return None
     try:
-        return mapping(to_shape(wkb_element))
-    except Exception:
+        return shapely_shape(geojson)
+    except (AttributeError, KeyError, TypeError, ValueError):
         return None
+
+
+def geojson_centroid(
+    geojson: Mapping[str, Any] | None,
+) -> tuple[float, float] | None:
+    """Return ``(latitude, longitude)`` for a JSONB GeoJSON geometry."""
+    geometry = geojson_to_shape(geojson)
+    if geometry is None or geometry.is_empty:
+        return None
+    centroid = geometry.centroid
+    return float(centroid.y), float(centroid.x)

@@ -25,7 +25,6 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import rasterio
 import structlog
-from geoalchemy2.shape import to_shape
 from rasterio.features import geometry_mask
 from rasterio.transform import from_bounds, xy
 from rasterio.warp import Resampling, reproject
@@ -35,6 +34,7 @@ from shapely.geometry import mapping
 
 from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
 from app.core.config import settings, scene_max_workers
+from app.core.geo import geojson_to_shape
 from app.core.index_cogs import write_index_cogs_enabled
 from app.core.job_progress_redis import (
     flush_to_job,
@@ -1040,14 +1040,20 @@ def process_s1_backfill(
         session.commit()
 
         land = session.get(LandParcel, job.land_id)
-        if not land or land.geom is None or land.deleted_at is not None:
+        if not land or land.deleted_at is not None:
             job.status = "failed"
-            job.error = "Land parcel not found or missing geom"
+            job.error = "Land parcel not found"
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
 
-        land_geom = to_shape(land.geom)
+        land_geom = geojson_to_shape(land.boundary_geojson)
+        if land_geom is None:
+            job.status = "failed"
+            job.error = "Land parcel boundary is missing or invalid"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "failed"}
         land_geom_geojson = mapping(land_geom)
         params = job.params_json or {}
         mq_task_id = params.get("mq_task_id")
