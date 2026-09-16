@@ -121,9 +121,10 @@ app.include_router(internal_schedule.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────
-@app.get("/healthz", tags=["health"])
+@app.get("/health", tags=["health"])
+@app.get("/healthz", tags=["health"], include_in_schema=False)
 async def healthz():
-    """Check DB connection and Redis ping."""
+    """Check DB connection and Redis ping; /healthz remains a compatibility alias."""
     errors: list[str] = []
 
     # DB check

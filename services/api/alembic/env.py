@@ -3,10 +3,14 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool, text
 
 # Ensure the project root is on sys.path so 'app' is importable
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, PROJECT_ROOT)
+# ABflow 将测试配置复制为项目根目录 .env；迁移脚本需要先加载它才能读取同步数据库连接串。
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
 
 config = context.config
 
@@ -18,7 +22,8 @@ db_url = os.environ.get("DATABASE_URL_SYNC") or os.environ.get("DATABASE_URL", "
 # Convert asyncpg URL to sync for Alembic
 if "+asyncpg" in db_url:
     db_url = db_url.replace("+asyncpg", "")
-config.set_main_option("sqlalchemy.url", db_url)
+# ConfigParser 会将百分号当作插值标记；密码中的 URL 编码（如 %23）需要先转义。
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 from app.models.tables import Base  # noqa: E402
 

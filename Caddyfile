@@ -13,6 +13,16 @@ www.{$DOMAIN:localhost} {
 
 {$DOMAIN:localhost} {
 	# ── API routes → FastAPI ─────────────────────────────────────────
+	handle /satellite-api {
+		redir /satellite-api/ permanent
+	}
+
+	# The frontend uses one stable gateway prefix; restore FastAPI's /v1 prefix upstream.
+	handle_path /satellite-api/* {
+		rewrite * /v1{uri}
+		reverse_proxy api:8000
+	}
+
 	handle /v1/* {
 		reverse_proxy api:8000
 	}
@@ -29,9 +39,9 @@ www.{$DOMAIN:localhost} {
 		reverse_proxy api:8000
 	}
 
-	# ── Everything else → Next.js ────────────────────────────────────
+	# ── Everything else → static frontend ────────────────────────────
 	handle {
-		reverse_proxy web:3000
+		reverse_proxy web:80
 	}
 
 	# Compression

@@ -71,11 +71,13 @@ Do **not** commit `.env`. Only `.env.example` is in git.
 | API (FastAPI) | http://localhost:8000 | Backend API |
 | API Docs | http://localhost:8000/docs | Swagger UI |
 
+浏览器前端统一通过 `/satellite-api/` 访问 API；Caddy 会将其转换为 FastAPI 的 `/v1/` 路径。
+
 Health checks:
 
 ```bash
 curl http://localhost:8000/healthz    # API
-curl http://localhost:3000/api/health # Web
+curl -f http://localhost:3000/       # Web（静态 Nginx）
 ```
 
 Production compose files stay as upstream: `docker-compose.yml` + `docker-compose.prod.yml` (Caddy). See [DEPLOYMENT.md](DEPLOYMENT.md).
