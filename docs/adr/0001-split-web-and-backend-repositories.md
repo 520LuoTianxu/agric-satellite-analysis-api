@@ -18,7 +18,7 @@ Use two sibling repositories under one workspace directory:
 
 ```text
 agric-satellite-analysis-workspace/
-├── agric-satellite-analysis/
+├── agric-satellite-analysis-api/
 └── agric-satellite-analysis-web/
 ```
 

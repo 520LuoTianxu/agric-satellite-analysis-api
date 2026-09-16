@@ -126,5 +126,5 @@ variable "subnet_cidr" {
 
 locals {
   compartment_id = var.compartment_ocid != "" ? var.compartment_ocid : var.tenancy_ocid
-  repo_url       = "https://github.com/520LuoTianxu/agric-satellite-analysis.git"
+  repo_url       = "https://github.com/520LuoTianxu/agric-satellite-analysis-api.git"
 }

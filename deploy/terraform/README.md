@@ -7,7 +7,7 @@ Provisions the complete agric-satellite-analysis stack on an Oracle Cloud **Alwa
 - Ubuntu 24.04 aarch64 instance
 - First-boot cloud-init: runs `deploy/setup.sh` (Docker, swap, ufw + OCI
   iptables fix, fail2ban, secret generation), writes your domain + OAuth
-  config into `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/.env`, builds and starts the full Docker
+  config into `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/.env`, builds and starts the full Docker
   Compose stack, and installs a daily backup cron
 
 Only two things remain manual, because they can't be automated from here:
@@ -77,7 +77,7 @@ already succeeded are reused.
   Do **not** re-apply Terraform for app changes - the instance ignores
   `user_data` changes after first boot (guarded with `ignore_changes` so a
   tfvars tweak can't plan a destroy/recreate of your data).
-- **Config changes** (domain, OAuth): edit `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/.env` on the VM,
+- **Config changes** (domain, OAuth): edit `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/.env` on the VM,
   then rebuild (`NEXT_PUBLIC_*` are build args - a domain change requires
   `up -d --build`, not just a restart).
 - **Backups**: cron runs `deploy/backup.sh` daily at 02:00 (log:
@@ -98,7 +98,7 @@ already succeeded are reused.
   backend (OCI Object Storage has an S3-compatible mode).
 - Runtime secrets (DB password, JWT secret, NextAuth secret, MinIO
   password) are generated **on the VM** by `setup.sh` and live only in
-  `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/.env` - they never touch Terraform state. That file plus
+  `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/.env` - they never touch Terraform state. That file plus
   the backup dumps are what you need to save to survive a VM loss.
 
 ## Known caveats

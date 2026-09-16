@@ -10,14 +10,14 @@ Keep both repositories under one outer directory:
 
 ```text
 agric-satellite-analysis-workspace/
-├── agric-satellite-analysis/
+├── agric-satellite-analysis-api/
 └── agric-satellite-analysis-web/
 ```
 
 ```bash
-git clone https://github.com/520LuoTianxu/agric-satellite-analysis.git
+git clone https://github.com/520LuoTianxu/agric-satellite-analysis-api.git
 git clone https://github.com/520LuoTianxu/agric-satellite-analysis-web.git
-cd agric-satellite-analysis
+cd agric-satellite-analysis-api
 ```
 
 The sibling layout is required when Docker Compose builds the `web` service.

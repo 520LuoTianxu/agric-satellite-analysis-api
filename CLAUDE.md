@@ -9,7 +9,7 @@ Next.js application is maintained in the sibling repository
 
 ```text
 agric-satellite-analysis-workspace/
-├── agric-satellite-analysis/       # this backend repository
+├── agric-satellite-analysis-api/   # this backend repository
 └── agric-satellite-analysis-web/   # standalone Next.js repository
 ```
 

@@ -10,7 +10,7 @@ write_files:
     permissions: "0644"
     content: |
       # Daily agric-satellite-analysis Postgres backup (see deploy/backup.sh)
-      0 2 * * * root /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
+      0 2 * * * root /opt/agric-satellite-analysis-workspace/agric-satellite-analysis-api/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 
   - path: /opt/openfarm-bootstrap/bootstrap.sh
     permissions: "0700"

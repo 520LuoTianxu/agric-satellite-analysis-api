@@ -8,7 +8,7 @@
 
 `agric-satellite-analysis` is a self-hostable crop intelligence stack: Sentinel-2, weather, and soil fused into explainable per-field insights.
 
-[![CI](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml)
+[![CI](https://github.com/520LuoTianxu/agric-satellite-analysis-api/actions/workflows/ci.yml/badge.svg)](https://github.com/520LuoTianxu/agric-satellite-analysis-api/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
 Frontend source and screenshots are maintained in the separate
@@ -48,9 +48,9 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 ```bash
 # Clone both repositories into one workspace. The sibling layout is required
 # by the web service build context in docker-compose.yml.
-git clone https://github.com/520LuoTianxu/agric-satellite-analysis.git
+git clone https://github.com/520LuoTianxu/agric-satellite-analysis-api.git
 git clone https://github.com/520LuoTianxu/agric-satellite-analysis-web.git
-cd agric-satellite-analysis
+cd agric-satellite-analysis-api
 cp .env.example .env
 # Fill Google OAuth (see below) and generate secrets:
 #   NEXTAUTH_SECRET:     openssl rand -base64 32

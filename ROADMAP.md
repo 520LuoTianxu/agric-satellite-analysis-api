@@ -2,7 +2,7 @@
 
 > Last updated: March 2026
 
-This document outlines where agric-satellite-analysis is today and where it's headed. If you'd like to contribute to any of these areas, check the [Contributing Guide](CONTRIBUTING.md) and look for issues labeled [`help wanted`](https://github.com/520LuoTianxu/agric-satellite-analysis/labels/help%20wanted) or [`good first issue`](https://github.com/520LuoTianxu/agric-satellite-analysis/labels/good%20first%20issue).
+This document outlines where agric-satellite-analysis is today and where it's headed. If you'd like to contribute to any of these areas, check the [Contributing Guide](CONTRIBUTING.md) and look for issues labeled [`help wanted`](https://github.com/520LuoTianxu/agric-satellite-analysis-api/labels/help%20wanted) or [`good first issue`](https://github.com/520LuoTianxu/agric-satellite-analysis-api/labels/good%20first%20issue).
 
 ---
 
@@ -358,6 +358,6 @@ Each tier builds on the one above it.
 The MVP is complete! The highest-impact contributions right now are:
 
 1. **Automated tests** - API integration tests, frontend component tests, and E2E acceptance tests (Milestone 4 remaining items)
-2. **Future Ideas** - pick any item from the list above or browse [open issues](https://github.com/520LuoTianxu/agric-satellite-analysis/issues)
+2. **Future Ideas** - pick any item from the list above or browse [open issues](https://github.com/520LuoTianxu/agric-satellite-analysis-api/issues)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
