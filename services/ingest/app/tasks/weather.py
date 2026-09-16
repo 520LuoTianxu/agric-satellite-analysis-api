@@ -11,11 +11,11 @@ from decimal import Decimal
 import httpx
 import structlog
 from celery import group
-from geoalchemy2.shape import to_shape
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
+from app.core.geo import geojson_to_shape
 from app.worker import celery_app
 
 logger = structlog.get_logger()
@@ -83,7 +83,6 @@ def _http_only_weather() -> bool:
     """True when download must not use SyncSession (reads or writes)."""
     try:
         from agric_satellite_analysis_common.internal_api import (
-            http_writes_enabled,
             ingest_pg_reads_allowed,
             ingest_pg_writes_enabled,
             internal_api_enabled,
@@ -100,7 +99,7 @@ def _http_only_weather() -> bool:
 
 
 def _resolve_land_lat_lon(land_id: str, session=None) -> tuple[float, float] | None:
-    """Centroid (lat, lon) via internal geom API, else database land_parcels.geom."""
+    """Centroid (lat, lon) via internal JSONB boundary API or local data."""
     try:
         from agric_satellite_analysis_common.internal_api import land_geom, internal_api_enabled
 
@@ -128,9 +127,11 @@ def _resolve_land_lat_lon(land_id: str, session=None) -> tuple[float, float] | N
     from app.models.tables import LandParcel
 
     land = session.get(LandParcel, land_id)
-    if not land or land.deleted_at is not None or land.geom is None:
+    if not land or land.deleted_at is not None:
         return None
-    geom_shape = to_shape(land.geom)
+    geom_shape = geojson_to_shape(land.boundary_geojson)
+    if geom_shape is None:
+        return None
     centroid = geom_shape.centroid
     return float(centroid.y), float(centroid.x)
 

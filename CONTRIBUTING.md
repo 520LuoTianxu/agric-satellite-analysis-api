@@ -24,8 +24,9 @@ The sibling layout is required when Docker Compose builds the `web` service.
 
 ## Backend development
 
-Prerequisites are Python 3.11+, Docker Compose v2 and a running Postgres/PostGIS
-and Redis instance, or the local Compose stack.
+Prerequisites are Python 3.11+, Docker Compose v2 and a running PostgreSQL
+and Redis instance, or the local Compose stack. Parcel boundaries and points
+are stored as GeoJSON JSONB; no database spatial extension is required.
 
 ```bash
 python -m venv .venv

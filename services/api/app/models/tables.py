@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import date as _date, datetime
+from typing import Any
 
-from geoalchemy2 import Geometry
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -110,7 +110,7 @@ class LandParcel(Base):
     max_lat: Mapped[float] = mapped_column(Float, nullable=False)
 
     # 这些列是历史字段模型并入主表后的业务属性，不是第二套地块身份。
-    geom = mapped_column(Geometry("MULTIPOLYGON", srid=4326), nullable=True)
+    # 边界的唯一权威来源是 boundary_geojson；数据库中的历史 geom 列不再映射。
     area_ha: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     crop_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     season: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -232,7 +232,8 @@ class ScoutingObservation(Base):
     alert_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("alerts.id"), nullable=True
     )
-    geom_point = mapped_column(Geometry("POINT", srid=4326), nullable=False)
+    # 现场观察点直接保存为 GeoJSON JSONB，避免依赖数据库空间类型。
+    geom_point: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json = mapped_column(JSONB, nullable=True)

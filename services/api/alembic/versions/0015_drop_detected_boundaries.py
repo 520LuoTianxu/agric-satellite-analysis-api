@@ -7,7 +7,7 @@ Create Date: 2026-09-09
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 # revision identifiers
 revision: str = "0015"
@@ -71,19 +71,13 @@ def downgrade() -> None:
         ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.execute(
-        "ALTER TABLE detected_boundaries "
-        "ADD COLUMN geom geometry(MULTIPOLYGON, 4326) NOT NULL"
+    op.add_column(
+        "detected_boundaries",
+        sa.Column("geom", JSONB, nullable=False),
     )
     op.create_index("ix_detected_boundaries_org_id", "detected_boundaries", ["org_id"])
     op.create_index("ix_detected_boundaries_job_id", "detected_boundaries", ["job_id"])
     op.create_index("ix_detected_boundaries_status", "detected_boundaries", ["status"])
-    op.create_index(
-        "ix_detected_boundaries_geom",
-        "detected_boundaries",
-        ["geom"],
-        postgresql_using="gist",
-    )
     op.execute(
         """
         CREATE TRIGGER set_detected_boundaries_updated_at

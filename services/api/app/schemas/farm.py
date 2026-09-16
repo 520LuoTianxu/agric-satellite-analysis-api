@@ -124,6 +124,7 @@ class LandParcelOut(BaseModel):
     min_lat: float
     max_lon: float
     max_lat: float
+    # 兼容旧客户端的字段名；实际值由 boundary_geojson 提供，不再读取空间列。
     geom: dict[str, Any] | None = None
     area_ha: float | None = None
     crop_type: str | None = None
@@ -136,23 +137,6 @@ class LandParcelOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True, "populate_by_name": True}
-
-    @field_validator("geom", mode="before")
-    @classmethod
-    def convert_wkb_to_geojson(cls, v: Any) -> dict[str, Any] | None:
-        """Auto-convert GeoAlchemy2 WKBElement to GeoJSON dict."""
-        if v is None:
-            return None
-        if isinstance(v, dict):
-            return v
-        # WKBElement from GeoAlchemy2
-        try:
-            from geoalchemy2.shape import to_shape
-            from shapely.geometry import mapping
-
-            return mapping(to_shape(v))
-        except Exception:
-            return None
 
     @field_validator("tags_json", mode="before")
     @classmethod

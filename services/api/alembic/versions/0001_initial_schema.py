@@ -10,7 +10,6 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID, JSONB
-from geoalchemy2 import Geometry
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -29,7 +28,6 @@ def upgrade() -> None:
         'CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch" WITH SCHEMA agric_satellite'
     )
     op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA agric_satellite')
-    op.execute('CREATE EXTENSION IF NOT EXISTS "postgis" WITH SCHEMA agric_satellite')
 
     # ── updated_at trigger function ───────────────────────────────────
     op.execute("""
@@ -231,7 +229,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("name", sa.Text, nullable=False),
-        sa.Column("geom", Geometry("MULTIPOLYGON", srid=4326), nullable=False),
+        # 边界直接保存为 GeoJSON JSONB，基础库不再要求数据库空间扩展。
+        sa.Column("geom", JSONB, nullable=False),
         sa.Column("area_ha", sa.Numeric, nullable=True),
         sa.Column("crop_type", sa.Text, nullable=True),
         sa.Column("season", sa.Text, nullable=True),
@@ -258,7 +257,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_fields_org_id", "fields", ["org_id"])
     op.create_index("ix_fields_farm_id", "fields", ["farm_id"])
-    op.execute("CREATE INDEX ix_fields_geom ON fields USING GIST (geom);")
 
     # ── raster_layers ─────────────────────────────────────────────────
     op.create_table(
@@ -417,7 +415,7 @@ def upgrade() -> None:
             sa.ForeignKey("alerts.id", ondelete="SET NULL"),
             nullable=True,
         ),
-        sa.Column("geom_point", Geometry("POINT", srid=4326), nullable=False),
+        sa.Column("geom_point", JSONB, nullable=False),
         sa.Column("title", sa.Text, nullable=False),
         sa.Column("note", sa.Text, nullable=True),
         sa.Column("tags_json", JSONB, nullable=True),

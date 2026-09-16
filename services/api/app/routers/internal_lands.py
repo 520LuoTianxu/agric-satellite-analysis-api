@@ -12,10 +12,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.geo import geojson_centroid
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import LandParcel
 
@@ -95,29 +96,19 @@ async def land_geom(
     db: Annotated[AsyncSession, Depends(get_db)],
     include_geojson: int = Query(0, ge=0, le=1),
 ):
-    """Return centroid and optional boundary directly from land_parcels."""
-    columns = """
-        land_id,
-        land_name,
-        area_ha::float AS area_ha,
-        ST_X(ST_Centroid(geom))::float AS centroid_lon,
-        ST_Y(ST_Centroid(geom))::float AS centroid_lat
-    """
-    columns += ", ST_AsGeoJSON(geom)::json AS geojson" if include_geojson else ", NULL::json AS geojson"
-    result = await db.execute(
-        text(
-            f"""
-            SELECT {columns}
-            FROM agric_satellite.land_parcels
-            WHERE land_id = :land_id AND deleted_at IS NULL
-            """
-        ),
-        {"land_id": land_id},
-    )
-    row = result.mappings().first()
-    if not row:
+    """Return centroid and optional JSONB boundary from land_parcels."""
+    land = await db.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
         raise HTTPException(status_code=404, detail="land parcel not found")
-    return LandGeomOut.model_validate(dict(row))
+    centroid = geojson_centroid(land.boundary_geojson)
+    return LandGeomOut(
+        land_id=land.land_id,
+        land_name=land.land_name,
+        area_ha=float(land.area_ha) if land.area_ha is not None else None,
+        centroid_lon=centroid[1] if centroid else None,
+        centroid_lat=centroid[0] if centroid else None,
+        geojson=land.boundary_geojson if include_geojson else None,
+    )
 
 
 @router.patch("/{land_id}/tags", response_model=LandResolveOut)

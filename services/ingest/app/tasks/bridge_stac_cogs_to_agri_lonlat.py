@@ -145,7 +145,7 @@ def _load_land(conn, land_id: str) -> dict[str, Any]:
         cur.execute(
             """
             SELECT land_id, tile_id, land_name,
-                   COALESCE(ST_AsGeoJSON(geom), boundary_geojson::text) AS geom_geojson
+                   boundary_geojson AS geometry_geojson
             FROM agric_satellite.land_parcels
             WHERE land_id = %s AND deleted_at IS NULL
             """,
@@ -154,11 +154,17 @@ def _load_land(conn, land_id: str) -> dict[str, Any]:
         row = cur.fetchone()
         if not row:
             raise SystemExit(f"land parcel not found: {land_id}")
-        if not row["geom_geojson"]:
+        geometry = row["geometry_geojson"]
+        if isinstance(geometry, str):
+            try:
+                geometry = json.loads(geometry)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"land parcel {land_id} has invalid boundary JSON") from exc
+        if not isinstance(geometry, dict):
             raise SystemExit(f"land parcel {land_id} has no geometry")
 
         return {
-            "geom": json.loads(row["geom_geojson"]),
+            "geometry": geometry,
             "land_id": row["land_id"],
             "tile_id": row["tile_id"],
             "land_name": row["land_name"] or row["land_id"],
@@ -486,7 +492,7 @@ def process_date(
         _load_one(MNDWI_FALLBACK[0], MNDWI_FALLBACK[1], required=False)
 
     assert transform is not None
-    pixels = _sample_lonlat(meta["geom"], band_arrays, transform, crs)
+    pixels = _sample_lonlat(meta["geometry"], band_arrays, transform, crs)
     if not pixels:
         print(f"  skip {date_str}: 0 pixels inside polygon", file=sys.stderr)
         return None

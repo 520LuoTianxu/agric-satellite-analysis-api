@@ -27,7 +27,7 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 
 ## Why this stack / 为什么用这套栈
 
-- Self-hostable services: Next.js ↔ FastAPI ↔ Aliyun OSS ↔ PostGIS
+- Self-hostable services: Next.js ↔ FastAPI ↔ Aliyun OSS ↔ PostgreSQL/JSONB
 - Vegetation indices from Sentinel-2: NDVI, EVI, SAVI, NDWI, with 24-month backfill
 - Daily weather (Open-Meteo) plus agricultural indices (GDD, water balance, drought)
 - Soil intelligence from SoilGrids (global, 250 m) and POLARIS (US, 30 m)
@@ -188,7 +188,7 @@ Layer A - Observation:  Satellite · Weather · Soil · Boundaries
 ```
 ../agric-satellite-analysis-web/ → Next.js 14 + NextAuth (Google + optional demo) + Tailwind + MapLibre
 services/api/   → FastAPI + SQLAlchemy 2.0 (async) + Alembic + Celery
-docker-compose.yml → Postgres/PostGIS, Redis, API, workers, Web
+docker-compose.yml → PostgreSQL, Redis, API, workers, Web
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the upstream strategic document.
