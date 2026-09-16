@@ -29,9 +29,9 @@ www.{$DOMAIN:localhost} {
 		reverse_proxy api:8000
 	}
 
-	# ── Everything else → Next.js ────────────────────────────────────
+	# ── Everything else → static frontend ────────────────────────────
 	handle {
-		reverse_proxy web:3000
+		reverse_proxy web:80
 	}
 
 	# Compression

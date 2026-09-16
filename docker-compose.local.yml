@@ -26,18 +26,15 @@ services:
       - "8000:8000"
   web:
     ports:
-      - "3000:3000"
+      - "3000:80"
     build:
       # The frontend is a sibling repository in the workspace layout.
       context: ../agric-satellite-analysis-web
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/v1}
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: "true"
         NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
-        INTERNAL_API_URL: http://api:8000
-    environment:
-      ENABLE_DEMO_LOGIN: "true"
-      NEXT_PUBLIC_ENABLE_DEMO_LOGIN: "true"

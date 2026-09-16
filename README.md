@@ -75,7 +75,7 @@ Health checks:
 
 ```bash
 curl http://localhost:8000/healthz    # API
-curl http://localhost:3000/api/health # Web
+curl -f http://localhost:3000/       # Web（静态 Nginx）
 ```
 
 Production compose files stay as upstream: `docker-compose.yml` + `docker-compose.prod.yml` (Caddy). See [DEPLOYMENT.md](DEPLOYMENT.md).

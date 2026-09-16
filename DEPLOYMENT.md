@@ -145,7 +145,7 @@ sudo docker compose ps
 
 # Check health endpoints
 curl -s http://localhost:8000/healthz    # API
-curl -s http://localhost:3000/api/health # Web (internal)
+curl -s http://localhost:3000/          # Web (static Nginx, internal)
 curl -s https://agric-satellite-analysis.example.com    # Public (through Caddy)
 ```
 
@@ -163,7 +163,7 @@ Internet
     ├── /v1/*          → api:8000      (FastAPI)
     ├── /docs*         → api:8000      (Swagger UI)
     ├── /healthz       → api:8000      (Health check)
-    └── /*             → web:3000      (Next.js frontend)
+    └── /*             → web:80        (Nginx static frontend)
 
 Internal network (not exposed):
     ├── db:5432        (PostgreSQL + PostGIS)

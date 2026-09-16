@@ -239,39 +239,16 @@ services:
       context: ../agric-satellite-analysis-web
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/v1}
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
         NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
         NEXT_PUBLIC_OSS_URL: ${NEXT_PUBLIC_OSS_URL:-}
-        INTERNAL_API_URL: http://api:8000
-    environment:
-      # Next.js standalone binds to $HOSTNAME, which Docker sets to the
-      # container ID; bind all interfaces so the healthcheck can reach it
-      HOSTNAME: 0.0.0.0
-      NEXTAUTH_URL: ${NEXTAUTH_URL}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      ENABLE_DEMO_LOGIN: ${ENABLE_DEMO_LOGIN:-false}
-      NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
-      OPENFARM_JWT_SECRET: ${OPENFARM_JWT_SECRET}
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
-      NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
-      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
-      NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
-      NEXT_PUBLIC_OSS_URL: ${NEXT_PUBLIC_OSS_URL:-}
-      DATABASE_URL: ${DATABASE_URL_SYNC}
-      INTERNAL_API_URL: http://api:8000
-    depends_on:
-      db:
-        condition: service_healthy
-      api:
-        condition: service_healthy
     healthcheck:
-      # the web image has no curl; probe with node's built-in fetch
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      # 静态镜像由 Nginx 提供服务，使用内置 wget 检查首页是否可读。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
