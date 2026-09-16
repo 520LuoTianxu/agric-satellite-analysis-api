@@ -160,6 +160,7 @@ async def list_lands(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
     farm_id: uuid.UUID | None = Query(None),
+    group_id: str | None = Query(None, description="Filter by planting group_id"),
     q: str | None = Query(None, description="Search land_id or land_name"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -168,6 +169,8 @@ async def list_lands(
     filters = [LandParcel.deleted_at.is_(None)]
     if farm_id is not None:
         filters.append(LandParcel.farm_id == farm_id)
+    if group_id and group_id.strip():
+        filters.append(LandParcel.group_id == group_id.strip())
     if q and q.strip():
         needle = f"%{q.strip()}%"
         filters.append(
