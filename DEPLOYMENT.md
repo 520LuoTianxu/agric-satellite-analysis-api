@@ -160,6 +160,7 @@ Internet
     │
     ▼
   Caddy (:80 → redirect, :443 auto-SSL)
+    ├── /satellite-api/* → api:8000   (FastAPI /v1 gateway)
     ├── /v1/*          → api:8000      (FastAPI)
     ├── /docs*         → api:8000      (Swagger UI)
     ├── /healthz       → api:8000      (Health check)

@@ -71,6 +71,8 @@ Do **not** commit `.env`. Only `.env.example` is in git.
 | API (FastAPI) | http://localhost:8000 | Backend API |
 | API Docs | http://localhost:8000/docs | Swagger UI |
 
+浏览器前端统一通过 `/satellite-api/` 访问 API；Caddy 会将其转换为 FastAPI 的 `/v1/` 路径。
+
 Health checks:
 
 ```bash
