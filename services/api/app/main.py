@@ -1,6 +1,8 @@
 """agric-satellite-analysis API - FastAPI application entry point."""
 
+import re
 from contextlib import asynccontextmanager
+from time import perf_counter
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
@@ -10,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
-from app.core.logging import setup_logging
+from app.core.logging import logger, setup_logging
 from app.core.rate_limit import limiter
 from app.middleware.trace import TraceIdMiddleware
 from app.routers import (
@@ -121,30 +123,85 @@ app.include_router(internal_schedule.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────
+def _health_error_message(exc: Exception) -> str:
+    """格式化健康检查异常，避免日志和响应意外暴露连接凭据。"""
+
+    message = re.sub(
+        r"((?:postgresql(?:\+\w+)?|redis(?:s)?):\/\/)[^@\s]+@",
+        r"\1<redacted>@",
+        str(exc),
+        flags=re.IGNORECASE,
+    )
+    return message[:500]
+
+
 @app.get("/health", tags=["health"])
 @app.get("/healthz", tags=["health"], include_in_schema=False)
 async def healthz():
     """Check DB connection and Redis ping; /healthz remains a compatibility alias."""
+    health_started_at = perf_counter()
     errors: list[str] = []
+    redis_scheme = settings.redis_url.partition("://")[0] or "<missing>"
+    logger.info(
+        "health_check_started",
+        database_configured=bool(settings.database_url),
+        redis_configured=bool(settings.redis_url),
+        redis_scheme=redis_scheme,
+    )
 
     # DB check
+    database_started_at = perf_counter()
+    logger.info("health_check_database_started")
     try:
         from sqlalchemy import text
         from app.core.database import engine
 
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-    except Exception as e:
-        errors.append(f"db: {e}")
+        logger.info(
+            "health_check_database_succeeded",
+            duration_ms=round((perf_counter() - database_started_at) * 1000),
+        )
+    except Exception as exc:
+        error_message = _health_error_message(exc)
+        errors.append(f"db: {error_message}")
+        logger.warning(
+            "health_check_database_failed",
+            error_type=type(exc).__name__,
+            error=error_message,
+            duration_ms=round((perf_counter() - database_started_at) * 1000),
+        )
 
     # Redis check
+    redis_started_at = perf_counter()
+    logger.info("health_check_redis_started")
     try:
         r = aioredis.from_url(settings.redis_url)
         await r.ping()
         await r.aclose()
-    except Exception as e:
-        errors.append(f"redis: {e}")
+        logger.info(
+            "health_check_redis_succeeded",
+            duration_ms=round((perf_counter() - redis_started_at) * 1000),
+        )
+    except Exception as exc:
+        error_message = _health_error_message(exc)
+        errors.append(f"redis: {error_message}")
+        logger.warning(
+            "health_check_redis_failed",
+            error_type=type(exc).__name__,
+            error=error_message,
+            duration_ms=round((perf_counter() - redis_started_at) * 1000),
+        )
 
     if errors:
+        logger.warning(
+            "health_check_unhealthy",
+            error_count=len(errors),
+            duration_ms=round((perf_counter() - health_started_at) * 1000),
+        )
         return {"status": "unhealthy", "errors": errors}
+    logger.info(
+        "health_check_succeeded",
+        duration_ms=round((perf_counter() - health_started_at) * 1000),
+    )
     return {"status": "ok"}
