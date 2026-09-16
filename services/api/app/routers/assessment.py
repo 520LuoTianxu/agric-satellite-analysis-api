@@ -509,6 +509,34 @@ async def _latest_report_job_for_meta(
     return latest
 
 
+@router.get("/assessment-reports/latest/meta", response_model=JobOut)
+async def get_latest_available_assessment_meta(
+    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """首页默认展示最近完成且有 PDF 的选地报告。"""
+    # 关联地块排除已删除地块的报告，权限沿用现有报告接口的请求上下文。
+    job = (
+        await db.execute(
+            select(Job)
+            .join(LandParcel, LandParcel.land_id == Job.land_id)
+            .where(
+                org_scope(None, ctx),
+                LandParcel.deleted_at.is_(None),
+                Job.type == "assessment_report",
+                Job.status == "succeeded",
+                Job.progress_json["object_key"].as_string().is_not(None),
+                Job.progress_json["object_key"].as_string() != "",
+            )
+            .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="No assessment report yet")
+    return job
+
+
 @router.get("/lands/{land_id}/assessment-report/latest/meta", response_model=JobOut)
 async def get_latest_assessment_meta(
     land_id: str,
