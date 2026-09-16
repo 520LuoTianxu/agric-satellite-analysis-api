@@ -62,14 +62,16 @@ ssh ubuntu@<your-vm-ip>
 curl -sSL https://raw.githubusercontent.com/520LuoTianxu/agric-satellite-analysis/main/deploy/setup.sh | sudo bash
 ```
 
-This installs Docker, configures the firewall, creates swap, clones the repo, and generates secure random passwords.
+This installs Docker, configures the firewall, creates swap, clones both
+repositories into the sibling workspace layout, and generates secure random
+passwords.
 
 ---
 
 ## Step 3: Configure Environment
 
 ```bash
-cd /opt/openfarm
+cd /opt/agric-satellite-analysis-workspace/agric-satellite-analysis
 sudo nano .env
 ```
 
@@ -112,7 +114,7 @@ dig agric-satellite-analysis.example.com +short
 ## Step 5: Deploy
 
 ```bash
-cd /opt/openfarm
+cd /opt/agric-satellite-analysis-workspace/agric-satellite-analysis
 
 # Build and start all services
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
@@ -175,14 +177,21 @@ Internal network (not exposed):
 Worker split (ingest download vs storage OSS upload): [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
 
 Celery workers (ingest, storage, beat) share Redis broker settings from
-`packages/openfarm_common`. Socket timeouts, TCP keepalive, and
+`packages/agric_satellite_analysis_common`. Socket timeouts, TCP keepalive, and
 `retry_on_timeout` are on by default so a stale remote Redis session cannot
 block the consumer loop. Override via `CELERY_REDIS_*` and
 `CELERY_BROKER_*` in `.env` (see `.env.example`). After a Redis blip,
 `docker compose exec ingest celery -A app.worker inspect ping` should return
 OK and the `ingest` queue length should fall without restarting the container.
 
-**物理拆包已落地**：`packages/openfarm_common` + `services/ingest` / `services/storage` 独立 Dockerfile；compose `build.context` 为仓库根目录。storage 镜像不含 GDAL。
+**物理拆包已落地**：`packages/agric_satellite_analysis_common` +
+`services/ingest` / `services/storage` 使用独立 Dockerfile。后端服务的
+Compose build context 为本仓库，`web` 服务的 build context 为旁边的前端
+仓库。storage 镜像不含 GDAL。
+
+The backend services build from this repository. The `web` service builds from
+the sibling `../agric-satellite-analysis-web` repository, so both repositories
+must remain under `/opt/agric-satellite-analysis-workspace`.
 
 ---
 
@@ -191,7 +200,7 @@ OK and the `ingest` queue length should fall without restarting the container.
 ### View Logs
 
 ```bash
-cd /opt/openfarm
+cd /opt/agric-satellite-analysis-workspace/agric-satellite-analysis
 
 # All services
 sudo docker compose logs -f --tail 100
@@ -206,8 +215,9 @@ sudo docker compose logs -f web
 ### Update to Latest Version
 
 ```bash
-cd /opt/openfarm
+cd /opt/agric-satellite-analysis-workspace/agric-satellite-analysis
 git pull origin main
+git -C ../agric-satellite-analysis-web pull origin main
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
@@ -222,7 +232,7 @@ agric-satellite-analysis includes an automated backup script at `deploy/backup.s
 sudo docker compose exec db pg_dump -U openfarm openfarm | gzip > backup_$(date +%Y%m%d).sql.gz
 
 # Using the backup script (recommended)
-sudo /opt/openfarm/deploy/backup.sh
+sudo /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh
 ```
 
 **Automated daily backups (cron):**
@@ -232,14 +242,14 @@ sudo /opt/openfarm/deploy/backup.sh
 sudo crontab -e
 
 # Daily at 02:00 UTC, 7-day retention (default)
-0 2 * * * /opt/openfarm/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
+0 2 * * * /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 ```
 
 **Configuration (environment variables):**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BACKUP_DIR` | `/opt/openfarm/backups` | Local backup directory |
+| `BACKUP_DIR` | `/opt/agric-satellite-analysis-workspace/agric-satellite-analysis/backups` | Local backup directory |
 | `RETENTION_DAYS` | `7` | Days to keep local backups |
 | `UPLOAD_TO_MINIO` | `false` | Upload backups to MinIO/S3 |
 | `MINIO_ALIAS` | `local` | mc alias for MinIO |
@@ -289,8 +299,8 @@ For production deployments requiring point-in-time recovery (PITR), enable Postg
 **1. Create archive directory:**
 
 ```bash
-sudo mkdir -p /opt/openfarm/wal-archive
-sudo chown 999:999 /opt/openfarm/wal-archive  # postgres container UID
+sudo mkdir -p /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive
+sudo chown 999:999 /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive  # postgres container UID
 ```
 
 **2. Add PostgreSQL config overrides** - create `deploy/postgresql.conf`:
@@ -309,7 +319,7 @@ archive_timeout = 300
 db:
   volumes:
     - ./deploy/postgresql.conf:/etc/postgresql/conf.d/wal.conf:ro
-    - /opt/openfarm/wal-archive:/var/lib/postgresql/wal-archive
+    - /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive:/var/lib/postgresql/wal-archive
   command: >
     postgres
     -c config_file=/etc/postgresql/postgresql.conf
@@ -340,11 +350,11 @@ sudo docker compose up -d
 
 ```bash
 # Check archive size
-du -sh /opt/openfarm/wal-archive/
+du -sh /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive/
 
 # Prune WAL files older than the oldest base backup (manual)
 # Keep at minimum 7 days of WAL for PITR window
-find /opt/openfarm/wal-archive/ -name "*.gz" -mtime +7 -delete
+find /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/wal-archive/ -name "*.gz" -mtime +7 -delete
 ```
 
 ### Restart a Service
@@ -357,7 +367,7 @@ sudo docker compose restart ingest storage beat
 ### Full Restart
 
 ```bash
-cd /opt/openfarm
+cd /opt/agric-satellite-analysis-workspace/agric-satellite-analysis
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml down
 sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```

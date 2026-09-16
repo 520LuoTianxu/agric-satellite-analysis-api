@@ -1,6 +1,6 @@
 """Re-export observation-only harvest detection."""
 
-from openfarm_common.harvest_detect import (  # noqa: F401
+from agric_satellite_analysis_common.harvest_detect import (  # noqa: F401
     HarvestDetectResult,
     HarvestThresholds,
     detect_harvest,

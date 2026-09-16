@@ -153,7 +153,7 @@ def generate_assessment_pdf(
             raise ValueError("land_id required when data_dir is omitted")
         land_id = str(land_id)
         try:
-            from openfarm_common.internal_api import internal_api_enabled
+            from agric_satellite_analysis_common.internal_api import internal_api_enabled
 
             http_ok = internal_api_enabled()
         except ImportError:

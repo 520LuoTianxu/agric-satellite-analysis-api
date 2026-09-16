@@ -11,10 +11,8 @@
 [![CI](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/520LuoTianxu/agric-satellite-analysis/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
-<p>
-  <img src="apps/web/public/screenshots/openfarm-1.png" width="49%" />
-  <img src="apps/web/public/screenshots/openfarm-2.png" width="49%" />
-</p>
+Frontend source and screenshots are maintained in the separate
+[agric-satellite-analysis-web repository](https://github.com/520LuoTianxu/agric-satellite-analysis-web).
 
 </div>
 
@@ -41,13 +39,18 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 ## Prerequisites / 前置条件
 
 - Docker + Docker Compose v2
-- Node.js 20+ and npm 10+ (local web)
+- Node.js 20+ and npm 10+ when developing the frontend repository
 - Python 3.11+ and pip (local API)
 - Google OAuth credentials for production login (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`)
 
 ## Quick Start / 快速开始
 
 ```bash
+# Clone both repositories into one workspace. The sibling layout is required
+# by the web service build context in docker-compose.yml.
+git clone https://github.com/520LuoTianxu/agric-satellite-analysis.git
+git clone https://github.com/520LuoTianxu/agric-satellite-analysis-web.git
+cd agric-satellite-analysis
 cp .env.example .env
 # Fill Google OAuth (see below) and generate secrets:
 #   NEXTAUTH_SECRET:     openssl rand -base64 32
@@ -100,7 +103,7 @@ NEXTAUTH_URL=http://localhost:3000   # or https://your-domain.com
 NEXTAUTH_SECRET=$(openssl rand -base64 32)
 ```
 
-OAuth consent screen: add your test users while the app is in **Testing**. The sign-in modal copy comes from i18n keys under `signInPage` (`apps/web/messages/{zh,en,es}.json`).
+OAuth consent screen: add your test users while the app is in **Testing**. The sign-in modal copy comes from i18n keys under `signInPage` in the frontend repository.
 
 ### Optional Demo login / 可选演示登录
 
@@ -124,7 +127,7 @@ Leave both `false` in production unless you want a shared demo user. After enabl
 | `en` English | `/en` | |
 | `es` Español | `/es` | |
 
-Messages: `apps/web/messages/{zh,en,es}.json`. Routing: `apps/web/src/i18n/routing.ts`. Switch languages with the globe control in the header / sidebar.
+Messages and routing live in the frontend repository under `messages/` and `src/i18n/routing.ts`. Switch languages with the globe control in the header / sidebar.
 
 
 ## Object storage / 对象存储（Aliyun OSS）
@@ -181,7 +184,7 @@ Layer A - Observation:  Satellite · Weather · Soil · Boundaries
 ```
 
 ```
-apps/web/       → Next.js 14 + NextAuth (Google + optional demo) + Tailwind + MapLibre
+../agric-satellite-analysis-web/ → Next.js 14 + NextAuth (Google + optional demo) + Tailwind + MapLibre
 services/api/   → FastAPI + SQLAlchemy 2.0 (async) + Alembic + Celery
 docker-compose.yml → Postgres/PostGIS, Redis, API, workers, Web
 ```
@@ -190,10 +193,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the upstream strategic document.
 
 ## Local development / 本地开发
 
-### Frontend (`apps/web`)
+### Frontend (`../agric-satellite-analysis-web`)
 
 ```bash
-cd apps/web
+cd ../agric-satellite-analysis-web
 npm install
 npm run dev          # start dev server
 npm run lint         # ESLint
@@ -215,8 +218,8 @@ ruff format --check .
 
 ## Quality & CI
 
-- GitHub Actions: `.github/workflows/ci.yml` (env parity, i18n key parity, web lint/type-check, API ruff)
-- Message files must share the same key tree: `python3 scripts/check-i18n-keys.py`
+- Backend GitHub Actions: `.github/workflows/ci.yml` (env parity, common package, ingest and API checks)
+- Frontend GitHub Actions and i18n checks live in the `agric-satellite-analysis-web` repository.
 
 ## Acknowledgements / 致谢
 

@@ -368,7 +368,7 @@ def _backfill_indices_http_only(
 def _schedule_via_http() -> bool:
     """下载机已配置 Internal HTTP 时，地块清单必须向 API 要。"""
     try:
-        from openfarm_common.internal_api import internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import internal_api_enabled
 
         return internal_api_enabled()
     except ImportError:
@@ -415,7 +415,7 @@ def schedule_weekly_index_compute(self) -> dict:
     """给过期的规范地块派发统一光学任务。"""
     if _schedule_via_http():
         # 下载机只拿清单并投递，Job 已在 API 建好
-        from openfarm_common.internal_api import weekly_index_prepare
+        from agric_satellite_analysis_common.internal_api import weekly_index_prepare
 
         payload = weekly_index_prepare()
         items = payload.get("items") or []

@@ -16,7 +16,7 @@ router = APIRouter(prefix="/internal/results", tags=["internal-results"])
 class ApplyRequest(BaseModel):
     """ResultMessage-like or domain inline payload.
 
-    Same shapes accepted by ``openfarm_common.result_apply.apply_result_envelope``.
+    Same shapes accepted by ``agric_satellite_analysis_common.result_apply.apply_result_envelope``.
     """
 
     result: dict[str, Any] = Field(default_factory=dict)
@@ -70,7 +70,7 @@ async def apply_results(
     exists; use this endpoint for legacy/MQ-free result delivery without a
     claim lease (e.g. weather/soil bulk after Celery finishes).
     """
-    from openfarm_common.result_apply import apply_result_envelope
+    from agric_satellite_analysis_common.result_apply import apply_result_envelope
 
     envelope = _envelope_from_body(body)
     stats = await asyncio.to_thread(apply_result_envelope, envelope)

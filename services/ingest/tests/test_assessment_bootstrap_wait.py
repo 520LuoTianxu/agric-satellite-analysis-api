@@ -165,7 +165,7 @@ class BootstrapPullsReadyTests(unittest.TestCase):
             internal_api_enabled=lambda: True,
             get_job=lambda *_a, **_k: remote,
         )
-        with patch.dict(sys.modules, {"openfarm_common.internal_api": fake}):
+        with patch.dict(sys.modules, {"agric_satellite_analysis_common.internal_api": fake}):
             started = ar._resolve_wait_started_at(None, "job-1")
         self.assertEqual(started.year, 2026)
         self.assertEqual(started.hour, 3)

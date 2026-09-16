@@ -143,7 +143,7 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
     from app.core.date_coerce import coerce_to_date, dates_from_sql_rows
 
     try:
-        from openfarm_common.internal_api import agri_scene_dates, internal_api_enabled
+        from agric_satellite_analysis_common.internal_api import agri_scene_dates, internal_api_enabled
     except ImportError:
         internal_api_enabled = lambda: False  # noqa: E731
         agri_scene_dates = None  # type: ignore

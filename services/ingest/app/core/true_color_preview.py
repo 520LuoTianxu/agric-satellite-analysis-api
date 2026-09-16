@@ -14,8 +14,8 @@ import numpy as np
 import structlog
 from PIL import Image
 
-from openfarm_common.settings import settings
-from openfarm_common.storage import get_storage
+from agric_satellite_analysis_common.settings import settings
+from agric_satellite_analysis_common.storage import get_storage
 
 logger = structlog.get_logger()
 

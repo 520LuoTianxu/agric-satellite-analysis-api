@@ -13,7 +13,7 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 0.1 | Monorepo scaffold (`apps/web`, `services/api`, `services/processor`, `services/tiler`, `db/`) | [x] | |
+| 0.1 | Monorepo scaffold (`agric-satellite-analysis-web`, `services/api`, `services/processor`, `services/tiler`, `db/`) | [x] | |
 | 0.2 | Docker Compose with all 7 services (db, redis, minio, minio-init, api, processor, tiler, web) | [x] | Proper healthchecks, volumes, networking |
 | 0.3 | `.env.example` with all environment variables | [x] | Matches PRD Section 7.7 |
 | 0.4 | Persistent Docker volumes for Postgres, Redis (AOF), MinIO | [x] | Redis AOF + noeviction configured |
@@ -1052,7 +1052,7 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 21.33 | Add `soilApi` namespace to `apps/web/src/lib/api.ts` - `get(fieldId)` → `GET /fields/{id}/soil`, `getSummary(fieldId)` → `GET /fields/{id}/soil/summary`, `refresh(fieldId)` → `POST /fields/{id}/soil/refresh` | [x] | Follow `fieldsApi` / `weatherApi` pattern |
+| 21.33 | Add `soilApi` namespace to `agric-satellite-analysis-web/src/lib/api.ts` - `get(fieldId)` → `GET /fields/{id}/soil`, `getSummary(fieldId)` → `GET /fields/{id}/soil/summary`, `refresh(fieldId)` → `POST /fields/{id}/soil/refresh` | [x] | Follow `fieldsApi` / `weatherApi` pattern |
 | 21.34 | Add `SoilProfile`, `SoilLayer`, `SoilFieldSummary` TypeScript interfaces to `api.ts` or a new types file | [x] | Match Pydantic schema field names |
 
 **Verify:** `npx tsc --noEmit` - zero errors
@@ -1078,8 +1078,8 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 22.1 | Create `apps/web/src/components/field/soil-tab.tsx` - main soil tab component | [x] | Default export; fetches `soilApi.get(fieldId)` + `soilApi.getSummary(fieldId)` via Promise.allSettled |
-| 22.2 | Add `SoilTab` dynamic import in field detail page `apps/web/src/app/[locale]/(authenticated)/farms/[id]/fields/[fieldId]/page.tsx` - new tab alongside NDVI/Alerts/Scouting/Share | [x] | `dynamic(() => import("@/components/field/soil-tab"), { ssr: false, loading: ... })` |
+| 22.1 | Create `agric-satellite-analysis-web/src/components/field/soil-tab.tsx` - main soil tab component | [x] | Default export; fetches `soilApi.get(fieldId)` + `soilApi.getSummary(fieldId)` via Promise.allSettled |
+| 22.2 | Add `SoilTab` dynamic import in field detail page `agric-satellite-analysis-web/src/app/[locale]/(authenticated)/farms/[id]/fields/[fieldId]/page.tsx` - new tab alongside NDVI/Alerts/Scouting/Share | [x] | `dynamic(() => import("@/components/field/soil-tab"), { ssr: false, loading: ... })` |
 | 22.3 | Add "Soil" tab trigger in the `TabsList` - with `Layers` icon from Lucide | [x] | Tab value: `"soil"`; grid-cols-7; positioned after Weather tab |
 
 **Verify:** Field detail page shows "Soil" tab; clicking it renders loading skeleton then soil data
@@ -1122,8 +1122,8 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 22.18 | Add English translations to `apps/web/messages/en.json` - `soil` section with keys for tab label, property names, texture classes, risk labels, disclaimer text, empty state, refresh button/toast | [x] | ~65 translation keys in `soil` section + `fieldDetail.tabSoil` |
-| 22.19 | Add Spanish translations to `apps/web/messages/es.json` - matching `soil` section | [x] | Matching es translations for all keys |
+| 22.18 | Add English translations to `agric-satellite-analysis-web/messages/en.json` - `soil` section with keys for tab label, property names, texture classes, risk labels, disclaimer text, empty state, refresh button/toast | [x] | ~65 translation keys in `soil` section + `fieldDetail.tabSoil` |
+| 22.19 | Add Spanish translations to `agric-satellite-analysis-web/messages/es.json` - matching `soil` section | [x] | Matching es translations for all keys |
 
 #### Integration Testing & QA
 

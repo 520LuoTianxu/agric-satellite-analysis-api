@@ -84,7 +84,7 @@ class JobProgressRedisTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fake = _FakeRedis()
         # Import after path is ready (ingest tests run with services/ingest on path).
-        from openfarm_common import job_progress_redis as jpr
+        from agric_satellite_analysis_common import job_progress_redis as jpr
 
         self.jpr = jpr
         jpr.reset_client_for_tests()

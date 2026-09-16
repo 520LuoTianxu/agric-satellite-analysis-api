@@ -26,8 +26,8 @@ try:
 except Exception:
     from app.tasks.pipeline import compute_target_grid, read_band_windowed  # type: ignore
 
-from openfarm_common.settings import settings
-from openfarm_common.storage import get_storage
+from agric_satellite_analysis_common.settings import settings
+from agric_satellite_analysis_common.storage import get_storage
 
 LAND_ID = "4933"
 DATE_FROM = date(2025, 8, 1)

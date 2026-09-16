@@ -73,7 +73,7 @@ agric-satellite-analysis **Milestone 11 (Soil Intelligence & Decision Support) i
 
 ## Milestone 0 - Foundation (Complete)
 
-- [x] Monorepo structure (`apps/web`, `services/api`, `services/tiler`)
+- [x] Monorepo structure (`agric-satellite-analysis-web`, `services/api`, `services/tiler`)
 - [x] Docker Compose with all services (Postgres/PostGIS, Redis, MinIO, API, Celery, TiTiler, Web)
 - [x] Database schema - all 13 tables with UUID PKs, PostGIS geometry, soft-delete
 - [x] JWT auth (NextAuth Google OAuth → shared HS256 JWT bridge)

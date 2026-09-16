@@ -10,10 +10,10 @@ import logging
 import uuid
 from typing import Any
 
-from openfarm_common.celery_app import celery_client
-from openfarm_common.mq_results import publish_task_result
-from openfarm_common.mq_schemas import TaskMessage
-from openfarm_common.trace import (
+from agric_satellite_analysis_common.celery_app import celery_client
+from agric_satellite_analysis_common.mq_results import publish_task_result
+from agric_satellite_analysis_common.mq_schemas import TaskMessage
+from agric_satellite_analysis_common.trace import (
     bind_trace_from_mapping,
     clear_trace_id,
     get_or_create_trace_id,

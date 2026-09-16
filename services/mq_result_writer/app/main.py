@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import sys
 
-from openfarm_common.mq import connection_label, consume_forever
-from openfarm_common.settings import settings
-from openfarm_common.trace import install_stdlib_trace_log_record
+from agric_satellite_analysis_common.mq import connection_label, consume_forever
+from agric_satellite_analysis_common.settings import settings
+from agric_satellite_analysis_common.trace import install_stdlib_trace_log_record
 
 from app.writer import handle_result_message
 

@@ -1,3 +1,3 @@
-"""Re-export object storage from openfarm_common (presign / read paths)."""
+"""Re-export object storage from agric_satellite_analysis_common (presign / read paths)."""
 
-from openfarm_common.storage import *  # noqa: F403
+from agric_satellite_analysis_common.storage import *  # noqa: F403

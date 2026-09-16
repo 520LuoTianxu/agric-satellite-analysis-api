@@ -5,7 +5,7 @@ Celery worker consuming the **`storage`** queue (`app.tasks.storage.*`).
 Physical package (lean image, **no GDAL**):
 
 - Tasks: `services/storage/app/tasks/storage_tasks.py`
-- Object storage: `packages/openfarm_common` (`ObjectStorage`)
+- Object storage: `packages/agric_satellite_analysis_common` (`ObjectStorage`)
 - Compose build context: **repo root** → `services/storage/Dockerfile`
 
 ```

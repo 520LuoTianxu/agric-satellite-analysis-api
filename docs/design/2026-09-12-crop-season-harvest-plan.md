@@ -11,12 +11,12 @@
 | File | Change |
 |------|--------|
 | `services/ingest/app/core/crops.py` (+ api mirror if any) | Keep `corn` default 6–9; aliases 春/夏玉米→corn; no spring/summer keys |
-| `apps/web` refresh RS UI | List of windows: date range + crops[] (≤2) + presets |
+| `agric-satellite-analysis-web` refresh RS UI | List of windows: date range + crops[] (≤2) + presets |
 | `services/api` backfill body | Pass `crop_key` + date windows |
 | `services/ingest` decloud/drought season checks | Consume normalized windows |
 | `services/ingest/app/core/harvest_detect.py` (new) | NDVI drop detector |
 | `services/api` router | On-demand harvest detect endpoint |
-| `apps/web` timeseries | Marker for harvest_date |
+| `agric-satellite-analysis-web` timeseries | Marker for harvest_date |
 | tests | Unit tests for seasons + detector |
 
 ## Task 1: Crop catalog (clarified)

@@ -1,6 +1,6 @@
-"""Re-export growing-season helpers (shared with ingest via openfarm_common)."""
+"""Re-export growing-season helpers (shared with ingest via agric_satellite_analysis_common)."""
 
-from openfarm_common.growing_seasons import (  # noqa: F401
+from agric_satellite_analysis_common.growing_seasons import (  # noqa: F401
     MAX_CROPS_PER_WINDOW,
     MAX_DISTINCT_CROPS,
     MAX_WINDOWS,

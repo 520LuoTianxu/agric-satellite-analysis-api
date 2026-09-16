@@ -40,6 +40,9 @@ Thumbs.db
 # ── Internal Docs ────────────────────────────────────────────────────
 # R&D docs stay local; the design system reference and TaskList are tracked
 docs/*
+!docs/adr/
+docs/adr/*
+!docs/adr/0001-split-web-and-backend-repositories.md
 !docs/design/
 !docs/TaskList.md
 !docs/agri-first-data.md

@@ -10,7 +10,7 @@ write_files:
     permissions: "0644"
     content: |
       # Daily agric-satellite-analysis Postgres backup (see deploy/backup.sh)
-      0 2 * * * root /opt/openfarm/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
+      0 2 * * * root /opt/agric-satellite-analysis-workspace/agric-satellite-analysis/deploy/backup.sh >> /var/log/openfarm-backup.log 2>&1
 
   - path: /opt/openfarm-bootstrap/bootstrap.sh
     permissions: "0700"
@@ -18,7 +18,8 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
-      INSTALL_DIR=/opt/openfarm
+      WORKSPACE_DIR=/opt/agric-satellite-analysis-workspace
+      INSTALL_DIR=$WORKSPACE_DIR/agric-satellite-analysis
 
       echo "── agric-satellite-analysis bootstrap: wait for apt ─────"
       # First boot: unattended-upgrades may hold the apt lock for minutes.
@@ -32,6 +33,7 @@ write_files:
           # setup.sh would clone too, but cloning first means we run the
           # branch-pinned copy of setup.sh itself (single source of truth).
           apt-get install -y -qq git
+          mkdir -p "$WORKSPACE_DIR"
           git clone --branch '${git_branch}' '${repo_url}' "$INSTALL_DIR"
       fi
 
@@ -56,11 +58,7 @@ write_files:
       set_env NEXT_PUBLIC_SITE_URL 'https://${domain}'
       set_env APP_URL 'https://${domain}'
       set_env NEXT_PUBLIC_API_URL 'https://${domain}/v1'
-      set_env NEXT_PUBLIC_TITILER_URL 'https://${domain}/tiles'
-      set_env TITILER_PUBLIC_URL 'https://${domain}/tiles'
-      set_env NEXT_PUBLIC_MINIO_URL 'https://${domain}/storage/openfarm'
-      set_env NEXT_PUBLIC_PROTOMAPS_URL 'https://${domain}/storage/openfarm/basemap'
-      set_env MINIO_PUBLIC_ENDPOINT '${domain}/storage'
+      set_env NEXT_PUBLIC_PROTOMAPS_URL 'https://${domain}/basemap'
       set_env CORS_ORIGINS 'https://${domain}'
       set_env GOOGLE_CLIENT_ID '${google_client_id}'
       set_env GOOGLE_CLIENT_SECRET '${google_client_secret}'

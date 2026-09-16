@@ -12,11 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PYTHONUNBUFFERED=1
 
-COPY packages/openfarm_common /packages/openfarm_common
+COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/mq_consumer/pyproject.toml .
 COPY services/mq_consumer/app ./app
 
-RUN pip install --no-cache-dir /packages/openfarm_common \
+RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
     && pip install --no-cache-dir .
 
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \

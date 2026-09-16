@@ -3,7 +3,7 @@
 
 Usage (from repo root, with .env loaded or env exported):
 
-  pip install -e packages/openfarm_common
+  pip install -e packages/agric_satellite_analysis_common
   python scripts/mq_publish_test.py --land-id <land_id>
   python scripts/mq_publish_test.py --land-id <land_id> --mode bridge_only
   python scripts/mq_publish_test.py --land-id <land_id> --type weather_backfill --days 30
@@ -62,11 +62,11 @@ def main() -> int:
 
     # Ensure repo packages importable when not installed
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root / "packages" / "openfarm_common"))
+    sys.path.insert(0, str(root / "packages" / "agric_satellite_analysis_common"))
 
-    from openfarm_common.mq import connection_label, publish_task
-    from openfarm_common.mq_schemas import TaskMessage
-    from openfarm_common.settings import settings
+    from agric_satellite_analysis_common.mq import connection_label, publish_task
+    from agric_satellite_analysis_common.mq_schemas import TaskMessage
+    from agric_satellite_analysis_common.settings import settings
 
     if not settings.cloudamqp_url:
         print("ERROR: CLOUDAMQP_URL not set", file=sys.stderr)

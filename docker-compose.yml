@@ -1,5 +1,5 @@
 # Shared Celery Redis transport knobs (ingest/storage/beat/api/mq_consumer).
-# Code defaults live in packages/openfarm_common; these let .env override them.
+# Code defaults live in packages/agric_satellite_analysis_common; these let .env override them.
 x-celery-redis-env: &celery-redis-env
   CELERY_BROKER_VISIBILITY_TIMEOUT: ${CELERY_BROKER_VISIBILITY_TIMEOUT:-7200}
   CELERY_REDIS_SOCKET_TIMEOUT: ${CELERY_REDIS_SOCKET_TIMEOUT:-5}
@@ -235,14 +235,16 @@ services:
   # ── Next.js (Web UI) ──────────────────────────────────────────────
   web:
     build:
-      context: .
-      dockerfile: apps/web/Dockerfile
+      # The frontend is a sibling repository in the workspace layout.
+      context: ../agric-satellite-analysis-web
+      dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_ENABLE_DEMO_LOGIN: ${NEXT_PUBLIC_ENABLE_DEMO_LOGIN:-false}
         NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
+        NEXT_PUBLIC_OSS_URL: ${NEXT_PUBLIC_OSS_URL:-}
         INTERNAL_API_URL: http://api:8000
     environment:
       # Next.js standalone binds to $HOSTNAME, which Docker sets to the
@@ -259,6 +261,7 @@ services:
       NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}
       NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
       NEXT_PUBLIC_GLOSSARY_ASSET_BASE: ${NEXT_PUBLIC_GLOSSARY_ASSET_BASE:-}
+      NEXT_PUBLIC_OSS_URL: ${NEXT_PUBLIC_OSS_URL:-}
       DATABASE_URL: ${DATABASE_URL_SYNC}
       INTERNAL_API_URL: http://api:8000
     depends_on:

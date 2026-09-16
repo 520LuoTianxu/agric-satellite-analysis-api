@@ -199,7 +199,7 @@ def publish_api_task(
         raise HTTPException(status_code=400, detail="land_id is required")
     extras = dict(extras or {})
     tid = task_id or str(uuid.uuid4())
-    from openfarm_common.trace import get_or_create_trace_id, stamp_trace_on_payload
+    from agric_satellite_analysis_common.trace import get_or_create_trace_id, stamp_trace_on_payload
 
     trace_id = get_or_create_trace_id()
 
@@ -271,9 +271,9 @@ def publish_api_task(
         return tid
 
     try:
-        from openfarm_common.mq import publish_task
-        from openfarm_common.mq_schemas import TaskMessage
-        from openfarm_common.settings import settings as common_settings
+        from agric_satellite_analysis_common.mq import publish_task
+        from agric_satellite_analysis_common.mq_schemas import TaskMessage
+        from agric_satellite_analysis_common.settings import settings as common_settings
     except Exception as exc:
         logger.error("mq_helpers_unavailable", error=str(exc))
         if _mq_fallback_enabled():

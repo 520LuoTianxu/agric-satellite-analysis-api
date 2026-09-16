@@ -178,7 +178,7 @@ After D4.1 verify assessment PDF for a known field with download `DATABASE_URL` 
 ## 8. Hot-patch notes
 
 - Prefer hot-patch **API** first (enqueue + internal routes + `result_apply`).
-- Download image: claim agent + `openfarm_common` HTTP helpers.
+- Download image: claim agent + `agric_satellite_analysis_common` HTTP helpers.
 - Never ship production download env with `claim` / `INGEST_PG_WRITES=0` as compose defaults.
 
 ---

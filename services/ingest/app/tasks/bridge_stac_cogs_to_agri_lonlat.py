@@ -639,7 +639,7 @@ def bridge_land_stac_to_agri(
                 oss_url = None
                 if not dry_run:
                     try:
-                        from openfarm_common.mq_results import (
+                        from agric_satellite_analysis_common.mq_results import (
                             scene_json_oss_key,
                             upload_scene_product_json)
 

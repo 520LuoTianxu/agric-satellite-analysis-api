@@ -1,6 +1,6 @@
 """Persist ResultMessage payloads into agric_satellite.mq_task_results (+ domain upserts).
 
-Domain upserts live in ``openfarm_common.result_apply`` so API work-complete
+Domain upserts live in ``agric_satellite_analysis_common.result_apply`` so API work-complete
 can reuse the same logic (download-host isolation D3).
 """
 
@@ -10,9 +10,9 @@ import json
 import logging
 from typing import Any
 
-from openfarm_common.database_sync import SyncSession
-from openfarm_common.mq_schemas import ResultMessage
-from openfarm_common.result_apply import (
+from agric_satellite_analysis_common.database_sync import SyncSession
+from agric_satellite_analysis_common.mq_schemas import ResultMessage
+from agric_satellite_analysis_common.result_apply import (
     UPSERT_SCENE_SQL,
     UPSERT_WEATHER_SQL,
     apply_complete_result,
@@ -23,7 +23,7 @@ from openfarm_common.result_apply import (
     apply_weather_payload,
     handle_result_message_dict,
 )
-from openfarm_common.trace import (
+from agric_satellite_analysis_common.trace import (
     bind_trace_from_mapping,
     clear_trace_id,
     get_or_create_trace_id,

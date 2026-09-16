@@ -20,7 +20,7 @@ from app.core.agri_classify import (
     is_official_optical_product,
 )
 from app.core.harvest_detect import detect_harvest
-from openfarm_common.growing_seasons import months_from_window
+from agric_satellite_analysis_common.growing_seasons import months_from_window
 
 logger = logging.getLogger(__name__)
 
@@ -1606,7 +1606,7 @@ def build_season_facts(
 
     http_inputs: dict[str, Any] | None = None
     try:
-        from openfarm_common.internal_api import (
+        from agric_satellite_analysis_common.internal_api import (
             ingest_pg_reads_allowed,
             internal_api_enabled,
             season_growth_inputs,

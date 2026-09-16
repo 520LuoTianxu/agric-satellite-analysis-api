@@ -1,8 +1,8 @@
 """对象存储上传任务（仅 ``storage`` 队列）。
 
 任务名固定为 ``app.tasks.storage.*``，与 API / ingest 的 ``send_task``
-以及 ``openfarm_common.celery_app.TASK_ROUTES`` 对齐。实际 OSS 读写走
-``openfarm_common.storage.get_storage()``，本文件只做队列侧契约。
+以及 ``agric_satellite_analysis_common.celery_app.TASK_ROUTES`` 对齐。实际 OSS 读写走
+``agric_satellite_analysis_common.storage.get_storage()``，本文件只做队列侧契约。
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from __future__ import annotations
 import base64
 import os
 
-from openfarm_common.logging import logger
-from openfarm_common.storage import get_storage
+from agric_satellite_analysis_common.logging import logger
+from agric_satellite_analysis_common.storage import get_storage
 
 from app.worker import celery_app
 

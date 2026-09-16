@@ -150,7 +150,7 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 ## 6. 本地冒烟
 
 ```bash
-pip install -e packages/openfarm_common
+pip install -e packages/agric_satellite_analysis_common
 python scripts/mq_publish_test.py --field-id <uuid>
 python scripts/mq_publish_test.py --field-id <uuid> --type weather_backfill --days 30
 python scripts/mq_publish_test.py --field-id <uuid> --type soil_fetch
@@ -166,10 +166,10 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 
 | 路径 | 说明 |
 |------|------|
-| `packages/openfarm_common/openfarm_common/settings.py` | `cloudamqp_download_queue` / `cloudamqp_process_queue` + 旧别名 |
-| `packages/openfarm_common/openfarm_common/mq.py` | pika 连接 / publish→download / publish_result→process / consume |
-| `packages/openfarm_common/openfarm_common/mq_schemas.py` | TaskMessage / ResultMessage（含 payload/data） |
-| `packages/openfarm_common/openfarm_common/mq_results.py` | inline 限幅、scene JSON 上传、Result 发布 |
+| `packages/agric_satellite_analysis_common/agric_satellite_analysis_common/settings.py` | `cloudamqp_download_queue` / `cloudamqp_process_queue` + 旧别名 |
+| `packages/agric_satellite_analysis_common/agric_satellite_analysis_common/mq.py` | pika 连接 / publish→download / publish_result→process / consume |
+| `packages/agric_satellite_analysis_common/agric_satellite_analysis_common/mq_schemas.py` | TaskMessage / ResultMessage（含 payload/data） |
+| `packages/agric_satellite_analysis_common/agric_satellite_analysis_common/mq_results.py` | inline 限幅、scene JSON 上传、Result 发布 |
 | `services/api/app/mq_publish.py` | API 侧 publish → download 队列 |
 | `services/mq_consumer/` | download 队列消费者 |
 | `services/mq_result_writer/` | process 队列写库（mq_task_results + weather/soil/scene） |

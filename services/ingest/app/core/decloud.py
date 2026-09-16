@@ -182,7 +182,7 @@ def _iso_date(value: Any) -> str | None:
 def _months_from_window(window: dict) -> set[int]:
     """Parse one growing-season window: months, month range, or start_date/end_date."""
     try:
-        from openfarm_common.growing_seasons import months_from_window
+        from agric_satellite_analysis_common.growing_seasons import months_from_window
 
         return months_from_window(window)
     except Exception:

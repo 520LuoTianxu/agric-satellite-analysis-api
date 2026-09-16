@@ -114,7 +114,7 @@
     .sc-logic-error{position:absolute;top:8px;left:8px;z-index:2147483647;max-width:60ch;
       padding:6px 10px;background:#b00020;color:#fff;font:12px/1.4 ui-monospace,monospace;
       border-radius:4px;white-space:pre-wrap;pointer-events:none}
-    /* Mirrors PRINT_BASELINE_CSS in apps/web deck-stage-export.ts \u2014 keep both
+    /* Mirrors PRINT_BASELINE_CSS in agric-satellite-analysis-web deck-stage-export.ts \u2014 keep both
        in sync until dc-runtime regains a build step. */
     @media print {
       @page { margin: 0.5cm; }

@@ -53,7 +53,7 @@ async def enqueue_mq_task(
             detail=f"Unsupported type. Allowed: {', '.join(sorted(ALLOWED_MQ_TYPES))}",
         )
     from app.mq_publish import publish_api_task
-    from openfarm_common.settings import settings as common_settings
+    from agric_satellite_analysis_common.settings import settings as common_settings
 
     task_id = body.task_id or str(uuid.uuid4())
     publish_api_task(

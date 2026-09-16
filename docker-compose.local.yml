@@ -28,8 +28,9 @@ services:
     ports:
       - "3000:3000"
     build:
-      context: .
-      dockerfile: apps/web/Dockerfile
+      # The frontend is a sibling repository in the workspace layout.
+      context: ../agric-satellite-analysis-web
+      dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         NEXT_PUBLIC_PROTOMAPS_URL: ${NEXT_PUBLIC_PROTOMAPS_URL}

@@ -1,4 +1,4 @@
-"""Drought / flood classifiers mirroring apps/web/src/lib/agri-classify.ts.
+"""Drought / flood classifiers mirroring agric-satellite-analysis-web/src/lib/agri-classify.ts.
 
 Keep this file in sync with services/ingest/app/core/agri_classify.py.
 """
@@ -75,7 +75,7 @@ PHYSIOLOGY_GROWING_NDVI_FLOOR = 0.15
 PHYSIOLOGY_GREEN_NEIGHBOR_NDVI = 0.40
 
 # NDDI-primary drought bands for agri parcels (keep in sync with
-# apps/web/src/lib/agri-classify.ts). Citations:
+# agric-satellite-analysis-web/src/lib/agri-classify.ts). Citations:
 # - Gu, Brown, Verdin & Wardlow, 2007, Geophys. Res. Lett.:
 #   NDDI = (NDVI - NDWI) / (NDVI + NDWI); higher NDDI = drier.
 #   Gao (1996) NDMI (NIR/SWIR) stands in for NDWI here.
@@ -125,7 +125,7 @@ VV_VH_DIFF_PCTL = 40.0
 FLOOD_SPRING_MONTHS = (3, 4, 5)
 
 # Legacy S2 grid pixel tuple: [row, col, evi, cire, ndmi, ndre, ndvi, mndwi]
-# Mirrors apps/web/src/lib/agri-heatmap.ts S2_VALUE_INDEX.
+# Mirrors agric-satellite-analysis-web/src/lib/agri-heatmap.ts S2_VALUE_INDEX.
 S2_GRID_NDMI_IDX = 4
 S2_GRID_NDVI_IDX = 6
 
@@ -138,7 +138,7 @@ _S1_ID_RE = re.compile(
 )
 
 # Additive UnCRtainTS decloud products (keep in sync with ingest
-# app.core.decloud / agri_classify and apps/web agri-classify.ts).
+# app.core.decloud / agri_classify and agric-satellite-analysis-web agri-classify.ts).
 DECLOUD_SOURCE = "uncrtaints_decloud"
 DECLOUD_SCENE_ID_SUFFIX = "_decloud"
 DECLOUD_QUALITY_GOOD = "good"

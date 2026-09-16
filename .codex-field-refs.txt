@@ -1,60 +1,60 @@
-packages/openfarm_common/openfarm_common\result_apply.py:42:  id, field_id, date, latitude, longitude,
-packages/openfarm_common/openfarm_common\result_apply.py:54:  :id, CAST(:field_id AS uuid), CAST(:date AS date),
-packages/openfarm_common/openfarm_common\result_apply.py:67:ON CONFLICT (field_id, date) DO UPDATE SET
-packages/openfarm_common/openfarm_common\result_apply.py:289:                "field_id": row.get("field_id") or payload.get("field_id"),
-packages/openfarm_common/openfarm_common\result_apply.py:319:            if not params["field_id"] or not params["date"]:
-packages/openfarm_common/openfarm_common\result_apply.py:325:        field_ids = {
-packages/openfarm_common/openfarm_common\result_apply.py:326:            str(r.get("field_id") or payload.get("field_id"))
-packages/openfarm_common/openfarm_common\result_apply.py:328:            if isinstance(r, dict) and (r.get("field_id") or payload.get("field_id"))
-packages/openfarm_common/openfarm_common\result_apply.py:330:        for fid in field_ids:
-packages/openfarm_common/openfarm_common\result_apply.py:348:                                        PARTITION BY field_id
-packages/openfarm_common/openfarm_common\result_apply.py:354:                                        PARTITION BY field_id
-packages/openfarm_common/openfarm_common\result_apply.py:359:                            WHERE field_id = CAST(:field_id AS uuid)
-packages/openfarm_common/openfarm_common\result_apply.py:365:                    {"field_id": fid},
-packages/openfarm_common/openfarm_common\result_apply.py:380:    field_id = payload.get("field_id")
-packages/openfarm_common/openfarm_common\result_apply.py:384:    if not field_id:
-packages/openfarm_common/openfarm_common\result_apply.py:385:        raise ValueError("soil_profile payload missing field_id")
-packages/openfarm_common/openfarm_common\result_apply.py:393:                    "SELECT id FROM soil_profiles WHERE field_id = CAST(:fid AS uuid)"
-packages/openfarm_common/openfarm_common\result_apply.py:395:                {"fid": field_id},
-packages/openfarm_common/openfarm_common\result_apply.py:412:            text("DELETE FROM soil_field_summary WHERE field_id = CAST(:fid AS uuid)"),
-packages/openfarm_common/openfarm_common\result_apply.py:413:            {"fid": field_id},
-packages/openfarm_common/openfarm_common\result_apply.py:422:                  id, field_id, source, source_resolution_m,
-packages/openfarm_common/openfarm_common\result_apply.py:425:                  CAST(:id AS uuid), CAST(:field_id AS uuid),
-packages/openfarm_common/openfarm_common\result_apply.py:433:                "field_id": field_id,
-packages/openfarm_common/openfarm_common\result_apply.py:499:                  id, field_id, profile_id, dominant_texture, avg_ph,
-packages/openfarm_common/openfarm_common\result_apply.py:505:                  CAST(:id AS uuid), CAST(:field_id AS uuid), CAST(:profile_id AS uuid),
-packages/openfarm_common/openfarm_common\result_apply.py:516:                "field_id": field_id,
-packages/openfarm_common/openfarm_common\mq_schemas.py:8:from pydantic import BaseModel, Field, model_validator
-packages/openfarm_common/openfarm_common\mq_schemas.py:21:    field_id: str | None = None
-packages/openfarm_common/openfarm_common\mq_schemas.py:22:    # agric_satellite.land_parcels.land_id — user sample field_id often means this
-packages/openfarm_common/openfarm_common\mq_schemas.py:25:    extras: dict[str, Any] = Field(default_factory=dict)
-packages/openfarm_common/openfarm_common\mq_schemas.py:26:    created_at: datetime = Field(default_factory=_utcnow)
-packages/openfarm_common/openfarm_common\mq_schemas.py:38:    oss_urls: dict[str, str] = Field(default_factory=dict)
-packages/openfarm_common/openfarm_common\mq_schemas.py:40:    field_id: str | None = None
-packages/openfarm_common/openfarm_common\mq_schemas.py:42:    finished_at: datetime = Field(default_factory=_utcnow)
-packages/openfarm_common/openfarm_common\mq_schemas.py:43:    extras: dict[str, Any] = Field(default_factory=dict)
-packages/openfarm_common/openfarm_common\mq_results.py:107:            "field_id": payload.get("field_id"),
-packages/openfarm_common/openfarm_common\mq_results.py:124:                "field_id": payload.get("field_id"),
-packages/openfarm_common/openfarm_common\mq_results.py:159:    field_id: str | None = None,
-packages/openfarm_common/openfarm_common\mq_results.py:197:        "field_id": field_id,
-packages/openfarm_common/openfarm_common\mq_results.py:219:        field_id=field_id,
-packages/openfarm_common/openfarm_common\internal_api.py:158:    field_id: str | None = None,
-packages/openfarm_common/openfarm_common\internal_api.py:163:    """GET /v1/internal/fields/resolve → {field_id, land_id, tags?}."""
-packages/openfarm_common/openfarm_common\internal_api.py:165:    if field_id:
-packages/openfarm_common/openfarm_common\internal_api.py:166:        params["field_id"] = str(field_id)
-packages/openfarm_common/openfarm_common\internal_api.py:173:        r = c.get("/v1/internal/fields/resolve", params=params)
-packages/openfarm_common/openfarm_common\internal_api.py:301:    field_id: str,
-packages/openfarm_common/openfarm_common\internal_api.py:306:    """GET /v1/internal/fields/{id}/geom."""
-packages/openfarm_common/openfarm_common\internal_api.py:310:            f"/v1/internal/fields/{field_id}/geom",
-packages/openfarm_common/openfarm_common\internal_api.py:427:    field_id: str,
-packages/openfarm_common/openfarm_common\internal_api.py:434:    """GET /v1/internal/fields/{id}/assessment-bundle — full load_field_bundle JSON."""
-packages/openfarm_common/openfarm_common\internal_api.py:443:            f"/v1/internal/fields/{field_id}/assessment-bundle",
-packages/openfarm_common/openfarm_common\internal_api.py:459:    field_id: str,
-packages/openfarm_common/openfarm_common\internal_api.py:466:    """GET /v1/internal/fields/{id}/season-growth-inputs — field + S2/S1/indices rows."""
-packages/openfarm_common/openfarm_common\internal_api.py:471:            f"/v1/internal/fields/{field_id}/season-growth-inputs",
-packages/openfarm_common/openfarm_common\internal_api.py:487:    field_id: str,
-packages/openfarm_common/openfarm_common\internal_api.py:493:    """GET /v1/internal/fields/{id}/data-readiness — weather/soil/RS coverage counts."""
-packages/openfarm_common/openfarm_common\internal_api.py:502:            f"/v1/internal/fields/{field_id}/data-readiness",
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:42:  id, field_id, date, latitude, longitude,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:54:  :id, CAST(:field_id AS uuid), CAST(:date AS date),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:67:ON CONFLICT (field_id, date) DO UPDATE SET
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:289:                "field_id": row.get("field_id") or payload.get("field_id"),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:319:            if not params["field_id"] or not params["date"]:
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:325:        field_ids = {
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:326:            str(r.get("field_id") or payload.get("field_id"))
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:328:            if isinstance(r, dict) and (r.get("field_id") or payload.get("field_id"))
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:330:        for fid in field_ids:
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:348:                                        PARTITION BY field_id
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:354:                                        PARTITION BY field_id
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:359:                            WHERE field_id = CAST(:field_id AS uuid)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:365:                    {"field_id": fid},
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:380:    field_id = payload.get("field_id")
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:384:    if not field_id:
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:385:        raise ValueError("soil_profile payload missing field_id")
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:393:                    "SELECT id FROM soil_profiles WHERE field_id = CAST(:fid AS uuid)"
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:395:                {"fid": field_id},
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:412:            text("DELETE FROM soil_field_summary WHERE field_id = CAST(:fid AS uuid)"),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:413:            {"fid": field_id},
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:422:                  id, field_id, source, source_resolution_m,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:425:                  CAST(:id AS uuid), CAST(:field_id AS uuid),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:433:                "field_id": field_id,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:499:                  id, field_id, profile_id, dominant_texture, avg_ph,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:505:                  CAST(:id AS uuid), CAST(:field_id AS uuid), CAST(:profile_id AS uuid),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\result_apply.py:516:                "field_id": field_id,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:8:from pydantic import BaseModel, Field, model_validator
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:21:    field_id: str | None = None
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:22:    # agric_satellite.land_parcels.land_id — user sample field_id often means this
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:25:    extras: dict[str, Any] = Field(default_factory=dict)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:26:    created_at: datetime = Field(default_factory=_utcnow)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:38:    oss_urls: dict[str, str] = Field(default_factory=dict)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:40:    field_id: str | None = None
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:42:    finished_at: datetime = Field(default_factory=_utcnow)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_schemas.py:43:    extras: dict[str, Any] = Field(default_factory=dict)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_results.py:107:            "field_id": payload.get("field_id"),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_results.py:124:                "field_id": payload.get("field_id"),
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_results.py:159:    field_id: str | None = None,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_results.py:197:        "field_id": field_id,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\mq_results.py:219:        field_id=field_id,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:158:    field_id: str | None = None,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:163:    """GET /v1/internal/fields/resolve → {field_id, land_id, tags?}."""
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:165:    if field_id:
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:166:        params["field_id"] = str(field_id)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:173:        r = c.get("/v1/internal/fields/resolve", params=params)
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:301:    field_id: str,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:306:    """GET /v1/internal/fields/{id}/geom."""
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:310:            f"/v1/internal/fields/{field_id}/geom",
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:427:    field_id: str,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:434:    """GET /v1/internal/fields/{id}/assessment-bundle — full load_field_bundle JSON."""
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:443:            f"/v1/internal/fields/{field_id}/assessment-bundle",
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:459:    field_id: str,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:466:    """GET /v1/internal/fields/{id}/season-growth-inputs — field + S2/S1/indices rows."""
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:471:            f"/v1/internal/fields/{field_id}/season-growth-inputs",
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:487:    field_id: str,
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:493:    """GET /v1/internal/fields/{id}/data-readiness — weather/soil/RS coverage counts."""
+packages/agric_satellite_analysis_common/agric_satellite_analysis_common\internal_api.py:502:            f"/v1/internal/fields/{field_id}/data-readiness",
 services/ingest/app\tasks\assessment_report.py:45:    field_id: str | None,
 services/ingest/app\tasks\assessment_report.py:59:            field_id=str(field_id) if field_id else None,
 services/ingest/app\tasks\assessment_report.py:92:    field_id: uuid.UUID,
@@ -552,73 +552,73 @@ services/api/app\services\agri_land_parcels.py:165:        source_properties["fi
 services/api/app\services\agri_land_parcels.py:212:            field_id=str(getattr(field, "id", "")),
 services/api/app\services\agri_land_parcels.py:229:        field_id=str(field.id) if getattr(field, "id", None) else None,
 services/api/app\services\agri_land_parcels.py:236:        field_id=str(getattr(field, "id", "") or ""),
-apps/web/src\lib\api.ts:182:export interface Field {
-apps/web/src\lib\api.ts:319:    field_id: string;
-apps/web/src\lib\api.ts:334:    field_id: string;
-apps/web/src\lib\api.ts:361:    field_id: string;
-apps/web/src\lib\api.ts:381:    field_id: string;
-apps/web/src\lib\api.ts:403:    field_id: string;
-apps/web/src\lib\api.ts:471:    field_id: string;
-apps/web/src\lib\api.ts:490:    field_id: string;
-apps/web/src\lib\api.ts:509:export const farmsApi = {
-apps/web/src\lib\api.ts:523:        apiFetch<Paginated<Field>>(`/farms/${farmId}/fields?limit=${limit}&offset=${offset}`),
-apps/web/src\lib\api.ts:531:    field_id: string;
-apps/web/src\lib\api.ts:543:export const fieldsApi = {
-apps/web/src\lib\api.ts:544:    get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
-apps/web/src\lib\api.ts:546:        apiFetch<Field>("/fields", { method: "POST", body: JSON.stringify(data) }),
-apps/web/src\lib\api.ts:548:        apiFetch<Field>(`/fields/${fieldId}`, { method: "PUT", body: JSON.stringify(data) }),
-apps/web/src\lib\api.ts:550:        apiFetch(`/fields/${fieldId}`, { method: "DELETE" }),
-apps/web/src\lib\api.ts:554:        return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
-apps/web/src\lib\api.ts:574:        return apiFetch<{ field_id: string; status: string; message: string }>(
-apps/web/src\lib\api.ts:575:            `/fields/${fieldId}/backfill-indices`,
-apps/web/src\lib\api.ts:581:            `/fields/${fieldId}/backfill-status`,
-apps/web/src\lib\api.ts:589:        apiFetch<Paginated<RasterLayer>>(`/fields/${fieldId}/layers?type=${type}&limit=${limit}`),
-apps/web/src\lib\api.ts:591:        apiFetch<Paginated<FieldStat>>(`/fields/${fieldId}/stats?type=${type}&limit=${limit}`),
-apps/web/src\lib\api.ts:593:        apiFetch<string[]>(`/fields/${fieldId}/layers/types`),
-apps/web/src\lib\api.ts:600:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/ndvi`, {
-apps/web/src\lib\api.ts:605:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/index`, {
-apps/web/src\lib\api.ts:695:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
-apps/web/src\lib\api.ts:700:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
-apps/web/src\lib\api.ts:703:            `/fields/${fieldId}/assessment-report/latest/scorecard`,
-apps/web/src\lib\api.ts:707:            `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
-apps/web/src\lib\api.ts:756:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report`, {
-apps/web/src\lib\api.ts:761:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report/latest/meta`),
-apps/web/src\lib\api.ts:766:            `/fields/${fieldId}/season-growth-report/materials`,
-apps/web/src\lib\api.ts:772:            `${getApiBase()}/fields/${fieldId}/season-growth-report/latest`,
-apps/web/src\lib\api.ts:807:    listForField: (fieldId: string, limit = 50, indexType?: string) => {
-apps/web/src\lib\api.ts:808:        const params = new URLSearchParams({ field_id: fieldId, limit: String(limit) });
-apps/web/src\lib\api.ts:823:            `/fields/${fieldId}/scouting?limit=${limit}&offset=${offset}`,
-apps/web/src\lib\api.ts:826:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting`, {
-apps/web/src\lib\api.ts:831:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting/${obsId}`, {
-apps/web/src\lib\api.ts:836:        apiFetch(`/fields/${fieldId}/scouting/${obsId}`, { method: "DELETE" }),
-apps/web/src\lib\api.ts:845:            `/fields/${fieldId}/weather?start_date=${startDate}&end_date=${endDate}&include_forecast=${includeForecast}`,
-apps/web/src\lib\api.ts:848:        apiFetch<WeatherSummary>(`/fields/${fieldId}/weather/summary?days=${days}`),
-apps/web/src\lib\api.ts:850:        apiFetch<{ field_id: string; status: string; message: string }>(
-apps/web/src\lib\api.ts:851:            `/fields/${fieldId}/weather/backfill`,
-apps/web/src\lib\api.ts:860:    field_id: string;
-apps/web/src\lib\api.ts:878:    field_id?: string | null;
-apps/web/src\lib\api.ts:1000:    field_id: string;
-apps/web/src\lib\api.ts:1009:    field_id: string;
-apps/web/src\lib\api.ts:1026:    field_id: string;
-apps/web/src\lib\api.ts:1101:    field_id: string;
-apps/web/src\lib\api.ts:1124:    field_id: string;
-apps/web/src\lib\api.ts:1133:    field_id?: string | null;
-apps/web/src\lib\api.ts:1155:    field_id?: string | null;
-apps/web/src\lib\api.ts:1164:        apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
-apps/web/src\lib\api.ts:1166:        apiFetch<SoilFieldSummary>(`/fields/${fieldId}/soil/summary`),
-apps/web/src\lib\api.ts:1168:        apiFetch<SoilRefreshResponse>(`/fields/${fieldId}/soil/refresh`, {
-apps/web/src\lib\api.ts:1172:        apiFetch<SamplingZonesResponse>(`/fields/${fieldId}/soil/sampling-zones`),
-apps/web/src\lib\api.ts:1174:        apiFetch<CropSuitabilityResponse>(`/fields/${fieldId}/soil/crop-suitability`),
-apps/web/src\lib\api.ts:1176:        apiFetch<NutrientContextResponse>(`/fields/${fieldId}/soil/nutrient-context`),
-apps/web/src\lib\api.ts:1178:        apiFetch<CarbonEstimateResponse>(`/fields/${fieldId}/soil/carbon`),
-apps/web/src\lib\api.ts:1180:        apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
-apps/web/src\lib\api.ts:1182:        apiFetch<SoilNpk>(`/fields/${fieldId}/soil/npk`),
-apps/web/src\lib\api.ts:1187:        apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
-apps/web/src\lib\api.ts:1195:        apiFetch<SiteAdmission>(`/fields/${fieldId}/site-admission`),
-apps/web/src\lib\api.ts:1207:        apiFetch<SiteAdmissionFetchResponse>(`/fields/${fieldId}/site-admission`, {
-apps/web/src\lib\api.ts:1643:        apiFetch<ShareLink[]>(`/fields/${fieldId}/share`),
-apps/web/src\lib\api.ts:1645:        apiFetch<ShareLink>(`/fields/${fieldId}/share`, {
-apps/web/src\lib\api.ts:1650:        apiFetch(`/fields/${fieldId}/share/${token}`, { method: "DELETE" }),
+agric-satellite-analysis-web/src\lib\api.ts:182:export interface Field {
+agric-satellite-analysis-web/src\lib\api.ts:319:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:334:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:361:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:381:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:403:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:471:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:490:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:509:export const farmsApi = {
+agric-satellite-analysis-web/src\lib\api.ts:523:        apiFetch<Paginated<Field>>(`/farms/${farmId}/fields?limit=${limit}&offset=${offset}`),
+agric-satellite-analysis-web/src\lib\api.ts:531:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:543:export const fieldsApi = {
+agric-satellite-analysis-web/src\lib\api.ts:544:    get: (fieldId: string) => apiFetch<Field>(`/fields/${fieldId}`),
+agric-satellite-analysis-web/src\lib\api.ts:546:        apiFetch<Field>("/fields", { method: "POST", body: JSON.stringify(data) }),
+agric-satellite-analysis-web/src\lib\api.ts:548:        apiFetch<Field>(`/fields/${fieldId}`, { method: "PUT", body: JSON.stringify(data) }),
+agric-satellite-analysis-web/src\lib\api.ts:550:        apiFetch(`/fields/${fieldId}`, { method: "DELETE" }),
+agric-satellite-analysis-web/src\lib\api.ts:554:        return apiFetch<FieldImportResult>(`/fields/import?farm_id=${farmId}`, { method: "POST", body: formData });
+agric-satellite-analysis-web/src\lib\api.ts:574:        return apiFetch<{ field_id: string; status: string; message: string }>(
+agric-satellite-analysis-web/src\lib\api.ts:575:            `/fields/${fieldId}/backfill-indices`,
+agric-satellite-analysis-web/src\lib\api.ts:581:            `/fields/${fieldId}/backfill-status`,
+agric-satellite-analysis-web/src\lib\api.ts:589:        apiFetch<Paginated<RasterLayer>>(`/fields/${fieldId}/layers?type=${type}&limit=${limit}`),
+agric-satellite-analysis-web/src\lib\api.ts:591:        apiFetch<Paginated<FieldStat>>(`/fields/${fieldId}/stats?type=${type}&limit=${limit}`),
+agric-satellite-analysis-web/src\lib\api.ts:593:        apiFetch<string[]>(`/fields/${fieldId}/layers/types`),
+agric-satellite-analysis-web/src\lib\api.ts:600:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/ndvi`, {
+agric-satellite-analysis-web/src\lib\api.ts:605:        apiFetch<NdviJob>(`/fields/${fieldId}/jobs/index`, {
+agric-satellite-analysis-web/src\lib\api.ts:695:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report`, {
+agric-satellite-analysis-web/src\lib\api.ts:700:        apiFetch<NdviJob>(`/fields/${fieldId}/assessment-report/latest/meta`),
+agric-satellite-analysis-web/src\lib\api.ts:703:            `/fields/${fieldId}/assessment-report/latest/scorecard`,
+agric-satellite-analysis-web/src\lib\api.ts:707:            `${getApiBase()}/fields/${fieldId}/assessment-report/latest`,
+agric-satellite-analysis-web/src\lib\api.ts:756:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report`, {
+agric-satellite-analysis-web/src\lib\api.ts:761:        apiFetch<NdviJob>(`/fields/${fieldId}/season-growth-report/latest/meta`),
+agric-satellite-analysis-web/src\lib\api.ts:766:            `/fields/${fieldId}/season-growth-report/materials`,
+agric-satellite-analysis-web/src\lib\api.ts:772:            `${getApiBase()}/fields/${fieldId}/season-growth-report/latest`,
+agric-satellite-analysis-web/src\lib\api.ts:807:    listForField: (fieldId: string, limit = 50, indexType?: string) => {
+agric-satellite-analysis-web/src\lib\api.ts:808:        const params = new URLSearchParams({ field_id: fieldId, limit: String(limit) });
+agric-satellite-analysis-web/src\lib\api.ts:823:            `/fields/${fieldId}/scouting?limit=${limit}&offset=${offset}`,
+agric-satellite-analysis-web/src\lib\api.ts:826:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting`, {
+agric-satellite-analysis-web/src\lib\api.ts:831:        apiFetch<ScoutingObservation>(`/fields/${fieldId}/scouting/${obsId}`, {
+agric-satellite-analysis-web/src\lib\api.ts:836:        apiFetch(`/fields/${fieldId}/scouting/${obsId}`, { method: "DELETE" }),
+agric-satellite-analysis-web/src\lib\api.ts:845:            `/fields/${fieldId}/weather?start_date=${startDate}&end_date=${endDate}&include_forecast=${includeForecast}`,
+agric-satellite-analysis-web/src\lib\api.ts:848:        apiFetch<WeatherSummary>(`/fields/${fieldId}/weather/summary?days=${days}`),
+agric-satellite-analysis-web/src\lib\api.ts:850:        apiFetch<{ field_id: string; status: string; message: string }>(
+agric-satellite-analysis-web/src\lib\api.ts:851:            `/fields/${fieldId}/weather/backfill`,
+agric-satellite-analysis-web/src\lib\api.ts:860:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:878:    field_id?: string | null;
+agric-satellite-analysis-web/src\lib\api.ts:1000:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:1009:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:1026:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:1101:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:1124:    field_id: string;
+agric-satellite-analysis-web/src\lib\api.ts:1133:    field_id?: string | null;
+agric-satellite-analysis-web/src\lib\api.ts:1155:    field_id?: string | null;
+agric-satellite-analysis-web/src\lib\api.ts:1164:        apiFetch<SoilProfile>(`/fields/${fieldId}/soil`),
+agric-satellite-analysis-web/src\lib\api.ts:1166:        apiFetch<SoilFieldSummary>(`/fields/${fieldId}/soil/summary`),
+agric-satellite-analysis-web/src\lib\api.ts:1168:        apiFetch<SoilRefreshResponse>(`/fields/${fieldId}/soil/refresh`, {
+agric-satellite-analysis-web/src\lib\api.ts:1172:        apiFetch<SamplingZonesResponse>(`/fields/${fieldId}/soil/sampling-zones`),
+agric-satellite-analysis-web/src\lib\api.ts:1174:        apiFetch<CropSuitabilityResponse>(`/fields/${fieldId}/soil/crop-suitability`),
+agric-satellite-analysis-web/src\lib\api.ts:1176:        apiFetch<NutrientContextResponse>(`/fields/${fieldId}/soil/nutrient-context`),
+agric-satellite-analysis-web/src\lib\api.ts:1178:        apiFetch<CarbonEstimateResponse>(`/fields/${fieldId}/soil/carbon`),
+agric-satellite-analysis-web/src\lib\api.ts:1180:        apiFetch<SoilWeatherStressResponse>(`/fields/${fieldId}/soil/weather-stress`),
+agric-satellite-analysis-web/src\lib\api.ts:1182:        apiFetch<SoilNpk>(`/fields/${fieldId}/soil/npk`),
+agric-satellite-analysis-web/src\lib\api.ts:1187:        apiFetch<SoilNpkFetchResponse>(`/fields/${fieldId}/soil/npk`, {
+agric-satellite-analysis-web/src\lib\api.ts:1195:        apiFetch<SiteAdmission>(`/fields/${fieldId}/site-admission`),
+agric-satellite-analysis-web/src\lib\api.ts:1207:        apiFetch<SiteAdmissionFetchResponse>(`/fields/${fieldId}/site-admission`, {
+agric-satellite-analysis-web/src\lib\api.ts:1643:        apiFetch<ShareLink[]>(`/fields/${fieldId}/share`),
+agric-satellite-analysis-web/src\lib\api.ts:1645:        apiFetch<ShareLink>(`/fields/${fieldId}/share`, {
+agric-satellite-analysis-web/src\lib\api.ts:1650:        apiFetch(`/fields/${fieldId}/share/${token}`, { method: "DELETE" }),
 services/ingest/app\tasks\backfill.py:45:    field_id: str,
 services/ingest/app\tasks\backfill.py:57:    """Backfill vegetation indices for *field_id* over *months*.
 services/ingest/app\tasks\backfill.py:75:            field_id=field_id,
@@ -670,12 +670,12 @@ services/ingest/app\tasks\backfill.py:662:    from app.models.tables import Fiel
 services/ingest/app\tasks\backfill.py:672:            session.execute(select(Field).where(Field.deleted_at.is_(None)))
 services/ingest/app\tasks\backfill.py:680:            if is_agri_tagged(field.tags_json):
 services/ingest/app\tasks\backfill.py:684:                args=[str(field.id)],
-apps/web/src\lib\agri-heatmap.ts:6: * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
-apps/web/src\lib\agri-heatmap.ts:795: * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
-apps/web/src\lib\agri-heatmap.ts:909: * Rebuild / soft-clip continuous color-film dataUrl to field.geom.
-apps/web/src\lib\agri-heatmap.ts:915:export function clipHeatmapImageToField(
-apps/web/src\lib\agri-heatmap.ts:1020:export function clipHeatmapToField(
-apps/web/src\lib\agri-heatmap.ts:1092:export function filterHeatmapPointsInField(
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:6: * Optional field.geom mask in WebMercator canvas space (skipped if alpha≈0).
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:795: * Zero-out canvas pixels outside field.geom (destination-in polygon mask in grid space).
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:909: * Rebuild / soft-clip continuous color-film dataUrl to field.geom.
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:915:export function clipHeatmapImageToField(
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:1020:export function clipHeatmapToField(
+agric-satellite-analysis-web/src\lib\agri-heatmap.ts:1092:export function filterHeatmapPointsInField(
 services/ingest/app\tasks\pipeline.py:124:    session, field_id, layer_type: str, satellite: str | None = None
 services/ingest/app\tasks\pipeline.py:130:        RasterLayer.field_id == field_id, RasterLayer.layer_type == layer_type
 services/ingest/app\tasks\pipeline.py:196:    existing = existing_layer_dates(session, field.id, layer_type, satellite=satellite)
@@ -729,8 +729,8 @@ services/api/app\schemas\farm.py:121:    crops: list[str] = PydanticField(defaul
 services/api/app\schemas\farm.py:123:    months: list[int] = PydanticField(default_factory=list)
 services/api/app\schemas\farm.py:157:    field_id: uuid.UUID
 services/api/app\schemas\farm.py:163:    field_id: uuid.UUID
-apps/web/src\components\create-farm-modal.tsx:5:import { farmsApi } from "@/lib/api";
-apps/web/src\components\create-farm-modal.tsx:51:            const farm = await farmsApi.create({
+agric-satellite-analysis-web/src\components\create-farm-modal.tsx:5:import { farmsApi } from "@/lib/api";
+agric-satellite-analysis-web/src\components\create-farm-modal.tsx:51:            const farm = await farmsApi.create({
 services/api/app\schemas\monitoring.py:22:    field_id: uuid.UUID
 services/api/app\schemas\monitoring.py:37:# ── Field Stats ──────────────────────────────────────────────────────
 services/api/app\schemas\monitoring.py:42:    field_id: uuid.UUID
@@ -750,15 +750,15 @@ services/api/app\schemas\soil.py:256:    field_id: str | None = None
 services/api/app\schemas\weather.py:58:    field_id: uuid.UUID
 services/api/app\schemas\weather.py:85:    field_id: uuid.UUID
 services/api/app\schemas\weather.py:97:    field_id: uuid.UUID
-apps/web/src\components\marketing\scene.tsx:81:/** Field boundary alone, the way layer A stores it before any index runs. */
+agric-satellite-analysis-web/src\components\marketing\scene.tsx:81:/** Field boundary alone, the way layer A stores it before any index runs. */
 services/ingest/app\reports\land_assessment\__main__.py:27:    if not args.field_id and not args.from_dir:
 services/ingest/app\reports\land_assessment\__main__.py:40:                session=session, field_id=args.field_id, out_path=args.out
-apps/web/src\components\marketing\og-card.tsx:3:import { IMAGERY, RDYLGN, insideField, rampColor, vigour } from "./imagery";
-apps/web/src\components\marketing\og-card.tsx:89:            if (!insideField(u * 100, v * 100)) continue;
-apps/web/src\components\marketing\og-card.tsx:180:                            {alert("cardField")}
-apps/web/src\components\marketing\imagery.ts:58: * Field outline shared by every raster on the page, in a 0-100 box.
-apps/web/src\components\marketing\imagery.ts:103:export function insideField(x: number, y: number): boolean {
-apps/web/src\components\sidebar.tsx:47:    const isMapScreen = /^\/farms\/[^/]+\/fields\//.test(pathname);
+agric-satellite-analysis-web/src\components\marketing\og-card.tsx:3:import { IMAGERY, RDYLGN, insideField, rampColor, vigour } from "./imagery";
+agric-satellite-analysis-web/src\components\marketing\og-card.tsx:89:            if (!insideField(u * 100, v * 100)) continue;
+agric-satellite-analysis-web/src\components\marketing\og-card.tsx:180:                            {alert("cardField")}
+agric-satellite-analysis-web/src\components\marketing\imagery.ts:58: * Field outline shared by every raster on the page, in a 0-100 box.
+agric-satellite-analysis-web/src\components\marketing\imagery.ts:103:export function insideField(x: number, y: number): boolean {
+agric-satellite-analysis-web/src\components\sidebar.tsx:47:    const isMapScreen = /^\/farms\/[^/]+\/fields\//.test(pathname);
 services/ingest/app\reports\land_assessment\data_loader.py:19:    Field,
 services/ingest/app\reports\land_assessment\data_loader.py:52:def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list[dict]:
 services/ingest/app\reports\land_assessment\data_loader.py:67:        .where(FieldStat.field_id == field_id)
@@ -806,7 +806,7 @@ services/ingest/app\reports\land_assessment\data_loader.py:1040:                
 services/ingest/app\reports\land_assessment\data_loader.py:1147:    field_id: uuid.UUID | str | None,
 services/ingest/app\reports\land_assessment\data_loader.py:1169:    if session is not None and field_id is not None:
 services/ingest/app\reports\land_assessment\data_loader.py:1170:        fid = uuid.UUID(str(field_id))
-apps/web/src\components\charts\ndvi-grade-shares-chart.tsx:95:    /** Field area in 亩 for donut center */
+agric-satellite-analysis-web/src\components\charts\ndvi-grade-shares-chart.tsx:95:    /** Field area in 亩 for donut center */
 services/ingest/app\reports\land_assessment\service.py:139:    field_id: uuid.UUID | str | None = None,
 services/ingest/app\reports\land_assessment\service.py:145:    Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
 services/ingest/app\reports\land_assessment\service.py:153:        if field_id is None:
@@ -849,7 +849,7 @@ services/ingest/app\models\tables.py:488:        ForeignKey("fields.id", ondelet
 services/api/app\routers\internal_jobs.py:10:from pydantic import BaseModel, Field
 services/api/app\routers\internal_jobs.py:23:    field_id: uuid.UUID | None = None
 services/api/app\routers\internal_jobs.py:37:    status: str | None = Field(default=None, max_length=20)
-apps/web/src\components\alert-row.tsx:272:                                href={`/farms/${farmId}/fields/${alert.field_id}`}
+agric-satellite-analysis-web/src\components\alert-row.tsx:272:                                href={`/farms/${farmId}/fields/${alert.field_id}`}
 services/api/app\routers\mq_tasks.py:10:from pydantic import BaseModel, Field
 services/api/app\routers\mq_tasks.py:33:    field_id: str | None = None
 services/api/app\routers\mq_tasks.py:36:    extras: dict[str, Any] = Field(default_factory=dict)
@@ -1024,8 +1024,8 @@ services/api/app\routers\internal_work.py:64:    result: dict[str, Any] = Field(
 services/api/app\routers\internal_work.py:69:    error: str = Field(..., min_length=1)
 services/api/app\routers\agri.py:4:and `/v1/fields` endpoints remain available for compatibility.
 services/api/app\routers\agri.py:308:            "/v1/farms and /v1/fields are legacy in this fork."
-apps/web/src\components\landing-page.tsx:36:    { name: "Fields of The World", url: "https://fieldsofthe.world" },
-apps/web/src\components\landing-page.tsx:323:                                {t("cardField")}
+agric-satellite-analysis-web/src\components\landing-page.tsx:36:    { name: "Fields of The World", url: "https://fieldsofthe.world" },
+agric-satellite-analysis-web/src\components\landing-page.tsx:323:                                {t("cardField")}
 services/api/app\routers\internal_results.py:9:from pydantic import BaseModel, Field
 services/api/app\routers\internal_results.py:22:    result: dict[str, Any] = Field(default_factory=dict)
 services/api/app\routers\internal_results.py:35:    stats: dict[str, Any] = Field(default_factory=dict)
@@ -1318,14 +1318,14 @@ services/api/app\core\agri_tags.py:6:  (keyed by fields.id) bind to the same par
 services/api/app\core\soil_intelligence.py:1460:        summary: Field soil summary dict (avg_ph, rootzone_awc_mm, etc.)
 services/api/app\reports\land_assessment\__main__.py:27:    if not args.field_id and not args.from_dir:
 services/api/app\reports\land_assessment\__main__.py:40:                session=session, field_id=args.field_id, out_path=args.out
-apps/web/src\app\[locale]\share\[token]\page.tsx:10:    clipHeatmapImageToField,
-apps/web/src\app\[locale]\share\[token]\page.tsx:211:                        {report.field.name}
-apps/web/src\app\[locale]\share\[token]\page.tsx:212:                        {report.field.crop_type && ` · ${report.field.crop_type}`}
-apps/web/src\app\[locale]\share\[token]\page.tsx:216:                {/* Field Info + Map */}
-apps/web/src\app\[locale]\share\[token]\page.tsx:230:                                <dd className="mt-0.5">{report.field.crop_type || t("na")}</dd>
-apps/web/src\app\[locale]\share\[token]\page.tsx:244:                            geom={report.field.geom}
-apps/web/src\app\[locale]\share\[token]\page.tsx:418:                            report.field.geom && t("sourceBasemap"),
-apps/web/src\app\[locale]\share\[token]\page.tsx:503:                const clipped = clipHeatmapImageToField(hm, fieldGeom);
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:10:    clipHeatmapImageToField,
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:211:                        {report.field.name}
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:212:                        {report.field.crop_type && ` · ${report.field.crop_type}`}
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:216:                {/* Field Info + Map */}
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:230:                                <dd className="mt-0.5">{report.field.crop_type || t("na")}</dd>
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:244:                            geom={report.field.geom}
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:418:                            report.field.geom && t("sourceBasemap"),
+agric-satellite-analysis-web/src\app\[locale]\share\[token]\page.tsx:503:                const clipped = clipHeatmapImageToField(hm, fieldGeom);
 services/api/app\reports\land_assessment\service.py:139:    field_id: uuid.UUID | str | None = None,
 services/api/app\reports\land_assessment\service.py:145:    Provide either ``session``+``field_id`` (DB) or ``data_dir`` (fixtures).
 services/api/app\reports\land_assessment\service.py:153:        if field_id is None:
@@ -1336,44 +1336,44 @@ services/api/app\reports\land_assessment\service.py:185:    fid_raw = field.get(
 services/api/app\reports\land_assessment\service.py:192:            field_id=fid_raw,
 services/api/app\reports\land_assessment\service.py:200:            field_id=None,
 services/api/app\reports\land_assessment\service.py:412:        "field_id": field.get("id"),
-apps/web/src\components\field\scouting-tab.tsx:128:            .listForField(fieldId, 200)
-apps/web/src\components\field\alerts-tab.tsx:33:            const res = await alertsApi.listForField(fieldId, 200);
-apps/web/src\components\field\ndvi-tab.tsx:8:    fieldsApi,
-apps/web/src\components\field\ndvi-tab.tsx:88:    /** Field crop_type for agri season calendar / grade shares */
-apps/web/src\components\field\ndvi-tab.tsx:90:    /** Field area (ha) — agri NDVI donut center shows 亩 */
-apps/web/src\components\field\ndvi-tab.tsx:92:    /** Field tags — used to detect agri:<land_id> for RS fallback */
-apps/web/src\components\field\ndvi-tab.tsx:114:    const isAgriField = !!agriLandId;
-apps/web/src\components\field\ndvi-tab.tsx:158:        if (isAgriField) {
-apps/web/src\components\field\ndvi-tab.tsx:196:    }, [fieldId, activeIndex, isAgriField, onDataLoaded]);
-apps/web/src\components\field\ndvi-tab.tsx:210:        if (isAgriField) return;
-apps/web/src\components\field\ndvi-tab.tsx:215:                const res = await fieldsApi.backfillStatus(fieldId);
-apps/web/src\components\field\ndvi-tab.tsx:236:    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
-apps/web/src\components\field\ndvi-tab.tsx:240:        if (isAgriField) return; // agri panel polls its own backfill status
-apps/web/src\components\field\ndvi-tab.tsx:242:        fieldsApi.backfillStatus(fieldId)
-apps/web/src\components\field\ndvi-tab.tsx:257:    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
-apps/web/src\components\field\ndvi-tab.tsx:275:        if (isAgriField) {
-apps/web/src\components\field\ndvi-tab.tsx:289:    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
-apps/web/src\components\field\ndvi-tab.tsx:382:            await fieldsApi.backfillIndices(fieldId);
-apps/web/src\components\field\ndvi-tab.tsx:462:            {!isAgriField && (
-apps/web/src\components\field\ndvi-tab.tsx:496:            {!isAgriField && showJobForm && (
-apps/web/src\components\field\ndvi-tab.tsx:592:            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
-apps/web/src\components\field\ndvi-tab.tsx:712:            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
-apps/web/src\components\field\ndvi-tab.tsx:744:            {!isAgriField && layers.length > 0 && (
-apps/web/src\components\field\ndvi-tab.tsx:818:            {!isAgriField && layers.length === 0 && !activeJob && (
+agric-satellite-analysis-web/src\components\field\scouting-tab.tsx:128:            .listForField(fieldId, 200)
+agric-satellite-analysis-web/src\components\field\alerts-tab.tsx:33:            const res = await alertsApi.listForField(fieldId, 200);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:8:    fieldsApi,
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:88:    /** Field crop_type for agri season calendar / grade shares */
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:90:    /** Field area (ha) — agri NDVI donut center shows 亩 */
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:92:    /** Field tags — used to detect agri:<land_id> for RS fallback */
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:114:    const isAgriField = !!agriLandId;
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:158:        if (isAgriField) {
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:196:    }, [fieldId, activeIndex, isAgriField, onDataLoaded]);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:210:        if (isAgriField) return;
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:215:                const res = await fieldsApi.backfillStatus(fieldId);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:236:    }, [fieldId, isAgriField, loadData, onDataLoaded, stopBackfillPoll]);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:240:        if (isAgriField) return; // agri panel polls its own backfill status
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:242:        fieldsApi.backfillStatus(fieldId)
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:257:    }, [fieldId, isAgriField]); // eslint-disable-line react-hooks/exhaustive-deps
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:275:        if (isAgriField) {
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:289:    }, [selectedDate, layerVisible, layers, onShowLayer, activeIndex, isAgriField]);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:382:            await fieldsApi.backfillIndices(fieldId);
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:462:            {!isAgriField && (
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:496:            {!isAgriField && showJobForm && (
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:592:            {!isAgriField && (backfillActive || backfillTriggered) && !loading && !activeJob && (
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:712:            {!isAgriField && (layers.length > 0 || stats.length > 0) && (
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:744:            {!isAgriField && layers.length > 0 && (
+agric-satellite-analysis-web/src\components\field\ndvi-tab.tsx:818:            {!isAgriField && layers.length === 0 && !activeJob && (
 services/ingest/app\core\soil_intelligence.py:1460:        summary: Field soil summary dict (avg_ph, rootzone_awc_mm, etc.)
-apps/web/src\components\field\ndvi-legend.tsx:53:                {/* Field min marker */}
-apps/web/src\components\field\ndvi-legend.tsx:68:                {/* Field max marker */}
-apps/web/src\components\field\ndvi-legend.tsx:90:            {/* Field actual range */}
-apps/web/src\components\field\land-report-tab.tsx:6:    fieldsApi,
-apps/web/src\components\field\land-report-tab.tsx:420:            await fieldsApi.update(fieldId, { crop_type: key });
-apps/web/src\components\field\agri-timeseries-panel.tsx:8:    fieldsApi,
-apps/web/src\components\field\agri-timeseries-panel.tsx:228:            field_id: "",
-apps/web/src\components\field\agri-timeseries-panel.tsx:294:            field_id: "",
-apps/web/src\components\field\agri-timeseries-panel.tsx:409:    /** Field area in hectares — donut center shows 亩 (×15) */
-apps/web/src\components\field\agri-timeseries-panel.tsx:663:                const res = await fieldsApi.backfillStatus(fieldId);
-apps/web/src\components\field\agri-timeseries-panel.tsx:685:                const res = await fieldsApi.backfillStatus(fieldId);
-apps/web/src\components\field\agri-timeseries-panel.tsx:834:            await fieldsApi.backfillIndices(fieldId, {
-apps/web/src\components\field\agri-timeseries-panel.tsx:845:                          field_id: fieldId,
+agric-satellite-analysis-web/src\components\field\ndvi-legend.tsx:53:                {/* Field min marker */}
+agric-satellite-analysis-web/src\components\field\ndvi-legend.tsx:68:                {/* Field max marker */}
+agric-satellite-analysis-web/src\components\field\ndvi-legend.tsx:90:            {/* Field actual range */}
+agric-satellite-analysis-web/src\components\field\land-report-tab.tsx:6:    fieldsApi,
+agric-satellite-analysis-web/src\components\field\land-report-tab.tsx:420:            await fieldsApi.update(fieldId, { crop_type: key });
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:8:    fieldsApi,
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:228:            field_id: "",
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:294:            field_id: "",
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:409:    /** Field area in hectares — donut center shows 亩 (×15) */
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:663:                const res = await fieldsApi.backfillStatus(fieldId);
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:685:                const res = await fieldsApi.backfillStatus(fieldId);
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:834:            await fieldsApi.backfillIndices(fieldId, {
+agric-satellite-analysis-web/src\components\field\agri-timeseries-panel.tsx:845:                          field_id: fieldId,
 services/ingest/app\core\http_mode.py:26:def resolve_field_http(field_id: str) -> dict[str, Any]:
 services/ingest/app\core\http_mode.py:27:    """GET /v1/internal/fields/resolve for tags / land_id."""
 services/ingest/app\core\http_mode.py:30:    data = resolve_field(field_id=str(field_id))
@@ -1381,14 +1381,14 @@ services/ingest/app\core\http_mode.py:36:def field_geom_http(field_id: str, *, i
 services/ingest/app\core\http_mode.py:39:    data = field_geom(str(field_id), include_geojson=include_geojson)
 services/ingest/app\core\agri_tags.py:5:- Field records may carry tags like ``agri:<land_id>`` so soil/weather
 services/ingest/app\core\agri_tags.py:6:  (keyed by fields.id) bind to the same parcel the UI shows.
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:5:import { farmsApi, alertsApi } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:6:import type { Farm, Alert, Field } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:32:/** Field count and total area per farm, so a row carries its own numbers. */
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:53:                    farmsApi.list(10, 0),
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:68:                            const r = await farmsApi.fields(f.id, 200, 0);
-apps/web/src\app\[locale]\(authenticated)\dashboard\page.tsx:71:                            return { farm: f, total: 0, items: [] as Field[] };
-apps/web/src\app\[locale]\(authenticated)\farms\page.tsx:5:import { farmsApi } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\page.tsx:47:                const res = await farmsApi.list(PAGE_SIZE, offset, debouncedQ || undefined);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:5:import { farmsApi, alertsApi } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:6:import type { Farm, Alert, Field } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:32:/** Field count and total area per farm, so a row carries its own numbers. */
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:53:                    farmsApi.list(10, 0),
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:68:                            const r = await farmsApi.fields(f.id, 200, 0);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\dashboard\page.tsx:71:                            return { farm: f, total: 0, items: [] as Field[] };
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\page.tsx:5:import { farmsApi } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\page.tsx:47:                const res = await farmsApi.list(PAGE_SIZE, offset, debouncedQ || undefined);
 services/api/app\mq_publish.py:30:    field_id: str | None,
 services/api/app\mq_publish.py:37:    fid = field_id
 services/api/app\mq_publish.py:41:            detail="MQ_FALLBACK_CELERY requires field_id",
@@ -1406,29 +1406,29 @@ services/api/app\mq_publish.py:361:                field_id=field_id,
 services/api/app\mq_publish.py:365:                type=type, field_id=field_id, land_id=land_id, extras=extras
 services/api/app\mq_publish.py:376:        field_id=field_id,
 services/api/app\mq_publish.py:393:        field_id=field_id,
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:6:import { farmsApi, fieldsApi } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:7:import type { Farm, Field } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:44:    const [fields, setFields] = useState<Field[]>([]);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:61:            const f = await farmsApi.get(farmId);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:74:            const fieldsRes = await farmsApi.fields(farmId, 200, 0);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:91:            const updated = await farmsApi.update(farmId, {
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:116:            await farmsApi.delete(farmId);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:129:            const result = await fieldsApi.import(farmId, file);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:143:    const handleDeleteField = async (fieldId: string, fieldName: string) => {
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:145:            title: tFarms("deleteField"),
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:152:            await fieldsApi.delete(fieldId);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:156:            toast.error(err.detail || tFarms("failedDeleteField"));
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:273:                            <Link href={`/farms/${farmId}/fields/new`}>
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:275:                                Draw Field
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:297:                                    <Link href={`/farms/${farmId}/fields/new`}>
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:298:                                        <Plus className="h-4 w-4 mr-2" /> Draw Field
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:308:                                key={field.id}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:313:                                        href={`/farms/${farmId}/fields/${field.id}`}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:320:                                            <p className="text-sm font-medium">{field.name}</p>
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:325:                                                {field.crop_type && <Badge variant="secondary">{field.crop_type}</Badge>}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:326:                                                {field.season && <Badge variant="outline">{field.season}</Badge>}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:335:                                            onClick={() => handleDeleteField(field.id, field.name)}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:339:                                        <Link href={`/farms/${farmId}/fields/${field.id}`}>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:6:import { farmsApi, fieldsApi } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:7:import type { Farm, Field } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:44:    const [fields, setFields] = useState<Field[]>([]);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:61:            const f = await farmsApi.get(farmId);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:74:            const fieldsRes = await farmsApi.fields(farmId, 200, 0);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:91:            const updated = await farmsApi.update(farmId, {
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:116:            await farmsApi.delete(farmId);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:129:            const result = await fieldsApi.import(farmId, file);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:143:    const handleDeleteField = async (fieldId: string, fieldName: string) => {
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:145:            title: tFarms("deleteField"),
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:152:            await fieldsApi.delete(fieldId);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:156:            toast.error(err.detail || tFarms("failedDeleteField"));
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:273:                            <Link href={`/farms/${farmId}/fields/new`}>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:275:                                Draw Field
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:297:                                    <Link href={`/farms/${farmId}/fields/new`}>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:298:                                        <Plus className="h-4 w-4 mr-2" /> Draw Field
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:308:                                key={field.id}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:313:                                        href={`/farms/${farmId}/fields/${field.id}`}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:320:                                            <p className="text-sm font-medium">{field.name}</p>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:325:                                                {field.crop_type && <Badge variant="secondary">{field.crop_type}</Badge>}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:326:                                                {field.season && <Badge variant="outline">{field.season}</Badge>}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:335:                                            onClick={() => handleDeleteField(field.id, field.name)}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\page.tsx:339:                                        <Link href={`/farms/${farmId}/fields/${field.id}`}>
 services/api/app\reports\land_assessment\data_loader.py:19:    Field,
 services/api/app\reports\land_assessment\data_loader.py:52:def load_indices_from_field_stats(session: Session, field_id: uuid.UUID) -> list[dict]:
 services/api/app\reports\land_assessment\data_loader.py:67:        .where(FieldStat.field_id == field_id)
@@ -1476,45 +1476,45 @@ services/api/app\reports\land_assessment\data_loader.py:1038:                Wea
 services/api/app\reports\land_assessment\data_loader.py:1145:    field_id: uuid.UUID | str | None,
 services/api/app\reports\land_assessment\data_loader.py:1167:    if session is not None and field_id is not None:
 services/api/app\reports\land_assessment\data_loader.py:1168:        fid = uuid.UUID(str(field_id))
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:7:import { fieldsApi, withAgriFieldTags } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:39:    const t = useTranslations("createField");
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:93:            const field = await fieldsApi.create({
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:101:            toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:102:            router.push(`/farms/${farmId}/fields/${field.id}`);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:104:            toast.error(err.detail || t("createField"));
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:228:                                    {t("createField")}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:8:import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId, parseCdfinanceGroupId, withAgriFieldTags } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:10:import type { Field, RasterLayer, IndexType } from "@/lib/api";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:12:import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:160:function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:162:    if (!layer.tile_url || !field.geom) return;
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:166:    const bounds = computeGeomBounds(field.geom);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:236:    const [field, setField] = useState<Field | null>(null);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:265:    const fieldRef = useRef<Field | null>(null);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:358:        alertsApi.listForField(fieldId, 200).then((res) => {
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:395:    const loadField = useCallback(async () => {
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:397:            const f = await fieldsApi.get(fieldId);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:398:            setField(f);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:414:        loadField();
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:415:    }, [loadField]);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:461:            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:630:        getAllCoords(field.geom).forEach(([lng, lat]) => bounds.extend([lng, lat]));
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:659:    // (handleMapReady often runs with field still null — race with loadField).
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:782:            const updated = await fieldsApi.update(fieldId, data);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:783:            setField(updated);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:802:            await fieldsApi.delete(fieldId);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:834:                        initialGeometry={field.geom}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1071:                                    <h3 className="text-sm font-semibold mb-3">{t("editField")}</h3>
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1162:                                        {/* Field header card */}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1164:                                            <h2 className="text-sm font-semibold">{field.name}</h2>
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1167:                                                {field.crop_type && field.crop_type !== "unknown" && ` · ${field.crop_type}`}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1168:                                                {field.season && ` · ${field.season}`}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1172:                                        {/* Field details card */}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1175:                                                <InfoRow label={t("name")} value={field.name} />
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1184:                                                    value={field.crop_type && field.crop_type !== "unknown" ? field.crop_type : t("cropUnset")}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1188:                                                    value={field.season || "-"}
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1223:                                                setEditName(field.name);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1224:                                                setEditCropType(field.crop_type || "");
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1225:                                                setEditSeason(field.season || "");
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1228:                                                setEditGeom(field.geom);
-apps/web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1289:                                                setField((prev) => (prev ? { ...prev, crop_type: key } : prev));
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:7:import { fieldsApi, withAgriFieldTags } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:39:    const t = useTranslations("createField");
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:93:            const field = await fieldsApi.create({
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:101:            toast.success(`Field "${field.name}" created (${field.area_ha != null ? formatAreaMu(field.area_ha) : "?"})`);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:102:            router.push(`/farms/${farmId}/fields/${field.id}`);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:104:            toast.error(err.detail || t("createField"));
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\new\page.tsx:228:                                    {t("createField")}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:8:import { fieldsApi, alertsApi, INDEX_CONFIG, ALL_INDEX_TYPES, monitoringApi, parseAgriLandId, parseCdfinanceGroupId, withAgriFieldTags } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:10:import type { Field, RasterLayer, IndexType } from "@/lib/api";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:12:import { AGRI_MODE_LABELS, AGRI_PRIMARY_MODES, canvasToObjectUrl, clipHeatmapImageToField, dataUrlToObjectUrl, heatmapImageHasContent, revokeHeatmapObjectUrl } from "@/lib/agri-heatmap";
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:160:function addIndexOverlay(map: maplibregl.Map, layer: RasterLayer, field: Field, indexType: IndexType) {
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:162:    if (!layer.tile_url || !field.geom) return;
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:166:    const bounds = computeGeomBounds(field.geom);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:236:    const [field, setField] = useState<Field | null>(null);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:265:    const fieldRef = useRef<Field | null>(null);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:358:        alertsApi.listForField(fieldId, 200).then((res) => {
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:395:    const loadField = useCallback(async () => {
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:397:            const f = await fieldsApi.get(fieldId);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:398:            setField(f);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:414:        loadField();
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:415:    }, [loadField]);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:461:            const clippedImg = clipHeatmapImageToField(hm, fieldGeom);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:630:        getAllCoords(field.geom).forEach(([lng, lat]) => bounds.extend([lng, lat]));
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:659:    // (handleMapReady often runs with field still null — race with loadField).
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:782:            const updated = await fieldsApi.update(fieldId, data);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:783:            setField(updated);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:802:            await fieldsApi.delete(fieldId);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:834:                        initialGeometry={field.geom}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1071:                                    <h3 className="text-sm font-semibold mb-3">{t("editField")}</h3>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1162:                                        {/* Field header card */}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1164:                                            <h2 className="text-sm font-semibold">{field.name}</h2>
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1167:                                                {field.crop_type && field.crop_type !== "unknown" && ` · ${field.crop_type}`}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1168:                                                {field.season && ` · ${field.season}`}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1172:                                        {/* Field details card */}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1175:                                                <InfoRow label={t("name")} value={field.name} />
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1184:                                                    value={field.crop_type && field.crop_type !== "unknown" ? field.crop_type : t("cropUnset")}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1188:                                                    value={field.season || "-"}
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1223:                                                setEditName(field.name);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1224:                                                setEditCropType(field.crop_type || "");
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1225:                                                setEditSeason(field.season || "");
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1228:                                                setEditGeom(field.geom);
+agric-satellite-analysis-web/src\app\[locale]\(authenticated)\farms\[id]\fields\[fieldId]\page.tsx:1289:                                                setField((prev) => (prev ? { ...prev, crop_type: key } : prev));

@@ -50,8 +50,8 @@ class PublishEnqueueTests(unittest.TestCase):
             ),
             patch("app.services.work_items.should_publish_mq", return_value=True),
             patch("app.services.work_items.enqueue_work_item_sync") as enq,
-            patch("openfarm_common.settings.settings") as common_settings,
-            patch("openfarm_common.mq.publish_task") as pub,
+            patch("agric_satellite_analysis_common.settings.settings") as common_settings,
+            patch("agric_satellite_analysis_common.mq.publish_task") as pub,
         ):
             common_settings.cloudamqp_url = "amqps://example"
             tid = publish_api_task(

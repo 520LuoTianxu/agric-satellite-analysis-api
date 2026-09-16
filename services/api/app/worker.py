@@ -4,7 +4,7 @@
 本模块不得导入它们，路由按稳定任务名派单。
 """
 
-from openfarm_common.celery_app import create_celery_app
+from agric_satellite_analysis_common.celery_app import create_celery_app
 
 celery_app = create_celery_app(
     name="openfarm",

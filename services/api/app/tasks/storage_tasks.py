@@ -1,6 +1,6 @@
 """Client helpers for the storage queue (tasks run in services/storage)."""
 
-from openfarm_common.storage_client import (
+from agric_satellite_analysis_common.storage_client import (
     DEFAULT_UPLOAD_TIMEOUT,
     SCRATCH_DIR,
     put_bytes_via_storage,

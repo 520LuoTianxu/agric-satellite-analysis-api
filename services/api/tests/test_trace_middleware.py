@@ -6,7 +6,7 @@ import unittest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from openfarm_common.trace import current_trace_id
+from agric_satellite_analysis_common.trace import current_trace_id
 
 from app.middleware.trace import TraceIdMiddleware
 

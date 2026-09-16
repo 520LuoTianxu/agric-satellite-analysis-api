@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from openfarm_common.trace import stamp_trace_on_payload
+from agric_satellite_analysis_common.trace import stamp_trace_on_payload
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -96,7 +96,7 @@ def enqueue_work_item_sync(
         return None
     payload = dict(payload or {})
     payload = stamp_trace_on_payload(payload)
-    from openfarm_common.database_sync import SyncSession
+    from agric_satellite_analysis_common.database_sync import SyncSession
     from app.models.tables import WorkItem
 
     session = SyncSession()
@@ -321,7 +321,7 @@ async def complete_work_item(
     if apply_result and result_dict:
         try:
             import asyncio
-            from openfarm_common.result_apply import apply_complete_result
+            from agric_satellite_analysis_common.result_apply import apply_complete_result
 
             apply_stats = await asyncio.to_thread(apply_complete_result, result_dict)
             # Stash apply stats only when something ran (avoid noise on ack payloads)

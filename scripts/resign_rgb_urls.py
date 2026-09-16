@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from sqlalchemy import create_engine, text
-from openfarm_common.storage import get_storage, signed_get_expire_sec
+from agric_satellite_analysis_common.storage import get_storage, signed_get_expire_sec
 
 url = (os.environ.get("DATABASE_URL_SYNC") or os.environ["DATABASE_URL"]).replace(
     "postgresql+asyncpg://", "postgresql://"
