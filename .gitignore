@@ -4,7 +4,6 @@
 .env
 .env.local
 .env.*.local
-ABflow/.env.test
 
 # ── Python ───────────────────────────────────────────────────────────
 __pycache__/
