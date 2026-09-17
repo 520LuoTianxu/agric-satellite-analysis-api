@@ -30,7 +30,7 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 - Self-hostable services: Next.js ↔ FastAPI ↔ Aliyun OSS ↔ PostgreSQL/JSONB
 - Vegetation indices from Sentinel-2: NDVI, EVI, SAVI, NDWI, with 24-month backfill
 - [Batch backfill by landIdList](docs/design/satellite-batch-backfill.md): pull the past three years through today by default, group requested parcels within 5×5 km windows, share S1/S2 downloads, and save per-parcel results.
-- [Daily national overview](docs/design/daily-satellite-overview.md): opt in with `SCHEDULE_DAILY_SATELLITE_ENABLED=true` to check every active parcel at 23:00 China time, share 5×5 km S1/S2 downloads, verify result ingestion, and preserve daily country/province/city/county snapshots. All periodic schedules default to disabled and have independent env switches.
+- [Daily national overview](docs/design/daily-satellite-overview.md): opt in with `SCHEDULE_DAILY_SATELLITE_ENABLED=true` to check every active parcel at 19:15 China time, inspect the seven-calendar-day S1/S2 window including today, skip dates already in the database, share 5×5 km downloads, verify result ingestion, and preserve daily country/province/city/county snapshots. All periodic schedules default to disabled and have independent env switches.
 - Daily weather (Open-Meteo) plus agricultural indices (GDD, water balance, drought)
 - Soil intelligence from SoilGrids (global, 250 m) and POLARIS (US, 30 m)
 - Provenance: Element84 STAC → COG/scene JSON → Aliyun OSS

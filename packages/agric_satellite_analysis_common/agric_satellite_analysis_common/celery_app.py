@@ -42,8 +42,8 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
     },
     "refresh-satellite-overview-daily": {
         "task": "app.tasks.overview_preagg.refresh_daily_satellite",
-        # Celery显式使用UTC；15:00对应北京时间23:00，为当日光学影像发布预留时间。
-        "schedule": crontab(hour=15, minute=0),
+        # Celery显式使用UTC；11:15对应北京时间19:15，检查近7个自然日的S1/S2缺失观测。
+        "schedule": crontab(hour=11, minute=15),
     },
     "refresh-overview-stats-daily": {
         "task": "app.tasks.overview_preagg.refresh_overview_stats",

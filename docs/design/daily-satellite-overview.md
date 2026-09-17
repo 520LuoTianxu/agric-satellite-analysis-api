@@ -1,6 +1,6 @@
 # 全国态势每日刷新运行说明
 
-所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间23:00（15:00 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。下载与计算完成、结果入库确认后生成当天快照；生成完成时间取决于数据量，不是固定23:00立即可见。
+所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间19:15（11:15 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。任务检查包含当天在内的近7个自然日S1/S2观测，并按数据库已有日期跳过已入库数据。下载与计算完成、结果入库确认后生成当天快照；生成完成时间取决于数据量，不是固定19:15立即可见。
 
 `.env`配置：
 
@@ -38,6 +38,6 @@ celery -A app.worker call app.tasks.overview_preagg.refresh_daily_satellite --qu
 
 批次阶段：dispatching → downloading → waiting_results → finished；状态为running、completed或partial。partial的原因记录在error，并保留pending_jobs、failed_jobs和results_pending。无效边界记录invalid_land_ids。修复失败数据后可使用既有批量回填接口补拉；下一统计日重新检查并使用已有最新结果，已保存历史快照保持原值。
 
-首次或没有历史的地块下载近60天；已有地块按传感器最近观测回看7天补新景，按`INDEX_BACKFILL_CHUNK_DAYS`拆分。多年历史从既有`POST /v1/lands/backfill-indices/batch`回填。部署前的日期不会自动拥有每日快照，可在区间分析查看已有历史影像；若人工用as_of重建历史，使用当前已入库的历史影像，它不代表当时实际已保存的实时态势。
+首次或没有历史的地块同样只检查包含当天在内的近7个自然日；已有地块通过数据库中的S1/S2场景日期跳过已入库日期，按`INDEX_BACKFILL_CHUNK_DAYS`拆分缺失日期。多年历史从既有`POST /v1/lands/backfill-indices/batch`回填。部署前的日期不会自动拥有每日快照，可在区间分析查看已有历史影像；若人工用as_of重建历史，使用当前已入库的历史影像，它不代表当时实际已保存的实时态势。
 
 验证范围：批次恢复、分组边界、传感器增量窗口、发布结果入库检查、缺测/失败/超时、各级计数与面积一致、历史无实时回退、Celery延时重试及页面静态构建。真实全国下载耗时、Copernicus/STAC访问和生产MQ吞吐需要在部署环境核对。

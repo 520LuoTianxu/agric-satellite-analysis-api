@@ -34,13 +34,10 @@ def run_id_for(day: date) -> uuid.UUID:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"agric-satellite/overview-daily/{day}")
 
 
-def download_start(latest: date | None, day: date) -> date:
-    """新地块先建立60天观测；已有地块回看7天并补齐停机期间的遗漏。"""
-    return (
-        (min(latest, day) - timedelta(days=LOOKBACK_DAYS))
-        if latest
-        else day - timedelta(days=WINDOW_DAYS)
-    )
+def download_start(_latest: date | None, day: date) -> date:
+    """所有地块只检查包含当天在内的近7个自然日，并按数据库结果去重。"""
+    # 使用闭区间 [day-6, day]，避免把“近7天”扩大成8个自然日。
+    return day - timedelta(days=LOOKBACK_DAYS - 1)
 
 
 def region_key(level: str, code: str | None, name: str | None, parent: str = "") -> str:
@@ -212,22 +209,10 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
             except ValueError:
                 invalid.append(land.land_id)
         groups = await asyncio.to_thread(group_satellite_lands, valid)
-        latest_rows = (
-            await db.execute(
-                text(
-                    "SELECT land_id, sensor, max(date)::date AS latest FROM agric_satellite.parcel_scene_products WHERE date <= :day GROUP BY land_id, sensor"
-                ),
-                {"day": day},
-            )
-        ).all()
-        latest = {(row.land_id, row.sensor): row.latest for row in latest_rows}
         jobs = []
         for group in groups:
             for sensor in ("S1", "S2"):
-                cursor = min(
-                    download_start(latest.get((land_id, sensor)), day)
-                    for land_id in group.land_ids
-                )
+                cursor = download_start(None, day)
                 while cursor <= day:
                     end = min(
                         cursor

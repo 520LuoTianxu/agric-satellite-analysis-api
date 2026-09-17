@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agric_satellite_analysis_common.celery_app import (
+    BEAT_SCHEDULE,
     TASK_ROUTES,
     celery_app_config,
     celery_redis_transport_options,
@@ -20,6 +21,11 @@ from agric_satellite_analysis_common.settings import CommonSettings
 
 
 class CeleryRedisTransportTests(unittest.TestCase):
+    def test_daily_satellite_schedule_is_1915_china_time(self) -> None:
+        schedule = BEAT_SCHEDULE["refresh-satellite-overview-daily"]["schedule"]
+        self.assertEqual(schedule.hour, {11})
+        self.assertEqual(schedule.minute, {15})
+
     def test_transport_options_set_timeouts_and_health_check(self) -> None:
         cfg = CommonSettings(
             celery_broker_visibility_timeout=7200,
