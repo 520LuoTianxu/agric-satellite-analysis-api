@@ -103,14 +103,10 @@ class JobOut(BaseModel):
 
 
 class AlertSummaryOut(BaseModel):
-    """Open alert counts across the whole workspace.
-
-    Deliberately independent of the caller's paging and filters: the
-    summary cards are an overview, so they must not change meaning when
-    the user pages through the list or narrows it by severity.
-    """
+    """当前基地未关闭统计及本人未读统计，均不受列表分页、筛选影响。"""
 
     open_total: int = 0
+    unread_total: int = 0
     high: int = 0
     medium: int = 0
     low: int = 0
@@ -129,6 +125,9 @@ class AlertOut(BaseModel):
     weather_context: dict[str, Any] | None = None
     soil_context: dict[str, Any] | None = None
     created_at: datetime
+    # 只在已验证身份的预警接口填充；公开分享不暴露个人阅读状态。
+    is_read: bool | None = None
+    read_at: datetime | None = None
 
     # Resolved by an outer join at query time, never stored on the alert row.
     # The canonical parcel name is read directly from land_parcels.
@@ -141,6 +140,10 @@ class AlertOut(BaseModel):
 
 class AlertUpdate(BaseModel):
     status: str  # open | closed
+
+
+class AlertReadResult(BaseModel):
+    marked_count: int
 
 
 # ── Scouting ─────────────────────────────────────────────────────────

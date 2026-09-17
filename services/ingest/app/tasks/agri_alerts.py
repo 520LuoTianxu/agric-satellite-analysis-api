@@ -99,7 +99,9 @@ def _pick_eval_scene(
     return (clear or usable)[-1]
 
 
-def _delete_open_rs_alerts(session, land_id: str, index_keys: list[str]) -> int:
+def _delete_open_rs_alerts(
+    session, land_id: str, index_keys: list[str], keep_keys: set[tuple[date, str]]
+) -> int:
     from app.models.tables import Alert
 
     rule_names: list[str] = []
@@ -112,7 +114,11 @@ def _delete_open_rs_alerts(session, land_id: str, index_keys: list[str]) -> int:
             Alert.status == "open",
             Alert.rule_name.in_(rule_names))
     )
-    rows = result.scalars().all()
+    # 同日同规则仍触发时保留原预警 ID，避免重算删除关联的个人已读记录。
+    rows = [
+        row for row in result.scalars().all()
+        if (row.date, row.rule_name) not in keep_keys
+    ]
     for row in rows:
         session.delete(row)
     return len(rows)
@@ -136,7 +142,8 @@ def _emit_rules(
     historical_means: list[float],
     index_def: IndexDef,
     weather_ctx: dict | None,
-    existing: set[tuple[date, str]]) -> int:
+    existing: set[tuple[date, str]],
+    active_keys: set[tuple[date, str]]) -> int:
     from app.models.tables import Alert
 
     created = 0
@@ -145,6 +152,7 @@ def _emit_rules(
 
     if current_mean < alert_cfg.threshold:
         rule = f"{index_def.key}_threshold"
+        active_keys.add((scene_date, rule))
         if (scene_date, rule) not in existing:
             severity = "high" if current_mean < alert_cfg.threshold_high else "medium"
             session.add(
@@ -176,6 +184,7 @@ def _emit_rules(
             drop_pct = ((rolling_avg - current_mean) / rolling_avg) * 100
             if drop_pct >= alert_cfg.drop_pct:
                 rule = f"{index_def.key}_drop"
+                active_keys.add((scene_date, rule))
                 if (scene_date, rule) not in existing:
                     severity = (
                         "high"
@@ -218,8 +227,8 @@ def evaluate_agri_rs_alerts_for_land(
     replace_open: bool = True) -> dict[str, Any]:
     """Evaluate threshold/drop alerts from agri S2 averages.
 
-    Default behaviour (refresh / post-ingest): replace open optical RS alerts and
-    evaluate the latest clear scene per index against full history.
+    Default behaviour (refresh / post-ingest): evaluate the latest clear scene
+    and retain matching open alerts so personal read records survive retries.
 
     When ``scene_date`` is set (single-date ingest), only that date is evaluated
     and existing alerts for other dates are left alone unless ``replace_open``.
@@ -259,9 +268,7 @@ def evaluate_agri_rs_alerts_for_land(
             target_date = date.fromisoformat(str(scene_date)[:10])
 
         removed = 0
-        if replace_open:
-            removed = _delete_open_rs_alerts(session, lid, keys)
-
+        active_keys: set[tuple[date, str]] = set()
         existing = _existing_alert_keys(session, lid)
         created = 0
         evaluated: list[dict[str, Any]] = []
@@ -293,7 +300,8 @@ def evaluate_agri_rs_alerts_for_land(
                 historical_means=hist,
                 index_def=index_def,
                 weather_ctx=weather_ctx,
-                existing=existing)
+                existing=existing,
+                active_keys=active_keys)
             created += n
             evaluated.append(
                 {
@@ -304,6 +312,8 @@ def evaluate_agri_rs_alerts_for_land(
                 }
             )
 
+        if replace_open:
+            removed = _delete_open_rs_alerts(session, lid, keys, active_keys)
         session.commit()
         result = {
             "land_id": lid,
