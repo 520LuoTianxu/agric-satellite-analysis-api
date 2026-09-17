@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date, timedelta
 from typing import Annotated, Any
 
@@ -22,6 +23,7 @@ from app.services.beat_schedule import (
     index_task_name,
     weekly_date_window,
 )
+from app.services.overview_daily import business_today, finalize_daily, prepare_daily
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
 
@@ -46,6 +48,31 @@ class WeeklyIndexPrepareOut(BaseModel):
 class WeatherLandsOut(BaseModel):
     land_ids: list[str] = Field(default_factory=list)
     batch_size: int = 50
+
+
+@router.post("/daily-satellite")
+async def prepare_daily_satellite(
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    as_of: date | None = Query(None),
+) -> dict[str, Any]:
+    """每日发现全部有效地块，按5×5公里窗口派发增量S1/S2下载。"""
+    from fastapi import HTTPException
+
+    day = as_of or business_today()
+    if day > business_today():
+        raise HTTPException(400, "统计日期不能晚于北京时间当天")
+    return await prepare_daily(db, day)
+
+
+@router.post("/daily-satellite/{run_id}/finalize")
+async def finalize_daily_satellite(
+    run_id: uuid.UUID,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    """核对下载和MQ入库状态，统一保存每日干旱、洪涝和弱长势快照。"""
+    return await finalize_daily(db, run_id)
 
 
 @router.post("/weekly-index", response_model=WeeklyIndexPrepareOut)
@@ -122,10 +149,14 @@ async def list_weather_lands(
 ):
     """每日 Open-Meteo 拉取用的有效 land_id 列表。"""
     land_ids = (
-        await db.execute(
-            select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
+        (
+            await db.execute(
+                select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return WeatherLandsOut(
         land_ids=[str(lid) for lid in land_ids],
         batch_size=settings.weather_batch_size,
@@ -158,6 +189,7 @@ DO UPDATE SET
     parent_code = EXCLUDED.parent_code,
     metric_json = EXCLUDED.metric_json,
     updated_at = now()
+WHERE COALESCE(overview_stats_daily.metric_json->'filters'->>'snapshot', 'false') <> 'true'
 """
 
 
@@ -203,7 +235,10 @@ async def _refresh_overview_preagg(
         )
         payload = out.model_dump(mode="json")
         resolved_code, resolved_name = await _resolve_region_label(
-            db, level, code, name  # type: ignore[arg-type]
+            db,
+            level,
+            code,
+            name,  # type: ignore[arg-type]
         )
         await db.execute(
             text(_UPSERT_OVERVIEW_SQL),

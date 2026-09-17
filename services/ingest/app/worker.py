@@ -13,6 +13,7 @@ INGEST_INCLUDES = [
     "app.tasks.soil",
     "app.tasks.agri_bridge",
     "app.tasks.agri_lonlat",
+    "app.tasks.satellite_batch",
     "app.tasks.decloud_uncrtaints",
     "app.tasks.agri_alerts",
     "app.tasks.sentinel1",

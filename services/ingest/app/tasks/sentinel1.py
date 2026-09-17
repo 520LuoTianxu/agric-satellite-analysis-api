@@ -125,9 +125,9 @@ def _dn_to_db(dn: np.ndarray) -> np.ndarray:
 
 
 def search_s1_scenes(
-    land_geom_geojson: dict, date_from: date, date_to: date
+    land_geom_geojson: dict, date_from: date, date_to: date, *, dedupe_week: bool = True
 ) -> list[dict]:
-    """Search sentinel-1-grd; keep lowest-id scene per ISO week (IW DV preferred)."""
+    """默认每周优选IW双极化景；聚合窗口保留全部景以覆盖不同轨道的地块。"""
     t0 = time.perf_counter()
     catalog = open_s1_stac_client()
     search = catalog.search(
@@ -168,7 +168,7 @@ def search_s1_scenes(
             continue
         item_date = item.datetime.date() if item.datetime else date_from
         week_key = item_date.isocalendar()[:2]
-        week_str = f"{week_key[0]}-W{week_key[1]:02d}"
+        week_str = f"{week_key[0]}-W{week_key[1]:02d}" if dedupe_week else item.id
         # Prefer dual-pol IW GRDH (DV) when multiple per week
         score = 0
         props = item.properties or {}
@@ -207,6 +207,7 @@ def search_s1_scenes(
                 "vv_href": e["vv_href"],
                 "vh_href": e["vh_href"],
                 "relative_orbit": e.get("relative_orbit"),
+                "geometry": e["item"].geometry,
             }
         )
     return scenes

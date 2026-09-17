@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import socket
+import os
 import unittest
+from unittest.mock import patch
 
 from agric_satellite_analysis_common.celery_app import (
     TASK_ROUTES,
     celery_app_config,
     celery_redis_transport_options,
     create_celery_app,
+    enabled_beat_schedule,
+    BEAT_SWITCHES,
     redis_socket_keepalive_options,
 )
 from agric_satellite_analysis_common.settings import CommonSettings
@@ -87,13 +91,35 @@ class CeleryRedisTransportTests(unittest.TestCase):
             include=[],
             default_queue="ingest",
         )
-        self.assertIn("compute-indices-weekly", with_beat.conf.beat_schedule)
-        self.assertIn("fetch-weather-daily", with_beat.conf.beat_schedule)
-        self.assertIn(
-            "refresh-overview-stats-daily",
-            with_beat.conf.beat_schedule,
-        )
+        self.assertFalse(with_beat.conf.beat_schedule)
         self.assertFalse(without_beat.conf.beat_schedule)
+
+    def test_each_schedule_has_an_independent_opt_in_switch(self):
+        defaults = {attribute: False for attribute in BEAT_SWITCHES.values()}
+        for name, attribute in BEAT_SWITCHES.items():
+            cfg = CommonSettings(_env_file=None, **{**defaults, attribute: True})
+            self.assertEqual(set(enabled_beat_schedule(cfg)), {name})
+
+    def test_all_switches_can_be_enabled_explicitly(self):
+        cfg = CommonSettings(
+            _env_file=None, **{attribute: True for attribute in BEAT_SWITCHES.values()}
+        )
+        self.assertEqual(set(enabled_beat_schedule(cfg)), set(BEAT_SWITCHES))
+
+    def test_env_boolean_values_control_registration(self):
+        env = {attribute.upper(): "false" for attribute in BEAT_SWITCHES.values()}
+        with patch.dict(os.environ, env):
+            self.assertEqual(enabled_beat_schedule(CommonSettings(_env_file=None)), {})
+            os.environ["SCHEDULE_DAILY_SATELLITE_ENABLED"] = "true"
+            cfg = CommonSettings(_env_file=None)
+            self.assertEqual(
+                set(enabled_beat_schedule(cfg)), {"refresh-satellite-overview-daily"}
+            )
+            with patch("agric_satellite_analysis_common.celery_app.settings", cfg):
+                app = create_celery_app(name="beat-enabled", with_beat_schedule=True)
+            self.assertEqual(
+                set(app.conf.beat_schedule), {"refresh-satellite-overview-daily"}
+            )
 
     def test_create_celery_app_inherits_shared_transport(self) -> None:
         expected = celery_app_config()
@@ -109,7 +135,6 @@ class CeleryRedisTransportTests(unittest.TestCase):
             app.conf.broker_connection_max_retries,
             expected["broker_connection_max_retries"],
         )
-
 
     def test_decloud_tasks_route_to_decloud_queue(self) -> None:
         """Download-machine runs UnCRtainTS on -Q decloud, not ingest."""

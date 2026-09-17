@@ -60,6 +60,7 @@
       <div style="font-size:10px; font-weight:600; letter-spacing:0.09em; text-transform:uppercase; color:#5F6C66; padding:16px 10px 6px;">Applied</div>
       <a href="#dataviz" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Data visualisation</a>
       <a href="#patterns" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Layout patterns</a>
+      <a href="#project-monitoring" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Project monitoring</a>
       <a href="#marketing" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Marketing site</a>
       <a href="#mobile" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Mobile &amp; responsive</a>
       <a href="#content" style="display:block; padding:7px 10px; border-radius:6px; font-size:13px; color:#C8D1CD;">Content &amp; copy</a>
@@ -1973,6 +1974,25 @@
       </div>
     </section>
     </sc-if>
+
+    <section id="project-monitoring" style="padding:56px; max-width:1180px; border-top:1px solid #222A26;">
+      <h2 style="font-size:24px; margin:0 0 16px;">Project monitoring · Phase one</h2>
+      <p style="font-size:14px; color:#C8D1CD; line-height:1.6;">ProjectStatistics, ProjectRiskBadge and ProjectLandPanel share the active parcel filters with the map. Area-weighted coverage excludes no parcels silently: unknown area disables ratios. Values below illustrate the components.</p>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin:20px 0;">
+        <div style="border:1px solid #222A26; border-radius:8px; background:#121715; padding:16px;"><div style="font-size:12px; color:#9BA6A1;">Valid monitoring coverage</div><strong style="display:block; font-family:monospace; font-size:24px; margin:8px 0;">28.6%</strong><span style="font-size:12px; color:#9BA6A1;">3 of 6 parcels · Area weighted</span></div>
+        <div style="border:1px solid #222A26; border-radius:8px; background:#121715; padding:16px;"><div style="font-size:12px; color:#9BA6A1;">Parcels with alerts</div><strong style="display:block; font-family:monospace; font-size:24px; color:#F87171; margin:8px 0;">3</strong><span style="font-size:12px; color:#9BA6A1;">High 1 · Medium 1 · Low 1</span></div>
+        <div style="border:1px solid #222A26; border-radius:8px; background:#121715; padding:16px;"><div style="font-size:12px; color:#9BA6A1;">Open alerts</div><strong style="display:block; font-family:monospace; font-size:24px; margin:8px 0;">4</strong><span style="font-size:12px; color:#9BA6A1;">Independent of parcel count</span></div>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:12px; margin:20px 0;">
+        <span style="color:#F87171;">△ High risk</span><span style="color:#FBBF24;">△ Medium risk</span><span style="color:#FACC15;">△ Low risk</span><span style="color:#4ADE80;">✓ No current alerts</span><span style="color:#9BA6A1; border-bottom:2px dashed currentColor;">? Unknown</span>
+      </div>
+      <div style="max-width:352px; border:1px solid #222A26; border-radius:12px; background:#121715; padding:16px;">
+        <strong style="font-size:18px;">Parcel 01</strong><p style="font-size:12px; color:#F87171;">△ High risk · 2 open alerts</p>
+        <p style="font-size:14px;">NDVI decline · Verify on site</p><p style="font-family:monospace; font-size:12px; color:#9BA6A1;">S2 · 2026-09-15 · NDVI 0.400</p>
+        <p style="font-size:12px; color:#9BA6A1; line-height:1.6;">Closing an alert does not confirm recovery. Show observation validity separately. Use the full-height side panel on desktop and nearly full-screen details on mobile.</p>
+      </div>
+      <p style="font-size:13px; margin-top:20px;"><a href="project-monitoring-phase-one.md">Data definitions and verification</a></p>
+    </section>
 
     <section id="handoff" style="padding:56px 56px 96px; max-width:1180px;">
       <div style="font-size:10px; font-weight:600; letter-spacing:0.1em; text-transform:uppercase; color:#22C55E; margin-bottom:10px;">27 — Handoff</div>

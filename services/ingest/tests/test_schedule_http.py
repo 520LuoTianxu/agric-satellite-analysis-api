@@ -100,3 +100,89 @@ class OverviewScheduleHttpTests(unittest.TestCase):
         http_call.assert_called_once()
         self.assertTrue(out["ok"])
         self.assertEqual(out["regions"], 3)
+
+
+class DailySatelliteScheduleTests(unittest.TestCase):
+    def setUp(self):
+        from app.tasks import overview_preagg
+
+        self.task = overview_preagg.refresh_daily_satellite
+        self.enabled = patch(
+            "agric_satellite_analysis_common.internal_api.internal_api_enabled",
+            return_value=True,
+        )
+        self.enabled.start()
+        self.addCleanup(self.enabled.stop)
+
+    def test_download_discovery_then_ingestion_check(self):
+        with (
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_prepare",
+                return_value={"run_id": "run-1"},
+            ) as prepare,
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_finalize",
+                return_value={"status": "completed", "regions": 5},
+            ) as finalize,
+        ):
+            out = self.task.run(as_of="2026-09-16")
+        prepare.assert_called_once_with(as_of="2026-09-16")
+        finalize.assert_called_once_with("run-1")
+        self.assertEqual(out["status"], "completed")
+
+    def test_pending_results_delay_retry_without_recreating_batch(self):
+        with (
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_prepare"
+            ) as prepare,
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_finalize",
+                return_value={"status": "running"},
+            ),
+            patch.object(
+                self.task, "retry", side_effect=RuntimeError("delayed")
+            ) as retry,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "delayed"):
+                self.task.run(run_id="run-1", as_of="2026-09-16")
+        prepare.assert_not_called()
+        self.assertEqual(retry.call_args.kwargs["countdown"], 300)
+        self.assertEqual(
+            retry.call_args.kwargs["kwargs"], {"run_id": "run-1", "as_of": "2026-09-16"}
+        )
+
+    def test_dispatch_error_retry_keeps_original_statistical_day(self):
+        with (
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_prepare",
+                side_effect=RuntimeError("HTTP error"),
+            ),
+            patch.object(
+                self.task, "retry", side_effect=RuntimeError("delayed")
+            ) as retry,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "delayed"):
+                self.task.run(as_of="2026-09-16")
+        self.assertEqual(
+            retry.call_args.kwargs["kwargs"], {"run_id": None, "as_of": "2026-09-16"}
+        )
+
+    def test_partial_batch_is_reported_without_polling_forever(self):
+        with (
+            patch(
+                "agric_satellite_analysis_common.internal_api.daily_satellite_finalize",
+                return_value={"status": "partial"},
+            ),
+            patch.object(self.task, "retry") as retry,
+        ):
+            out = self.task.run(run_id="run-1", as_of="2026-09-16")
+        self.assertEqual(out["status"], "partial")
+        retry.assert_not_called()
+
+    def test_internal_http_is_required(self):
+        with patch(
+            "agric_satellite_analysis_common.internal_api.internal_api_enabled",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "API_BASE_URL"):
+                self.task.run()

@@ -20,6 +20,7 @@ CLAIMABLE_TYPES = frozenset(
         "season_growth_report",
         "land_bootstrap",
         "satellite_analysis",  # agri optical + S1 chunk wave via backfill
+        "satellite_batch",  # 请求地块按5×5公里聚合，共用一个下载窗口
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
@@ -32,6 +33,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
         "land_bootstrap",
         "satellite_analysis",
+        "satellite_batch",
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
