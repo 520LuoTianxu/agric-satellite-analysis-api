@@ -80,6 +80,7 @@ app.add_middleware(
         "X-Trace-Id",
         "X-Request-Id",
         "Hr-Base-Id",
+        "X-Account-Id",
     ],
     expose_headers=["X-Trace-Id"],
     max_age=3600,

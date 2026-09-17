@@ -4,7 +4,7 @@
 
 - 租户标识是 `land_parcels.base_id`。
 - `alert_reads` 以 `(base_id, user_id, alert_id)` 为主键；无记录即未读。
-- 用户 ID 是农业服务 `/getInfo` 返回的 `user.userId`，不使用匿名用户、token 或账号角色 ID 作为用户主键。
+- 用户 ID 取自 localStorage 的 `jointLoginData.accountRoleList[0].accountId`，不取 `accountRoleId`、当前选中角色或 token 中的值。
 - 单条和一键已读只影响当前用户。开启/关闭仍是预警处理状态，与阅读状态独立。
 - 一键已读包含当前租户所有未读预警（含已关闭、其他分页），不受列表筛选限制。语句执行之后新增的预警仍未读。
 - 页面展示预警数量超过 99 时显示 `99+`，真实统计与分页总数不截断。
@@ -18,11 +18,13 @@
 
 SQL 使用 `IF NOT EXISTS`，可重复执行。已有预警无需回填：没有个人阅读记录就显示未读。脚本只新增表、索引及注释，不修改预警处理状态，不删除历史数据。大表建立索引会占用数据库资源，应按正常数据库变更窗口执行。
 
+改为使用 `accountId` 不改变表结构；已执行过建表脚本无需重新建表。旧版以农业 `userId` 写入的记录不会自动转换，若存在旧阅读记录，需核对账号映射后另行迁移。
+
 ## 身份与接口
 
-前端所有预警请求携带 `Authorization: Bearer <agricToken>` 和 `Hr-Base-Id`，基地来自当前联合登录数据的 `certifiedExternalSystems[systemType=2].systemId`。
+前端所有预警请求携带 `Hr-Base-Id` 和 `X-Account-Id`，不传农业 token。基地来自当前联合登录数据的 `certifiedExternalSystems[systemType=2].systemId`，账号来自 `accountRoleList` 第一项的 `accountId`。例如基地为 `37`、第一项账号为 `209`，请求头即 `Hr-Base-Id: 37`、`X-Account-Id: 209`；无需上传整个登录对象及手机号等个人信息。
 
-后端使用现有 `CDFINANCE_SOIL_BASE_URL` 配置调用农业服务 `/getInfo` 验证用户，并查询 `/agriculture/baseinfo/list` 验证基地授权。需要确保此地址与前端农业登录环境一致，且账号能访问自己的基地列表。地址不包含凭证；不配置独立用户密码，不存储 token，不接受浏览器指定用户 ID。上游不可用时返回明确错误，不退回匿名访问。
+后端只校验两个标识是有效的正整数，然后按基地过滤预警、按账号记录个人已读。不解析或验证 token，不调用 `/getInfo`、`/agriculture/baseinfo/list`，预警接口不依赖 `CDFINANCE_SOIL_BASE_URL`。缺少或无效的标识返回 `400`，不会返回农业登录失效错误。此实现信任客户端传入的基地和账号，不验证真实身份或基地访问权限；需要的认证与授权应由入口或网关负责。
 
 - `GET /v1/alerts`：返回 `is_read`、`read_at`，可用 `is_read=true/false` 筛选。
 - `GET /v1/alerts/summary`：`unread_total` 是当前用户、当前基地的全部未读；`open_total/high/medium/low` 是当前基地的未关闭统计。
@@ -30,11 +32,11 @@ SQL 使用 `IF NOT EXISTS`，可重复执行。已有预警无需回填：没有
 - `POST /v1/alerts/read-all`：幂等批量插入阅读记录，返回实际新增记录数 `marked_count`。
 - 地块预警列表及关闭/重新打开接口也使用同一基地范围校验。
 
-本次仅为预警接口接入上述身份边界，其余历史匿名接口不在此次改动范围。
+未读统计缓存按 `(base_id, accountId)` 区分，农业 token 更新或角色变化不会改变个人已读归属。
 
 ## 验证
 
-API：`python -m unittest tests.test_alert_reads -v`。采用隔离的内存数据库执行真实查询及 INSERT SELECT，覆盖个人隔离、租户隔离、批量超过分页、重复请求、新预警、关闭独立、失效登录和上游故障。PostgreSQL 的批量计数 CTE 需在部署环境联调验证；未运行生产数据库脚本。
+API：`python -m unittest tests.test_alert_reads -v`。采用隔离的内存数据库执行真实查询及 INSERT SELECT，覆盖个人隔离、基地数据范围、批量超过分页、重复请求、新预警、关闭独立，以及无需 token、忽略无效 token、缺失和无效标识。PostgreSQL 的批量计数 CTE 需在部署环境联调验证；未运行生产数据库脚本。
 
 Ingest：`python -m unittest tests.test_alert_read_preservation -v`，验证同日重算保留预警、新日期生成新记录。
 
