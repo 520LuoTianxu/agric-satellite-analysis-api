@@ -38,8 +38,8 @@ class Base(DeclarativeBase):
 class Farm(Base):
     __tablename__ = "farms"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, server_default=text("uuid_generate_v4()::text")
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     country: Mapped[str | None] = mapped_column(String(3), nullable=True)
@@ -72,8 +72,8 @@ class LandParcel(Base):
     project_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     tile_assignment_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     tile_anchor_land_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    farm_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("farms.id", ondelete="SET NULL"), nullable=True
+    farm_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("farms.id", ondelete="SET NULL"), nullable=True
     )
     land_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

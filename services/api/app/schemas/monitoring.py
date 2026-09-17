@@ -132,7 +132,7 @@ class AlertOut(BaseModel):
     # Resolved by an outer join at query time, never stored on the alert row.
     # The canonical parcel name is read directly from land_parcels.
     land_name: str | None = None
-    farm_id: uuid.UUID | None = None
+    farm_id: str | None = None
     farm_name: str | None = None
 
     model_config = {"from_attributes": True}

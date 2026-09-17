@@ -27,7 +27,7 @@ class FarmUpdate(BaseModel):
 
 
 class FarmOut(BaseModel):
-    id: uuid.UUID
+    id: str
     org_id: uuid.UUID | None = None
     name: str
     country: str | None = None
@@ -47,7 +47,7 @@ class LandParcelCreate(BaseModel):
 
     land_id: str
     tile_id: str | None = None
-    farm_id: uuid.UUID | None = None
+    farm_id: str | None = None
     land_name: str
     group_id: str | None = None
     group_name: str | None = None
@@ -86,7 +86,7 @@ class LandParcelUpdate(BaseModel):
     crop_type: str | None = None
     season: str | None = None
     tags_json: list[str] | None = None
-    farm_id: uuid.UUID | None = None
+    farm_id: str | None = None
 
 
 class LandParcelOut(BaseModel):
@@ -97,7 +97,7 @@ class LandParcelOut(BaseModel):
     project_key: str | None = None
     tile_assignment_type: str | None = None
     tile_anchor_land_id: str | None = None
-    farm_id: uuid.UUID | None = None
+    farm_id: str | None = None
     land_name: str | None = None
     group_id: str | None = None
     group_name: str | None = None
