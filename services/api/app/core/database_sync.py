@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import os
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-# Celery workers need sync DB; read DATABASE_URL_SYNC or convert asyncpg URL.
-_sync_url = os.environ.get("DATABASE_URL_SYNC", "")
-if not _sync_url:
-    _async_url = os.environ.get("DATABASE_URL", "")
-    _sync_url = _async_url.replace("postgresql+asyncpg://", "postgresql://")
-_database_schema = os.environ.get("DATABASE_SCHEMA", "agric_satellite")
+from agric_satellite_analysis_common.settings import resolve_sync_database_url
+from app.core.config import settings
+
+# Prefer Settings/.env (same source as the async engine). Raw os.environ is not
+# enough in ABflow images that copy .env.test but never export it into the process.
+_sync_url = resolve_sync_database_url(settings.database_url_sync, settings.database_url)
+_database_schema = settings.database_schema or "agric_satellite"
 
 sync_engine = create_engine(
     _sync_url,

@@ -1,11 +1,20 @@
 """agric-satellite-analysis API - Core configuration."""
 
-from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 容器/ABflow 往往只提供 .env 文件，不 export 到进程环境。
+load_dotenv()
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", env_ignore_empty=True
+    )
+
     # Database
     database_url: str = "postgresql+asyncpg://openfarm:openfarm_dev@db:5432/openfarm"
+    database_url_sync: str = ""
     # 数据库只保留 agric_satellite；应用表、扩展和 Alembic 版本表均在此 schema。
     database_schema: str = "agric_satellite"
 
@@ -83,10 +92,6 @@ class Settings(BaseSettings):
     work_lease_seconds: int = 600
     work_claim_default_limit: int = 1
     work_reaper_on_claim: bool = True
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 
 settings = Settings()

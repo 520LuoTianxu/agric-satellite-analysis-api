@@ -6,12 +6,16 @@ from typing import Self
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 class CommonSettings(BaseSettings):
     """Subset of env used by ingest/storage and ObjectStorage."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", env_ignore_empty=True
+    )
 
     redis_url: str = "redis://redis:6379/0"
 
@@ -83,8 +87,29 @@ class CommonSettings(BaseSettings):
 settings = CommonSettings()
 
 
+def resolve_sync_database_url(
+    database_url_sync: str = "",
+    database_url: str = "",
+) -> str:
+    """Build a psycopg2 SQLAlchemy URL from env-style strings.
+
+    ``DATABASE_URL_SYNC`` wins when it is non-blank. Otherwise ``DATABASE_URL``
+    is used after converting ``postgresql+asyncpg://`` to ``postgresql://``.
+    """
+    url = (database_url_sync or "").strip() or (database_url or "").strip()
+    url = url.replace("postgresql+asyncpg://", "postgresql://")
+    url = url.replace("postgres+asyncpg://", "postgresql://")
+    if not url:
+        raise ValueError(
+            "DATABASE_URL_SYNC or DATABASE_URL is required for the sync engine"
+        )
+    try:
+        make_url(url)
+    except ArgumentError as exc:
+        raise ValueError(str(exc)) from exc
+    return url
+
+
 def sync_database_url() -> str:
     """Return a sync SQLAlchemy URL (psycopg2)."""
-    if settings.database_url_sync:
-        return settings.database_url_sync
-    return settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    return resolve_sync_database_url(settings.database_url_sync, settings.database_url)
