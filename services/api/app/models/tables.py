@@ -220,6 +220,24 @@ class Alert(Base):
     )
 
 
+class AlertRead(Base):
+    """个人已读记录：同一租户内每个用户独立，缺少记录即未读。"""
+
+    __tablename__ = "alert_reads"
+
+    base_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("alerts.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ScoutingObservation(Base):
     __tablename__ = "scouting_observations"
 
