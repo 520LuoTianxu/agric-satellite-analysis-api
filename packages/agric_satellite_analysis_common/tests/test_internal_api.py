@@ -211,6 +211,28 @@ class HttpWritesTests(unittest.TestCase):
         out = ia.apply_results({"kind": "weather_daily", "rows": []}, client=client)
         self.assertTrue(out["ok"])
 
+    def test_cache_results_client(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/internal/results/cache")
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result_id": "scene-cache-1",
+                    "queued": True,
+                    "ttl_seconds": 86400,
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.cache_results(
+            {"status": "success", "oss_urls": {"2026-09-16_S2": "https://oss.test/a"}},
+            client=client,
+        )
+        self.assertTrue(out["queued"])
+        self.assertEqual(out["ttl_seconds"], 86400)
+
 
 class AssessmentBundleClientTests(unittest.TestCase):
     def setUp(self) -> None:

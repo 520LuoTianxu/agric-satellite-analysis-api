@@ -371,11 +371,24 @@ def _upsert_agri_s1(
     vh_stats: dict,
     mq_task_id: str | None = None,
     relative_orbit: int | None = None,
+    result_delivery: str = "mq",
 ) -> str | None:
-    """Upload S1 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
+    """Upload S1 lonlat JSON and deliver it through the selected result channel.
 
-    Returns public JSON URL when upload+publish succeed.
+    ``result_delivery='http'`` is used by the daily satellite batch: only a
+    small OSS callback is sent to the API, which queues it in Redis before the
+    API-side PostgreSQL upsert. Legacy callers keep the MQ path by default.
+
+    Returns public JSON URL when upload+delivery succeed.
     """
+    if result_delivery not in {"mq", "http"}:
+        raise ValueError(f"unsupported S1 result delivery: {result_delivery}")
+    if result_delivery == "mq":
+        # 下载机关闭本地 PG 写入时，历史调用方也必须切到 API HTTP/Redis，不能再发结果 MQ。
+        from app.core.http_mode import ingest_http_only
+
+        if ingest_http_only():
+            result_delivery = "http"
     date_str = scene_date.isoformat()
     rel = parse_s1_relative_orbit(scene_id, relative_orbit)
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
@@ -422,12 +435,50 @@ def _upsert_agri_s1(
     product["json_url"] = json_url
 
     if not json_url or not json_oss_key:
-        raise RuntimeError("S1 agri path requires OSS scene JSON upload before MQ publish")
-
-    from agric_satellite_analysis_common.mq_results import publish_task_result
+        raise RuntimeError("S1 agri path requires OSS scene JSON upload before delivery")
 
     label = f"{date_str}_S1"
     parent = (mq_task_id or "").strip() or None
+    extras = {
+        "kind": "parcel_scene_product",
+        "land_id": str(meta["land_id"]),
+        "sensor": "S1",
+        "date": date_str,
+        "scene_id": scene_id,
+        "parent_mq_task_id": parent,
+        "json_oss_key": json_oss_key,
+    }
+    if result_delivery == "http":
+        # HTTP 只传 OSS 地址，API 侧从 Redis 队列异步取出并入库，避免并发下载结果堵塞 API。
+        from app.core.http_mode import cache_scene_result_http
+
+        t_callback = time.perf_counter()
+        cache_scene_result_http(label=label, json_url=json_url, extras=extras)
+        callback_ms = int((time.perf_counter() - t_callback) * 1000)
+        logger.info(
+            "lonlat_write_timing",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            sensor="S1",
+            json_upload_ms=json_upload_ms,
+            db_upsert_ms=0,
+            callback_ms=callback_ms,
+            mq_publish_ms=0,
+            uploaded_json=True,
+            path="oss_http_redis",
+        )
+        logger.info(
+            "lonlat_oss_http_cached",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            sensor="S1",
+            json_url=json_url,
+            label=label,
+        )
+        return json_url
+
+    from agric_satellite_analysis_common.mq_results import publish_task_result
+
     result_task_id = (
         f"{parent}:{label}" if parent else f"agri-scene:{meta['land_id']}:{label}"
     )
@@ -439,14 +490,7 @@ def _upsert_agri_s1(
         oss_urls={label: json_url},
         collect_parcel_urls=False,
         upload_summary_if_empty=False,
-        extras={
-            "kind": "parcel_scene_product",
-            "sensor": "S1",
-            "date": date_str,
-            "scene_id": scene_id,
-            "parent_mq_task_id": parent,
-            "json_oss_key": json_oss_key,
-        },
+        extras=extras,
     )
     mq_publish_ms = int((time.perf_counter() - t_mq) * 1000)
     logger.info(

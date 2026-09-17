@@ -24,6 +24,7 @@ __all__ = [
     "agri_scenes_summary",
     "api_base_url",
     "apply_results",
+    "cache_results",
     "assessment_bundle",
     "complete_work",
     "data_readiness",
@@ -348,6 +349,28 @@ def apply_results(
         data = r.json()
         if not isinstance(data, dict):
             raise InternalApiError("results/apply returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def cache_results(
+    result: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/results/cache — enqueue a result in API Redis."""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post("/v1/internal/results/cache", json={"result": result})
+        _raise_for_status(r, context="results/cache")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("results/cache returned non-object")
         return data
 
     if client is not None:
