@@ -1,5 +1,6 @@
 """agric-satellite-analysis API - FastAPI application entry point."""
 
+import asyncio
 import re
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -52,11 +53,16 @@ async def lifespan(app: FastAPI):
 
     # Create shared httpx client for outbound HTTP (e.g., tile proxy)
     import httpx
+    from app.services.scene_result_cache import consume_cached_scene_results
 
     app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    # API 进程负责从 Redis 消费下载结果，下载机只做 HTTP 入队，不参与数据库写入。
+    scene_result_consumer = asyncio.create_task(consume_cached_scene_results())
     try:
         yield
     finally:
+        scene_result_consumer.cancel()
+        await asyncio.gather(scene_result_consumer, return_exceptions=True)
         await app.state.http_client.aclose()
 
 

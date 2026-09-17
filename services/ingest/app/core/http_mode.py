@@ -50,6 +50,28 @@ def patch_job_http(job_id: str | None, body: dict[str, Any]) -> None:
     patch_job(str(job_id), body)
 
 
+def cache_scene_result_http(
+    *,
+    label: str,
+    json_url: str,
+    extras: dict[str, Any],
+) -> dict[str, Any]:
+    """通过 API HTTP 将 OSS 结果放入 Redis 待入库队列，不在下载机直写 PG。"""
+    from agric_satellite_analysis_common.internal_api import cache_results
+
+    result = cache_results(
+        {
+            "status": "success",
+            "oss_urls": {label: json_url},
+            "extras": extras,
+        },
+        timeout=30.0,
+    )
+    if result.get("ok") is False:
+        raise RuntimeError(f"results/cache rejected scene result: {result}")
+    return result
+
+
 def get_job_http(job_id: str) -> dict[str, Any] | None:
     try:
         from agric_satellite_analysis_common.internal_api import get_job, internal_api_enabled

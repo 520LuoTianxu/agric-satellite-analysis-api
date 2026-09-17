@@ -215,6 +215,17 @@ class PrepareTests(unittest.IsolatedAsyncioTestCase):
             [job.params_json["land_ids"] for job in jobs],
             [["A", "B"], ["A", "B"], ["C"], ["C"]],
         )
+        self.assertEqual(
+            {job.params_json["sensor"] for job in jobs},
+            {"S1", "S2"},
+        )
+        self.assertTrue(
+            all(
+                job.params_json["date_from"] == (DAY - timedelta(days=6)).isoformat()
+                and job.params_json["date_to"] == DAY.isoformat()
+                for job in jobs
+            )
+        )
 
     async def test_partial_dispatch_retries_only_unconfirmed_jobs(self):
         a, b = satellite_job("pending"), satellite_job("pending")

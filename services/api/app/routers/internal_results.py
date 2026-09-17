@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.middleware.internal_auth import InternalAuth
+from app.core.logging import logger
 
 router = APIRouter(prefix="/internal/results", tags=["internal-results"])
 
@@ -33,6 +34,13 @@ class ApplyRequest(BaseModel):
 class ApplyResponse(BaseModel):
     ok: bool = True
     stats: dict[str, Any] = Field(default_factory=dict)
+
+
+class CacheResponse(BaseModel):
+    ok: bool = True
+    result_id: str
+    queued: bool
+    ttl_seconds: int
 
 
 def _envelope_from_body(body: ApplyRequest) -> dict[str, Any]:
@@ -76,3 +84,25 @@ async def apply_results(
     stats = await asyncio.to_thread(apply_result_envelope, envelope)
     ok = "error" not in stats
     return ApplyResponse(ok=ok, stats=stats)
+
+
+@router.post("/cache", response_model=CacheResponse)
+async def cache_results(
+    body: ApplyRequest,
+    _: InternalAuth,
+):
+    """仅缓存下载机结果通知，实际 OSS 下载和 PG 入库由 API 后台消费完成。"""
+    from app.services.scene_result_cache import enqueue_scene_result
+
+    envelope = _envelope_from_body(body)
+    try:
+        cached = await enqueue_scene_result(envelope)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("satellite_scene_result_cache_failed", error=str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail="satellite result cache unavailable",
+        ) from exc
+    return CacheResponse(**cached)

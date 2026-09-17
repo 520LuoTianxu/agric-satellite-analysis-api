@@ -208,6 +208,10 @@ class ParcelProductTests(unittest.TestCase):
         self.assertAlmostEqual(products[0][0]["ndvi_avg"], 0.5, places=5)
         self.assertAlmostEqual(products[1][0]["ndvi_avg"], 0, places=5)
         self.assertEqual([parent for _, parent in products], ["parent:A", "parent:B"])
+        self.assertEqual(
+            [kwargs["result_delivery"] for _, kwargs in products],
+            ["http", "http"],
+        )
         for (row, _), land in zip(products, self.lands):
             for pixel in row["_pixel_data_obj"]["pixels"]:
                 self.assertTrue(land["geom"].covers(Point(pixel["lon"], pixel["lat"])))
@@ -232,6 +236,10 @@ class ParcelProductTests(unittest.TestCase):
         self.assertEqual(
             [call.kwargs["mq_task_id"] for call in publish.call_args_list],
             ["parent:A", "parent:B"],
+        )
+        self.assertEqual(
+            [call.kwargs["result_delivery"] for call in publish.call_args_list],
+            ["http", "http"],
         )
         np.testing.assert_array_equal(bands["vv"], original)
 

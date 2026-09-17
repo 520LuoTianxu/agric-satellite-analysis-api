@@ -1,4 +1,4 @@
-"""按聚合窗口下载一次影像，在内存中裁到请求地块后发布现有OSS/MQ结果。"""
+"""按聚合窗口下载一次影像，在内存中裁到请求地块后回调 API 结果缓存。"""
 
 from datetime import date
 
@@ -171,7 +171,7 @@ def _publish_land(
     }
     meta = land["meta"]
     geom_json = mapping(land["geom"])
-    # 同组多个地块同一天的结果必须具有不同消息编号，否则结果写入端会去重丢数据。
+    # 同组多个地块同一天的结果必须具有不同结果编号，否则缓存/入库端会去重丢数据。
     land_task_id = f"{parent_id}:{meta['land_id']}"
     if sensor == "S1":
         for band in bands.values():
@@ -192,6 +192,8 @@ def _publish_land(
             compute_zonal_stats(bands["vh"]),
             mq_task_id=land_task_id,
             relative_orbit=scene.get("relative_orbit"),
+            # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
+            result_delivery="http",
         )
         return True
 
@@ -254,6 +256,8 @@ def _publish_land(
         rgb_url=rgb.get("rgb_url"),
         large_rgb_url=rgb.get("large_rgb_url"),
         rgb_oss_key=rgb.get("rgb_oss_key"),
+        # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
+        result_delivery="http",
     )
     if result:
         land["raw_results"].append(result)

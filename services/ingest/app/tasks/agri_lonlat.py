@@ -189,15 +189,25 @@ def publish_optical_lonlat_to_oss_mq(
     mq_task_id: str | None = None,
     oss_sensor: str = "S2",
     extra_extras: dict[str, Any] | None = None,
+    result_delivery: str = "mq",
 ) -> str | None:
-    """Upload S2 lonlat JSON to OSS and publish one result MQ (no local PG upsert).
+    """Upload S2 lonlat JSON and deliver it through the selected result channel.
 
-    Producer mq_result_writer pulls the OSS URL and writes agric_satellite.parcel_scene_products.
+    The daily satellite batch uses ``result_delivery='http'`` so the API caches
+    the OSS callback in Redis before writing ``parcel_scene_products``. Legacy
+    callers keep the MQ path by default.
     ``oss_sensor`` only changes the object key / MQ label (e.g. ``S2_decloud``).
     The stored row stays ``sensor='S2'`` so existing clients keep working.
     """
+    if result_delivery not in {"mq", "http"}:
+        raise ValueError(f"unsupported S2 result delivery: {result_delivery}")
+    if result_delivery == "mq":
+        # 下载机关闭本地 PG 写入时，历史调用方也必须切到 API HTTP/Redis，不能再发结果 MQ。
+        from app.core.http_mode import ingest_http_only
+
+        if ingest_http_only():
+            result_delivery = "http"
     from agric_satellite_analysis_common.mq_results import (
-        publish_task_result,
         scene_json_oss_key,
         upload_scene_product_json,
     )
@@ -261,9 +271,9 @@ def publish_optical_lonlat_to_oss_mq(
     result_task_id = (
         f"{parent}:{label}" if parent else f"agri-scene:{row['land_id']}:{label}"
     )
-    t_mq = time.perf_counter()
     extras: dict[str, Any] = {
         "kind": "parcel_scene_product",
+        "land_id": str(row["land_id"]),
         "sensor": "S2",
         "date": row["date"],
         "scene_id": row["scene_id"],
@@ -273,6 +283,39 @@ def publish_optical_lonlat_to_oss_mq(
     }
     if extra_extras:
         extras.update(extra_extras)
+
+    if result_delivery == "http":
+        # HTTP 只传 OSS 地址，API 侧从 Redis 队列异步取出并入库，避免并发下载结果堵塞 API。
+        from app.core.http_mode import cache_scene_result_http
+
+        t_callback = time.perf_counter()
+        cache_scene_result_http(label=label, json_url=json_url, extras=extras)
+        callback_ms = int((time.perf_counter() - t_callback) * 1000)
+        logger.info(
+            "lonlat_write_timing",
+            land_id=row.get("land_id"),
+            date=row.get("date"),
+            sensor="S2",
+            json_upload_ms=json_upload_ms,
+            db_upsert_ms=0,
+            callback_ms=callback_ms,
+            mq_publish_ms=0,
+            uploaded_json=True,
+            path="oss_http_redis",
+        )
+        logger.info(
+            "lonlat_oss_http_cached",
+            land_id=row.get("land_id"),
+            date=row.get("date"),
+            sensor="S2",
+            json_url=json_url,
+            label=label,
+        )
+        return json_url
+
+    from agric_satellite_analysis_common.mq_results import publish_task_result
+
+    t_mq = time.perf_counter()
     publish_task_result(
         task_id=result_task_id,
         status="success",
@@ -330,8 +373,9 @@ def emit_optical_lonlat(
     rgb_url: str | None = None,
     large_rgb_url: str | None = None,
     rgb_oss_key: str | None = None,
+    result_delivery: str = "mq",
 ) -> dict[str, Any] | None:
-    """Sample lonlat_v1, upload OSS JSON, publish one MQ (PG write on producer)."""
+    """Sample lonlat_v1, upload OSS JSON, then deliver by MQ or HTTP/Redis."""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
         _round6,
         _sample_lonlat,
@@ -445,7 +489,11 @@ def emit_optical_lonlat(
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
     }
-    json_url = publish_optical_lonlat_to_oss_mq(row, mq_task_id=mq_task_id)
+    json_url = publish_optical_lonlat_to_oss_mq(
+        row,
+        mq_task_id=mq_task_id,
+        result_delivery=result_delivery,
+    )
     logger.info(
         "lonlat_upserted",
         land_id=meta["land_id"],
