@@ -82,7 +82,7 @@ async def list_alerts(
     ctx: Context,
     db: Database,
     land_id: str | None = Query(None),
-    farm_id: uuid.UUID | None = Query(None),
+    farm_id: str | None = Query(None),
     status_filter: str | None = Query(None, alias="status"),
     severity: str | None = Query(None),
     index_type: str | None = Query(None),

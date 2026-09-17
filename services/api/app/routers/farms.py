@@ -6,7 +6,6 @@ remain in agric_satellite.land_parcels and are never translated elsewhere.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -70,7 +69,7 @@ async def create_farm(
 
 @router.get("/farms/{farm_id}", response_model=FarmOut)
 async def get_farm(
-    farm_id: uuid.UUID,
+    farm_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -82,7 +81,7 @@ async def get_farm(
 
 @router.put("/farms/{farm_id}", response_model=FarmOut)
 async def update_farm(
-    farm_id: uuid.UUID,
+    farm_id: str,
     body: FarmUpdate,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -101,7 +100,7 @@ async def update_farm(
 
 @router.delete("/farms/{farm_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_farm(
-    farm_id: uuid.UUID,
+    farm_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -123,7 +122,7 @@ async def delete_farm(
     "/farms/{farm_id}/lands", response_model=PaginatedResponse[LandParcelOut]
 )
 async def list_farm_lands(
-    farm_id: uuid.UUID,
+    farm_id: str,
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(50, ge=1, le=500),

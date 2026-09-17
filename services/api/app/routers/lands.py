@@ -159,7 +159,7 @@ def _normalized_crop(value: str | None) -> str | None:
 async def list_lands(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    farm_id: uuid.UUID | None = Query(None),
+    farm_id: str | None = Query(None),
     group_id: str | None = Query(None, description="Filter by planting group_id"),
     q: str | None = Query(None, description="Search land_id or land_name"),
     limit: int = Query(50, ge=1, le=500),
@@ -343,7 +343,7 @@ async def delete_land(
 @router.post("/lands/import", response_model=LandParcelImportResponse)
 async def import_lands(
     file: UploadFile,
-    farm_id: uuid.UUID | None = Query(None),
+    farm_id: str | None = Query(None),
     ctx: Annotated[OrgContext, Depends(_writer)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
@@ -627,7 +627,7 @@ async def backfill_all_lands(
 
 @router.post("/admin/ensure-soil-weather", status_code=status.HTTP_202_ACCEPTED)
 async def ensure_soil_weather(
-    farm_id: uuid.UUID | None = Query(None),
+    farm_id: str | None = Query(None),
     ctx: Annotated[OrgContext, Depends(require_roles("owner"))] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):

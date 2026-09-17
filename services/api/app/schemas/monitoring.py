@@ -125,14 +125,14 @@ class AlertOut(BaseModel):
     weather_context: dict[str, Any] | None = None
     soil_context: dict[str, Any] | None = None
     created_at: datetime
-    # 只在已验证身份的预警接口填充；公开分享不暴露个人阅读状态。
+    # 只在提供基地和账号上下文的预警接口填充；公开分享不暴露个人阅读状态。
     is_read: bool | None = None
     read_at: datetime | None = None
 
     # Resolved by an outer join at query time, never stored on the alert row.
     # The canonical parcel name is read directly from land_parcels.
     land_name: str | None = None
-    farm_id: uuid.UUID | None = None
+    farm_id: str | None = None
     farm_name: str | None = None
 
     model_config = {"from_attributes": True}

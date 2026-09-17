@@ -4,10 +4,11 @@ import unittest
 import uuid
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from typing import Annotated
 from unittest.mock import AsyncMock
 
 import httpx
-from fastapi import HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -48,9 +49,9 @@ class PersonalReadTests(unittest.IsolatedAsyncioTestCase):
             execute=AsyncMock(side_effect=self.session.execute),
             flush=AsyncMock(side_effect=self.session.flush),
         )
-        self.a = AlertContext(base_id="38", user_id="alice")
-        self.b = AlertContext(base_id="38", user_id="bob")
-        self.other = AlertContext(base_id="39", user_id="alice")
+        self.a = AlertContext(base_id="38", user_id="209")
+        self.b = AlertContext(base_id="38", user_id="210")
+        self.other = AlertContext(base_id="39", user_id="209")
         self.first = self.add_alert("A")
         self.foreign = self.add_alert("B")
         self.add_alert("C")
@@ -137,57 +138,59 @@ class PersonalReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(mine.items[0].is_read)
 
 
-class AlertAuthTests(unittest.IsolatedAsyncioTestCase):
-    async def context(self, handler, token="Bearer valid-token", base="38"):
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            request = SimpleNamespace(
-                app=SimpleNamespace(state=SimpleNamespace(http_client=client))
-            )
-            return await get_alert_context(request, token, base)
+class AlertContextTests(unittest.IsolatedAsyncioTestCase):
+    async def request_context(self, headers):
+        app = FastAPI()
 
-    async def test_verified_user_and_allowed_base_in_later_page(self):
-        def handler(request):
-            self.assertEqual(request.headers["authorization"], "Bearer valid-token")
-            self.assertEqual(request.headers["hr-base-id"], "-1")
-            if request.url.path.endswith("/getInfo"):
-                return httpx.Response(200, json={"code": 200, "user": {"userId": 123}})
-            page = request.url.params["pageNum"]
-            rows = [{"baseId": 39}] * 200 if page == "1" else [{"baseId": 38}]
-            return httpx.Response(200, json={"code": 200, "rows": rows, "total": 201})
+        @app.get("/context")
+        async def context(ctx: Annotated[AlertContext, Depends(get_alert_context)]):
+            return ctx
 
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            return await client.get("/context", headers=headers)
+
+    async def test_headers_work_without_token_or_with_invalid_token(self):
+        # 预警上下文无需农业服务；Authorization 缺失、格式错误、失效均不影响它。
+        for authorization in (None, "invalid-token", "Bearer expired-token"):
+            headers = {"hr-base-id": "37", "x-account-id": "209"}
+            if authorization is not None:
+                headers["Authorization"] = authorization
+            response = await self.request_context(headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"base_id": "37", "user_id": "209"})
+
+    async def test_missing_or_invalid_identifiers_are_rejected(self):
+        for header, max_length in (("hr-base-id", 64), ("x-account-id", 128)):
+            for value in (
+                None,
+                "",
+                " ",
+                "0",
+                "-1",
+                "1.5",
+                "abc",
+                "1,2",
+                "1" * (max_length + 1),
+            ):
+                with self.subTest(header=header, value=value):
+                    headers = {"hr-base-id": "37", "x-account-id": "209"}
+                    if value is None:
+                        headers.pop(header)
+                    else:
+                        headers[header] = value
+                    response = await self.request_context(headers)
+                    self.assertEqual(response.status_code, 400)
+
+    async def test_ids_are_normalized_and_non_ascii_ids_rejected(self):
         self.assertEqual(
-            await self.context(handler), AlertContext(base_id="38", user_id="123")
+            await get_alert_context(" 037 ", " 0209 "),
+            AlertContext(base_id="37", user_id="209"),
         )
-
-    async def test_missing_login_invalid_base_and_forged_base_fail_closed(self):
-        def handler(request):
-            if request.url.path.endswith("/getInfo"):
-                return httpx.Response(200, json={"code": 200, "user": {"userId": 123}})
-            return httpx.Response(
-                200, json={"code": 200, "rows": [{"baseId": 39}], "total": 1}
-            )
-
-        for token, base, code in (
-            (None, "38", 401),
-            ("Bearer token", "-1", 400),
-            ("Bearer token", None, 400),
-            ("Bearer token", "38", 403),
-        ):
-            with self.assertRaises(HTTPException) as error:
-                await self.context(handler, token, base)
-            self.assertEqual(error.exception.status_code, code)
-
-    async def test_expired_token_or_unavailable_upstream_does_not_use_anonymous_user(
-        self,
-    ):
-        for status, body, expected in (
-            (200, {"code": 401}, 401),
-            (503, {}, 502),
-            (200, {"code": 200, "user": {}}, 401),
-        ):
-            with self.assertRaises(HTTPException) as error:
-                await self.context(lambda request: httpx.Response(status, json=body))
-            self.assertEqual(error.exception.status_code, expected)
+        with self.assertRaises(HTTPException) as error:
+            await get_alert_context("37", "２０９")
+        self.assertEqual(error.exception.status_code, 400)
 
 
 if __name__ == "__main__":
