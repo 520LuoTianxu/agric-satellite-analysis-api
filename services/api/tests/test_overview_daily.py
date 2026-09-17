@@ -176,9 +176,11 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(outputs[0].totals.parcel_count, 0)
 
     def test_incremental_dates_include_late_scenes_and_outages(self):
-        self.assertEqual(daily.download_start(None, DAY), DAY - timedelta(days=60))
-        self.assertEqual(daily.download_start(DAY, DAY), DAY - timedelta(days=7))
-        self.assertEqual(daily.download_start(date(2026, 7, 1), DAY), date(2026, 6, 24))
+        self.assertEqual(daily.download_start(None, DAY), DAY - timedelta(days=6))
+        self.assertEqual(daily.download_start(DAY, DAY), DAY - timedelta(days=6))
+        self.assertEqual(
+            daily.download_start(date(2026, 7, 1), DAY), DAY - timedelta(days=6)
+        )
         self.assertEqual(daily.run_id_for(DAY), daily.run_id_for(DAY))
 
 
