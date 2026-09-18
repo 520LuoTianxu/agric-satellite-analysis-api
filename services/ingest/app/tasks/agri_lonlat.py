@@ -24,6 +24,9 @@ from shapely.geometry import mapping
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    is_scheduled_land_allowed,
+)
 from app.core.agri_classify import (
     PARCEL_CLOUD_SOURCE_LONLAT,
     PARCEL_CLOUD_SOURCE_SCL,
@@ -822,7 +825,12 @@ def _process_agri_optical_http_only(
     """Optical chunk worker without SyncSession (OSS + MQ path)."""
     from shapely.geometry import shape as shapely_shape
 
-    from app.core.http_mode import land_geom_http, get_job_http, resolve_land_http
+    from app.core.http_mode import (
+        land_geom_http,
+        get_job_http,
+        patch_job_http,
+        resolve_land_http,
+    )
     from app.tasks.pipeline import (
         existing_agri_scene_dates,
         filter_scenes_skip_existing,
@@ -855,6 +863,27 @@ def _process_agri_optical_http_only(
         }
 
     resolved = resolve_land_http(land_id)
+    if not is_scheduled_land_allowed(
+        resolved.get("base_id"), resolved.get("land_area_mu")
+    ):
+        patch_job_http(
+            job_id,
+            {
+                "status": "cancelled",
+                "error": "定时任务地块过滤：基地被排除或地块面积超过5000亩",
+                "progress_json": {
+                    "current_step": "filtered",
+                    "message": "地块不参与自动化遥感任务",
+                },
+            },
+        )
+        return {
+            "job_id": job_id,
+            "land_id": str(land_id),
+            "status": "cancelled",
+            "reason": "land_filtered",
+            "http_only": True,
+        }
     geom_payload = land_geom_http(land_id, include_geojson=True)
     geojson = geom_payload.get("geojson")
     if not geojson:
@@ -1117,6 +1146,12 @@ def process_agri_optical_lonlat(
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
+        if not is_scheduled_land_allowed(land.base_id, land.land_area_mu):
+            job.status = "cancelled"
+            job.error = "定时任务地块过滤：基地被排除或地块面积超过5000亩"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "cancelled", "reason": "land_filtered"}
 
         agri_meta = _load_land_meta(session, land.land_id)
         land_geom = geojson_to_shape(land.boundary_geojson)

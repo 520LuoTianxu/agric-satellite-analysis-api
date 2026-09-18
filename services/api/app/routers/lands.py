@@ -8,7 +8,6 @@ does not translate to a legacy UUID or consult a second parcel table.
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
@@ -114,6 +113,7 @@ def _land_to_out(land: LandParcel) -> LandParcelOut:
         town_name=land.town_name,
         village_code=land.village_code,
         village_name=land.village_name,
+        land_area_mu=(float(land.land_area_mu) if land.land_area_mu is not None else None),
         boundary_geojson=boundary,
         boundary_srid=land.boundary_srid,
         min_lon=land.min_lon,

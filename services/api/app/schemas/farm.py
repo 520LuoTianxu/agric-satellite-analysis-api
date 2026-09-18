@@ -114,6 +114,7 @@ class LandParcelOut(BaseModel):
     town_name: str | None = None
     village_code: str | None = None
     village_name: str | None = None
+    land_area_mu: float | None = None
     soil_property: str | None = None
     current_batch: str | None = None
     land_status: str | None = None

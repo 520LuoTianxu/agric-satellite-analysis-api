@@ -11,9 +11,14 @@ from decimal import Decimal
 import httpx
 import structlog
 from celery import group
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    EXCLUDED_SCHEDULE_BASE_IDS,
+    MAX_SCHEDULE_LAND_AREA_MU,
+    is_scheduled_land_allowed,
+)
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
 from app.worker import celery_app
@@ -278,6 +283,39 @@ def fetch_weather_for_land(
     http_only = _http_only_weather()
     session = None if http_only else _get_db_session()
     try:
+        if http_only:
+            from agric_satellite_analysis_common.internal_api import resolve_land
+
+            remote = resolve_land(land_id=land_id)
+            if not is_scheduled_land_allowed(
+                remote.get("base_id"), remote.get("land_area_mu")
+            ):
+                logger.info(
+                    "weather_land_filtered",
+                    land_id=land_id,
+                    base_id=remote.get("base_id"),
+                    land_area_mu=remote.get("land_area_mu"),
+                )
+                return {
+                    "land_id": land_id,
+                    "rows_upserted": 0,
+                    "status": "skipped",
+                    "reason": "land_filtered",
+                }
+        elif session is not None:
+            from app.models.tables import LandParcel
+
+            land = session.get(LandParcel, land_id)
+            if not land or not is_scheduled_land_allowed(
+                land.base_id, land.land_area_mu
+            ):
+                logger.info("weather_land_filtered", land_id=land_id)
+                return {
+                    "land_id": land_id,
+                    "rows_upserted": 0,
+                    "status": "skipped",
+                    "reason": "land_filtered",
+                }
         coords = _resolve_land_lat_lon(land_id, session=session)
         if coords is None:
             logger.warning("weather_land_not_found", land_id=land_id)
@@ -523,7 +561,17 @@ def schedule_daily_weather_fetch() -> dict:
             land_ids = [
                 str(lid)
                 for lid in session.execute(
-                    select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
+                    select(LandParcel.land_id).where(
+                        LandParcel.deleted_at.is_(None),
+                        or_(
+                            LandParcel.base_id.is_(None),
+                            LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
+                        ),
+                        or_(
+                            LandParcel.land_area_mu.is_(None),
+                            LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
+                        ),
+                    )
                 )
                 .scalars()
                 .all()

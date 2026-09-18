@@ -30,6 +30,7 @@ __all__ = [
     "data_readiness",
     "daily_satellite_prepare",
     "daily_satellite_finalize",
+    "finalize_overview_stats",
     "fail_work",
     "land_geom",
     "get_job",
@@ -603,13 +604,20 @@ def refresh_overview_stats(
     *,
     window_days: int = 60,
     crop: str | None = None,
+    land_batch_size: int = 10,
+    after_land_id: str | None = None,
     client: httpx.Client | None = None,
     timeout: float = 300.0,
 ) -> dict[str, Any]:
-    """POST /v1/internal/schedule/overview-refresh：总览预聚合在 API 上执行。"""
-    params: dict[str, str] = {"window_days": str(int(window_days))}
+    """POST /v1/internal/schedule/overview-refresh：取一批总览 OSS 输入数据。"""
+    params: dict[str, str] = {
+        "window_days": str(int(window_days)),
+        "land_batch_size": str(int(land_batch_size)),
+    }
     if crop:
         params["crop"] = str(crop)
+    if after_land_id:
+        params["after_land_id"] = str(after_land_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.post("/v1/internal/schedule/overview-refresh", params=params)
@@ -617,6 +625,31 @@ def refresh_overview_stats(
         data = r.json()
         if not isinstance(data, dict):
             raise InternalApiError("overview-refresh returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def finalize_overview_stats(
+    result_oss_key: str,
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/schedule/overview-refresh/finalize：提交 OSS 结果包。"""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(
+            "/v1/internal/schedule/overview-refresh/finalize",
+            json={"result_oss_key": str(result_oss_key)},
+        )
+        _raise_for_status(r, context="schedule/overview-refresh/finalize")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("overview-refresh/finalize returned non-object")
         return data
 
     if client is not None:

@@ -20,7 +20,7 @@ router = APIRouter(prefix="/internal/admin", tags=["internal-admin"])
 class AdminTaskStatusRequest(BaseModel):
     worker_name: str = Field(..., min_length=1, max_length=256)
     celery_task_id: str = Field(..., min_length=1, max_length=255)
-    status: Literal["running", "success", "failed"]
+    status: Literal["running", "success", "failed", "cancelled"]
     result: Any | None = None
     error: str | None = Field(default=None, max_length=4000)
 

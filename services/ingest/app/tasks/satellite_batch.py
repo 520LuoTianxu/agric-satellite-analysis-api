@@ -15,6 +15,9 @@ from agric_satellite_analysis_common.internal_api import (
     patch_job,
     resolve_land,
 )
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    is_scheduled_land_allowed,
+)
 from app.core.band_parallel import run_parallel_band_jobs
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
@@ -78,6 +81,18 @@ def _load_lands(land_ids, sensor, force):
     lands = []
     for land_id in land_ids:
         remote = resolve_land(land_id=land_id)
+        # 任务可能在过滤规则发布前已经入队，因此下载机执行前再兜底过滤，
+        # 防止被排除基地或超大地块继续访问 STAC、OSS 和卫星数据。
+        if not is_scheduled_land_allowed(
+            remote.get("base_id"), remote.get("land_area_mu")
+        ):
+            logger.info(
+                "satellite_batch_land_filtered",
+                land_id=land_id,
+                base_id=remote.get("base_id"),
+                land_area_mu=remote.get("land_area_mu"),
+            )
+            continue
         if str(remote.get("land_id")) != land_id or not remote.get("boundary_geojson"):
             raise RuntimeError(f"地块{land_id}的内部HTTP元数据不完整")
         geom = shape(remote["boundary_geojson"])
@@ -333,6 +348,19 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
         )
         patch_job(job_id, {"status": "running", "touch_started": True})
         lands = _load_lands(params["land_ids"], sensor, params.get("force", False))
+        if not lands:
+            patch_job(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "error": "定时任务地块过滤：基地被排除或地块面积超过5000亩",
+                    "progress_json": {
+                        "current_step": "filtered",
+                        "message": "所有地块均不参与自动化任务",
+                    },
+                },
+            )
+            return {"job_id": job_id, "status": "cancelled", "reason": "land_filtered"}
         processing_window_km = resolve_processing_window_km(
             params.get("processing_window_km")
         )

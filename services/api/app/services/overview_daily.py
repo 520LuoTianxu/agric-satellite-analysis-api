@@ -10,9 +10,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    EXCLUDED_SCHEDULE_BASE_IDS,
+    MAX_SCHEDULE_LAND_AREA_MU,
+)
 from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.mq_publish import publish_api_task
@@ -195,6 +199,16 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                 await db.execute(
                     select(LandParcel)
                     .where(LandParcel.deleted_at.is_(None))
+                    .where(
+                        or_(
+                            LandParcel.base_id.is_(None),
+                            LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
+                        ),
+                        or_(
+                            LandParcel.land_area_mu.is_(None),
+                            LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
+                        ),
+                    )
                     .order_by(LandParcel.land_id)
                 )
             )

@@ -15,6 +15,9 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    is_scheduled_land_allowed,
+)
 from app.worker import celery_app
 from app.tasks.indices import get_index
 from app.core.config import scene_max_workers
@@ -60,6 +63,12 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
             return {"job_id": job_id, "status": "failed"}
+        if not is_scheduled_land_allowed(land.base_id, land.land_area_mu):
+            job.status = "cancelled"
+            job.error = "定时任务地块过滤：基地被排除或地块面积超过5000亩"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "cancelled", "reason": "land_filtered"}
 
         land_geom = geojson_to_shape(land.boundary_geojson)
         if land_geom is None:
