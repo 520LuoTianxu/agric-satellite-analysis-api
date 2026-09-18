@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -85,6 +87,36 @@ class OverviewScheduleHttpTests(unittest.TestCase):
     def test_http_path(self) -> None:
         from app.tasks import overview_preagg as ov
 
+        payload = {
+            "window_from": "2026-07-20",
+            "window_to": "2026-09-18",
+            "crop": None,
+            "lands": [
+                {
+                    "land_id": "L1",
+                    "area_mu": 10,
+                    "province_code": "11",
+                    "province_name": "北京",
+                    "city_code": None,
+                    "city_name": None,
+                    "county_code": None,
+                    "county_name": None,
+                    "s2": None,
+                    "s1": [],
+                    "weak": False,
+                }
+            ],
+        }
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        internal_client = MagicMock()
+        internal_client.__enter__.return_value = MagicMock()
+        internal_client.__exit__.return_value = False
+        oss_client = MagicMock()
+        oss_client.__enter__.return_value = oss_client
+        oss_client.__exit__.return_value = False
+        oss_response = MagicMock(content=raw)
+        oss_client.get.return_value = oss_response
+
         with (
             patch(
                 "agric_satellite_analysis_common.internal_api.internal_api_enabled",
@@ -92,14 +124,35 @@ class OverviewScheduleHttpTests(unittest.TestCase):
             ),
             patch(
                 "agric_satellite_analysis_common.internal_api.refresh_overview_stats",
-                return_value={"ok": True, "regions": 3},
+                return_value={
+                    "ok": True,
+                    "status": "batch",
+                    "window_from": "2026-07-20",
+                    "window_to": "2026-09-18",
+                    "crop": None,
+                    "land_count": 1,
+                    "next_cursor": "L1",
+                    "done": True,
+                    "oss_url": "https://oss.test/input.json",
+                    "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                },
             ) as http_call,
+            patch(
+                "agric_satellite_analysis_common.internal_api.finalize_overview_stats",
+                return_value={"ok": True, "status": "success", "regions": 2},
+            ),
+            patch.object(ov, "internal_client", return_value=internal_client),
+            patch.object(ov.httpx, "Client", return_value=oss_client),
+            patch.object(ov, "get_storage", return_value=MagicMock()),
         ):
             out = ov.refresh_overview_stats.run(window_days=60)
 
         http_call.assert_called_once()
         self.assertTrue(out["ok"])
-        self.assertEqual(out["regions"], 3)
+        self.assertEqual(out["regions"], 2)
+        self.assertEqual(out["land_count"], 1)
+        oss_client.get.assert_called_once_with("https://oss.test/input.json")
 
 
 class DailySatelliteScheduleTests(unittest.TestCase):

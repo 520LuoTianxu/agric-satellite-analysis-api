@@ -11,10 +11,15 @@ from __future__ import annotations
 import uuid
 from datetime import date, timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 
 import structlog
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    EXCLUDED_SCHEDULE_BASE_IDS,
+    MAX_SCHEDULE_LAND_AREA_MU,
+    is_scheduled_land_allowed,
+)
 from app.core.config import settings
 from app.worker import celery_app
 
@@ -99,6 +104,13 @@ def backfill_indices_for_land(
                 "land_id": land_id,
                 "status": "error",
                 "detail": "Land parcel not found",
+            }
+        if not is_scheduled_land_allowed(land.base_id, land.land_area_mu):
+            logger.info("backfill_land_filtered", land_id=land_id)
+            return {
+                "land_id": land_id,
+                "status": "cancelled",
+                "reason": "land_filtered",
             }
 
         # MQ 至少一次投递可能让同一地块同时启动两个编排任务；事务锁让
@@ -259,6 +271,24 @@ def _backfill_indices_http_only(
 
     if not resolved or not resolved.get("land_id"):
         raise RuntimeError(f"land parcel not found: {land_id}")
+    if not is_scheduled_land_allowed(
+        resolved.get("base_id"), resolved.get("land_area_mu")
+    ):
+        # 编排层先截断过滤地块，避免后续再创建多个光学分片和S1任务。
+        if sentinel_job_id:
+            patch_job_http(
+                sentinel_job_id,
+                {
+                    "status": "cancelled",
+                    "error": "定时任务地块过滤：基地被排除或地块面积超过5000亩",
+                },
+            )
+        return {
+            "land_id": land_id,
+            "status": "cancelled",
+            "reason": "land_filtered",
+            "http_only": True,
+        }
     if sentinel_job_id:
         try:
             from app.core.http_mode import get_job_http
@@ -455,7 +485,17 @@ def schedule_weekly_index_compute(self) -> dict:
 
     try:
         land_rows = session.execute(
-            select(LandParcel.land_id).where(LandParcel.deleted_at.is_(None))
+            select(LandParcel.land_id).where(
+                LandParcel.deleted_at.is_(None),
+                or_(
+                    LandParcel.base_id.is_(None),
+                    LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
+                ),
+                or_(
+                    LandParcel.land_area_mu.is_(None),
+                    LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
+                ),
+            )
         ).all()
 
         lands_checked = 0
@@ -559,7 +599,19 @@ def backfill_all_existing_lands(self, months: int | None = None) -> dict:
     session = get_db_session()
     try:
         lands = (
-            session.execute(select(LandParcel).where(LandParcel.deleted_at.is_(None)))
+            session.execute(
+                select(LandParcel).where(
+                    LandParcel.deleted_at.is_(None),
+                    or_(
+                        LandParcel.base_id.is_(None),
+                        LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
+                    ),
+                    or_(
+                        LandParcel.land_area_mu.is_(None),
+                        LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
+                    ),
+                )
+            )
             .scalars()
             .all()
         )

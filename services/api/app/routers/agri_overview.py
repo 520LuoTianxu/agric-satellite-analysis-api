@@ -15,6 +15,10 @@ from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    MAX_SCHEDULE_LAND_AREA_MU,
+    scheduled_land_sql,
+)
 from app.core.agri_classify import (
     CLOUD_MAX_PCT,
     NDMI_DRY_ABS,
@@ -169,8 +173,12 @@ def _region_where(
     level: OverviewLevel, code: str | None, name: str | None, params: dict[str, Any]
 ) -> str:
     """Build WHERE for parcels in the selected region (code preferred, else exact name)."""
+    # 总览既有定时预聚合也有实时查询，统一在这里过滤不参与自动任务的地块，
+    # 避免被排除地块重新进入统计链路或拖慢大地块的实时查询。
+    schedule_filter = scheduled_land_sql("p")
+    params["max_schedule_area_mu"] = MAX_SCHEDULE_LAND_AREA_MU
     if level == "country":
-        return "p.deleted_at IS NULL"
+        return f"p.deleted_at IS NULL AND {schedule_filter}"
     code_col = _LEVEL_CODE_COL[level]
     name_col = _LEVEL_NAME_COL[level]
     clauses: list[str] = []
@@ -193,8 +201,8 @@ def _region_where(
             detail=f"level={level} requires code or name",
         )
     if len(clauses) == 1:
-        return f"({clauses[0]}) AND p.deleted_at IS NULL"
-    return " AND ".join(clauses + ["p.deleted_at IS NULL"])
+        return f"({clauses[0]}) AND p.deleted_at IS NULL AND {schedule_filter}"
+    return " AND ".join(clauses + ["p.deleted_at IS NULL", schedule_filter])
 
 
 async def _resolve_region_label(
@@ -363,8 +371,15 @@ async def _compute_live_stats(
     crop: str | None,
     allow_pixels: bool,
     parcel_facts: dict[str, dict[str, Any]] | None = None,
+    parcel_batch_size: int | None = None,
 ) -> OverviewStatsOut:
-    """Compute live overview stats; pixel drought when allow_pixels and data exists."""
+    """Compute live overview stats; pixel drought when allow_pixels and data exists.
+
+    ``parcel_batch_size`` is used by the internal pre-aggregation job to avoid
+    loading every parcel and its scene rows into one database result set.  The
+    public live endpoint keeps the historical one-batch behavior when it is
+    omitted.
+    """
     crop_key = normalize_crop_key(crop) if crop else None
     pheno_months = _phenology_months(crop)
 
@@ -377,39 +392,9 @@ async def _compute_live_stats(
     region_wh = _region_where(level, code, name, params)
     month_wh = _month_in_clause(pheno_months, params)
 
-    parcels = (
-        await db.execute(
-            text(
-                f"""
-                SELECT p.land_id,
-                       coalesce(p.land_area_mu, 0)::float AS area_mu,
-                       p.province_code, p.province_name,
-                       p.city_code, p.city_name,
-                       p.county_code, p.county_name
-                FROM agric_satellite.land_parcels p
-                WHERE {region_wh}
-                """
-            ),
-            params,
-        )
-    ).fetchall()
-
-    area_by_land = {r.land_id: float(r.area_mu or 0) for r in parcels}
-    total_area = sum(area_by_land.values())
-    total_count = len(parcels)
-
-    # 每日批次复用同一次分类构建各级快照，保留当时区划与面积，避免历史受地块修改影响。
-    if parcel_facts is not None:
-        for row in parcels:
-            parcel_facts[row.land_id] = {
-                **dict(row._mapping),
-                "drought": "unknown",
-                "flood": "unknown",
-                "weak": False,
-                "s1_date": None,
-                "s2_date": None,
-            }
-
+    area_by_land: dict[str, float] = {}
+    total_area = 0.0
+    total_count = 0
     drought_counts = {"severe": 0, "moderate": 0, "mild": 0, "normal": 0, "unknown": 0}
     drought_area = {k: 0.0 for k in drought_counts}
     flood_keys = ("flood_severe", "flood_moderate", "flood_mild", "dry", "unknown")
@@ -433,38 +418,92 @@ async def _compute_live_stats(
             return None
         return (str(c) if c else None, str(n))
 
-    for row in parcels:
-        ck = _child_key(row)
-        if ck is None:
-            continue
-        if ck not in child_agg:
-            child_agg[ck] = {
-                "level": child_level,
-                "code": ck[0],
-                "name": ck[1],
-                "parcel_count": 0,
-                "area_mu": 0.0,
-                "drought_severe": 0,
-                "drought_alert": 0,
-                "flood": 0,
-                "flood_alert": 0,
-                "weak_growth": 0,
-            }
-        child_agg[ck]["parcel_count"] += 1
-        child_agg[ck]["area_mu"] += float(row.area_mu or 0)
-
     land_to_child: dict[str, tuple[str | None, str]] = {}
-    for row in parcels:
-        ck = _child_key(row)
-        if ck is not None:
-            land_to_child[row.land_id] = ck
 
     drought_source: Literal["pixels", "scene_avg", "cache"] = "scene_avg"
     pixels_used = 0
     pixels_parcels = 0
+    ranks = {None: -1, "dry": 0, "watch": 1, "flood_moderate": 2, "flood_severe": 3}
 
-    if parcels:
-        # Latest clear S2 — optionally include pixel_data for sub-country levels
+    # 内部预聚合按 land_id 游标分页，避免 OFFSET 越翻越慢，也避免一次把所有地块和像素 JSONB 拉进内存。
+    land_cursor: str | None = None
+    while True:
+        page_params = dict(params)
+        page_region_wh = region_wh
+        if land_cursor is not None:
+            page_region_wh += " AND p.land_id > :land_cursor"
+            page_params["land_cursor"] = land_cursor
+        page_limit = ""
+        if parcel_batch_size is not None:
+            page_limit = " LIMIT :parcel_limit"
+            page_params["parcel_limit"] = parcel_batch_size
+
+        parcels = (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT p.land_id,
+                           coalesce(p.land_area_mu, 0)::float AS area_mu,
+                           p.province_code, p.province_name,
+                           p.city_code, p.city_name,
+                           p.county_code, p.county_name
+                    FROM agric_satellite.land_parcels p
+                    WHERE {page_region_wh}
+                    ORDER BY p.land_id{page_limit}
+                    """
+                ),
+                page_params,
+            )
+        ).fetchall()
+        if not parcels:
+            break
+
+        total_count += len(parcels)
+        total_area += sum(float(row.area_mu or 0) for row in parcels)
+        for row in parcels:
+            area_by_land[row.land_id] = float(row.area_mu or 0)
+
+        # 每日批次复用同一次分类构建各级快照，保留当时区划与面积，避免历史受地块修改影响。
+        if parcel_facts is not None:
+            for row in parcels:
+                parcel_facts[row.land_id] = {
+                    **dict(row._mapping),
+                    "drought": "unknown",
+                    "flood": "unknown",
+                    "weak": False,
+                    "s1_date": None,
+                    "s2_date": None,
+                }
+
+        for row in parcels:
+            ck = _child_key(row)
+            if ck is None:
+                continue
+            land_to_child[row.land_id] = ck
+            if ck not in child_agg:
+                child_agg[ck] = {
+                    "level": child_level,
+                    "code": ck[0],
+                    "name": ck[1],
+                    "parcel_count": 0,
+                    "area_mu": 0.0,
+                    "drought_severe": 0,
+                    "drought_alert": 0,
+                    "flood": 0,
+                    "flood_alert": 0,
+                    "weak_growth": 0,
+                }
+            child_agg[ck]["parcel_count"] += 1
+            child_agg[ck]["area_mu"] += float(row.area_mu or 0)
+
+        # 每个场景查询只绑定当前页的地块，避免 IN 查询重新扫描整个区域的数据。
+        land_params = {f"land_{idx}": row.land_id for idx, row in enumerate(parcels)}
+        land_sql = ", ".join(f":{key}" for key in land_params)
+        batch_params = dict(params)
+        batch_params.update(land_params)
+        batch_region = f"{region_wh} AND s.land_id IN ({land_sql})"
+
+        # Latest clear S2 — optionally include pixel_data for sub-country levels.
         pixel_col = ", s.pixel_data" if allow_pixels else ""
         s2_rows = (
             await db.execute(
@@ -475,14 +514,14 @@ async def _compute_live_stats(
                            {pixel_col}
                     FROM agric_satellite.parcel_scene_products s
                     JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
-                    WHERE {region_wh}
+                    WHERE {batch_region}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
                       AND {official_s2_sql("s")}
                     ORDER BY s.land_id, s.date DESC, s.scene_id
                     """
                 ),
-                params,
+                batch_params,
             )
         ).fetchall()
 
@@ -505,14 +544,11 @@ async def _compute_live_stats(
                 cls = classify_drought(r.ndvi_avg, r.ndmi_avg)
             if cls is None:
                 continue
-            # Snapshot confirmation: NDMI dry. Without a month baseline, do
-            # not keep mild+ drought on a well-watered canopy.
+            # 快照确认：NDMI 干旱阈值不满足时，不保留轻/中/重旱分类。
             if cls in ("mild", "moderate", "severe"):
                 ndmi = r.ndmi_avg
                 if ndmi is None or float(ndmi) >= NDMI_DRY_ABS:
                     cls = "normal"
-            if cls is None:
-                continue
             drought_counts[cls] += 1
             if parcel_facts is not None:
                 parcel_facts[r.land_id].update(drought=cls, s2_date=date_str)
@@ -527,7 +563,7 @@ async def _compute_live_stats(
         if allow_pixels and pixels_parcels > 0:
             drought_source = "pixels"
 
-        # 洪涝必须比较近期历史基线；只取最新单景会永远只能给出watch，不能确认洪涝。
+        # 洪涝必须比较近期历史基线；每页内保留该页地块的完整 S1 序列。
         s1_rows = (
             await db.execute(
                 text(
@@ -536,13 +572,13 @@ async def _compute_live_stats(
                            s.pixel_data->>'relative_orbit' AS relative_orbit
                     FROM agric_satellite.parcel_scene_products s
                     JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
-                    WHERE {region_wh}
+                    WHERE {batch_region}
                       AND s.sensor = 'S1'
                       AND s.date >= :from_d AND s.date <= :to_d
                     ORDER BY s.land_id, s.date, s.scene_id
                     """
                 ),
-                params,
+                batch_params,
             )
         ).fetchall()
 
@@ -557,7 +593,6 @@ async def _compute_live_stats(
                     "relative_orbit": getattr(row, "relative_orbit", None),
                 }
             )
-        ranks = {None: -1, "dry": 0, "watch": 1, "flood_moderate": 2, "flood_severe": 3}
         for land_id, observations in s1_by_land.items():
             classified = [
                 (day, cls)
@@ -592,7 +627,7 @@ async def _compute_live_stats(
                            avg(s.ndvi_avg)::float AS mean_ndvi
                     FROM agric_satellite.parcel_scene_products s
                     JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
-                    WHERE {region_wh}
+                    WHERE {batch_region}
                       AND s.sensor = 'S2'
                       AND s.date >= :from_d AND s.date <= :to_d
                       AND {month_wh}
@@ -602,7 +637,7 @@ async def _compute_live_stats(
                     HAVING avg(s.ndvi_avg) < :weak_ndvi
                     """
                 ),
-                params,
+                batch_params,
             )
         ).fetchall()
 
@@ -613,6 +648,10 @@ async def _compute_live_stats(
             ck = land_to_child.get(r.land_id)
             if ck and ck in child_agg:
                 child_agg[ck]["weak_growth"] += 1
+
+        if parcel_batch_size is None:
+            break
+        land_cursor = str(parcels[-1].land_id)
 
     drought_counts["unknown"] = total_count - sum(
         drought_counts[k] for k in ("severe", "moderate", "mild", "normal")
@@ -983,7 +1022,9 @@ async def overview_regions(
 
     params: dict[str, Any] = {}
     if pl == "country":
-        wh = "TRUE"
+        # 全国根节点也必须沿用自动任务过滤条件，避免被排除地块出现在下钻汇总中。
+        wh = scheduled_land_sql("p")
+        params["max_schedule_area_mu"] = MAX_SCHEDULE_LAND_AREA_MU
     else:
         wh = _region_where(pl, parent_code, parent_name, params)
 

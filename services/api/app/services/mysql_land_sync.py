@@ -25,6 +25,10 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    is_excluded_schedule_base_id,
+    is_scheduled_land_allowed,
+)
 from app.core.config import settings
 from app.core.logging import logger
 from app.models.tables import AuditEvent, Farm, Job, LandParcel
@@ -44,6 +48,7 @@ SOURCE_SQL = text(
         NULL AS region,
         'Asia/Shanghai' AS timezone,
         CAST(al.base_id AS CHAR) AS base_id,
+        CAST(lg.base_id AS CHAR) AS group_base_id,
         al.province_code,
         al.province_name,
         al.city_code,
@@ -635,6 +640,7 @@ async def run_land_sync(*, today: date | None = None) -> dict[str, Any]:
         "invalid_land_ids": [],
         "rs_dispatched": 0,
         "dispatch_failed": 0,
+        "filtered_rows": 0,
         "soft_deleted": 0,
     }
     source_engine = _mysql_engine()
@@ -661,6 +667,16 @@ async def run_land_sync(*, today: date | None = None) -> dict[str, Any]:
                             raw_land_id = _string_or_none(row.get("land_id"))
                             if raw_land_id:
                                 seen_land_ids.add(raw_land_id)
+                            # MySQL 源快照仍完整读取以保证缺失软删判断准确，
+                            # 但被排除基地或超大地块不进入主表 upsert，也不派发遥感任务。
+                            if (
+                                is_excluded_schedule_base_id(row.get("group_base_id"))
+                                or not is_scheduled_land_allowed(
+                                    row.get("base_id"), row.get("land_area")
+                                )
+                            ):
+                                summary["filtered_rows"] += 1
+                                continue
                             try:
                                 record = normalize_source_row(dict(row))
                             except (TypeError, ValueError) as exc:

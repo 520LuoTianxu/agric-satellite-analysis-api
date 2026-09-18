@@ -25,6 +25,8 @@ router = APIRouter(prefix="/internal/lands", tags=["internal-lands"])
 
 class LandResolveOut(BaseModel):
     land_id: str
+    base_id: str | None = None
+    land_area_mu: float | None = None
     source_parcel_id: str | None = None
     tile_id: str
     virtual_tile_id: str | None = None
@@ -69,6 +71,8 @@ async def resolve_land(
         raise HTTPException(status_code=404, detail="land parcel not found")
     return LandResolveOut(
         land_id=land.land_id,
+        base_id=(str(land.base_id) if land.base_id is not None else None),
+        land_area_mu=(float(land.land_area_mu) if land.land_area_mu is not None else None),
         source_parcel_id=land.source_parcel_id,
         tile_id=land.tile_id,
         virtual_tile_id=land.virtual_tile_id,
