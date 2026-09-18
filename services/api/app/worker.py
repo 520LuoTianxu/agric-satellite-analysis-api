@@ -4,10 +4,10 @@
 本模块不得导入它们，路由按稳定任务名派单。
 """
 
-from agric_satellite_analysis_common.celery_app import create_celery_app
+from agric_satellite_analysis_common.celery_app import CPU_COMPUTE_QUEUE, create_celery_app
 
 celery_app = create_celery_app(
     name="openfarm",
     include=[],
-    default_queue="ingest",
+    default_queue=CPU_COMPUTE_QUEUE,
 )

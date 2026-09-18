@@ -23,7 +23,7 @@ class ClaimModeGuardTests(unittest.TestCase):
         request = client.post.call_args
         self.assertEqual(request.kwargs["json"]["worker_name"], "download-east-01")
         self.assertEqual(request.kwargs["json"]["worker_id"], "download-east-01")
-        self.assertEqual(request.kwargs["json"]["queue_name"], "ingest")
+        self.assertEqual(request.kwargs["json"]["queue_name"], "cpu_compute")
         self.assertEqual(request.kwargs["json"]["pending_queue_count"], 7)
         self.assertEqual(request.kwargs["json"]["queue_depths"], {"ingest": 7})
 
@@ -71,7 +71,7 @@ class ClaimModeGuardTests(unittest.TestCase):
         send.assert_called_once_with(
             "app.tasks.weather.schedule_daily_weather_fetch",
             kwargs={},
-            queue="ingest",
+            queue="cpu_compute",
         )
         self.assertEqual(dispatched["celery_id"], "celery-admin-1")
         self.assertEqual(dispatched["admin_task_run_id"], "run-1")

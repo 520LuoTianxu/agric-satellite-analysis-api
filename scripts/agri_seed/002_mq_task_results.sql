@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS agric_satellite.download_workers (
     poll_interval_seconds integer NOT NULL DEFAULT 4,
     last_claim_count integer NOT NULL DEFAULT 0,
     total_claims integer NOT NULL DEFAULT 0,
-    queue_name varchar(128) NOT NULL DEFAULT 'ingest',
+    queue_name varchar(128) NOT NULL DEFAULT 'cpu_compute',
     queue_depths_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     pending_queue_count integer,
     last_claim_at timestamptz,
@@ -59,7 +59,7 @@ CREATE INDEX IF NOT EXISTS ix_admin_task_runs_created_at
     ON agric_satellite.admin_task_runs (created_at DESC);
 
 ALTER TABLE agric_satellite.download_workers
-    ADD COLUMN IF NOT EXISTS queue_name varchar(128) NOT NULL DEFAULT 'ingest';
+    ADD COLUMN IF NOT EXISTS queue_name varchar(128) NOT NULL DEFAULT 'cpu_compute';
 ALTER TABLE agric_satellite.download_workers
     ADD COLUMN IF NOT EXISTS pending_queue_count integer;
 ALTER TABLE agric_satellite.download_workers

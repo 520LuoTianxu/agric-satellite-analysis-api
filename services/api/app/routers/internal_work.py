@@ -27,7 +27,7 @@ class ClaimRequest(BaseModel):
     limit: int = Field(default=1, ge=1, le=50)
     lease_seconds: int | None = Field(default=None, ge=30, le=3600)
     interval_seconds: int = Field(default=4, ge=1, le=3600)
-    queue_name: str = Field(default="ingest", min_length=1, max_length=128)
+    queue_name: str = Field(default="cpu_compute", min_length=1, max_length=128)
     pending_queue_count: int | None = Field(default=None, ge=0, le=2_000_000_000)
     queue_depths: dict[str, int] = Field(default_factory=dict)
 

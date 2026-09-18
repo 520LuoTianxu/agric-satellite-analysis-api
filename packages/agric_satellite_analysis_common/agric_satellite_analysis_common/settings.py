@@ -22,7 +22,6 @@ class CommonSettings(BaseSettings):
     # 所有周期任务默认关闭，只有显式开启对应env开关时Beat才注册该任务。
     schedule_daily_satellite_enabled: bool = False
     schedule_daily_weather_enabled: bool = False
-    schedule_weekly_index_enabled: bool = False
     schedule_overview_refresh_enabled: bool = False
 
     # Celery / kombu Redis transport. Defaults match a remote broker over a

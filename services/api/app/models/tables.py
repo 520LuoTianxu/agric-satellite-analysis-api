@@ -683,7 +683,7 @@ class DownloadWorker(Base):
         Integer, nullable=False, server_default="0"
     )
     queue_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, server_default="ingest"
+        String(128), nullable=False, server_default="cpu_compute"
     )
     queue_depths_json: Mapped[dict[str, int]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")

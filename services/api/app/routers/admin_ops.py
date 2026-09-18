@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import async_session, get_db
 from app.core.config import settings
 from app.models.tables import AdminTaskRun, DownloadWorker
 from app.middleware.auth import OrgContext, require_roles
@@ -23,12 +23,6 @@ router = APIRouter(prefix="/admin/ops", tags=["admin-ops"])
 _admin = require_roles("owner", "admin")
 
 _TASK_CATALOG: dict[str, dict[str, str]] = {
-    "weekly-index": {
-        "label": "每周指数计算",
-        "description": "发现过期地块并派发统一光学指数计算。",
-        "task_name": "app.tasks.backfill.schedule_weekly_index_compute",
-        "schedule": "每周一 14:00（北京时间）",
-    },
     "daily-weather": {
         "label": "每日天气拉取",
         "description": "按有效地块批量拉取天气与历史补齐数据。",
@@ -46,6 +40,12 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
         "description": "刷新全国和分省总览统计缓存。",
         "task_name": "app.tasks.overview_preagg.refresh_overview_stats",
         "schedule": "每天 02:30（北京时间）",
+    },
+    "mysql-land-sync": {
+        "label": "同步 MySQL 地块数据",
+        "description": "从外部 MySQL 同步地块主数据到 PostgreSQL，并为新增或变更地块派发遥感处理任务。",
+        "task_name": "app.services.mysql_land_sync.run_land_sync",
+        "schedule": "每天 23:00（北京时间，API 机）",
     },
 }
 
@@ -182,7 +182,7 @@ def _to_worker_out(worker: DownloadWorker, now: datetime) -> DownloadWorkerOut:
         poll_interval_seconds=int(worker.poll_interval_seconds or 4),
         last_claim_count=int(worker.last_claim_count or 0),
         total_claims=int(worker.total_claims or 0),
-        queue_name=worker.queue_name or "ingest",
+        queue_name=worker.queue_name or "cpu_compute",
         queue_depths={
             str(name): int(count)
             for name, count in (worker.queue_depths_json or {}).items()
@@ -227,22 +227,68 @@ def _enabled_task_keys() -> set[str]:
 def _task_outputs() -> list[ScheduledTaskOut]:
     enabled_names = _enabled_task_keys()
     switch_name_by_key = {
-        "weekly-index": "compute-indices-weekly",
         "daily-weather": "fetch-weather-daily",
         "daily-satellite": "refresh-satellite-overview-daily",
         "overview-refresh": "refresh-overview-stats-daily",
     }
-    return [
-        ScheduledTaskOut(
-            key=key,
-            label=item["label"],
-            description=item["description"],
-            task_name=item["task_name"],
-            schedule=item["schedule"],
-            enabled=switch_name_by_key[key] in enabled_names,
+    result: list[ScheduledTaskOut] = []
+    for key, item in _TASK_CATALOG.items():
+        # MySQL 源只允许 API 机访问，所以它不是 Celery/download worker 任务，
+        # 页面仍提供手动触发，但启用状态直接反映 API 的源开关。
+        enabled = (
+            settings.mysql_source_enabled
+            if key == "mysql-land-sync"
+            else switch_name_by_key[key] in enabled_names
         )
-        for key, item in _TASK_CATALOG.items()
-    ]
+        result.append(
+            ScheduledTaskOut(
+                key=key,
+                label=item["label"],
+                description=item["description"],
+                task_name=item["task_name"],
+                schedule=item["schedule"],
+                enabled=enabled,
+            )
+        )
+    return result
+
+
+async def _run_api_admin_task(run_id: uuid.UUID) -> None:
+    """在 API 进程执行仅 API 可访问的管理员任务，并持久化最终状态。"""
+    now = datetime.now(timezone.utc)
+    async with async_session() as db:
+        run = await db.get(AdminTaskRun, run_id)
+        if run is None:
+            return
+        run.status = "running"
+        run.started_at = run.started_at or now
+        run.updated_at = now
+        await db.commit()
+
+    try:
+        from app.services.mysql_land_sync import run_land_sync
+
+        # MySQL 凭据只在 API 机，不能通过 claim payload 或 Celery 传给下载机。
+        result = await run_land_sync()
+    except Exception as exc:
+        async with async_session() as db:
+            run = await db.get(AdminTaskRun, run_id)
+            if run is not None:
+                run.status = "failed"
+                run.error = str(exc)[:4000]
+                run.finished_at = datetime.now(timezone.utc)
+                run.updated_at = run.finished_at
+                await db.commit()
+        return
+
+    async with async_session() as db:
+        run = await db.get(AdminTaskRun, run_id)
+        if run is not None:
+            run.status = "success"
+            run.result_json = result
+            run.finished_at = datetime.now(timezone.utc)
+            run.updated_at = run.finished_at
+            await db.commit()
 
 
 @router.get("/overview", response_model=AdminOpsOverviewOut)
@@ -304,6 +350,12 @@ async def trigger_task(
     )
     db.add(run)
     await db.flush()
+    if body.task_key == "mysql-land-sync":
+        # 该同步器会访问 API 机上的源 MySQL，并在 PostgreSQL 内做批量 upsert；
+        # 不放入下载机 claim 队列，避免泄露源库连接信息且不占用卫星下载 worker。
+        await db.commit()
+        asyncio.create_task(_run_api_admin_task(run.id))
+        return _to_task_out(run)
     if settings.work_queue_mode == "claim":
         # claim 模式的 Celery Redis 在下载机本地，先交给下载机再投递本机队列。
         await wi.enqueue_work_item(

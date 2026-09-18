@@ -30,6 +30,7 @@ services:
       MYSQL_SYNC_TIMEZONE: ${MYSQL_SYNC_TIMEZONE:-Asia/Shanghai}
       MYSQL_SYNC_BATCH_SIZE: ${MYSQL_SYNC_BATCH_SIZE:-500}
       MYSQL_SYNC_RS_MONTHS: ${MYSQL_SYNC_RS_MONTHS:-24}
+      MYSQL_SYNC_PROCESSING_WINDOW_KM: ${MYSQL_SYNC_PROCESSING_WINDOW_KM:-5}
     depends_on:
       db:
         condition: service_healthy
@@ -37,6 +38,9 @@ services:
 
   # 这些 worker 属于下载机。profile 防止 API 机上普通 docker compose up 误启。
   ingest:
+    profiles: ["download-machine"]
+
+  satellite:
     profiles: ["download-machine"]
 
   storage:

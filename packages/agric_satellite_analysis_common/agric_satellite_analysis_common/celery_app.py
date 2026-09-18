@@ -10,32 +10,74 @@ from celery.schedules import crontab
 
 from agric_satellite_analysis_common.settings import CommonSettings, settings
 
+# 业务队列按资源类型隔离：卫星数据任务不能堵住 CPU 计算任务，反之亦然。
+SATELLITE_DOWNLOAD_QUEUE = "satellite_download"
+CPU_COMPUTE_QUEUE = "cpu_compute"
+LEGACY_INGEST_QUEUE = "ingest"
+
+SATELLITE_TASK_PREFIXES = (
+    "app.tasks.agri_lonlat.",
+    "app.tasks.sentinel1.",
+    "app.tasks.satellite_batch.",
+)
+
+CPU_TASK_PREFIXES = (
+    "app.tasks.backfill.",
+    "app.tasks.weather.",
+    "app.tasks.soil.",
+    "app.tasks.pipeline.",
+    "app.tasks.vegetation.",
+    "app.tasks.ndvi.",
+    "app.tasks.indices.",
+    "app.tasks.agri_bridge.",
+    "app.tasks.bridge_stac_cogs_to_agri_lonlat.",
+    "app.tasks.agri_alerts.",
+    "app.tasks.assessment_report.",
+    "app.tasks.season_growth_report.",
+    "app.tasks.overview_preagg.",
+)
+
+
+def task_queue_for(
+    task_name: str,
+    *,
+    requested_queue: str | None = None,
+) -> str:
+    """按任务资源类型选择队列，保留显式 storage/decloud 队列。"""
+    # 旧调用方大量显式传 queue=ingest；这里统一把已识别任务迁移到新队列，
+    # 避免遗漏某个 producer 后又把卫星任务塞回拥堵的旧 ingest 队列。
+    if requested_queue and requested_queue != LEGACY_INGEST_QUEUE:
+        return requested_queue
+    if task_name.startswith(SATELLITE_TASK_PREFIXES):
+        return SATELLITE_DOWNLOAD_QUEUE
+    if task_name.startswith(CPU_TASK_PREFIXES):
+        return CPU_COMPUTE_QUEUE
+    return requested_queue or LEGACY_INGEST_QUEUE
+
+
 # Shared task routes — must stay stable across services.
 TASK_ROUTES: dict[str, dict[str, str]] = {
-    "app.tasks.weather.*": {"queue": "ingest"},
-    "app.tasks.soil.*": {"queue": "ingest"},
-    "app.tasks.pipeline.*": {"queue": "ingest"},
-    "app.tasks.sentinel1.*": {"queue": "ingest"},
-    "app.tasks.satellite_batch.*": {"queue": "ingest"},
-    "app.tasks.vegetation.*": {"queue": "ingest"},
-    "app.tasks.ndvi.*": {"queue": "ingest"},
-    "app.tasks.indices.*": {"queue": "ingest"},
-    "app.tasks.agri_bridge.*": {"queue": "ingest"},
-    "app.tasks.agri_lonlat.*": {"queue": "ingest"},
+    "app.tasks.weather.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.soil.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.pipeline.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.sentinel1.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
+    "app.tasks.satellite_batch.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
+    "app.tasks.vegetation.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.ndvi.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.indices.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.agri_bridge.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.agri_lonlat.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
     "app.tasks.decloud_uncrtaints.*": {"queue": "decloud"},
-    "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": "ingest"},
-    "app.tasks.backfill.*": {"queue": "ingest"},
-    "app.tasks.agri_alerts.*": {"queue": "ingest"},
-    "app.tasks.assessment_report.*": {"queue": "ingest"},
-    "app.tasks.overview_preagg.*": {"queue": "ingest"},
+    "app.tasks.bridge_stac_cogs_to_agri_lonlat.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.backfill.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.agri_alerts.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.assessment_report.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.season_growth_report.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.overview_preagg.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.storage.*": {"queue": "storage"},
 }
 
 BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
-    "compute-indices-weekly": {
-        "task": "app.tasks.backfill.schedule_weekly_index_compute",
-        "schedule": crontab(hour=6, minute=0, day_of_week=1),
-    },
     "fetch-weather-daily": {
         "task": "app.tasks.weather.schedule_daily_weather_fetch",
         "schedule": crontab(hour=8, minute=0),
@@ -52,7 +94,6 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
 }
 
 BEAT_SWITCHES = {
-    "compute-indices-weekly": "schedule_weekly_index_enabled",
     "fetch-weather-daily": "schedule_daily_weather_enabled",
     "refresh-satellite-overview-daily": "schedule_daily_satellite_enabled",
     "refresh-overview-stats-daily": "schedule_overview_refresh_enabled",
@@ -154,7 +195,7 @@ def create_celery_app(
     *,
     name: str = "openfarm",
     include: list[str] | None = None,
-    default_queue: str = "ingest",
+    default_queue: str = CPU_COMPUTE_QUEUE,
     with_beat_schedule: bool = False,
 ) -> Celery:
     """构造共享 broker 与路由的 Celery app。
@@ -194,5 +235,5 @@ def create_celery_app(
 
 # Lightweight client for send_task helpers (api + ingest callers).
 celery_client = create_celery_app(
-    name="openfarm-client", include=[], default_queue="ingest"
+    name="openfarm-client", include=[], default_queue=CPU_COMPUTE_QUEUE
 )

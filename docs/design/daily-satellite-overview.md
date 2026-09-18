@@ -7,7 +7,6 @@
 ```dotenv
 SCHEDULE_DAILY_SATELLITE_ENABLED=false
 SCHEDULE_DAILY_WEATHER_ENABLED=false
-SCHEDULE_WEEKLY_INDEX_ENABLED=false
 SCHEDULE_OVERVIEW_REFRESH_ENABLED=false
 ```
 
@@ -15,7 +14,7 @@ SCHEDULE_OVERVIEW_REFRESH_ENABLED=false
 
 需要同步部署API、共享包、ingest、Beat及前端。既有MQ消费者/HTTP claim需要包含`satellite_batch`支持，结果写入服务正常运行。下载机配置`API_BASE_URL`、`INTERNAL_API_TOKEN`和本地Celery Redis；保持一个Beat实例。下载机不得直连API Postgres或API Redis。
 
-复用现有`jobs`、`land_parcels`、`parcel_scene_products`和`overview_stats_daily`，无需新增SQL迁移。原每周单地块光学调度和固定时间总览缓存刷新仍可分别显式开启；使用每日聚合时通常保持这两个旧开关关闭。天气需要开启对应开关，既有手动多年回填、去云流程继续使用。
+复用现有`jobs`、`land_parcels`、`parcel_scene_products`和`overview_stats_daily`，不新增业务表。原每周单地块光学调度已移除；总览缓存刷新仍可单独显式开启。天气需要开启对应开关，既有手动多年回填、去云流程继续使用。
 
 每日批处理按锚点地块建立5×5公里矩形共享窗口。只有完整边界被该窗口覆盖的地块才合并下载；与窗口相交但跨出窗口的地块不参与该组，下载机执行时还会用最新边界再次校验。超大地块单独按完整外接矩形处理。
 
@@ -33,7 +32,7 @@ API接口：
 需要立即运行首批时，在下载机服务环境中调用：
 
 ```powershell
-celery -A app.worker call app.tasks.overview_preagg.refresh_daily_satellite --queue ingest
+celery -A app.worker call app.tasks.overview_preagg.refresh_daily_satellite --queue cpu_compute
 ```
 
 该任务自动发现地块、派发并每5分钟检查完成状态，无需手动轮询finalize。人工Internal HTTP诊断时使用现有Bearer内部令牌。`run_id`可以通过`GET /v1/jobs/{id}`查看全国批次，`params_json.job_ids`用于排查组任务；每组任务的`progress_json.published_products`为入库检查明细。
