@@ -49,7 +49,8 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
     },
 }
 
-_TERMINAL_STATUSES = {"success", "failed"}
+# 取消后的运行记录不再读取 Celery 结果覆盖，避免页面重新刷新后恢复成运行中。
+_TERMINAL_STATUSES = {"success", "failed", "cancelled"}
 
 
 class ScheduledTaskOut(BaseModel):
