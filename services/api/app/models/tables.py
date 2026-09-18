@@ -661,3 +661,79 @@ class WorkItem(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class DownloadWorker(Base):
+    """下载机 claim 轮询的最后一次成功到达记录。"""
+
+    __tablename__ = "download_workers"
+
+    worker_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="claim")
+    claim_types_json: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    poll_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="4"
+    )
+    last_claim_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    total_claims: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    queue_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, server_default="ingest"
+    )
+    queue_depths_json: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    pending_queue_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_claim_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AdminTaskRun(Base):
+    """管理员手动触发或查看的 Beat 任务运行记录。"""
+
+    __tablename__ = "admin_task_runs"
+    __table_args__ = (Index("idx_admin_task_runs_created_at", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    )
+    task_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    celery_task_id: Mapped[str | None] = mapped_column(
+        Text, unique=True, nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="queued"
+    )
+    params_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    result_json: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triggered_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

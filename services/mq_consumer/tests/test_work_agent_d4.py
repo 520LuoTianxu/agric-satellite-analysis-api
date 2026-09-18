@@ -10,6 +10,23 @@ from app import work_agent as wa
 
 
 class ClaimModeGuardTests(unittest.TestCase):
+    def test_claim_sends_configured_worker_name(self) -> None:
+        client = MagicMock()
+        client.post.return_value.json.return_value = {"items": []}
+        with patch.dict(
+            os.environ,
+            {"WORKER_NAME": "download-east-01", "WORKER_ID": "legacy-id"},
+            clear=False,
+        ):
+            with patch.object(wa, "queue_depths", return_value={"ingest": 7}):
+                self.assertEqual(wa.claim_batch(client), [])
+        request = client.post.call_args
+        self.assertEqual(request.kwargs["json"]["worker_name"], "download-east-01")
+        self.assertEqual(request.kwargs["json"]["worker_id"], "download-east-01")
+        self.assertEqual(request.kwargs["json"]["queue_name"], "ingest")
+        self.assertEqual(request.kwargs["json"]["pending_queue_count"], 7)
+        self.assertEqual(request.kwargs["json"]["queue_depths"], {"ingest": 7})
+
     def test_should_run_only_claim(self) -> None:
         with patch.dict(os.environ, {"WORK_QUEUE_MODE": "legacy"}, clear=False):
             self.assertEqual(wa.work_queue_mode(), "legacy")
@@ -35,6 +52,29 @@ class ClaimModeGuardTests(unittest.TestCase):
         ):
             self.assertIn(t, wa.DEFAULT_TYPES)
             self.assertIn(t, wa.COMPLETE_ON_DISPATCH_TYPES)
+        self.assertIn("admin_task", wa.DEFAULT_TYPES)
+        self.assertIn("admin_task", wa.COMPLETE_ON_DISPATCH_TYPES)
+
+    def test_admin_task_dispatch_does_not_require_land_id(self) -> None:
+        result = MagicMock(id="celery-admin-1")
+        item = {
+            "id": "w-admin-1",
+            "type": "admin_task",
+            "payload_json": {
+                "admin_task_run_id": "run-1",
+                "task_name": "app.tasks.weather.schedule_daily_weather_fetch",
+                "kwargs": {},
+            },
+        }
+        with patch.object(wa.celery_client, "send_task", return_value=result) as send:
+            dispatched = wa._dispatch_celery(item)
+        send.assert_called_once_with(
+            "app.tasks.weather.schedule_daily_weather_fetch",
+            kwargs={},
+            queue="ingest",
+        )
+        self.assertEqual(dispatched["celery_id"], "celery-admin-1")
+        self.assertEqual(dispatched["admin_task_run_id"], "run-1")
 
 
 class ProcessItemTests(unittest.TestCase):
@@ -86,6 +126,34 @@ class ProcessItemTests(unittest.TestCase):
         args, kwargs = comp.call_args
         self.assertEqual(args[1], "w2")
         self.assertEqual(args[2]["phase"], "dispatched")
+
+    def test_admin_task_reports_running_monitors_and_completes(self) -> None:
+        client = MagicMock()
+        item = {
+            "id": "w-admin-2",
+            "type": "admin_task",
+            "payload_json": {
+                "admin_task_run_id": "run-2",
+                "task_name": "app.tasks.weather.schedule_daily_weather_fetch",
+                "kwargs": {},
+            },
+        }
+        result = {
+            "dispatched": ["app.tasks.weather.schedule_daily_weather_fetch"],
+            "celery_id": "celery-admin-2",
+            "admin_task_run_id": "run-2",
+        }
+        with patch.object(wa, "_dispatch_celery", return_value=result):
+            with patch.object(wa, "progress"):
+                with patch.object(wa, "complete") as comp:
+                    with patch.object(wa, "report_admin_task_status") as report:
+                        with patch.object(wa, "start_admin_task_monitor") as monitor:
+                            wa.process_item(client, item)
+        report.assert_called_once_with(
+            client, "run-2", "celery-admin-2", "running"
+        )
+        monitor.assert_called_once_with(client, "run-2", "celery-admin-2")
+        comp.assert_called_once()
 
 
 class MainEntrypointTests(unittest.TestCase):

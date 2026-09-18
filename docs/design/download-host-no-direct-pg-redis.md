@@ -144,7 +144,26 @@
 业务 REST（选地/长势/拉数等）在 API 侧 **写 `work_items`**（替代或并行于发 CloudAMQP）。  
 前端无感：仍调现有 `/v1/lands/.../assessment-report` 等。
 
-### 3.4 回收
+### 3.4 下载机心跳与本机队列汇报
+
+每次成功调用 `POST /v1/internal/work/claim` 都会更新 `download_workers`，即使本次没有领取到任务也算一次心跳。claim body 必须带 `worker_name`；下载机从 `WORKER_NAME` 环境变量读取，并同时汇报：
+
+- 最近一次 claim 时间、轮询间隔、领取数量与累计 claim 次数；
+- 本机 Redis 中配置队列的 ready list 深度（`CELERY_QUEUE_NAMES`，默认 `ingest,decloud,storage`）以及总待处理数量。
+
+管理员页面按最近心跳显示在线、心跳变慢、疑似离线和未知状态；队列深度不可读取时显示“暂不可用”，不会伪报为 0。
+
+### 3.5 管理员手动触发定时任务
+
+管理员页面 `/[locale]/admin/ops` 提供现有 Beat 白名单任务的手动触发与运行记录：
+
+- `GET /v1/admin/ops/overview`：下载机状态、队列深度、任务白名单和最近运行记录；
+- `POST /v1/admin/ops/task-runs`：触发受控任务；claim 模式先写入 `admin_task` work item；
+- 下载机投递到本机 Celery 后回调 `/v1/internal/admin/task-runs/{run_id}/status`，页面显示排队、运行中、完成或失败。
+
+下载机只接受 API 白名单中的任务名，避免管理员任务 payload 变成任意 Celery 任务执行器。
+
+### 3.6 回收
 
 定时任务：`status=leased AND lease_until < now()` → 改回 `pending`（或 `attempts++` 后 pending）。
 
@@ -174,8 +193,10 @@ Header：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
 | `API_BASE_URL` | API LB，如 `http://81.71.128.251:8000` → 后改公网 |
 | `INTERNAL_API_TOKEN` | 与 API 一致 |
 | `REDIS_URL` | **仅本机** `redis://127.0.0.1:6379/0` |
-| `WORKER_ID` | 领取租约标识（默认 hostname） |
+| `WORKER_NAME` | 每台下载机必须配置的唯一机器名；claim 与管理员心跳使用它标识机器 |
+| `WORKER_ID` | 旧配置兼容项；未配置 `WORKER_NAME` 时作为回退 |
 | `WORK_CLAIM_INTERVAL_SEC` | 短轮询间隔，默认 3–5 |
+| `CELERY_QUEUE_NAMES` | 上报本机 ready 队列深度，默认 `ingest,decloud,storage` |
 | ~~`DATABASE_URL*`~~ | **删除** |
 | ~~连 API 的 Redis~~ | **禁止** |
 
