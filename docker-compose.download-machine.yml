@@ -12,7 +12,7 @@
 # Internal HTTP (D2 reads + optional D1 claim) — set in .env:
 #   API_BASE_URL=http://<api-lb>:8000
 #   INTERNAL_API_TOKEN=<same as API>
-#   WORKER_ID=download-1
+#   WORKER_NAME=download-1
 #   WORK_CLAIM_INTERVAL_SEC=4
 #   WORK_QUEUE_MODE=claim   # optional; leave legacy until cutover (do not force)
 # ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2)
@@ -127,8 +127,12 @@ services:
       # Claim mode (WORK_QUEUE_MODE=claim): poll API; REDIS_URL stays localhost Celery.
       API_BASE_URL: ${API_BASE_URL:-}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      # 每台下载机必须配置唯一机器名，claim 与管理员心跳都使用它标识机器。
+      WORKER_NAME: ${WORKER_NAME:-}
       WORKER_ID: ${WORKER_ID:-}
       WORK_CLAIM_INTERVAL_SEC: ${WORK_CLAIM_INTERVAL_SEC:-4}
+      # 上报本机各 Celery ready 队列的待处理数量。
+      CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-ingest,decloud,storage}
       WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-legacy}
       WORK_LEASE_SECONDS: ${WORK_LEASE_SECONDS:-600}
       # Celery broker must be local Redis on download host (not API Redis).

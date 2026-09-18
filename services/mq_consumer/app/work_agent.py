@@ -6,9 +6,11 @@ therefore receive the same value without a field/parcel translation step.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
+import threading
 import time
 from typing import Any
 
@@ -34,7 +36,19 @@ DEFAULT_TYPES = [
     "agri_bridge",
     "weather_backfill",
     "soil_fetch",
+    "admin_task",
 ]
+
+# 管理员页面只允许触发这组预先登记的任务；下载机再次校验，避免 API
+# 被错误配置或恶意 payload 利用成任意 Celery 任务执行器。
+ADMIN_TASK_NAMES = frozenset(
+    {
+        "app.tasks.backfill.schedule_weekly_index_compute",
+        "app.tasks.weather.schedule_daily_weather_fetch",
+        "app.tasks.overview_preagg.refresh_daily_satellite",
+        "app.tasks.overview_preagg.refresh_overview_stats",
+    }
+)
 
 COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
@@ -44,6 +58,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
+        "admin_task",
     }
 )
 
@@ -68,8 +83,14 @@ def claim_types() -> list[str]:
     )
 
 
+def worker_name() -> str:
+    """返回管理员页面展示的稳定机器名，优先读取 WORKER_NAME。"""
+    return _env("WORKER_NAME") or _env("WORKER_ID") or socket.gethostname()
+
+
 def worker_id() -> str:
-    return _env("WORKER_ID") or socket.gethostname()
+    """兼容旧代码：租约 owner 与管理员机器名使用同一身份值。"""
+    return worker_name()
 
 
 def api_base_url() -> str:
@@ -81,6 +102,49 @@ def claim_interval_sec() -> float:
         return max(1.0, float(_env("WORK_CLAIM_INTERVAL_SEC", "4")))
     except ValueError:
         return 4.0
+
+
+def queue_name() -> str:
+    """返回本机 Celery ready 队列名，默认与 ingest worker 一致。"""
+    return _env("CELERY_QUEUE_NAME", "ingest") or "ingest"
+
+
+def queue_names() -> list[str]:
+    """返回需要汇报的本机 Celery 队列，可用环境变量覆盖。"""
+    raw = _env("CELERY_QUEUE_NAMES") or _env("CELERY_QUEUE_NAME")
+    raw = raw or "ingest,decloud,storage"
+    names = [item.strip() for item in raw.split(",") if item.strip()]
+    return list(dict.fromkeys(names)) or ["ingest"]
+
+
+def queue_depths() -> dict[str, int] | None:
+    """读取本机 Redis 各 ready list 长度；失败时返回 None，不能伪报为 0。"""
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            _env("REDIS_URL", "redis://127.0.0.1:6379/0"),
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+        )
+        try:
+            # Celery Redis transport 将指定 queue 的待消费消息存为同名 list。
+            return {
+                name: max(0, int(client.llen(name))) for name in queue_names()
+            }
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning(
+            "claim_queue_probe_failed queues=%s error=%s", queue_names(), exc
+        )
+        return None
+
+
+def pending_queue_count() -> int | None:
+    """返回本机所有已配置队列的 ready 任务总数。"""
+    depths = queue_depths()
+    return sum(depths.values()) if depths is not None else None
 
 
 def lease_seconds() -> int:
@@ -118,11 +182,18 @@ def claim_batch(
     types: list[str] | None = None,
     limit: int = 1,
 ) -> list[dict[str, Any]]:
+    depths = queue_depths()
+    pending = sum(depths.values()) if depths is not None else None
     body = {
+        "worker_name": worker_name(),
         "worker_id": worker_id(),
         "types": types or claim_types(),
         "limit": limit,
         "lease_seconds": lease_seconds(),
+        "interval_seconds": claim_interval_sec(),
+        "queue_name": queue_name(),
+        "pending_queue_count": pending,
+        "queue_depths": depths or {},
     }
     response = client.post("/v1/internal/work/claim", json=body)
     response.raise_for_status()
@@ -161,6 +232,92 @@ def progress(client: httpx.Client, work_id: str, progress_body: dict[str, Any]) 
         json={"worker_id": worker_id(), "progress": progress_body},
     )
     response.raise_for_status()
+
+
+def report_admin_task_status(
+    client: httpx.Client,
+    run_id: str,
+    celery_task_id: str,
+    status: str,
+    *,
+    result: Any | None = None,
+    error: str | None = None,
+) -> None:
+    """将下载机本地 Celery 的真实状态回传给 API 管理页面。"""
+    response = client.post(
+        f"/v1/internal/admin/task-runs/{run_id}/status",
+        json={
+            "worker_name": worker_name(),
+            "celery_task_id": celery_task_id,
+            "status": status,
+            "result": result,
+            "error": error,
+        },
+    )
+    response.raise_for_status()
+
+
+def _json_safe_result(value: Any) -> Any:
+    """把 Celery 返回值限制为可安全写入 API JSON 的值。"""
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except (TypeError, ValueError):
+        return {"repr": repr(value)}
+
+
+def monitor_admin_task(
+    client: httpx.Client,
+    run_id: str,
+    celery_task_id: str,
+) -> None:
+    """后台轮询本机 Redis 中的 Celery 结果，回报成功或失败终态。"""
+    while True:
+        try:
+            async_result = celery_client.AsyncResult(celery_task_id)
+            state = str(async_result.state or "PENDING").upper()
+            if state == "SUCCESS":
+                report_admin_task_status(
+                    client,
+                    run_id,
+                    celery_task_id,
+                    "success",
+                    result=_json_safe_result(async_result.result),
+                )
+                return
+            if state in {"FAILURE", "REVOKED"}:
+                error = str(async_result.result or f"Celery task state: {state}")
+                report_admin_task_status(
+                    client,
+                    run_id,
+                    celery_task_id,
+                    "failed",
+                    error=error,
+                )
+                return
+        except Exception:
+            # 结果后端或 API 短暂不可用时继续重试，避免页面永久停在 running。
+            logger.exception(
+                "admin_task_status_monitor_retrying run_id=%s celery_task_id=%s",
+                run_id,
+                celery_task_id,
+            )
+        time.sleep(5.0)
+
+
+def start_admin_task_monitor(
+    client: httpx.Client,
+    run_id: str,
+    celery_task_id: str,
+) -> None:
+    """为管理员任务启动守护线程，避免阻塞短轮询 claim。"""
+    thread = threading.Thread(
+        target=monitor_admin_task,
+        args=(client, run_id, celery_task_id),
+        name=f"admin-task-monitor-{run_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _payload_parts(item: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
@@ -266,6 +423,23 @@ def _dispatch_via_handler(
 def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
     wtype = item.get("type") or ""
     work_id = str(item.get("id"))
+    if wtype == "admin_task":
+        payload = dict(item.get("payload_json") or {})
+        task_name = str(payload.get("task_name") or "")
+        if task_name not in ADMIN_TASK_NAMES:
+            raise ValueError(f"unsupported admin task: {task_name}")
+        kwargs = dict(payload.get("kwargs") or {})
+        async_result = celery_client.send_task(
+            task_name,
+            kwargs=kwargs,
+            queue="ingest",
+        )
+        return {
+            "dispatched": [task_name],
+            "celery_id": async_result.id,
+            "admin_task_run_id": payload.get("admin_task_run_id"),
+        }
+
     land_id, extras = _payload_parts(item)
     if not land_id:
         raise ValueError("work item missing land_id")
@@ -287,6 +461,26 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
     get_or_create_trace_id()
     try:
         result = _dispatch_celery(item)
+        if wtype == "admin_task":
+            run_id = str(result.get("admin_task_run_id") or "")
+            celery_task_id = str(result.get("celery_id") or "")
+            if not run_id or not celery_task_id:
+                raise ValueError("admin task dispatch missing run id or celery task id")
+            try:
+                report_admin_task_status(
+                    client,
+                    run_id,
+                    celery_task_id,
+                    "running",
+                )
+            except Exception:
+                # 任务已经发到本机队列，回报失败时不能让 work item 被重复派发。
+                logger.exception(
+                    "admin_task_running_report_failed run_id=%s celery_task_id=%s",
+                    run_id,
+                    celery_task_id,
+                )
+            start_admin_task_monitor(client, run_id, celery_task_id)
         progress(
             client,
             work_id,
@@ -295,6 +489,7 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                 "celery_id": result.get("celery_id"),
                 "celery_ids": result.get("celery_ids"),
                 "dispatched": result.get("dispatched"),
+                "admin_task_run_id": result.get("admin_task_run_id"),
                 "job_id": result.get("job_id"),
                 "land_id": result.get("land_id"),
             },
@@ -318,6 +513,7 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                     or ([result["celery_id"]] if result.get("celery_id") else []),
                     "land_id": result.get("land_id"),
                     "job_id": result.get("job_id"),
+                    "admin_task_run_id": result.get("admin_task_run_id"),
                 },
             )
     except Exception as exc:
@@ -360,11 +556,20 @@ def run_forever() -> None:
 
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
+    "ADMIN_TASK_NAMES",
     "DEFAULT_TYPES",
     "claim_batch",
     "claim_types",
+    "pending_queue_count",
     "process_item",
+    "monitor_admin_task",
+    "report_admin_task_status",
+    "start_admin_task_monitor",
+    "queue_name",
+    "queue_names",
+    "queue_depths",
     "run_forever",
     "should_run_claim_agent",
+    "worker_name",
     "work_queue_mode",
 ]

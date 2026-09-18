@@ -7,12 +7,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from agric_satellite_analysis_common.trace import stamp_trace_on_payload
 
 from app.core.config import settings
 from app.core.logging import logger
-from app.models.tables import WorkItem
+from app.models.tables import DownloadWorker, WorkItem
 
 CLAIMABLE_TYPES = frozenset(
     {
@@ -24,6 +25,7 @@ CLAIMABLE_TYPES = frozenset(
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
+        "admin_task",
     }
 )
 
@@ -37,6 +39,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
         "agri_bridge",
         "weather_backfill",
         "soil_fetch",
+        "admin_task",
     }
 )
 
@@ -250,6 +253,63 @@ async def claim_work_items(
     return rows
 
 
+async def touch_download_worker(
+    db: AsyncSession,
+    *,
+    worker_id: str,
+    claim_types: Sequence[str] | None,
+    poll_interval_seconds: int,
+    claim_count: int,
+    queue_name: str,
+    pending_queue_count: int | None,
+    queue_depths: dict[str, int] | None,
+) -> None:
+    """记录一次成功 claim 请求，空队列也算心跳。"""
+    now = datetime.now(timezone.utc)
+    interval = max(1, min(int(poll_interval_seconds or 4), 3600))
+    types = [str(item) for item in (claim_types or []) if str(item)]
+    queue_name = (queue_name or "ingest").strip()[:128] or "ingest"
+    pending = (
+        max(0, min(int(pending_queue_count), 2_000_000_000))
+        if pending_queue_count is not None
+        else None
+    )
+    depths = {
+        str(name)[:128]: max(0, min(int(count), 2_000_000_000))
+        for name, count in (queue_depths or {}).items()
+        if str(name).strip()
+    }
+    stmt = pg_insert(DownloadWorker).values(
+        worker_id=worker_id,
+        mode="claim",
+        claim_types_json=types,
+        poll_interval_seconds=interval,
+        last_claim_count=int(claim_count),
+        total_claims=1,
+        queue_name=queue_name,
+        queue_depths_json=depths,
+        pending_queue_count=pending,
+        last_claim_at=now,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[DownloadWorker.worker_id],
+        set_={
+            "mode": "claim",
+            "claim_types_json": types,
+            "poll_interval_seconds": interval,
+            "last_claim_count": int(claim_count),
+            "total_claims": DownloadWorker.total_claims + 1,
+            "queue_name": queue_name,
+            "queue_depths_json": depths,
+            "pending_queue_count": pending,
+            "last_claim_at": now,
+            "updated_at": now,
+        },
+    )
+    await db.execute(stmt)
+
+
 def _require_lease(item: WorkItem, worker_id: str | None) -> None:
     if item.status != "leased":
         raise ValueError(f"work item status is {item.status}, expected leased")
@@ -387,6 +447,7 @@ __all__ = [
     "heartbeat_work_item",
     "progress_work_item",
     "reaper_expired_leases",
+    "touch_download_worker",
     "should_enqueue_work_items",
     "should_publish_mq",
     "should_run_claim_agent",

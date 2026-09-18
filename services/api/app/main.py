@@ -42,6 +42,8 @@ from app.routers import (
     internal_agri,
     internal_results,
     internal_schedule,
+    admin_ops,
+    internal_admin,
     satellite_batch,
 )
 
@@ -137,6 +139,8 @@ app.include_router(internal_jobs.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
 app.include_router(internal_results.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)
+app.include_router(admin_ops.router, prefix=PREFIX)
+app.include_router(internal_admin.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────
