@@ -71,6 +71,8 @@ def _dispatch_satellite_analysis(
     for key in ("date_from", "date_to"):
         if extras.get(key):
             backfill_kwargs[key] = str(extras[key])[:10]
+    if extras.get("processing_window_km") is not None:
+        backfill_kwargs["processing_window_km"] = float(extras["processing_window_km"])
     if sentinel_job_id:
         backfill_kwargs["sentinel_job_id"] = str(sentinel_job_id)
 
@@ -241,6 +243,8 @@ def _dispatch_land_bootstrap(
             index_kwargs["months"] = int(extras["months"])
         if extras.get("force") is not None:
             index_kwargs["force"] = bool(extras["force"])
+        if extras.get("processing_window_km") is not None:
+            index_kwargs["processing_window_km"] = float(extras["processing_window_km"])
         indices = celery_client.send_task(
             "app.tasks.backfill.backfill_indices_for_land",
             args=[land_id],

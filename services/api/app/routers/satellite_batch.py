@@ -68,6 +68,9 @@ async def backfill_satellite_batch(
                     status="pending",
                     params_json={
                         "land_ids": group.land_ids,
+                        "anchor_land_id": group.anchor_land_id,
+                        "processing_window_km": 5.0,
+                        "oversized": group.oversized,
                         "download_bbox": list(group.download_bbox),
                         "aggregation_bbox": list(group.aggregation_bbox),
                         "sensor": sensor,

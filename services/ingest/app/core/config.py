@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     index_backfill_months: int = 60
     index_backfill_chunk_days: int = 90
     index_weekly_batch_size: int = 50
+    # 每个下载机地块任务的检索/读取窗口边长；地块指标仍按原始边界掩膜。
+    processing_window_km: float = 5.0
 
     # Soil Data
     soilgrids_wcs_base_url: str = "https://maps.isric.org/mapserv"

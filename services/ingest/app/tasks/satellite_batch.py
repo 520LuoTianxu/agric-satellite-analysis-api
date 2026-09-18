@@ -6,7 +6,7 @@ import numpy as np
 import structlog
 from rasterio.features import geometry_mask
 from rasterio.warp import Resampling, reproject
-from shapely.geometry import mapping, shape
+from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 
 from agric_satellite_analysis_common.internal_api import (
@@ -23,6 +23,10 @@ from app.core.decloud import (
     decloud_stac_cloud_max_pct,
     filter_scenes_outside_season_high_cloud,
     normalize_season_months,
+)
+from app.core.processing_window import (
+    build_complete_processing_window,
+    resolve_processing_window_km,
 )
 from app.core.true_color_preview import upload_field_rgb_preview
 from app.tasks.agri_lonlat import (
@@ -109,6 +113,39 @@ def _load_lands(land_ids, sensor, force):
     return lands
 
 
+def select_complete_processing_lands(
+    lands,
+    anchor_id: str,
+    processing_window_km: float,
+    *,
+    oversized: bool = False,
+    download_bbox=None,
+):
+    """Return the shared processing geometry and only fully covered parcels."""
+    if not lands:
+        raise ValueError("satellite batch has no land parcels")
+    anchor = next(
+        (land for land in lands if str(land["meta"]["land_id"]) == str(anchor_id)),
+        lands[0],
+    )
+    if oversized:
+        # 超过5 km的锚点地块不能被5 km窗口截断，独立使用完整外接矩形。
+        window_bounds = tuple(download_bbox or anchor["geom"].bounds)
+        return [anchor], box(*window_bounds)
+
+    # 只合并完整落在锚点5 km窗口内的地块；跨出窗口的地块不参与本批次。
+    processing_geom, anchor_oversized = build_complete_processing_window(
+        anchor["geom"], processing_window_km
+    )
+    if anchor_oversized:
+        # 队列等待期间锚点边界可能变大；重新按完整地块独立处理，不能截断锚点。
+        return [anchor], box(*anchor["geom"].bounds)
+    selected = [
+        land for land in lands if processing_geom.covers(land["geom"])
+    ]
+    return selected, processing_geom
+
+
 def _scene_lands(scene, lands, sensor):
     footprint = shape(scene["geometry"]) if scene.get("geometry") else None
     selected = []
@@ -162,7 +199,14 @@ def _download_scene(scene, sensor, grid):
 
 
 def _publish_land(
-    scene, sensor, land, shared_bands, shared_scl, shared_grid, parent_id
+    scene,
+    sensor,
+    land,
+    shared_bands,
+    shared_scl,
+    shared_grid,
+    parent_id,
+    processing_window_km: float | None = None,
 ):
     target_transform, target_shape, field_mask, _ = land["grid"]
     bands = {
@@ -192,6 +236,8 @@ def _publish_land(
             compute_zonal_stats(bands["vh"]),
             mq_task_id=land_task_id,
             relative_orbit=scene.get("relative_orbit"),
+            processing_window_km=processing_window_km,
+            processing_window_bounds=shared_grid[3],
             # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
             result_delivery="http",
         )
@@ -256,6 +302,8 @@ def _publish_land(
         rgb_url=rgb.get("rgb_url"),
         large_rgb_url=rgb.get("large_rgb_url"),
         rgb_oss_key=rgb.get("rgb_oss_key"),
+        processing_window_km=processing_window_km,
+        processing_window_bounds=shared_grid[3],
         # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
         result_delivery="http",
     )
@@ -285,17 +333,50 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
         )
         patch_job(job_id, {"status": "running", "touch_started": True})
         lands = _load_lands(params["land_ids"], sensor, params.get("force", False))
-        # 任务排队期间边界可能更新；按HTTP最新边界重新求范围，保证完整覆盖。
-        union = unary_union([land["geom"] for land in lands])
-        grid = compute_target_grid(union.bounds, union)
+        processing_window_km = resolve_processing_window_km(
+            params.get("processing_window_km")
+        )
+        anchor_id = str(params.get("anchor_land_id") or job.get("land_id"))
+        selected_lands, processing_geom = select_complete_processing_lands(
+            lands,
+            anchor_id,
+            processing_window_km,
+            oversized=bool(params.get("oversized")),
+            download_bbox=params.get("download_bbox"),
+        )
+        selected_ids = {
+            str(land["meta"]["land_id"]) for land in selected_lands
+        }
+        excluded = [
+            land["meta"]["land_id"]
+            for land in lands
+            if str(land["meta"]["land_id"]) not in selected_ids
+        ]
+        if excluded:
+            logger.warning(
+                "satellite_batch_land_excluded_partial_window",
+                job_id=job_id,
+                anchor_land_id=anchor_id,
+                excluded_land_ids=excluded,
+                processing_window_km=processing_window_km,
+            )
+        if not selected_lands:
+            raise RuntimeError("5 km processing window contains no complete land parcel")
+        # 任务排队期间边界可能更新；按HTTP最新边界重新求范围，保证窗口与地块完整覆盖。
+        union = unary_union([land["geom"] for land in selected_lands])
+        grid = compute_target_grid(
+            processing_geom.bounds, union, padding_degrees=0.0
+        )
         if sensor == "S1":
-            scenes = search_s1_scenes(mapping(union), d0, d1, dedupe_week=False)
+            scenes = search_s1_scenes(
+                mapping(processing_geom), d0, d1, dedupe_week=False
+            )
         else:
             extra_assets = {"SCL": SCL_STAC_ASSETS}
             if decloud_enabled():
                 extra_assets.update(decloud_s2_extra_assets())
             scenes = search_scenes_for_defs(
-                mapping(union),
+                mapping(processing_geom),
                 d0,
                 d1,
                 agri_optical_index_defs(),
@@ -315,7 +396,7 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
             "published_products": [],
         }
         for scene in scenes:
-            selected = _scene_lands(scene, lands, sensor)
+            selected = _scene_lands(scene, selected_lands, sensor)
             if selected:
                 try:
                     shared_bands, scl = _download_scene(scene, sensor, grid)
@@ -338,6 +419,7 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
                                 scl,
                                 grid,
                                 mq_task_id or job_id,
+                                processing_window_km,
                             ):
                                 progress["products_published"] += 1
                                 # 完成下载不等于MQ结果已入库；API按这些地块/日期确认后才生成每日快照。
@@ -364,7 +446,7 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
         if sensor == "S2" and decloud_enabled():
             from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
 
-            for land in lands:
+            for land in selected_lands:
                 if land["raw_results"]:
                     schedule_decloud_after_raw(
                         land_id=land["meta"]["land_id"],

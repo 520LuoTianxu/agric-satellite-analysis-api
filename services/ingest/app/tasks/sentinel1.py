@@ -42,6 +42,10 @@ from app.core.job_progress_redis import (
     mark_scene_progress,
     set_total,
 )
+from app.core.processing_window import (
+    build_complete_processing_window,
+    resolve_processing_window_km,
+)
 from app.core.agri_classify import parse_s1_relative_orbit
 from app.core.s1_stac import (
     S1_STAC_COLLECTION,
@@ -371,6 +375,8 @@ def _upsert_agri_s1(
     vh_stats: dict,
     mq_task_id: str | None = None,
     relative_orbit: int | None = None,
+    processing_window_km: float | None = None,
+    processing_window_bounds: tuple[float, float, float, float] | None = None,
     result_delivery: str = "mq",
 ) -> str | None:
     """Upload S1 lonlat JSON and deliver it through the selected result channel.
@@ -392,6 +398,13 @@ def _upsert_agri_s1(
     date_str = scene_date.isoformat()
     rel = parse_s1_relative_orbit(scene_id, relative_orbit)
     pixel_data = {"format": "lonlat_v1", "pixels": pixels}
+    if processing_window_km is not None:
+        # 与光学产品保持一致，记录 S1 实际检索/读取的周边矩形范围。
+        pixel_data["processing_window"] = {
+            "shape": "square",
+            "side_km": processing_window_km,
+            "bounds": list(processing_window_bounds or ()),
+        }
     if rel is not None:
         pixel_data["relative_orbit"] = rel
     json_oss_key = None
@@ -557,6 +570,7 @@ def _process_one_s1_scene(
     date_to: date,
     agri_meta: dict | None,
     land_geom_geojson: dict,
+    processing_window_km: float | None = None,
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> bool:
@@ -741,6 +755,8 @@ def _process_one_s1_scene(
                     vh_stats,
                     mq_task_id=mq_task_id,
                     relative_orbit=scene.get("relative_orbit"),
+                    processing_window_km=processing_window_km,
+                    processing_window_bounds=bounds,
                 )
                 published = True
                 logger.info(
@@ -801,6 +817,7 @@ def _process_s1_scenes_parallel(
     date_to: date,
     agri_meta: dict | None,
     land_geom_geojson: dict,
+    processing_window_km: float | None = None,
     mq_task_id: str | None = None,
     on_chunk=None,
 ) -> int:
@@ -845,6 +862,7 @@ def _process_s1_scenes_parallel(
                 date_to=date_to,
                 agri_meta=agri_meta,
                 land_geom_geojson=land_geom_geojson,
+                processing_window_km=processing_window_km,
                 scene_workers=workers,
                 mq_task_id=mq_task_id,
             ): scene
@@ -887,6 +905,7 @@ def _process_s1_http_only(
     date_to: str | None,
     force: bool,
     mq_task_id: str | None,
+    processing_window_km: float | None,
 ) -> dict:
     """S1 chunk worker without SyncSession (OSS + MQ path)."""
     from shapely.geometry import shape as shapely_shape
@@ -906,6 +925,7 @@ def _process_s1_http_only(
         force = bool(force or params.get("force"))
         if mq_task_id is None and params.get("mq_task_id"):
             mq_task_id = str(params["mq_task_id"])
+        processing_window_km = processing_window_km or params.get("processing_window_km")
 
     if not land_id or not date_from or not date_to:
         return {
@@ -930,6 +950,11 @@ def _process_s1_http_only(
 
     land_geom = shapely_shape(geojson)
     land_geom_geojson = mapping(land_geom)
+    processing_window_km = resolve_processing_window_km(processing_window_km)
+    processing_geom, _ = build_complete_processing_window(
+        land_geom, processing_window_km
+    )
+    processing_geom_geojson = mapping(processing_geom)
     d0 = date.fromisoformat(str(date_from)[:10])
     d1 = date.fromisoformat(str(date_to)[:10])
     org_id_str = "default"
@@ -945,7 +970,7 @@ def _process_s1_http_only(
     )
 
     t_search = time.perf_counter()
-    scenes = search_s1_scenes(land_geom_geojson, d0, d1)
+    scenes = search_s1_scenes(processing_geom_geojson, d0, d1)
     skipped_existing = 0
     agri_meta = _resolve_land_meta(None, land_id, remote=resolved)
     if agri_meta is None:
@@ -984,9 +1009,7 @@ def _process_s1_http_only(
             "http_only": True,
         }
 
-    minx, miny, maxx, maxy = land_geom.bounds
-    buf = 0.001
-    bounds = (minx - buf, miny - buf, maxx + buf, maxy + buf)
+    bounds = processing_geom.bounds
     pixel_size = 0.0001
     width = max(int((bounds[2] - bounds[0]) / pixel_size), 1)
     height = max(int((bounds[3] - bounds[1]) / pixel_size), 1)
@@ -1020,6 +1043,7 @@ def _process_s1_http_only(
         date_to=d1,
         agri_meta=agri_meta,
         land_geom_geojson=land_geom_geojson,
+        processing_window_km=processing_window_km,
         mq_task_id=mq_task_id,
         on_chunk=None,
     )
@@ -1049,6 +1073,7 @@ def process_s1_backfill(
     date_to: str | None = None,
     force: bool = False,
     mq_task_id: str | None = None,
+    processing_window_km: float | None = None,
     is_backfill: bool = True,
 ) -> dict:
     """Celery entry: search S1 GRD, upsert agri lonlat_v1 (COGs only if enabled).
@@ -1066,6 +1091,7 @@ def process_s1_backfill(
             date_to=date_to,
             force=force,
             mq_task_id=mq_task_id,
+            processing_window_km=processing_window_km,
         )
 
     from app.models.tables import Job, LandParcel
@@ -1106,12 +1132,19 @@ def process_s1_backfill(
             mq_task_id = str(mq_task_id)
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
+        processing_window_km = resolve_processing_window_km(
+            params.get("processing_window_km")
+        )
+        processing_geom, _ = build_complete_processing_window(
+            land_geom, processing_window_km
+        )
+        processing_geom_geojson = mapping(processing_geom)
         org_id_str = "default"  # STORAGE_TENANT; auth/orgs removed
         land_id_str = str(job.land_id)
 
         update_job_progress(session, job, "scene_search")
         t_search = time.perf_counter()
-        scenes = search_s1_scenes(land_geom_geojson, date_from, date_to)
+        scenes = search_s1_scenes(processing_geom_geojson, date_from, date_to)
         force = bool(params.get("force") or False)
         skipped_existing = 0
         agri_meta = _resolve_land_meta(session, land.land_id)
@@ -1162,9 +1195,7 @@ def process_s1_backfill(
                 "skipped_existing": skipped_existing,
             }
 
-        minx, miny, maxx, maxy = land_geom.bounds
-        buf = 0.001
-        bounds = (minx - buf, miny - buf, maxx + buf, maxy + buf)
+        bounds = processing_geom.bounds
         pixel_size = 0.0001  # ~10 m
         width = max(int((bounds[2] - bounds[0]) / pixel_size), 1)
         height = max(int((bounds[3] - bounds[1]) / pixel_size), 1)
@@ -1215,6 +1246,7 @@ def process_s1_backfill(
             date_to=date_to,
             agri_meta=agri_meta,
             land_geom_geojson=land_geom_geojson,
+            processing_window_km=processing_window_km,
             mq_task_id=mq_task_id,
             on_chunk=_chunk_flush,
         )
@@ -1302,6 +1334,7 @@ def backfill_s1_for_land(
     mq_task_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    processing_window_km: float | None = None,
 ) -> dict:
     """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
     from app.core.http_mode import ingest_http_only
@@ -1344,6 +1377,7 @@ def backfill_s1_for_land(
                     "date_to": chunk_end.isoformat(),
                     "force": bool(force),
                     "mq_task_id": mq_task_id,
+                    "processing_window_km": processing_window_km,
                     "is_backfill": True,
                 },
                 countdown=chunk_idx * 30,
@@ -1393,6 +1427,7 @@ def backfill_s1_for_land(
                     "is_backfill": True,
                     "sensor": "S1",
                     "force": bool(force),
+                    "processing_window_km": processing_window_km,
                     **({"mq_task_id": mq_task_id} if mq_task_id else {}),
                 },
             )

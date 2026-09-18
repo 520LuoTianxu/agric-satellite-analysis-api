@@ -73,7 +73,7 @@ def group_satellite_lands(lands: Sequence[LandParcel]) -> list[SatelliteBatchGro
                 and geom.bounds[3] <= aggregation_bbox[3]
                 and square.covers(transform(to_local.transform, geom))
             )
-        # 下载只覆盖待处理地块的外接范围；完整边界超出5公里时独立拉取，防止丢像元。
+        # 保留组内地块外接范围供超大/旧任务兼容；普通下载任务使用 aggregation_bbox。
         download_bbox = unary_union([remaining.pop(key) for key in members]).bounds
         groups.append(
             SatelliteBatchGroup(
