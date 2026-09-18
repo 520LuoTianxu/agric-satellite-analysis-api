@@ -10,12 +10,15 @@ from unittest.mock import patch
 from agric_satellite_analysis_common.celery_app import (
     BEAT_SCHEDULE,
     TASK_ROUTES,
+    CPU_COMPUTE_QUEUE,
+    SATELLITE_DOWNLOAD_QUEUE,
     celery_app_config,
     celery_redis_transport_options,
     create_celery_app,
     enabled_beat_schedule,
     BEAT_SWITCHES,
     redis_socket_keepalive_options,
+    task_queue_for,
 )
 from agric_satellite_analysis_common.settings import CommonSettings
 
@@ -148,6 +151,41 @@ class CeleryRedisTransportTests(unittest.TestCase):
             TASK_ROUTES["app.tasks.decloud_uncrtaints.*"]["queue"],
             "decloud",
         )
+
+    def test_business_task_families_are_resource_isolated(self) -> None:
+        self.assertEqual(
+            TASK_ROUTES["app.tasks.agri_lonlat.*"]["queue"],
+            SATELLITE_DOWNLOAD_QUEUE,
+        )
+        self.assertEqual(
+            TASK_ROUTES["app.tasks.sentinel1.*"]["queue"],
+            SATELLITE_DOWNLOAD_QUEUE,
+        )
+        self.assertEqual(
+            TASK_ROUTES["app.tasks.satellite_batch.*"]["queue"],
+            SATELLITE_DOWNLOAD_QUEUE,
+        )
+        self.assertEqual(
+            TASK_ROUTES["app.tasks.backfill.*"]["queue"],
+            CPU_COMPUTE_QUEUE,
+        )
+        self.assertEqual(
+            task_queue_for(
+                "app.tasks.overview_preagg.refresh_overview_stats",
+                requested_queue="ingest",
+            ),
+            CPU_COMPUTE_QUEUE,
+        )
+        self.assertEqual(
+            task_queue_for(
+                "app.tasks.satellite_batch.process_satellite_batch",
+                requested_queue="ingest",
+            ),
+            SATELLITE_DOWNLOAD_QUEUE,
+        )
+
+    def test_weekly_index_is_not_scheduled(self) -> None:
+        self.assertNotIn("compute-indices-weekly", BEAT_SCHEDULE)
 
 
 if __name__ == "__main__":

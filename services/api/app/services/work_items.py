@@ -268,7 +268,7 @@ async def touch_download_worker(
     now = datetime.now(timezone.utc)
     interval = max(1, min(int(poll_interval_seconds or 4), 3600))
     types = [str(item) for item in (claim_types or []) if str(item)]
-    queue_name = (queue_name or "ingest").strip()[:128] or "ingest"
+    queue_name = (queue_name or "cpu_compute").strip()[:128] or "cpu_compute"
     pending = (
         max(0, min(int(pending_queue_count), 2_000_000_000))
         if pending_queue_count is not None

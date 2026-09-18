@@ -6,9 +6,17 @@ services:
   ingest:
     command: >
       celery -A app.worker worker
-      -Q ingest
+      -Q cpu_compute,ingest
+      -n cpu@%h
       --loglevel=info
       --concurrency=16
+  satellite:
+    command: >
+      celery -A app.worker worker
+      -Q satellite_download
+      -n satellite@%h
+      --loglevel=info
+      --concurrency=8
   storage:
     command: >
       celery -A app.worker worker

@@ -15,7 +15,11 @@ import time
 from typing import Any
 
 import httpx
-from agric_satellite_analysis_common.celery_app import celery_client
+from agric_satellite_analysis_common.celery_app import (
+    CPU_COMPUTE_QUEUE,
+    celery_client,
+    task_queue_for,
+)
 from agric_satellite_analysis_common.mq_schemas import TaskMessage
 from agric_satellite_analysis_common.trace import (
     attach_trace_header,
@@ -43,7 +47,6 @@ DEFAULT_TYPES = [
 # 被错误配置或恶意 payload 利用成任意 Celery 任务执行器。
 ADMIN_TASK_NAMES = frozenset(
     {
-        "app.tasks.backfill.schedule_weekly_index_compute",
         "app.tasks.weather.schedule_daily_weather_fetch",
         "app.tasks.overview_preagg.refresh_daily_satellite",
         "app.tasks.overview_preagg.refresh_overview_stats",
@@ -105,16 +108,16 @@ def claim_interval_sec() -> float:
 
 
 def queue_name() -> str:
-    """返回本机 Celery ready 队列名，默认与 ingest worker 一致。"""
-    return _env("CELERY_QUEUE_NAME", "ingest") or "ingest"
+    """返回本机主 Celery 队列名，默认汇报 CPU/编排队列。"""
+    return _env("CELERY_QUEUE_NAME", CPU_COMPUTE_QUEUE) or CPU_COMPUTE_QUEUE
 
 
 def queue_names() -> list[str]:
     """返回需要汇报的本机 Celery 队列，可用环境变量覆盖。"""
     raw = _env("CELERY_QUEUE_NAMES") or _env("CELERY_QUEUE_NAME")
-    raw = raw or "ingest,decloud,storage"
+    raw = raw or "satellite_download,cpu_compute,ingest,decloud,storage"
     names = [item.strip() for item in raw.split(",") if item.strip()]
-    return list(dict.fromkeys(names)) or ["ingest"]
+    return list(dict.fromkeys(names)) or [CPU_COMPUTE_QUEUE]
 
 
 def queue_depths() -> dict[str, int] | None:
@@ -366,7 +369,11 @@ def _dispatch_report(
         if wtype == "assessment_report"
         else "app.tasks.season_growth_report.generate_season_growth_report"
     )
-    async_result = celery_client.send_task(task_name, kwargs=kwargs, queue="ingest")
+    async_result = celery_client.send_task(
+        task_name,
+        kwargs=kwargs,
+        queue=task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
+    )
     return {
         "dispatched": [task_name],
         "celery_id": async_result.id,
@@ -432,7 +439,8 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
         async_result = celery_client.send_task(
             task_name,
             kwargs=kwargs,
-            queue="ingest",
+            # 管理员任务属于 CPU/编排侧；下载机只负责按任务名做最终路由。
+            queue=task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
         )
         return {
             "dispatched": [task_name],

@@ -6,7 +6,7 @@
 # Usage (legacy MQ still default until WORK_QUEUE_MODE=claim):
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 #     -f docker-compose.download-machine.yml --profile consumer \
-#     up -d --build ingest storage beat mq_consumer decloud
+#     up -d --build ingest satellite storage beat mq_consumer decloud
 #
 # REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
 # Internal HTTP (D2 reads + optional D1 claim) — set in .env:
@@ -55,8 +55,19 @@ services:
       - ${UNCRTAINTS_CHECKPOINT_HOST:-/workspace/UnCRtainTS/checkpoints}:/models/uncrtaints:ro
     command: >
       celery -A app.worker worker
-      -Q ingest
-      -n ingest@%h
+      -Q cpu_compute,ingest
+      -n cpu@%h
+      --loglevel=info
+      --concurrency=2
+
+  # 卫星搜索/下载单独消费 satellite_download，不和 CPU/编排任务争抢 worker。
+  satellite:
+    extends:
+      service: ingest
+    command: >
+      celery -A app.worker worker
+      -Q satellite_download
+      -n satellite@%h
       --loglevel=info
       --concurrency=2
 
@@ -132,7 +143,8 @@ services:
       WORKER_ID: ${WORKER_ID:-}
       WORK_CLAIM_INTERVAL_SEC: ${WORK_CLAIM_INTERVAL_SEC:-4}
       # 上报本机各 Celery ready 队列的待处理数量。
-      CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-ingest,decloud,storage}
+      CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-cpu_compute}
+      CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-satellite_download,cpu_compute,ingest,decloud,storage}
       WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-legacy}
       WORK_LEASE_SECONDS: ${WORK_LEASE_SECONDS:-600}
       # Celery broker must be local Redis on download host (not API Redis).

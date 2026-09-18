@@ -10,7 +10,7 @@ import logging
 import uuid
 from typing import Any
 
-from agric_satellite_analysis_common.celery_app import celery_client
+from agric_satellite_analysis_common.celery_app import celery_client, task_queue_for
 from agric_satellite_analysis_common.mq_results import publish_task_result
 from agric_satellite_analysis_common.mq_schemas import TaskMessage
 from agric_satellite_analysis_common.trace import (
@@ -20,6 +20,22 @@ from agric_satellite_analysis_common.trace import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _send_task(
+    task_name: str,
+    *args: Any,
+    queue: str | None = None,
+    **kwargs: Any,
+) -> Any:
+    """统一给 MQ consumer 的 producer 做资源队列路由。"""
+    # 历史 handler 都传 queue=ingest；集中转换才能保证下载和 CPU 任务不互相堵塞。
+    return celery_client.send_task(
+        task_name,
+        *args,
+        queue=task_queue_for(task_name, requested_queue=queue),
+        **kwargs,
+    )
 
 SUPPORTED_TYPES = {
     "satellite_analysis",
@@ -51,7 +67,7 @@ def _dispatch_satellite_analysis(
     dispatch_alerts = bool(extras.get("dispatch_alerts") or False)
 
     if mode == "bridge_only":
-        async_result = celery_client.send_task(
+        async_result = _send_task(
             "app.tasks.agri_bridge.bridge_land_stac_to_agri",
             args=[land_id],
             kwargs={"mq_task_id": task.task_id},
@@ -76,7 +92,7 @@ def _dispatch_satellite_analysis(
     if sentinel_job_id:
         backfill_kwargs["sentinel_job_id"] = str(sentinel_job_id)
 
-    backfill = celery_client.send_task(
+    backfill = _send_task(
         "app.tasks.backfill.backfill_indices_for_land",
         args=[land_id],
         kwargs=backfill_kwargs,
@@ -89,7 +105,7 @@ def _dispatch_satellite_analysis(
         bridge_kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
         if bridge_job_id:
             bridge_kwargs["bridge_job_id"] = str(bridge_job_id)
-        bridge = celery_client.send_task(
+        bridge = _send_task(
             "app.tasks.agri_bridge.bridge_after_backfill",
             args=[land_id],
             kwargs=bridge_kwargs,
@@ -98,7 +114,7 @@ def _dispatch_satellite_analysis(
         dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
         celery_ids.append(bridge.id)
         if dispatch_alerts:
-            celery_client.send_task(
+            _send_task(
                 "app.tasks.agri_alerts.evaluate_agri_alerts_for_land",
                 args=[land_id],
                 kwargs={"replace_open": True},
@@ -133,7 +149,7 @@ def _dispatch_satellite_batch(task: TaskMessage, land_id: str) -> dict[str, Any]
     if not job_id:
         raise ValueError("satellite_batch requires extras.job_id")
     name = "app.tasks.satellite_batch.process_satellite_batch"
-    result = celery_client.send_task(
+    result = _send_task(
         name,
         kwargs={"job_id": str(job_id), "mq_task_id": task.task_id},
         queue="ingest",
@@ -149,7 +165,7 @@ def _dispatch_weather_backfill(
     kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
     if extras.get("days") is not None:
         kwargs["days"] = int(extras["days"])
-    async_result = celery_client.send_task(
+    async_result = _send_task(
         "app.tasks.weather.backfill_weather_for_land",
         args=[land_id],
         kwargs=kwargs,
@@ -171,7 +187,7 @@ def _dispatch_soil_fetch(
     args = [land_id]
     if extras.get("job_id"):
         args.append(str(extras["job_id"]))
-    async_result = celery_client.send_task(
+    async_result = _send_task(
         "app.tasks.soil.fetch_soil_for_land",
         args=args,
         kwargs=kwargs,
@@ -214,7 +230,7 @@ def _dispatch_land_bootstrap(
     if days is not None:
         weather_kwargs["days"] = int(days)
 
-    weather = celery_client.send_task(
+    weather = _send_task(
         "app.tasks.weather.backfill_weather_for_land",
         args=[land_id],
         kwargs=weather_kwargs,
@@ -223,7 +239,7 @@ def _dispatch_land_bootstrap(
     dispatched.append("app.tasks.weather.backfill_weather_for_land")
     celery_ids.append(weather.id)
 
-    soil = celery_client.send_task(
+    soil = _send_task(
         "app.tasks.soil.fetch_soil_for_land",
         args=[land_id],
         kwargs={},
@@ -245,7 +261,7 @@ def _dispatch_land_bootstrap(
             index_kwargs["force"] = bool(extras["force"])
         if extras.get("processing_window_km") is not None:
             index_kwargs["processing_window_km"] = float(extras["processing_window_km"])
-        indices = celery_client.send_task(
+        indices = _send_task(
             "app.tasks.backfill.backfill_indices_for_land",
             args=[land_id],
             kwargs=index_kwargs,
@@ -259,7 +275,7 @@ def _dispatch_land_bootstrap(
             bridge_kwargs: dict[str, Any] = {}
             if extras.get("bridge_job_id"):
                 bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
-            bridge = celery_client.send_task(
+            bridge = _send_task(
                 "app.tasks.agri_bridge.bridge_after_backfill",
                 args=[land_id],
                 kwargs=bridge_kwargs,
@@ -283,7 +299,7 @@ def _dispatch_land_bootstrap(
                 assess_kwargs[key] = extras[key]
         if followup.get("mq_task_id"):
             assess_kwargs["mq_task_id"] = str(followup["mq_task_id"])
-        result = celery_client.send_task(
+        result = _send_task(
             "app.tasks.assessment_report.generate_assessment_report",
             kwargs=assess_kwargs,
             queue="ingest",
@@ -304,7 +320,7 @@ def _dispatch_land_bootstrap(
                 season_kwargs[key] = followup_sg[key]
             elif extras.get(key) is not None:
                 season_kwargs[key] = extras[key]
-        result = celery_client.send_task(
+        result = _send_task(
             "app.tasks.season_growth_report.generate_season_growth_report",
             kwargs=season_kwargs,
             queue="ingest",
@@ -358,7 +374,7 @@ def _dispatch_assessment_report(
         kwargs["pull_data"] = bool(extras["pull_data"])
     if extras.get("wait_celery_ids"):
         kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-    async_result = celery_client.send_task(
+    async_result = _send_task(
         "app.tasks.assessment_report.generate_assessment_report",
         kwargs=kwargs,
         queue="ingest",
@@ -390,7 +406,7 @@ def _dispatch_season_growth_report(
         kwargs["pull_data"] = bool(extras["pull_data"])
     if extras.get("wait_celery_ids"):
         kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-    async_result = celery_client.send_task(
+    async_result = _send_task(
         "app.tasks.season_growth_report.generate_season_growth_report",
         kwargs=kwargs,
         queue="ingest",

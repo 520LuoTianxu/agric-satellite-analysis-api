@@ -65,6 +65,13 @@ services:
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
       CORS_ORIGINS: ${CORS_ORIGINS}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
+      # MySQL 源只在 API 机使用；下载机 compose 不继承这些变量。
+      MYSQL_SOURCE_ENABLED: ${MYSQL_SOURCE_ENABLED:-false}
+      MYSQL_SOURCE_URL: ${MYSQL_SOURCE_URL:-}
+      MYSQL_SYNC_TIMEZONE: ${MYSQL_SYNC_TIMEZONE:-Asia/Shanghai}
+      MYSQL_SYNC_BATCH_SIZE: ${MYSQL_SYNC_BATCH_SIZE:-500}
+      MYSQL_SYNC_RS_MONTHS: ${MYSQL_SYNC_RS_MONTHS:-24}
+      MYSQL_SYNC_PROCESSING_WINDOW_KM: ${MYSQL_SYNC_PROCESSING_WINDOW_KM:-5}
       STAC_API_URL: ${STAC_API_URL}
       S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -108,15 +115,16 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Celery ingest (foreign download + raster compute) ─────────────
-  # Replaces legacy ``processor``. Queue: ingest. See docs/design/ingest-storage-split.md
+  # ── Celery CPU/编排 worker ────────────────────────────────────────
+  # 同时消费旧 ingest，确保迁移期间的历史积压可以排空。
   ingest:
     build:
       context: .
       dockerfile: services/ingest/Dockerfile
     command: >
       celery -A app.worker worker
-      -Q ingest
+      -Q cpu_compute,ingest
+      -n cpu@%h
       --loglevel=info
       --concurrency=4
     environment:
@@ -180,6 +188,18 @@ services:
       retries: 3
       start_period: 30s
 
+  # ── Celery satellite download worker ─────────────────────────────
+  # 与 CPU/编排 worker 分开，下载带宽或 STAC 拥堵不会阻塞报告、天气和总览。
+  satellite:
+    extends:
+      service: ingest
+    command: >
+      celery -A app.worker worker
+      -Q satellite_download
+      -n satellite@%h
+      --loglevel=info
+      --concurrency=2
+
   # ── Celery storage (Aliyun OSS uploads only) ──────────────────────
   storage:
     build:
@@ -217,7 +237,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── Celery Beat（ingest 镜像，定时任务投到 ingest 队列）──────────
+  # ── Celery Beat（ingest 镜像，定时任务投到 cpu_compute 队列）────
   # 单实例：只在下载机跑，禁止和第二套 beat 同时存在。
   beat:
     build:
@@ -232,7 +252,6 @@ services:
       # 仅显式开启的周期任务注册到Beat，所有开关缺省均关闭。
       SCHEDULE_DAILY_SATELLITE_ENABLED: ${SCHEDULE_DAILY_SATELLITE_ENABLED:-false}
       SCHEDULE_DAILY_WEATHER_ENABLED: ${SCHEDULE_DAILY_WEATHER_ENABLED:-false}
-      SCHEDULE_WEEKLY_INDEX_ENABLED: ${SCHEDULE_WEEKLY_INDEX_ENABLED:-false}
       SCHEDULE_OVERVIEW_REFRESH_ENABLED: ${SCHEDULE_OVERVIEW_REFRESH_ENABLED:-false}
     depends_on:
       redis:

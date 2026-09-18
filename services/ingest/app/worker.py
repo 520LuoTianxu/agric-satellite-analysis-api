@@ -1,6 +1,6 @@
 """Celery worker for the ingest queue (download + raster compute)."""
 
-from agric_satellite_analysis_common.celery_app import create_celery_app
+from agric_satellite_analysis_common.celery_app import CPU_COMPUTE_QUEUE, create_celery_app
 from agric_satellite_analysis_common.logging import setup_logging
 
 setup_logging()
@@ -25,5 +25,5 @@ INGEST_INCLUDES = [
 celery_app = create_celery_app(
     name="openfarm-ingest",
     include=INGEST_INCLUDES,
-    default_queue="ingest",
+    default_queue=CPU_COMPUTE_QUEUE,
 )

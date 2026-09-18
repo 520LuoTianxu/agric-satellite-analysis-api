@@ -40,7 +40,8 @@ services:
     restart: unless-stopped
     command: >
       celery -A app.worker worker
-      -Q ingest
+      -Q cpu_compute,ingest
+      -n cpu@%h
       --loglevel=info
       --concurrency=2
     healthcheck:
@@ -51,6 +52,23 @@ services:
         limits:
           cpus: "1.0"
           memory: 2G
+
+  satellite:
+    restart: unless-stopped
+    command: >
+      celery -A app.worker worker
+      -Q satellite_download
+      -n satellite@%h
+      --loglevel=info
+      --concurrency=2
+    healthcheck:
+      interval: 60s
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
 
   storage:
     restart: unless-stopped

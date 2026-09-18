@@ -18,6 +18,7 @@ ENV PYTHONUNBUFFERED=1
 COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/ingest/pyproject.toml .
 COPY services/ingest/app ./app
+COPY scripts/repartition_celery_queues.py ./repartition_celery_queues.py
 
 RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
     && pip install --no-cache-dir . \
@@ -28,4 +29,4 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
     && mkdir -p /data/scratch /tmp/matplotlib && chown -R appuser:appgroup /data/scratch /tmp/matplotlib && chmod 777 /tmp/matplotlib
 USER appuser
 
-CMD ["celery", "-A", "app.worker", "worker", "-Q", "ingest", "--loglevel=info", "--concurrency=4"]
+CMD ["celery", "-A", "app.worker", "worker", "-Q", "cpu_compute,ingest", "--loglevel=info", "--concurrency=4"]
