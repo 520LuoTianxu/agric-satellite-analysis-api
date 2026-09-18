@@ -43,6 +43,10 @@ from app.core.job_progress_redis import (
     mark_scene_progress,
     set_total,
 )
+from app.core.processing_window import (
+    build_complete_processing_window,
+    resolve_processing_window_km,
+)
 from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
@@ -373,6 +377,8 @@ def emit_optical_lonlat(
     rgb_url: str | None = None,
     large_rgb_url: str | None = None,
     rgb_oss_key: str | None = None,
+    processing_window_km: float | None = None,
+    processing_window_bounds: tuple[float, float, float, float] | None = None,
     result_delivery: str = "mq",
 ) -> dict[str, Any] | None:
     """Sample lonlat_v1, upload OSS JSON, then deliver by MQ or HTTP/Redis."""
@@ -448,6 +454,13 @@ def emit_optical_lonlat(
         "source": "stac_direct",
         "pixels": pixels,
     }
+    if processing_window_km is not None:
+        # 将实际检索窗口写入产品元数据，便于后续核验周边 5 km 数据确实参与处理。
+        pixel_data["processing_window"] = {
+            "shape": "square",
+            "side_km": processing_window_km,
+            "bounds": list(processing_window_bounds or ()),
+        }
     if source:
         pixel_data["parcel_cloud_source"] = source
     row = {
@@ -534,6 +547,7 @@ def _process_one_optical_scene(
     agri_meta: dict[str, Any],
     land_geom_geojson: dict,
     write_cogs: bool,
+    processing_window_km: float | None = None,
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
@@ -579,15 +593,8 @@ def _process_one_optical_scene(
             from rasterio.features import geometry_mask
             from shapely.geometry import shape as shapely_shape
 
-            # Use unbuffered parcel extent (bounds already include ~0.001° padding).
-            field_extent = (
-                bounds[0] + 0.001,
-                bounds[1] + 0.001,
-                bounds[2] - 0.001,
-                bounds[3] - 0.001,
-            )
             scene_transform, scene_shape, scene_bounds = compute_scene_preview_grid(
-                field_extent
+                bounds, pad_km=0.0
             )
             try:
                 geom = shapely_shape(land_geom_geojson)
@@ -769,6 +776,8 @@ def _process_one_optical_scene(
             rgb_url=rgb_meta.get("rgb_url"),
             large_rgb_url=rgb_meta.get("large_rgb_url"),
             rgb_oss_key=rgb_meta.get("rgb_oss_key"),
+            processing_window_km=processing_window_km,
+            processing_window_bounds=bounds,
         )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         incr_done(job_id, failed=False)
@@ -808,6 +817,7 @@ def _process_agri_optical_http_only(
     mq_task_id: str | None,
     growing_seasons: list | None,
     season_months: list | None,
+    processing_window_km: float | None,
 ) -> dict:
     """Optical chunk worker without SyncSession (OSS + MQ path)."""
     from shapely.geometry import shape as shapely_shape
@@ -833,6 +843,7 @@ def _process_agri_optical_http_only(
             mq_task_id = str(params["mq_task_id"])
         growing_seasons = growing_seasons or params.get("growing_seasons")
         season_months = season_months or params.get("season_months")
+        processing_window_km = processing_window_km or params.get("processing_window_km")
 
     if not land_id or not date_from or not date_to:
         return {
@@ -858,6 +869,11 @@ def _process_agri_optical_http_only(
     agri_meta = _load_land_meta(None, land_id, remote=resolved)
     land_geom = shapely_shape(geojson)
     land_geom_geojson = mapping(land_geom)
+    processing_window_km = resolve_processing_window_km(processing_window_km)
+    processing_geom, _ = build_complete_processing_window(
+        land_geom, processing_window_km
+    )
+    processing_geom_geojson = mapping(processing_geom)
     d0 = date.fromisoformat(str(date_from)[:10])
     d1 = date.fromisoformat(str(date_to)[:10])
     org_id_str = "default"
@@ -888,7 +904,7 @@ def _process_agri_optical_http_only(
 
     t_search = time.perf_counter()
     scenes = search_scenes_for_defs(
-        land_geom_geojson,
+        processing_geom_geojson,
         d0,
         d1,
         index_defs,
@@ -951,7 +967,7 @@ def _process_agri_optical_http_only(
         }
 
     target_transform, target_shape, field_mask, bounds = compute_target_grid(
-        land_geom.bounds, land_geom
+        processing_geom.bounds, land_geom, padding_degrees=0.0
     )
     workers = min(scene_max_workers(), len(scenes))
     set_total(synthetic_job_id, len(scenes), workers=workers)
@@ -977,6 +993,7 @@ def _process_agri_optical_http_only(
                 agri_meta=agri_meta,
                 land_geom_geojson=land_geom_geojson,
                 write_cogs=write_cogs,
+                processing_window_km=processing_window_km,
                 scene_workers=workers,
                 mq_task_id=mq_task_id,
             ): scene
@@ -1053,6 +1070,7 @@ def process_agri_optical_lonlat(
     mq_task_id: str | None = None,
     growing_seasons: list | None = None,
     season_months: list | None = None,
+    processing_window_km: float | None = None,
     is_backfill: bool = True,
 ) -> dict:
     """Search S2, compute agri optical indices in memory, upsert lonlat_v1.
@@ -1071,6 +1089,7 @@ def process_agri_optical_lonlat(
             mq_task_id=mq_task_id,
             growing_seasons=growing_seasons,
             season_months=season_months,
+            processing_window_km=processing_window_km,
         )
 
     from app.models.tables import LandParcel, Job
@@ -1111,6 +1130,13 @@ def process_agri_optical_lonlat(
         params = job.params_json or {}
         date_from = date.fromisoformat(params["date_from"])
         date_to = date.fromisoformat(params["date_to"])
+        processing_window_km = resolve_processing_window_km(
+            params.get("processing_window_km")
+        )
+        processing_geom, _ = build_complete_processing_window(
+            land_geom, processing_window_km
+        )
+        processing_geom_geojson = mapping(processing_geom)
         org_id_str = "default"
         land_id_str = str(job.land_id)
         write_cogs = write_index_cogs_enabled()
@@ -1137,7 +1163,7 @@ def process_agri_optical_lonlat(
         # Agri needs the full Element84 series (not weekly lowest-cloud):
         # weekly dedupe dropped the high-cloud days users compare in STAC.
         scenes = search_scenes_for_defs(
-            land_geom_geojson,
+            processing_geom_geojson,
             date_from,
             date_to,
             index_defs,
@@ -1228,7 +1254,7 @@ def process_agri_optical_lonlat(
             }
 
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
-            land_geom.bounds, land_geom
+            processing_geom.bounds, land_geom, padding_degrees=0.0
         )
         workers = min(scene_max_workers(), len(scenes))
         logger.info(
@@ -1276,6 +1302,7 @@ def process_agri_optical_lonlat(
                     agri_meta=agri_meta,
                     land_geom_geojson=land_geom_geojson,
                     write_cogs=write_cogs,
+                    processing_window_km=processing_window_km,
                     scene_workers=workers,
                     mq_task_id=mq_task_id,
                 ): scene

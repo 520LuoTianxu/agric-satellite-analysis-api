@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     # 数据库只保留 agric_satellite；应用表、扩展和 Alembic 版本表均在此 schema。
     database_schema: str = "agric_satellite"
 
+    # External agricultural source (API machine only; never passed to download workers).
+    mysql_source_enabled: bool = False
+    mysql_source_url: str = ""
+    mysql_sync_timezone: str = "Asia/Shanghai"
+    mysql_sync_batch_size: int = 500
+    mysql_sync_rs_months: int = 24
+    mysql_sync_processing_window_km: float = 5.0
+
     # Redis
     redis_url: str = "redis://redis:6379/0"
 

@@ -57,6 +57,7 @@ def backfill_indices_for_land(
     date_to: str | None = None,
     growing_seasons: list | None = None,
     season_months: list | None = None,
+    processing_window_km: float | None = None,
 ) -> dict:
     """Backfill vegetation indices for *land_id* over *months*.
 
@@ -81,6 +82,7 @@ def backfill_indices_for_land(
             date_to=date_to,
             growing_seasons=growing_seasons,
             season_months=season_months,
+            processing_window_km=processing_window_km,
         )
 
     from app.models.tables import LandParcel, Job
@@ -137,6 +139,11 @@ def backfill_indices_for_land(
                 **({"mq_task_id": mq_task_id} if mq_task_id else {}),
                 **({"growing_seasons": growing_seasons} if growing_seasons else {}),
                 **({"season_months": season_months} if season_months else {}),
+                **(
+                    {"processing_window_km": processing_window_km}
+                    if processing_window_km is not None
+                    else {}
+                ),
             }
             job = Job(
                 land_id=land.land_id,
@@ -186,6 +193,7 @@ def backfill_indices_for_land(
                 mq_task_id=mq_task_id,
                 date_from=start_date.isoformat(),
                 date_to=end_date.isoformat(),
+                processing_window_km=processing_window_km,
             )
             s1_result = {"task_id": async_result.id, "status": "queued"}
             logger.info("s1_backfill_dispatched", land_id=land_id, result=s1_result)
@@ -231,6 +239,7 @@ def _backfill_indices_http_only(
     date_to: str | None,
     growing_seasons: list | None,
     season_months: list | None,
+    processing_window_km: float | None,
 ) -> dict:
     """Orchestrate canonical optical chunks without a local database session."""
     from app.core.http_mode import patch_job_http, resolve_land_http
@@ -288,6 +297,7 @@ def _backfill_indices_http_only(
                     "mq_task_id": mq_task_id,
                     "growing_seasons": growing_seasons,
                     "season_months": season_months,
+                    "processing_window_km": processing_window_km,
                     "is_backfill": True,
                 },
                 countdown=countdown,
@@ -325,6 +335,7 @@ def _backfill_indices_http_only(
                 mq_task_id=mq_task_id,
                 date_from=start_date.isoformat(),
                 date_to=end_date.isoformat(),
+                processing_window_km=processing_window_km,
             )
             s1_result = {"task_id": async_result.id, "status": "queued"}
             logger.info(
@@ -394,6 +405,7 @@ def _dispatch_weekly_index_items(items: list) -> int:
                     "land_id": str(item["land_id"]),
                     "date_from": item["date_from"],
                     "date_to": item["date_to"],
+                    "processing_window_km": item.get("processing_window_km"),
                     "is_backfill": True,
                 },
                 countdown=countdown,

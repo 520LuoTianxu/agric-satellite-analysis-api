@@ -29,7 +29,7 @@ from sqlalchemy.orm.attributes import flag_modified
 import structlog
 
 from app.core.band_parallel import run_parallel_band_jobs, band_max_workers, gdal_read_slot
-from app.core.config import settings, scene_max_workers
+from app.core.config import scene_max_workers
 from app.tasks.indices import IndexDef
 
 logger = structlog.get_logger()
@@ -684,10 +684,15 @@ def run_alerts(
 # ── Grid / mask helpers ──────────────────────────────────────────────
 
 
-def compute_target_grid(field_bounds: tuple, land_geom):
-    """Return (target_transform, target_shape, field_mask, expanded_bounds)."""
+def compute_target_grid(field_bounds: tuple, land_geom, *, padding_degrees: float = 0.001):
+    """Return (target_transform, target_shape, field_mask, expanded_bounds).
+
+    ``padding_degrees=0`` is used by the fixed metric processing window so
+    the raster read covers the requested AOI instead of adding another degree
+    based margin. Existing callers retain the historical padding by default.
+    """
     minx, miny, maxx, maxy = field_bounds
-    buf = 0.001
+    buf = float(padding_degrees)
     minx -= buf
     miny -= buf
     maxx += buf

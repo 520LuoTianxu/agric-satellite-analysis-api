@@ -172,10 +172,39 @@ Internal network (not exposed):
     ├── object storage (Aliyun OSS)
     ├── ingest        (Celery -Q ingest: STAC/weather/soil/compute)
     ├── storage       (Celery -Q storage: OSS uploads)
-    └── beat          (Celery beat schedules → ingest)
+    ├── beat          (Celery beat schedules → ingest)
+    └── land_sync     (API-machine MySQL snapshot → PostgreSQL + RS jobs)
 ```
 
 Worker split (ingest download vs storage OSS upload): [`docs/design/ingest-storage-split.md`](docs/design/ingest-storage-split.md).
+
+### API-machine MySQL land sync
+
+The API-machine override starts one `land_sync` service. It reads the source
+tables `agriculture_land` and `agriculture_land_group` with a read-only MySQL
+account, writes the canonical PostgreSQL tables `agric_satellite.farms` and
+`agric_satellite.land_parcels`, and dispatches a 24-calendar-month S1/S2
+backfill for new or boundary-changed parcels. It runs at 23:00 in
+`Asia/Shanghai`; the download machine uses a 5 km × 5 km square per land
+task and excludes any grouped land whose complete boundary crosses that
+square. The scheduler uses a PostgreSQL advisory lock so only one instance
+can run.
+
+Set these values in the private `.env` on the API machine:
+
+```dotenv
+MYSQL_SOURCE_ENABLED=true
+MYSQL_SOURCE_URL=mysql+asyncmy://readonly:URL_ENCODED_PASSWORD@mysql-host:3306/agriculture?charset=utf8mb4
+MYSQL_SYNC_TIMEZONE=Asia/Shanghai
+MYSQL_SYNC_BATCH_SIZE=500
+MYSQL_SYNC_RS_MONTHS=24
+MYSQL_SYNC_PROCESSING_WINDOW_KM=5.0
+```
+
+The MySQL URL and password must not be copied to the download machine. Run a
+one-off sync with `docker compose ... run --rm land_sync python -m
+app.mysql_land_sync --once`; the normal API-machine compose command runs the
+daily scheduler.
 
 Celery workers (ingest, storage, beat) share Redis broker settings from
 `packages/agric_satellite_analysis_common`. Socket timeouts, TCP keepalive, and

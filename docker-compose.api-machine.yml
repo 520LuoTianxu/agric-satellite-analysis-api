@@ -10,6 +10,31 @@
 # （ingest 镜像，celery -A app.beat）。
 
 services:
+  # API机数据控制面：读取外部 MySQL，写入本机 PostgreSQL，并派发遥感回填。
+  land_sync:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: ["python", "-m", "app.mysql_land_sync", "--loop"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-}
+      REDIS_URL: ${REDIS_URL}
+      CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
+      CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
+      CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
+      MQ_FALLBACK_CELERY: ${MQ_FALLBACK_CELERY:-0}
+      WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-legacy}
+      MYSQL_SOURCE_ENABLED: ${MYSQL_SOURCE_ENABLED:-false}
+      MYSQL_SOURCE_URL: ${MYSQL_SOURCE_URL:-}
+      MYSQL_SYNC_TIMEZONE: ${MYSQL_SYNC_TIMEZONE:-Asia/Shanghai}
+      MYSQL_SYNC_BATCH_SIZE: ${MYSQL_SYNC_BATCH_SIZE:-500}
+      MYSQL_SYNC_RS_MONTHS: ${MYSQL_SYNC_RS_MONTHS:-24}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
   # 这些 worker 属于下载机。profile 防止 API 机上普通 docker compose up 误启。
   ingest:
     profiles: ["download-machine"]

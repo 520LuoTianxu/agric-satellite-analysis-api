@@ -228,6 +228,9 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                         status="pending",
                         params_json={
                             "land_ids": group.land_ids,
+                            "anchor_land_id": group.anchor_land_id,
+                            "processing_window_km": 5.0,
+                            "oversized": group.oversized,
                             "sensor": sensor,
                             "download_bbox": list(group.download_bbox),
                             "aggregation_bbox": list(group.aggregation_bbox),

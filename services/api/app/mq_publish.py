@@ -61,6 +61,7 @@ def _fallback_celery(
             "date_to",
             "growing_seasons",
             "season_months",
+            "processing_window_km",
         ):
             if extras.get(key) is not None:
                 kwargs[key] = extras[key]
