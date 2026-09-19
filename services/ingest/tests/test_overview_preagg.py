@@ -47,3 +47,41 @@ def test_overview_accumulator_aggregates_without_retaining_raw_batches() -> None
     assert country["weak_growth"] == {"parcel_count": 1, "area_mu": 12.0}
     assert province["totals"] == {"parcel_count": 1, "area_mu": 12.0}
     assert province["children"][0]["level"] == "city"
+
+
+def test_overview_accumulator_merge_matches_sequential_batches() -> None:
+    from app.core.overview_preagg import OverviewAccumulator
+
+    land = {
+        "land_id": "L1",
+        "area_mu": 12,
+        "province_code": "11",
+        "province_name": "北京",
+        "city_code": "1101",
+        "city_name": "北京市",
+        "county_code": "110101",
+        "county_name": "东城区",
+        "s2": None,
+        "s1": [],
+        "weak": False,
+    }
+    batch = [land]
+
+    sequential = OverviewAccumulator(
+        window_from="2026-07-20", window_to="2026-09-18", crop=None
+    )
+    sequential.add_batch(batch)
+    sequential.add_batch(batch)
+
+    left = OverviewAccumulator(
+        window_from="2026-07-20", window_to="2026-09-18", crop=None
+    )
+    right = OverviewAccumulator(
+        window_from="2026-07-20", window_to="2026-09-18", crop=None
+    )
+    left.add_batch(batch)
+    right.add_batch(batch)
+    left.merge(right)
+
+    assert left.land_count == sequential.land_count == 2
+    assert left.results() == sequential.results()

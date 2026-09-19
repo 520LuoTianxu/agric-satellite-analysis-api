@@ -27,6 +27,13 @@ WINDOW_DAYS = 60
 LOOKBACK_DAYS = 7
 RUN_TYPE = "overview_daily"
 CHINA_TZ = timezone(timedelta(hours=8))
+# 每批写入多个区划快照，减少每日终态汇总时的数据库往返次数。
+OVERVIEW_UPSERT_BATCH_SIZE = 200
+# 子任务进入失败/取消也是终态；兼容旧worker使用的 succeeded，汇总只等待未终态任务。
+TERMINAL_SATELLITE_JOB_STATUSES = frozenset(
+    {"completed", "succeeded", "failed", "cancelled"}
+)
+FAILED_SATELLITE_JOB_STATUSES = frozenset({"failed", "cancelled"})
 
 
 def business_today() -> date:
@@ -304,7 +311,7 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
 
 
 async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
-    """下载任务完成后核对发布结果已入库，最后原子保存所有区划快照。"""
+    """所有子任务进入终态后核对结果入库，并原子保存允许部分失败的区划快照。"""
     run = (
         await db.execute(
             select(Job).where(Job.id == run_id, Job.type == RUN_TYPE).with_for_update()
@@ -321,16 +328,30 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         if ids
         else []
     )
+    # 失败地块交给后续补偿，不应阻塞本次全国汇总；只有未进入终态的任务才算 pending。
     pending = (
-        sum(job.status not in ("completed", "failed", "cancelled") for job in jobs)
+        sum(job.status not in TERMINAL_SATELLITE_JOB_STATUSES for job in jobs)
         + len(ids)
         - len(jobs)
     )
-    failed = sum(job.status in ("failed", "cancelled") for job in jobs)
+    failed = sum(job.status in FAILED_SATELLITE_JOB_STATUSES for job in jobs)
+    failed_job_ids = [
+        str(job.id) for job in jobs if job.status in FAILED_SATELLITE_JOB_STATUSES
+    ]
+    failed_land_ids: set[str] = set()
     expected = set()
     unreported = 0
     for job in jobs:
         progress = job.progress_json or {}
+        if job.status in FAILED_SATELLITE_JOB_STATUSES:
+            failed_land_ids.update(
+                str(value) for value in progress.get("failed_land_ids", [])
+            )
+            if not progress.get("failed_land_ids"):
+                # 旧worker没有失败明细时，退化为该批次全部地块作为补偿候选。
+                failed_land_ids.update(
+                    str(value) for value in (job.params_json or {}).get("land_ids", [])
+                )
         products = progress.get("published_products", [])
         unreported += max(0, progress.get("products_published", 0) - len(products))
         expected.update(
@@ -365,6 +386,9 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         **(run.progress_json or {}),
         "pending_jobs": pending,
         "failed_jobs": failed,
+        "failed_job_ids": failed_job_ids,
+        "failed_land_ids": sorted(failed_land_ids),
+        "failed_land_count": len(failed_land_ids),
         "results_pending": missing,
         "phase": "downloading" if pending else "waiting_results",
     }
@@ -393,12 +417,12 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
     )
     await ensure_overview_cache_table(db)
     snapshots = aggregate_snapshots(facts, template, day)
+    upsert_rows: list[dict[str, Any]] = []
     for out in snapshots:
         out.filters.update(
             data_status="partial" if partial else "complete", run_id=str(run.id)
         )
-        await db.execute(
-            text(_UPSERT_OVERVIEW_SQL),
+        upsert_rows.append(
             {
                 "as_of": day,
                 "level": out.region["level"],
@@ -411,7 +435,14 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
                 "window_from": day - timedelta(days=WINDOW_DAYS),
                 "window_to": day,
                 "crop": "",
-            },
+            }
+        )
+    upsert_sql = text(_UPSERT_OVERVIEW_SQL)
+    for offset in range(0, len(upsert_rows), OVERVIEW_UPSERT_BATCH_SIZE):
+        # 先完成全部快照对象构造，再在同一事务内分批写入，避免留下半批结果。
+        await db.execute(
+            upsert_sql,
+            upsert_rows[offset : offset + OVERVIEW_UPSERT_BATCH_SIZE],
         )
     run.status = "partial" if partial else "completed"
     run.finished_at = datetime.now(timezone.utc)

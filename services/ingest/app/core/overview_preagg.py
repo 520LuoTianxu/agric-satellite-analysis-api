@@ -240,6 +240,46 @@ class OverviewAccumulator:
                     group["pixels_classified"] += classification["pixels_classified"]
             self.land_count += 1
 
+    def merge(self, other: "OverviewAccumulator") -> None:
+        """合并独立批次的聚合结果，供并发 OSS 处理后汇总。"""
+        if (
+            self.window_from != other.window_from
+            or self.window_to != other.window_to
+            or self.crop != other.crop
+        ):
+            raise ValueError("总览聚合批次的时间窗口或作物不一致")
+
+        # 每个线程使用独立的聚合器，主线程只在这里合并计数，避免共享聚合器的竞态。
+        for key, source in other.groups.items():
+            target = self.groups.get(key)
+            if target is None:
+                self.groups[key] = {
+                    **source,
+                    "path": [dict(node) for node in source["path"]],
+                    "children": set(source["children"]),
+                    "drought": dict(source["drought"]),
+                    "drought_area": dict(source["drought_area"]),
+                    "flood": dict(source["flood"]),
+                    "flood_area": dict(source["flood_area"]),
+                }
+                continue
+
+            target["children"].update(source["children"])
+            target["parcel_count"] += source["parcel_count"]
+            target["area_mu"] += source["area_mu"]
+            for category in DROUGHT_KEYS:
+                target["drought"][category] += source["drought"][category]
+                target["drought_area"][category] += source["drought_area"][category]
+            for category in FLOOD_KEYS:
+                target["flood"][category] += source["flood"][category]
+                target["flood_area"][category] += source["flood_area"][category]
+            target["weak_count"] += source["weak_count"]
+            target["weak_area"] += source["weak_area"]
+            target["pixels_parcels"] += source["pixels_parcels"]
+            target["pixels_classified"] += source["pixels_classified"]
+
+        self.land_count += other.land_count
+
     @staticmethod
     def _child_summary(group: dict[str, Any]) -> dict[str, Any]:
         drought = group["drought"]
