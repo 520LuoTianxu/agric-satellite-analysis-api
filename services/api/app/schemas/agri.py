@@ -316,6 +316,10 @@ class OverviewChildOut(BaseModel):
     flood_alert: int = 0  # severe + moderate + mild
     weak_growth: int = 0
     area_mu: float = 0.0
+    # 地图着色使用受影响地块/全部地块的比例，None 兼容旧快照，避免把旧数据误认为 0%。
+    drought_ratio: float | None = None
+    flood_ratio: float | None = None
+    weak_growth_ratio: float | None = None
 
 
 class OverviewStatsOut(BaseModel):
