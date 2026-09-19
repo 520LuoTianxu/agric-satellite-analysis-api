@@ -15,6 +15,7 @@ import structlog
 
 from agric_satellite_analysis_common.internal_api import internal_client
 from agric_satellite_analysis_common.storage import get_storage
+from app.core.admin_task_tracking import track_admin_task_run
 from app.core.overview_preagg import OverviewAccumulator
 from app.worker import celery_app
 
@@ -28,6 +29,27 @@ OSS_RETRY_BASE_SECONDS = 1.0
 OSS_RETRY_MAX_SECONDS = 10.0
 
 
+def _daily_execution_key(_args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    value = kwargs.get("as_of")
+    if value:
+        return str(value)
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+
+def _overview_execution_key(_args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return ":".join(
+        (
+            datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
+            str(kwargs.get("window_days") or 60),
+            str(kwargs.get("crop") or ""),
+        )
+    )
+
+
 @celery_app.task(
     name="app.tasks.overview_preagg.refresh_daily_satellite",
     bind=True,
@@ -35,8 +57,17 @@ OSS_RETRY_MAX_SECONDS = 10.0
     time_limit=600,
     soft_time_limit=540,
 )
+@track_admin_task_run(
+    task_key="daily-satellite",
+    task_name="app.tasks.overview_preagg.refresh_daily_satellite",
+    execution_key=_daily_execution_key,
+    params=lambda _args, kwargs: {"as_of": _daily_execution_key((), kwargs)},
+)
 def refresh_daily_satellite(
-    self, run_id: str | None = None, as_of: str | None = None
+    self,
+    run_id: str | None = None,
+    as_of: str | None = None,
+    admin_task_run_id: str | None = None,
 ) -> dict[str, Any]:
     """每天拉取全量地块的新影像，延时检查入库，完成后由API计算快照。"""
     from agric_satellite_analysis_common.internal_api import (
@@ -59,12 +90,23 @@ def refresh_daily_satellite(
         out = daily_satellite_finalize(run_id)
     except Exception as exc:
         logger.exception("overview_daily_http_failed", run_id=run_id, as_of=as_of)
+        retry_kwargs = {"run_id": run_id, "as_of": as_of}
+        if admin_task_run_id:
+            retry_kwargs["admin_task_run_id"] = admin_task_run_id
         raise self.retry(
-            exc=exc, kwargs={"run_id": run_id, "as_of": as_of}, countdown=300
+            exc=exc,
+            kwargs=retry_kwargs,
+            countdown=300,
         )
     if out["status"] not in ("completed", "partial"):
         # 用消息延时而非占用worker等待；MQ结果真正入库之后才发布当天态势。
-        raise self.retry(kwargs={"run_id": run_id, "as_of": as_of}, countdown=300)
+        retry_kwargs = {"run_id": run_id, "as_of": as_of}
+        if admin_task_run_id:
+            retry_kwargs["admin_task_run_id"] = admin_task_run_id
+        raise self.retry(
+            kwargs=retry_kwargs,
+            countdown=300,
+        )
     logger.info(
         "overview_daily_finished",
         run_id=run_id,
@@ -74,13 +116,24 @@ def refresh_daily_satellite(
     return out
 
 
-@celery_app.task(name="app.tasks.overview_preagg.refresh_overview_stats")
+@celery_app.task(name="app.tasks.overview_preagg.refresh_overview_stats", bind=True)
+@track_admin_task_run(
+    task_key="overview-refresh",
+    task_name="app.tasks.overview_preagg.refresh_overview_stats",
+    execution_key=_overview_execution_key,
+    params=lambda _args, kwargs: {
+        "window_days": int(kwargs.get("window_days") or 60),
+        "crop": kwargs.get("crop"),
+    },
+)
 def refresh_overview_stats(
+    self,
     window_days: int = 60,
     crop: str | None = None,
     land_batch_size: int = 10,
     oss_workers: int = DEFAULT_OSS_WORKERS,
     oss_retries: int = DEFAULT_OSS_RETRIES,
+    admin_task_run_id: str | None = None,
 ) -> dict[str, Any]:
     """按游标领取 OSS 输入批次，并发下载/计算后回传 OSS 结果包。"""
     try:

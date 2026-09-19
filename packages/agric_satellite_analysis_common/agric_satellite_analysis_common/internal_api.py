@@ -30,6 +30,7 @@ __all__ = [
     "data_readiness",
     "daily_satellite_prepare",
     "daily_satellite_finalize",
+    "ensure_admin_task_run",
     "finalize_overview_stats",
     "fail_work",
     "land_geom",
@@ -43,6 +44,7 @@ __all__ = [
     "patch_job",
     "progress_work",
     "refresh_overview_stats",
+    "update_admin_task_run_status",
     "resolve_land",
     "season_growth_inputs",
     "weather_land_ids",
@@ -171,6 +173,74 @@ def _raise_for_status(r: httpx.Response, *, context: str) -> None:
         f"{context} failed status={r.status_code} detail={detail}",
         status_code=r.status_code,
     )
+
+
+def ensure_admin_task_run(
+    task_key: str,
+    task_name: str,
+    execution_key: str,
+    *,
+    params: dict[str, Any] | None = None,
+    client: httpx.Client | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """让 Beat 任务通过 Internal HTTP 幂等创建管理员运行记录。"""
+    body = {
+        "task_key": str(task_key),
+        "task_name": str(task_name),
+        "execution_key": str(execution_key),
+        "params": dict(params or {}),
+    }
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post("/v1/internal/admin/task-runs/ensure", json=body)
+        _raise_for_status(r, context="admin/task-runs/ensure")
+        data = r.json()
+        if not isinstance(data, dict) or not data.get("run_id"):
+            raise InternalApiError("admin/task-runs/ensure returned invalid data")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
+def update_admin_task_run_status(
+    run_id: str,
+    status: str,
+    *,
+    celery_task_id: str | None = None,
+    result: Any | None = None,
+    error: str | None = None,
+    worker_name: str = "scheduled-task",
+    client: httpx.Client | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """通过 Internal HTTP 回报 Beat/Celery 任务的真实状态。"""
+    body: dict[str, Any] = {
+        "worker_name": worker_name,
+        "status": str(status),
+    }
+    if celery_task_id:
+        body["celery_task_id"] = str(celery_task_id)
+    if result is not None:
+        body["result"] = result
+    if error is not None:
+        body["error"] = str(error)[:4000]
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(f"/v1/internal/admin/task-runs/{run_id}/status", json=body)
+        _raise_for_status(r, context="admin/task-runs/status")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("admin/task-runs/status returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
 
 
 def resolve_land(

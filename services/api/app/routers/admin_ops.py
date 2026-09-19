@@ -10,12 +10,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session, get_db
 from app.core.config import settings
-from app.models.tables import AdminTaskRun, DownloadWorker
+from app.models.tables import AdminTaskRun, DownloadWorker, Job, WorkItem
 from app.middleware.auth import OrgContext, require_roles
 from app.services import work_items as wi
 
@@ -92,6 +92,52 @@ class TaskRunOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     updated_at: datetime | None
+
+
+class JobMonitorOut(BaseModel):
+    id: uuid.UUID
+    land_id: str | None = None
+    type: str
+    status: str
+    progress_summary: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class JobDetailOut(JobMonitorOut):
+    params_json: dict[str, Any] | None = None
+    progress_json: dict[str, Any] | None = None
+
+
+class WorkItemMonitorOut(BaseModel):
+    id: uuid.UUID
+    type: str
+    status: str
+    priority: int
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    attempts: int
+    progress_summary: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class WorkItemDetailOut(WorkItemMonitorOut):
+    idempotency_key: str | None = None
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    progress_json: dict[str, Any] | None = None
+    result_json: dict[str, Any] | None = None
+
+
+class ExecutionOverviewOut(BaseModel):
+    generated_at: datetime
+    job_counts: dict[str, int]
+    work_item_counts: dict[str, int]
+    jobs: list[JobMonitorOut]
+    work_items: list[WorkItemMonitorOut]
 
 
 class AdminOpsOverviewOut(BaseModel):
@@ -218,6 +264,94 @@ def _to_task_out(run: AdminTaskRun) -> TaskRunOut:
     )
 
 
+_PROGRESS_SUMMARY_KEYS = (
+    "phase",
+    "current_step",
+    "message",
+    "total",
+    "completed",
+    "scenes_total",
+    "scenes_done",
+    "products_published",
+    "failed",
+    "pending_jobs",
+    "results_pending",
+    "land_count",
+    "batch_count",
+    "rows_count",
+)
+
+
+def _progress_summary(progress: Any) -> dict[str, Any]:
+    """只提取列表页需要的轻量进度字段，完整 JSON 通过详情接口按需读取。"""
+    if not isinstance(progress, dict):
+        return {}
+    return {
+        key: progress[key]
+        for key in _PROGRESS_SUMMARY_KEYS
+        if key in progress and isinstance(progress[key], (str, int, float, bool))
+    }
+
+
+def _to_job_monitor_out(job: Job) -> JobMonitorOut:
+    return JobMonitorOut(
+        id=job.id,
+        land_id=job.land_id,
+        type=job.type,
+        status=job.status,
+        progress_summary=_progress_summary(job.progress_json),
+        error=job.error,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )
+
+
+def _to_job_detail_out(job: Job) -> JobDetailOut:
+    return JobDetailOut(
+        **_to_job_monitor_out(job).model_dump(),
+        params_json=dict(job.params_json or {}) if job.params_json else None,
+        progress_json=dict(job.progress_json or {}) if job.progress_json else None,
+    )
+
+
+def _to_work_item_monitor_out(item: WorkItem) -> WorkItemMonitorOut:
+    return WorkItemMonitorOut(
+        id=item.id,
+        type=item.type,
+        status=item.status,
+        priority=int(item.priority or 0),
+        lease_owner=item.lease_owner,
+        lease_until=item.lease_until,
+        attempts=int(item.attempts or 0),
+        progress_summary=_progress_summary(item.progress_json),
+        error=item.error,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _to_work_item_detail_out(item: WorkItem) -> WorkItemDetailOut:
+    return WorkItemDetailOut(
+        **_to_work_item_monitor_out(item).model_dump(),
+        idempotency_key=item.idempotency_key,
+        payload_json=dict(item.payload_json or {}),
+        progress_json=dict(item.progress_json or {}) if item.progress_json else None,
+        result_json=dict(item.result_json or {}) if item.result_json else None,
+    )
+
+
+async def _status_counts(db: AsyncSession, model: Any) -> dict[str, int]:
+    rows = (
+        await db.execute(
+            select(model.status, func.count(model.id)).group_by(model.status)
+        )
+    ).all()
+    counts = {str(status): int(count) for status, count in rows}
+    counts["all"] = sum(counts.values())
+    return counts
+
+
 def _enabled_task_keys() -> set[str]:
     """读取与 Beat 共用的环境开关，仅用于管理页展示。"""
     from agric_satellite_analysis_common.celery_app import enabled_beat_schedule
@@ -320,6 +454,70 @@ async def overview(
     )
 
 
+@router.get("/execution", response_model=ExecutionOverviewOut)
+async def execution_overview(
+    _: Annotated[OrgContext, Depends(_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=200),
+    job_status: str | None = Query(default=None, max_length=20),
+    work_item_status: str | None = Query(default=None, max_length=20),
+):
+    """返回全量状态统计和最近执行明细，供管理员定位“看似未完成”的任务。"""
+    now = datetime.now(timezone.utc)
+    # AsyncSession 不能被多个协程并发使用；这里保持同一事务连接串行查询，
+    # 避免管理页高频刷新时触发 SQLAlchemy 的并发状态错误。
+    job_counts = await _status_counts(db, Job)
+    work_item_counts = await _status_counts(db, WorkItem)
+
+    jobs_stmt = select(Job)
+    if job_status:
+        jobs_stmt = jobs_stmt.where(Job.status == job_status)
+    jobs_stmt = jobs_stmt.order_by(Job.created_at.desc()).limit(limit)
+
+    work_items_stmt = select(WorkItem)
+    if work_item_status:
+        work_items_stmt = work_items_stmt.where(WorkItem.status == work_item_status)
+    work_items_stmt = work_items_stmt.order_by(WorkItem.updated_at.desc()).limit(limit)
+
+    jobs = await db.execute(jobs_stmt)
+    work_items = await db.execute(work_items_stmt)
+    return ExecutionOverviewOut(
+        generated_at=now,
+        job_counts=job_counts,
+        work_item_counts=work_item_counts,
+        jobs=[_to_job_monitor_out(item) for item in jobs.scalars().all()],
+        work_items=[
+            _to_work_item_monitor_out(item) for item in work_items.scalars().all()
+        ],
+    )
+
+
+@router.get("/jobs/{job_id}", response_model=JobDetailOut)
+async def job_detail(
+    job_id: uuid.UUID,
+    _: Annotated[OrgContext, Depends(_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """读取单个 Job 的完整参数和进度，列表页只在展开时调用。"""
+    job = await db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return _to_job_detail_out(job)
+
+
+@router.get("/work-items/{work_item_id}", response_model=WorkItemDetailOut)
+async def work_item_detail(
+    work_item_id: uuid.UUID,
+    _: Annotated[OrgContext, Depends(_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """读取单个 work_item 的完整 payload、租约和结果。"""
+    item = await db.get(WorkItem, work_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return _to_work_item_detail_out(item)
+
+
 @router.post("/task-runs", response_model=TaskRunOut, status_code=202)
 async def trigger_task(
     body: TriggerTaskRequest,
@@ -357,6 +555,9 @@ async def trigger_task(
         await db.commit()
         asyncio.create_task(_run_api_admin_task(run.id))
         return _to_task_out(run)
+    # 将管理员运行 ID 传给任务本身；下载机 claim/legacy 两种模式都能回写真实状态，
+    # 同时避免手动触发任务被误认为是 Beat 自动执行记录。
+    kwargs["admin_task_run_id"] = str(run.id)
     if settings.work_queue_mode == "claim":
         # claim 模式的 Celery Redis 在下载机本地，先交给下载机再投递本机队列。
         await wi.enqueue_work_item(
