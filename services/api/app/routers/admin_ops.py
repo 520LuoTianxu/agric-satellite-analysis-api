@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
@@ -99,6 +101,7 @@ class JobMonitorOut(BaseModel):
     land_id: str | None = None
     type: str
     status: str
+    parent_job_id: uuid.UUID | None = None
     progress_summary: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: datetime | None = None
@@ -115,6 +118,7 @@ class WorkItemMonitorOut(BaseModel):
     id: uuid.UUID
     type: str
     status: str
+    parent_job_id: uuid.UUID | None = None
     priority: int
     lease_owner: str | None = None
     lease_until: datetime | None = None
@@ -132,12 +136,39 @@ class WorkItemDetailOut(WorkItemMonitorOut):
     result_json: dict[str, Any] | None = None
 
 
+class ExecutionGroupOut(BaseModel):
+    """任务树的一级节点；列表页只返回父任务和聚合后的子任务计数。"""
+
+    id: str
+    parent_job_id: uuid.UUID | None = None
+    type: str
+    status: str
+    land_id: str | None = None
+    progress_summary: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    child_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class ExecutionGroupDetailOut(ExecutionGroupOut):
+    """父任务详情及其所有子 Job/WorkItem，供前端弹窗按需展开。"""
+
+    parent_job: JobDetailOut | None = None
+    jobs: list[JobDetailOut] = Field(default_factory=list)
+    work_items: list[WorkItemDetailOut] = Field(default_factory=list)
+
+
 class ExecutionOverviewOut(BaseModel):
     generated_at: datetime
     job_counts: dict[str, int]
     work_item_counts: dict[str, int]
+    group_counts: dict[str, int]
+    group_has_more: bool
     job_has_more: bool
     work_item_has_more: bool
+    groups: list[ExecutionGroupOut]
     jobs: list[JobMonitorOut]
     work_items: list[WorkItemMonitorOut]
 
@@ -295,12 +326,275 @@ def _progress_summary(progress: Any) -> dict[str, Any]:
     }
 
 
-def _to_job_monitor_out(job: Job) -> JobMonitorOut:
+_EXECUTION_TERMINAL_STATUSES = {
+    "completed",
+    "succeeded",
+    "done",
+    "success",
+    "failed",
+    "cancelled",
+    "partial",
+}
+_EXECUTION_SUCCESS_STATUSES = {"completed", "succeeded", "done", "success"}
+_EXECUTION_FAILED_STATUSES = {"failed", "cancelled", "partial"}
+
+
+@dataclass
+class _ExecutionGroup:
+    """兼容历史 JSON 关联的任务树中间结构，不改变现有业务表。"""
+
+    key: str
+    parent_job: Job | None = None
+    jobs: list[tuple[Job, uuid.UUID | None]] = field(default_factory=list)
+    work_items: list[tuple[WorkItem, uuid.UUID | None]] = field(default_factory=list)
+    expected_job_ids: set[uuid.UUID] = field(default_factory=set)
+
+
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _job_parent_id_from_params(
+    job: Job, job_ids: set[uuid.UUID]
+) -> uuid.UUID | None:
+    params = _json_dict(job.params_json)
+    # overview_run_id 是每日全国态势子批次沿用的父任务引用；
+    # parent_job_id/parent_id 兼容后续新增的显式父子任务写法。
+    for key in ("overview_run_id", "parent_job_id", "parent_id"):
+        parent_id = _as_uuid(params.get(key))
+        if parent_id and parent_id != job.id and parent_id in job_ids:
+            return parent_id
+    return None
+
+
+def _work_item_parent_id(item: WorkItem) -> uuid.UUID | None:
+    payload = _json_dict(item.payload_json)
+    extras = _json_dict(payload.get("extras"))
+    # claim payload 的 job_id 通常放在 extras 内；保留顶层兼容旧任务和手工派发。
+    for value in (
+        payload.get("job_id"),
+        payload.get("parent_job_id"),
+        extras.get("job_id"),
+        extras.get("parent_job_id"),
+    ):
+        parent_id = _as_uuid(value)
+        if parent_id:
+            return parent_id
+    return None
+
+
+def _root_job_id(
+    job_id: uuid.UUID, parent_by_child: dict[uuid.UUID, uuid.UUID]
+) -> uuid.UUID:
+    """把多层父子关系折叠到页面一级节点，且对历史脏数据防循环。"""
+    current = job_id
+    visited: set[uuid.UUID] = set()
+    while current in parent_by_child and current not in visited:
+        visited.add(current)
+        parent_id = parent_by_child[current]
+        if parent_id == current:
+            break
+        current = parent_id
+    return current
+
+
+def _build_execution_groups(
+    jobs: list[Job], work_items: list[WorkItem]
+) -> list[_ExecutionGroup]:
+    """根据已落库的父子引用生成一级任务组，失败子任务不会被丢失。"""
+    jobs_by_id = {job.id: job for job in jobs}
+    job_ids = set(jobs_by_id)
+    parent_by_child: dict[uuid.UUID, uuid.UUID] = {}
+    expected_by_parent: dict[uuid.UUID, set[uuid.UUID]] = {}
+
+    for parent in jobs:
+        params = _json_dict(parent.params_json)
+        declared_ids = params.get("job_ids")
+        if isinstance(declared_ids, list):
+            expected = expected_by_parent.setdefault(parent.id, set())
+            for raw_id in declared_ids:
+                child_id = _as_uuid(raw_id)
+                if child_id and child_id != parent.id:
+                    expected.add(child_id)
+                    # 即使子 Job 尚未落库，也先保留父子路径；这样其迟到的
+                    # WorkItem 不会被错误拆成另一个一级任务组。
+                    parent_by_child[child_id] = parent.id
+        parent_id = _job_parent_id_from_params(parent, job_ids)
+        if parent_id:
+            parent_by_child[parent.id] = parent_id
+
+    groups: dict[str, _ExecutionGroup] = {}
+
+    def group_for_parent(job_id: uuid.UUID) -> _ExecutionGroup:
+        root_id = _root_job_id(job_id, parent_by_child)
+        key = f"job:{root_id}"
+        group = groups.setdefault(key, _ExecutionGroup(key=key))
+        if root_id in jobs_by_id:
+            group.parent_job = jobs_by_id[root_id]
+        # 父任务的 job_ids 是期望集合，即使某个子 Job 因异常没有落库，
+        # 也要在管理页显示为 missing/pending，而不是静默减少总数。
+        for parent_id, expected_ids in expected_by_parent.items():
+            if _root_job_id(parent_id, parent_by_child) == root_id:
+                group.expected_job_ids.update(expected_ids)
+        return group
+
+    for job in jobs:
+        direct_parent_id = parent_by_child.get(job.id)
+        if direct_parent_id:
+            group_for_parent(direct_parent_id).jobs.append((job, direct_parent_id))
+        else:
+            group_for_parent(job.id)
+
+    for item in work_items:
+        direct_parent_id = _work_item_parent_id(item)
+        if direct_parent_id:
+            group_for_parent(direct_parent_id).work_items.append(
+                (item, direct_parent_id)
+            )
+            continue
+        key = f"work:{item.id}"
+        groups.setdefault(key, _ExecutionGroup(key=key)).work_items.append(
+            (item, None)
+        )
+
+    return list(groups.values())
+
+
+def _group_child_counts(group: _ExecutionGroup) -> dict[str, int]:
+    # 同一个执行单元可能同时有 Job 和 claim WorkItem 两条记录；当 WorkItem
+    # 已经指向某个子 Job 时只按 Job 计进度，避免 20 个任务被错误显示成 40 个。
+    child_job_ids = {job.id for job, _ in group.jobs}
+    statuses = [job.status for job, _ in group.jobs]
+    statuses.extend(
+        item.status
+        for item, parent_job_id in group.work_items
+        if parent_job_id not in child_job_ids
+    )
+    missing = len(group.expected_job_ids - {job.id for job, _ in group.jobs})
+    terminal = sum(status in _EXECUTION_TERMINAL_STATUSES for status in statuses)
+    completed = sum(status in _EXECUTION_SUCCESS_STATUSES for status in statuses)
+    failed = sum(status in _EXECUTION_FAILED_STATUSES for status in statuses)
+    pending = sum(status in {"pending", "queued"} for status in statuses) + missing
+    total = len(statuses) + missing
+    return {
+        "total": total,
+        "jobs": len(group.jobs) + missing,
+        "work_items": len(group.work_items),
+        "terminal": terminal,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+        "running": max(0, total - terminal - pending),
+        "missing": missing,
+    }
+
+
+def _group_status(group: _ExecutionGroup) -> str:
+    # 有真实父 Job 时优先使用父 Job 状态；overview_daily 的 partial 正是
+    # “子任务允许失败，但所有子任务已终态”的最终业务状态。
+    if group.parent_job is not None:
+        return group.parent_job.status
+    counts = _group_child_counts(group)
+    child_job_ids = {job.id for job, _ in group.jobs}
+    statuses = [job.status for job, _ in group.jobs]
+    statuses.extend(
+        item.status
+        for item, parent_job_id in group.work_items
+        if parent_job_id not in child_job_ids
+    )
+    if counts["missing"] or any(
+        status not in _EXECUTION_TERMINAL_STATUSES for status in statuses
+    ):
+        return "running" if counts["running"] else "pending"
+    if counts["failed"] and counts["completed"]:
+        return "partial"
+    if counts["failed"]:
+        return "failed"
+    return "completed"
+
+
+def _max_datetime(values: list[datetime | None]) -> datetime | None:
+    valid = [value for value in values if value is not None]
+    return max(valid) if valid else None
+
+
+def _group_created_at(group: _ExecutionGroup) -> datetime | None:
+    if group.parent_job is not None:
+        return group.parent_job.created_at
+    return min(
+        (value for value in [
+            *(job.created_at for job, _ in group.jobs),
+            *(item.created_at for item, _ in group.work_items),
+        ] if value is not None),
+        default=None,
+    )
+
+
+def _group_land_id(group: _ExecutionGroup) -> str | None:
+    if group.parent_job is not None and group.parent_job.land_id:
+        return group.parent_job.land_id
+    for job, _ in group.jobs:
+        if job.land_id:
+            return job.land_id
+    for item, _ in group.work_items:
+        land_id = _json_dict(item.payload_json).get("land_id")
+        if land_id:
+            return str(land_id)
+    return None
+
+
+def _group_type(group: _ExecutionGroup) -> str:
+    if group.parent_job is not None:
+        return group.parent_job.type
+    if group.jobs:
+        return group.jobs[0][0].type
+    if group.work_items:
+        return group.work_items[0][0].type
+    return "unknown"
+
+
+def _group_error(group: _ExecutionGroup) -> str | None:
+    if group.parent_job is not None and group.parent_job.error:
+        return group.parent_job.error
+    for job, _ in group.jobs:
+        if job.error:
+            return job.error
+    for item, _ in group.work_items:
+        if item.error:
+            return item.error
+    return None
+
+
+def _group_sort_value(group: _ExecutionGroup) -> datetime:
+    values: list[datetime | None] = [
+        group.parent_job.created_at if group.parent_job is not None else None,
+        *(job.created_at for job, _ in group.jobs),
+        *(job.finished_at for job, _ in group.jobs),
+        *(item.updated_at for item, _ in group.work_items),
+    ]
+    return _max_datetime(values) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _to_job_monitor_out(
+    job: Job, parent_job_id: uuid.UUID | None = None
+) -> JobMonitorOut:
     return JobMonitorOut(
         id=job.id,
         land_id=job.land_id,
         type=job.type,
         status=job.status,
+        parent_job_id=parent_job_id,
         progress_summary=_progress_summary(job.progress_json),
         error=job.error,
         created_at=job.created_at,
@@ -309,19 +603,24 @@ def _to_job_monitor_out(job: Job) -> JobMonitorOut:
     )
 
 
-def _to_job_detail_out(job: Job) -> JobDetailOut:
+def _to_job_detail_out(
+    job: Job, parent_job_id: uuid.UUID | None = None
+) -> JobDetailOut:
     return JobDetailOut(
-        **_to_job_monitor_out(job).model_dump(),
+        **_to_job_monitor_out(job, parent_job_id).model_dump(),
         params_json=dict(job.params_json or {}) if job.params_json else None,
         progress_json=dict(job.progress_json or {}) if job.progress_json else None,
     )
 
 
-def _to_work_item_monitor_out(item: WorkItem) -> WorkItemMonitorOut:
+def _to_work_item_monitor_out(
+    item: WorkItem, parent_job_id: uuid.UUID | None = None
+) -> WorkItemMonitorOut:
     return WorkItemMonitorOut(
         id=item.id,
         type=item.type,
         status=item.status,
+        parent_job_id=parent_job_id,
         priority=int(item.priority or 0),
         lease_owner=item.lease_owner,
         lease_until=item.lease_until,
@@ -333,13 +632,76 @@ def _to_work_item_monitor_out(item: WorkItem) -> WorkItemMonitorOut:
     )
 
 
-def _to_work_item_detail_out(item: WorkItem) -> WorkItemDetailOut:
+def _to_work_item_detail_out(
+    item: WorkItem, parent_job_id: uuid.UUID | None = None
+) -> WorkItemDetailOut:
     return WorkItemDetailOut(
-        **_to_work_item_monitor_out(item).model_dump(),
+        **_to_work_item_monitor_out(item, parent_job_id).model_dump(),
         idempotency_key=item.idempotency_key,
         payload_json=dict(item.payload_json or {}),
         progress_json=dict(item.progress_json or {}) if item.progress_json else None,
         result_json=dict(item.result_json or {}) if item.result_json else None,
+    )
+
+
+def _to_execution_group_out(group: _ExecutionGroup) -> ExecutionGroupOut:
+    parent = group.parent_job
+    first_job = group.jobs[0][0] if group.jobs else None
+    first_item = group.work_items[0][0] if group.work_items else None
+    return ExecutionGroupOut(
+        id=group.key,
+        parent_job_id=parent.id if parent is not None else None,
+        type=_group_type(group),
+        status=_group_status(group),
+        land_id=_group_land_id(group),
+        progress_summary=_progress_summary(
+            parent.progress_json
+            if parent is not None
+            else (first_job.progress_json if first_job is not None else first_item.progress_json if first_item is not None else {})
+        ),
+        error=_group_error(group),
+        created_at=_group_created_at(group),
+        started_at=(
+            parent.started_at
+            if parent is not None
+            else min(
+                (value for value in [
+                    *(job.started_at for job, _ in group.jobs),
+                    *(item.created_at for item, _ in group.work_items),
+                ] if value is not None),
+                default=None,
+            )
+        ),
+        finished_at=(
+            parent.finished_at
+            if parent is not None
+            else _max_datetime([
+                *(job.finished_at for job, _ in group.jobs),
+                *(item.updated_at for item, _ in group.work_items),
+            ])
+        ),
+        child_counts=_group_child_counts(group),
+    )
+
+
+def _to_execution_group_detail_out(
+    group: _ExecutionGroup,
+) -> ExecutionGroupDetailOut:
+    return ExecutionGroupDetailOut(
+        **_to_execution_group_out(group).model_dump(),
+        parent_job=(
+            _to_job_detail_out(group.parent_job)
+            if group.parent_job is not None
+            else None
+        ),
+        jobs=[
+            _to_job_detail_out(job, parent_job_id)
+            for job, parent_job_id in group.jobs
+        ],
+        work_items=[
+            _to_work_item_detail_out(item, parent_job_id)
+            for item, parent_job_id in group.work_items
+        ],
     )
 
 
@@ -463,10 +825,12 @@ async def execution_overview(
     limit: int = Query(default=50, ge=1, le=200),
     job_status: str | None = Query(default=None, max_length=20),
     work_item_status: str | None = Query(default=None, max_length=20),
+    group_status: str | None = Query(default=None, max_length=20),
     job_offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     work_item_offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    group_offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
 ):
-    """返回全量状态统计和最近执行明细，供管理员定位“看似未完成”的任务。"""
+    """返回原始计数及父任务列表，父任务详情通过独立接口按需读取。"""
     now = datetime.now(timezone.utc)
     # AsyncSession 不能被多个协程并发使用；这里保持同一事务连接串行查询，
     # 避免管理页高频刷新时触发 SQLAlchemy 的并发状态错误。
@@ -495,6 +859,26 @@ async def execution_overview(
     work_items_result = await db.execute(work_items_stmt)
     job_rows = jobs_result.scalars().all()
     work_item_rows = work_items_result.scalars().all()
+
+    # 现有库通过 params/payload 中的 JSON 关联父子任务，暂时没有单独的
+    # parent_job_id 列；这里用轻量的全量 ORM 行构建一级任务组，保证历史数据
+    # 也能被正确归并。后续数据量增长后可将该关联正规化并迁移到索引列。
+    all_jobs = (await db.execute(select(Job))).scalars().all()
+    all_work_items = (await db.execute(select(WorkItem))).scalars().all()
+    groups = sorted(
+        _build_execution_groups(all_jobs, all_work_items),
+        key=_group_sort_value,
+        reverse=True,
+    )
+    group_counts_counter = Counter(_group_status(group) for group in groups)
+    group_counts = {status: int(count) for status, count in group_counts_counter.items()}
+    group_counts["all"] = len(groups)
+    filtered_groups = (
+        [group for group in groups if _group_status(group) == group_status]
+        if group_status
+        else groups
+    )
+    group_rows = filtered_groups[group_offset : group_offset + limit]
     job_total = job_counts["all"] if not job_status else job_counts.get(job_status, 0)
     work_item_total = (
         work_item_counts["all"]
@@ -505,11 +889,38 @@ async def execution_overview(
         generated_at=now,
         job_counts=job_counts,
         work_item_counts=work_item_counts,
+        group_counts=group_counts,
+        group_has_more=group_offset + len(group_rows) < len(filtered_groups),
         job_has_more=job_offset + len(job_rows) < job_total,
         work_item_has_more=work_item_offset + len(work_item_rows) < work_item_total,
+        groups=[_to_execution_group_out(group) for group in group_rows],
         jobs=[_to_job_monitor_out(item) for item in job_rows],
         work_items=[_to_work_item_monitor_out(item) for item in work_item_rows],
     )
+
+
+@router.get(
+    "/execution-groups/{group_id}", response_model=ExecutionGroupDetailOut
+)
+async def execution_group_detail(
+    group_id: str,
+    _: Annotated[OrgContext, Depends(_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """返回一个父任务及全部子 Job/WorkItem，供监控页弹窗查看。"""
+    all_jobs = (await db.execute(select(Job))).scalars().all()
+    all_work_items = (await db.execute(select(WorkItem))).scalars().all()
+    group = next(
+        (
+            candidate
+            for candidate in _build_execution_groups(all_jobs, all_work_items)
+            if candidate.key == group_id
+        ),
+        None,
+    )
+    if group is None:
+        raise HTTPException(status_code=404, detail="execution group not found")
+    return _to_execution_group_detail_out(group)
 
 
 @router.get("/jobs/{job_id}", response_model=JobDetailOut)
