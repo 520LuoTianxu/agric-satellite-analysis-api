@@ -136,6 +136,8 @@ class ExecutionOverviewOut(BaseModel):
     generated_at: datetime
     job_counts: dict[str, int]
     work_item_counts: dict[str, int]
+    job_has_more: bool
+    work_item_has_more: bool
     jobs: list[JobMonitorOut]
     work_items: list[WorkItemMonitorOut]
 
@@ -461,6 +463,8 @@ async def execution_overview(
     limit: int = Query(default=50, ge=1, le=200),
     job_status: str | None = Query(default=None, max_length=20),
     work_item_status: str | None = Query(default=None, max_length=20),
+    job_offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    work_item_offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
 ):
     """返回全量状态统计和最近执行明细，供管理员定位“看似未完成”的任务。"""
     now = datetime.now(timezone.utc)
@@ -472,23 +476,39 @@ async def execution_overview(
     jobs_stmt = select(Job)
     if job_status:
         jobs_stmt = jobs_stmt.where(Job.status == job_status)
-    jobs_stmt = jobs_stmt.order_by(Job.created_at.desc()).limit(limit)
+    jobs_stmt = (
+        jobs_stmt.order_by(Job.created_at.desc(), Job.id.desc())
+        .offset(job_offset)
+        .limit(limit)
+    )
 
     work_items_stmt = select(WorkItem)
     if work_item_status:
         work_items_stmt = work_items_stmt.where(WorkItem.status == work_item_status)
-    work_items_stmt = work_items_stmt.order_by(WorkItem.updated_at.desc()).limit(limit)
+    work_items_stmt = (
+        work_items_stmt.order_by(WorkItem.updated_at.desc(), WorkItem.id.desc())
+        .offset(work_item_offset)
+        .limit(limit)
+    )
 
-    jobs = await db.execute(jobs_stmt)
-    work_items = await db.execute(work_items_stmt)
+    jobs_result = await db.execute(jobs_stmt)
+    work_items_result = await db.execute(work_items_stmt)
+    job_rows = jobs_result.scalars().all()
+    work_item_rows = work_items_result.scalars().all()
+    job_total = job_counts["all"] if not job_status else job_counts.get(job_status, 0)
+    work_item_total = (
+        work_item_counts["all"]
+        if not work_item_status
+        else work_item_counts.get(work_item_status, 0)
+    )
     return ExecutionOverviewOut(
         generated_at=now,
         job_counts=job_counts,
         work_item_counts=work_item_counts,
-        jobs=[_to_job_monitor_out(item) for item in jobs.scalars().all()],
-        work_items=[
-            _to_work_item_monitor_out(item) for item in work_items.scalars().all()
-        ],
+        job_has_more=job_offset + len(job_rows) < job_total,
+        work_item_has_more=work_item_offset + len(work_item_rows) < work_item_total,
+        jobs=[_to_job_monitor_out(item) for item in job_rows],
+        work_items=[_to_work_item_monitor_out(item) for item in work_item_rows],
     )
 
 
