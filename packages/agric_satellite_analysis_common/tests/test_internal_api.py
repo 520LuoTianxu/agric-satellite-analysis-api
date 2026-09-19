@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -189,6 +190,58 @@ class InternalApiClientTests(unittest.TestCase):
         transport = httpx.MockTransport(handler)
         client = httpx.Client(base_url="http://api.test", transport=transport)
         out = ia.refresh_overview_stats(window_days=60, client=client)
+        self.assertTrue(out["ok"])
+
+    def test_ensure_admin_task_run(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/v1/internal/admin/task-runs/ensure")
+            payload = json.loads(request.content.decode())
+            self.assertEqual(payload["task_key"], "overview-refresh")
+            self.assertEqual(payload["execution_key"], "2026-09-19:60:")
+            self.assertEqual(payload["params"]["window_days"], 60)
+            return httpx.Response(
+                200,
+                json={
+                    "run_id": "00000000-0000-0000-0000-000000000001",
+                    "task_key": "overview-refresh",
+                    "status": "queued",
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.ensure_admin_task_run(
+            "overview-refresh",
+            "app.tasks.overview_preagg.refresh_overview_stats",
+            "2026-09-19:60:",
+            params={"window_days": 60},
+            client=client,
+        )
+        self.assertEqual(out["status"], "queued")
+
+    def test_update_admin_task_run_status(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(
+                request.url.path,
+                "/v1/internal/admin/task-runs/00000000-0000-0000-0000-000000000001/status",
+            )
+            payload = json.loads(request.content.decode())
+            self.assertEqual(payload["status"], "success")
+            self.assertEqual(payload["celery_task_id"], "celery-1")
+            self.assertEqual(payload["result"]["batches"], 3)
+            return httpx.Response(200, json={"ok": True, "status": "success"})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.update_admin_task_run_status(
+            "00000000-0000-0000-0000-000000000001",
+            "success",
+            celery_task_id="celery-1",
+            result={"batches": 3},
+            client=client,
+        )
         self.assertTrue(out["ok"])
 
 

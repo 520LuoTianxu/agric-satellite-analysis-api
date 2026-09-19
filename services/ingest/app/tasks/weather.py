@@ -19,6 +19,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
 )
+from app.core.admin_task_tracking import track_admin_task_run
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
 from app.worker import celery_app
@@ -530,8 +531,22 @@ def _update_water_balance(session, land_id: str) -> None:
     session.commit()
 
 
-@celery_app.task(name="app.tasks.weather.schedule_daily_weather_fetch")
-def schedule_daily_weather_fetch() -> dict:
+def _weather_execution_key(_args, _kwargs) -> str:
+    return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+
+@celery_app.task(name="app.tasks.weather.schedule_daily_weather_fetch", bind=True)
+@track_admin_task_run(
+    task_key="daily-weather",
+    task_name="app.tasks.weather.schedule_daily_weather_fetch",
+    execution_key=_weather_execution_key,
+    params=lambda _args, _kwargs: {
+        "as_of": datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    },
+)
+def schedule_daily_weather_fetch(
+    self, admin_task_run_id: str | None = None
+) -> dict:
     """每日天气定时任务（Celery Beat，08:00 UTC）。
 
     配了 API_BASE_URL 时，地块清单走 Internal HTTP，不在下载机查库。
