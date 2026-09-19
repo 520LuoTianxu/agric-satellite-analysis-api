@@ -60,10 +60,19 @@ def region_key(level: str, code: str | None, name: str | None, parent: str = "")
     return _pad_adcode(level, code) if code else f"{parent}/{name}"
 
 
+def _affected_ratio(count: int, total: int) -> float:
+    """每日快照和实时接口使用同一比例口径，保证地图切换视图时颜色一致。"""
+    if total <= 0 or count <= 0:
+        return 0.0
+    return round(min(count / total, 1.0), 6)
+
+
 def aggregate_snapshots(
     facts: dict[str, dict[str, Any]], template: OverviewStatsOut, day: date
 ) -> list[OverviewStatsOut]:
     """一次遍历地块分类，按当天区划和相同口径汇总全国到县级，不重复读取像元。"""
+    from app.routers.agri_overview import _pad_adcode
+
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     country = {"level": "country", "code": None, "name": "全国"}
     groups[("country", "")] = {
@@ -81,7 +90,13 @@ def aggregate_snapshots(
                 continue
             code = str(fact[f"{level}_code"]) if fact.get(f"{level}_code") else None
             key = (level, region_key(level, code, name, parent_key[1]))
-            node = {"level": level, "code": code, "name": name}
+            # 快照中的行政码必须与实时接口和 GeoJSON 使用同一套六位编码，
+            # 否则市/县边界只能按名称匹配，重名区划会出现错色或无法着色。
+            node = {
+                "level": level,
+                "code": _pad_adcode(level, code) if code else None,
+                "name": name,
+            }
             path = [*path, node]
             group = groups.setdefault(
                 key, {"node": node, "path": path, "lands": [], "children": set()}
@@ -152,17 +167,28 @@ def aggregate_snapshots(
         children = []
         for child_key in group["children"]:
             out = outputs[child_key]
+            drought_alert = out.drought.severe + out.drought.moderate + out.drought.mild
+            # 洪涝地图展示“关注”总量，包含轻度积水；open water 仍保留在 flood 字段中。
+            flood_alert = (
+                out.flood.flood_severe
+                + out.flood.flood_moderate
+                + out.flood.flood_mild
+            )
+            parcel_count = out.totals.parcel_count
             children.append(
                 {
                     **group_node(outputs[child_key]),
                     **out.totals.model_dump(),
                     "drought_severe": out.drought.severe,
-                    "drought_alert": out.drought.severe
-                    + out.drought.moderate
-                    + out.drought.mild,
+                    "drought_alert": drought_alert,
                     "flood": out.flood.flood,
-                    "flood_alert": out.flood.flood,
+                    "flood_alert": flood_alert,
                     "weak_growth": out.weak_growth.parcel_count,
+                    "drought_ratio": _affected_ratio(drought_alert, parcel_count),
+                    "flood_ratio": _affected_ratio(flood_alert, parcel_count),
+                    "weak_growth_ratio": _affected_ratio(
+                        out.weak_growth.parcel_count, parcel_count
+                    ),
                 }
             )
         outputs[key] = outputs[key].model_copy(

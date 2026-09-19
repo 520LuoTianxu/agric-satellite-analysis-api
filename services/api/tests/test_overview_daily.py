@@ -129,6 +129,10 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(sum(c.parcel_count for c in country.children), 3)
         self.assertEqual(sum(c.drought_alert for c in country.children), 1)
         self.assertEqual(sum(c.flood for c in country.children), 1)
+        province_11 = next(c for c in country.children if c.code == "110000")
+        self.assertEqual(province_11.drought_ratio, 0.5)
+        self.assertEqual(province_11.flood_ratio, 0.5)
+        self.assertEqual(province_11.weak_growth_ratio, 0.5)
         self.assertEqual(
             country.filters["freshness"]["s2"],
             {
@@ -489,6 +493,10 @@ class LiveFactsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(country.drought, out.drought)
         self.assertEqual(country.flood, out.flood)
+        child = next(value for value in country.children if value.code == "110000")
+        self.assertAlmostEqual(child.drought_ratio, 1 / 3, places=6)
+        self.assertAlmostEqual(child.flood_ratio, 1 / 3, places=6)
+        self.assertEqual(child.weak_growth_ratio, 0)
         self.assertIn("p.deleted_at IS NULL", str(db.execute.call_args_list[0].args[0]))
 
 

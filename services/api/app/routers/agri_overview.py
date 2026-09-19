@@ -152,6 +152,13 @@ def _pad_adcode(level: OverviewLevel, code: str | None) -> str | None:
     return c.zfill(6) if len(c) < 6 else c
 
 
+def _affected_ratio(count: int, total: int) -> float:
+    """计算稳定的 0..1 受影响比例，兼容空区划并限制异常计数。"""
+    if total <= 0 or count <= 0:
+        return 0.0
+    return round(min(count / total, 1.0), 6)
+
+
 async def _agri_ready(db: AsyncSession) -> None:
     q = await db.execute(
         text(
@@ -687,7 +694,7 @@ async def _compute_live_stats(
     children = [
         OverviewChildOut(
             level=v["level"],
-            code=v["code"],
+            code=_pad_adcode(v["level"], v["code"]),
             name=v["name"],
             parcel_count=v["parcel_count"],
             drought_severe=v["drought_severe"],
@@ -696,6 +703,9 @@ async def _compute_live_stats(
             flood_alert=v["flood_alert"],
             weak_growth=v["weak_growth"],
             area_mu=round(v["area_mu"], 2),
+            drought_ratio=_affected_ratio(v["drought_alert"], v["parcel_count"]),
+            flood_ratio=_affected_ratio(v["flood_alert"], v["parcel_count"]),
+            weak_growth_ratio=_affected_ratio(v["weak_growth"], v["parcel_count"]),
         )
         for v in sorted(
             child_agg.values(), key=lambda x: (-x["parcel_count"], x["name"])
