@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -82,6 +83,8 @@ _LEVEL_NAME_COL = {
 }
 
 _CACHE_FRESH_HOURS = 36
+_overview_cache_ready = False
+_overview_cache_init_lock = asyncio.Lock()
 
 _ENSURE_CACHE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS agric_satellite.overview_stats_daily (
@@ -163,10 +166,20 @@ async def _agri_ready(db: AsyncSession) -> None:
 
 
 async def ensure_overview_cache_table(db: AsyncSession) -> None:
-    """CREATE TABLE IF NOT EXISTS for overview pre-agg cache."""
-    await db.execute(text(_ENSURE_CACHE_TABLE_SQL))
-    await db.execute(text(_ENSURE_CACHE_INDEX_SQL))
-    await db.flush()
+    """兼容旧部署初始化总览缓存表；同一API进程只执行一次DDL。"""
+    global _overview_cache_ready
+    if _overview_cache_ready:
+        return
+    async with _overview_cache_init_lock:
+        if _overview_cache_ready:
+            return
+        # 使用独立事务提交DDL，避免调用方后续业务回滚时把初始化结果一起回滚。
+        from app.core.database import engine
+
+        async with engine.begin() as connection:
+            await connection.execute(text(_ENSURE_CACHE_TABLE_SQL))
+            await connection.execute(text(_ENSURE_CACHE_INDEX_SQL))
+        _overview_cache_ready = True
 
 
 def _region_where(
@@ -842,6 +855,7 @@ async def overview_daily(
                 "job_count",
                 "pending_jobs",
                 "failed_jobs",
+                "failed_land_count",
                 "results_pending",
                 "error",
             )

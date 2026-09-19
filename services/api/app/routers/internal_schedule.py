@@ -36,6 +36,8 @@ from app.services.overview_daily import business_today, finalize_daily, prepare_
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
 
+OVERVIEW_UPSERT_BATCH_SIZE = 200
+
 
 class WeeklyIndexJobOut(BaseModel):
     land_id: str
@@ -470,7 +472,7 @@ async def finalize_overview(
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise HTTPException(400, "总览 OSS 结果格式无效")
 
-    from app.routers.agri_overview import _UPSERT_OVERVIEW_SQL, ensure_overview_cache_table
+    from app.routers.agri_overview import ensure_overview_cache_table
 
     window_from = payload.get("window_from")
     window_to = payload.get("window_to")
@@ -485,19 +487,19 @@ async def finalize_overview(
 
     await ensure_overview_cache_table(db)
     as_of = date.today()
-    region_count = 0
-    try:
-        for item in payload["results"]:
-            from app.schemas.agri import OverviewStatsOut
+    upsert_rows: list[dict[str, Any]] = []
+    from app.schemas.agri import OverviewStatsOut
 
+    try:
+        # 先完成全部结果校验和转换，再分批写库；任一结果非法时不会留下半批快照。
+        for item in payload["results"]:
             metric = OverviewStatsOut.model_validate(item).model_dump(
                 mode="json", by_alias=True
             )
             region = metric.get("region") or {}
             path = region.get("path") or []
             parent_code = path[-2].get("code") if len(path) >= 2 else None
-            await db.execute(
-                text(_UPSERT_OVERVIEW_SQL),
+            upsert_rows.append(
                 {
                     "as_of": as_of,
                     "level": region.get("level") or "country",
@@ -508,9 +510,17 @@ async def finalize_overview(
                     "window_from": window_from_date,
                     "window_to": window_to_date,
                     "crop": crop_key,
-                },
+                }
             )
-            region_count += 1
+
+        region_count = len(upsert_rows)
+        upsert_sql = text(_UPSERT_OVERVIEW_SQL)
+        for offset in range(0, region_count, OVERVIEW_UPSERT_BATCH_SIZE):
+            batch = upsert_rows[offset : offset + OVERVIEW_UPSERT_BATCH_SIZE]
+            await db.execute(
+                upsert_sql,
+                batch,
+            )
         await db.commit()
     except Exception:
         await db.rollback()

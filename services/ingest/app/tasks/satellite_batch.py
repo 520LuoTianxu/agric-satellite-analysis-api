@@ -416,11 +416,22 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
                 cloud_dedupe="none",
                 max_items=2000,
             )
+        # 失败明细用于批次结束后的定向补偿；保留“失败过”的候选集合，重复补偿是幂等的。
+        failed_land_ids: set[str] = set()
+        failed_scene_ids: set[str] = set()
+
+        def record_failures(lands_to_record, scene_id: str | None) -> None:
+            failed_land_ids.update(str(land["meta"]["land_id"]) for land in lands_to_record)
+            if scene_id:
+                failed_scene_ids.add(str(scene_id))
+
         progress = {
             "scenes_total": len(scenes),
             "scenes_done": 0,
             "products_published": 0,
             "failed": 0,
+            "failed_land_ids": [],
+            "failed_scene_ids": [],
             "published_products": [],
         }
         for scene in scenes:
@@ -430,6 +441,7 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
                     shared_bands, scl = _download_scene(scene, sensor, grid)
                 except Exception as exc:
                     progress["failed"] += len(selected)
+                    record_failures(selected, scene["id"])
                     logger.error(
                         "satellite_batch_download_failed",
                         job_id=job_id,
@@ -461,14 +473,18 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
                                 land["existing"].add(scene["date"])
                             else:
                                 progress["failed"] += 1
+                                record_failures([land], scene["id"])
                         except Exception as exc:
                             progress["failed"] += 1
+                            record_failures([land], scene["id"])
                             logger.error(
                                 "satellite_batch_land_failed",
                                 job_id=job_id,
                                 land_id=land["meta"]["land_id"],
                                 error=str(exc),
                             )
+            progress["failed_land_ids"] = sorted(failed_land_ids)
+            progress["failed_scene_ids"] = sorted(failed_scene_ids)
             progress["scenes_done"] += 1
             patch_job(job_id, {"progress_json": progress})
         if sensor == "S2" and decloud_enabled():

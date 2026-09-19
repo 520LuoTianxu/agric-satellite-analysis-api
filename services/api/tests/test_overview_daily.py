@@ -292,7 +292,10 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
             if "INSERT INTO" in str(call.args[0])
         ]
         self.assertEqual(len(writes), 1)
-        self.assertTrue(json.loads(writes[0].args[1]["metric"])["filters"]["snapshot"])
+        self.assertEqual(len(writes[0].args[1]), 1)
+        self.assertTrue(
+            json.loads(writes[0].args[1][0]["metric"])["filters"]["snapshot"]
+        )
         self.assertIn("<> 'true'", str(writes[0].args[0]))
 
     async def test_no_new_scene_still_produces_snapshot(self):
@@ -310,6 +313,41 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(out["status"], "partial")
         self.assertEqual(out["results_pending"], 1)
+        compute.assert_awaited_once()
+
+    async def test_terminal_failed_job_does_not_block_final_aggregation(self):
+        completed = satellite_job(
+            products=[{"land_id": "A", "date": DAY.isoformat()}]
+        )
+        failed = satellite_job("failed")
+        legacy_succeeded = satellite_job("succeeded")
+        run = run_with([completed, failed, legacy_succeeded])
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.execute = AsyncMock(
+            side_effect=[
+                result(scalar_one_or_none=run),
+                result(lands=[completed, failed, legacy_succeeded]),
+                result(scalar_one=0),
+                *([result()] * 20),
+            ]
+        )
+        with (
+            patch(
+                "app.routers.agri_overview._compute_live_stats",
+                new=AsyncMock(return_value=template()),
+            ) as compute,
+            patch(
+                "app.routers.agri_overview.ensure_overview_cache_table", new=AsyncMock()
+            ),
+        ):
+            out = await daily.finalize_daily(db, run.id)
+
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["pending_jobs"], 0)
+        self.assertEqual(out["failed_jobs"], 1)
+        self.assertEqual(out["failed_land_ids"], ["A"])
+        self.assertEqual(out["failed_land_count"], 1)
         compute.assert_awaited_once()
 
     async def test_old_worker_without_product_details_cannot_skip_ingestion(self):
@@ -505,3 +543,68 @@ class PublicRouteTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
         finally:
             app.dependency_overrides.pop(get_db, None)
+
+
+class OverviewFinalizeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_regions_are_upserted_in_batches(self):
+        from app.routers.internal_schedule import (
+            OVERVIEW_UPSERT_BATCH_SIZE,
+            OverviewRefreshFinalizeIn,
+            finalize_overview,
+        )
+
+        metric = template().model_dump(mode="json", by_alias=True)
+        payload = {
+            "window_from": "2026-07-20",
+            "window_to": "2026-09-18",
+            "crop": None,
+            "results": [metric] * (OVERVIEW_UPSERT_BATCH_SIZE + 1),
+        }
+        storage = MagicMock()
+        storage.get_bytes.return_value = json.dumps(payload).encode()
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        with (
+            patch("app.routers.internal_schedule.get_storage", return_value=storage),
+            patch(
+                "app.routers.agri_overview.ensure_overview_cache_table",
+                new=AsyncMock(),
+            ),
+        ):
+            out = await finalize_overview(
+                OverviewRefreshFinalizeIn(result_oss_key="overview/preagg/output/result.json"),
+                MagicMock(),
+                db,
+            )
+
+        self.assertEqual(out["regions"], OVERVIEW_UPSERT_BATCH_SIZE + 1)
+        self.assertEqual(db.execute.await_count, 2)
+        self.assertEqual(len(db.execute.call_args_list[0].args[1]), OVERVIEW_UPSERT_BATCH_SIZE)
+        self.assertEqual(len(db.execute.call_args_list[1].args[1]), 1)
+        db.commit.assert_awaited_once()
+
+
+class OverviewCacheInitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cache_ddl_runs_once_per_api_process(self):
+        from app.routers import agri_overview
+
+        connection = MagicMock()
+        connection.execute = AsyncMock()
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=connection)
+        context.__aexit__ = AsyncMock(return_value=False)
+        engine = MagicMock()
+        engine.begin.return_value = context
+
+        with (
+            patch.object(agri_overview, "_overview_cache_ready", False),
+            patch("app.core.database.engine", engine),
+        ):
+            await agri_overview.ensure_overview_cache_table(MagicMock())
+            await agri_overview.ensure_overview_cache_table(MagicMock())
+
+        engine.begin.assert_called_once()
+        self.assertEqual(connection.execute.await_count, 2)
