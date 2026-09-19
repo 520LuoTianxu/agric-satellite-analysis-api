@@ -270,6 +270,7 @@ class ScoutingObservation(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_status", "status"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
@@ -279,6 +280,10 @@ class Job(Base):
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    # 任务树查询使用独立关联列，避免管理接口每次扫描都解析 params_json。
+    parent_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     progress_json = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     params_json = mapped_column(JSONB, nullable=True)
@@ -633,12 +638,17 @@ class WorkItem(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_work_items_idempotency_key"),
         Index("idx_work_items_type", "type"),
+        Index("ix_work_items_status", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
     )
     type: Mapped[str] = mapped_column(String(64), nullable=False)
+    # WorkItem 通常由某个 Job 派生；单独存储父 ID 后可按索引读取任务树。
+    parent_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     payload_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

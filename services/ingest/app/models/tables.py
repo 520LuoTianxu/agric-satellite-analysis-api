@@ -244,6 +244,7 @@ class ScoutingObservation(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_status", "status"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
@@ -253,6 +254,10 @@ class Job(Base):
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    # 与 API 侧共享任务树关联列，便于运维页按父任务建立索引查询。
+    parent_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
     progress_json = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     params_json = mapped_column(JSONB, nullable=True)

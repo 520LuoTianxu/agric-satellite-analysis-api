@@ -247,6 +247,8 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                         land_id=group.anchor_land_id,
                         type="satellite_batch",
                         status="pending",
+                        # 预先写入父任务 ID，任务树查询无需再解析 overview_run_id。
+                        parent_job_id=run_id_for(day),
                         params_json={
                             "land_ids": group.land_ids,
                             "anchor_land_id": group.anchor_land_id,

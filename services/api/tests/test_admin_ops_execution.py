@@ -38,7 +38,7 @@ class _FakeDb:
 
 
 class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
-    async def test_execution_overview_counts_all_and_summarizes_recent_rows(self):
+    async def test_execution_overview_counts_all_and_returns_parent_groups(self):
         now = datetime.now(timezone.utc)
         job = SimpleNamespace(
             id=uuid.uuid4(),
@@ -71,8 +71,8 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
                 _FakeResult(rows=[("running", 2), ("failed", 1)]),
                 _FakeResult(rows=[("failed", 3), ("done", 5)]),
                 _FakeResult(items=[job]),
-                _FakeResult(items=[work_item]),
-                _FakeResult(items=[job]),
+                _FakeResult(rows=[]),
+                _FakeResult(rows=[]),
                 _FakeResult(items=[work_item]),
             ]
         )
@@ -83,8 +83,42 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             out.work_item_counts, {"failed": 3, "done": 5, "all": 8}
         )
-        self.assertEqual(out.jobs[0].progress_summary, {"phase": "download", "completed": 2})
-        self.assertEqual(out.work_items[0].error, "download failed")
+        self.assertEqual(len(out.groups), 2)
+
+    async def test_execution_overview_uses_aggregated_child_counts(self):
+        now = datetime.now(timezone.utc)
+        parent_id = uuid.uuid4()
+        parent = SimpleNamespace(
+            id=parent_id,
+            land_id=None,
+            type="overview_daily",
+            status="partial",
+            progress_json={"phase": "finalizing"},
+            params_json={"job_ids": [str(uuid.uuid4()), str(uuid.uuid4())]},
+            error=None,
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+        )
+        db = _FakeDb(
+            [
+                _FakeResult(rows=[("partial", 1)]),
+                _FakeResult(rows=[("failed", 1)]),
+                _FakeResult(items=[parent]),
+                _FakeResult(rows=[(parent_id, 2, 2, 1, 1, 0, now, "child failed")]),
+                _FakeResult(rows=[(parent_id, 2, 1, 1, 1, 0, 0, now, None)]),
+                _FakeResult(items=[]),
+            ]
+        )
+
+        out = await execution_overview(None, db, limit=10)
+
+        self.assertEqual(len(out.groups), 1)
+        self.assertEqual(out.groups[0].child_counts["total"], 3)
+        self.assertEqual(out.groups[0].child_counts["terminal"], 3)
+        self.assertEqual(out.groups[0].child_counts["completed"], 2)
+        self.assertEqual(out.groups[0].child_counts["failed"], 1)
+        self.assertEqual(out.groups[0].child_counts["work_items"], 2)
 
     def test_execution_groups_keep_failed_children_under_parent(self):
         now = datetime.now(timezone.utc)

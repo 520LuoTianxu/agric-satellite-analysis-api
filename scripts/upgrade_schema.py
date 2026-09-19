@@ -89,7 +89,9 @@ def _split_sql(sql: str) -> list[str]:
             continue
         if stripped.startswith("DO $upgrade$"):
             in_do = True
-        if not in_do and stripped.upper().startswith("SELECT"):
+        # 只忽略文件末尾的检查 SELECT；UPDATE/INSERT 子查询中的 SELECT
+        # 必须保留，否则包含 JSON 回填逻辑的升级脚本会被截断。
+        if not in_do and not buffer and stripped.upper().startswith("SELECT"):
             break
         buffer.append(line)
         if in_do and stripped == "$upgrade$;":
