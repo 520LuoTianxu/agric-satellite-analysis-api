@@ -86,6 +86,28 @@ def work_item_idempotency_key(
     return None
 
 
+def _parent_job_id_from_payload(payload: dict[str, Any]) -> uuid.UUID | None:
+    """从派发载荷提取父 Job，写入索引列供运维任务树快速查询。"""
+    extras = payload.get("extras")
+    extras = extras if isinstance(extras, dict) else {}
+    for value in (
+        payload.get("job_id"),
+        payload.get("parent_job_id"),
+        extras.get("job_id"),
+        extras.get("parent_job_id"),
+        extras.get("sentinel_job_id"),
+        extras.get("bridge_job_id"),
+    ):
+        if isinstance(value, uuid.UUID):
+            return value
+        if isinstance(value, str):
+            try:
+                return uuid.UUID(value)
+            except ValueError:
+                continue
+    return None
+
+
 def enqueue_work_item_sync(
     *,
     type: str,
@@ -114,6 +136,7 @@ def enqueue_work_item_sync(
                 return str(existing.id)
         item = WorkItem(
             type=type,
+            parent_job_id=_parent_job_id_from_payload(payload),
             payload_json=payload,
             status="pending",
             priority=int(priority),
@@ -183,6 +206,7 @@ async def enqueue_work_item(
 
     item = WorkItem(
         type=type,
+        parent_job_id=_parent_job_id_from_payload(payload),
         payload_json=payload,
         status="pending",
         priority=int(priority),
