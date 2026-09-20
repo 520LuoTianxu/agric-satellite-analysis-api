@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import date, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -13,6 +15,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
@@ -22,6 +25,7 @@ from app.models.tables import LandParcel, Job
 from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.window import resolve_assessment_window
 from app.schemas.monitoring import JobOut
+from app.schemas.satellite_batch import SatelliteBatchGroup
 from app.services.cdfinance_report_prefetch import (
     land_has_site_admission,
     normalize_optional_group_id,
@@ -29,7 +33,15 @@ from app.services.cdfinance_report_prefetch import (
     prefetch_cdfinance_for_report,
     resolve_request_token,
 )
-from pydantic import BaseModel, Field as PydanticField, field_validator, model_validator
+from app.services.mysql_land_sync import sync_selected_lands
+from app.services.satellite_batch import build_satellite_batch_jobs
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field as PydanticField,
+    field_validator,
+    model_validator,
+)
 
 
 class AssessmentGenerateRequest(BaseModel):
@@ -89,6 +101,97 @@ class AssessmentGenerateRequest(BaseModel):
         return self
 
 
+class AssessmentBatchRequest(BaseModel):
+    """批量选地报告请求；地块边界先从 Smart 源库同步再统一拉取遥感。"""
+
+    land_ids: list[
+        Annotated[str, PydanticField(min_length=1, max_length=64)]
+    ] = PydanticField(
+        min_length=1,
+        max_length=1000,
+        validation_alias=AliasChoices("landIdList", "landIdlist", "land_ids"),
+        serialization_alias="landIdList",
+    )
+    crop_type: str | None = PydanticField(
+        default=None,
+        description="批量地块共用作物；不传时使用各地块已有 crop_type",
+    )
+    date_from: str | None = PydanticField(
+        default=None, description="YYYY-MM-DD；不传时按 years 回溯"
+    )
+    years: int | None = PydanticField(default=None, ge=1, le=20)
+    sensors: list[Literal["S1", "S2"]] = PydanticField(
+        default_factory=lambda: ["S1", "S2"], min_length=1, max_length=2
+    )
+    force: bool = PydanticField(
+        default=False, description="是否重新拉取已有日期的遥感产品"
+    )
+
+    @field_validator("land_ids", mode="before")
+    @classmethod
+    def _normalize_land_ids(cls, value: Any) -> Any:
+        # 前端可能传数字编号或重复编号；统一成 Smart/遥感主表使用的字符串键。
+        if isinstance(value, list):
+            if len(value) > 1000:
+                raise ValueError("landIdList最多包含1000个地块")
+            if any(
+                isinstance(item, bool) or not isinstance(item, (str, int))
+                for item in value
+            ):
+                raise ValueError("landIdList必须包含字符串或整数编号")
+            normalized = [str(item).strip() for item in value]
+            if any(not item for item in normalized):
+                raise ValueError("landIdList不能包含空编号")
+            return list(dict.fromkeys(normalized))
+        return value
+
+    @field_validator("sensors", mode="before")
+    @classmethod
+    def _unique_sensors(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return list(dict.fromkeys(value))
+        return value
+
+    @field_validator("date_from", mode="before")
+    @classmethod
+    def _empty_date_from(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def _validate_date_from_iso(self) -> "AssessmentBatchRequest":
+        if self.date_from:
+            try:
+                date.fromisoformat(self.date_from[:10])
+            except ValueError as exc:
+                raise ValueError("date_from must be YYYY-MM-DD") from exc
+            self.date_from = self.date_from[:10]
+        return self
+
+
+class AssessmentBatchReportOut(BaseModel):
+    job_id: uuid.UUID
+    land_id: str
+    status: str
+    progress_json: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class AssessmentBatchResponse(BaseModel):
+    batch_id: uuid.UUID
+    status: str
+    land_ids: list[str]
+    date_from: date
+    date_to: date
+    group_count: int
+    satellite_job_count: int
+    report_job_count: int
+    groups: list[SatelliteBatchGroup]
+    reports: list[AssessmentBatchReportOut]
+
+
 class AssessmentDimensionOut(BaseModel):
     key: str
     score: float
@@ -130,6 +233,9 @@ class AssessmentScorecardOut(BaseModel):
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
+_ASSESSMENT_BATCH_NAMESPACE = uuid.uuid5(
+    uuid.NAMESPACE_URL, "agric-satellite/assessment-report-batch"
+)
 
 
 async def _get_field(land_id: str, org_id: uuid.UUID, db: AsyncSession) -> LandParcel:
@@ -164,6 +270,359 @@ async def _maybe_enqueue_assessment_work(
     )
     await db.commit()
     return str(item.id)
+
+
+def _assessment_batch_id(body: AssessmentBatchRequest, *, date_from: str, date_to: str, crop_type: str | None) -> uuid.UUID:
+    """根据请求内容生成稳定批次 ID，重复点击不会重复创建下载任务。"""
+    key = json.dumps(
+        {
+            "land_ids": sorted(body.land_ids),
+            "crop_type": crop_type or "",
+            "date_from": date_from,
+            "date_to": date_to,
+            "sensors": sorted(body.sensors),
+            "force": body.force,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return uuid.uuid5(_ASSESSMENT_BATCH_NAMESPACE, key)
+
+
+async def _assessment_batch_response(
+    db: AsyncSession, batch_id: uuid.UUID
+) -> AssessmentBatchResponse:
+    parent = await db.get(Job, batch_id)
+    if not parent or parent.type != "assessment_batch":
+        raise HTTPException(status_code=404, detail="Assessment batch not found")
+
+    children = (
+        await db.execute(
+            select(Job)
+            .where(Job.parent_job_id == batch_id)
+            .order_by(Job.created_at.asc(), Job.id.asc())
+        )
+    ).scalars().all()
+    params = parent.params_json or {}
+    groups = [
+        SatelliteBatchGroup.model_validate(item)
+        for item in (params.get("groups") or [])
+    ]
+    reports = [
+        AssessmentBatchReportOut(
+            job_id=job.id,
+            land_id=str(job.land_id),
+            status=job.status,
+            progress_json=job.progress_json,
+            error=job.error,
+        )
+        for job in children
+        if job.type == "assessment_report" and job.land_id
+    ]
+    report_statuses = [item.status for item in reports]
+    failed = sum(status in {"failed", "cancelled"} for status in report_statuses)
+    succeeded = sum(status == "succeeded" for status in report_statuses)
+    if failed and succeeded:
+        batch_status = "partial"
+    elif failed:
+        batch_status = "failed"
+    elif reports and succeeded == len(reports):
+        batch_status = "succeeded"
+    elif parent.status in {"failed", "cancelled"}:
+        batch_status = parent.status
+    elif parent.status in {"running", "completed"} or any(
+        job.status in {"running", "completed"} for job in children
+    ):
+        batch_status = "running"
+    else:
+        batch_status = "queued"
+
+    return AssessmentBatchResponse(
+        batch_id=batch_id,
+        status=batch_status,
+        land_ids=[str(value) for value in (params.get("land_ids") or [])],
+        date_from=date.fromisoformat(str(params["date_from"])[:10]),
+        date_to=date.fromisoformat(str(params["date_to"])[:10]),
+        group_count=len(groups),
+        satellite_job_count=sum(job.type == "satellite_batch" for job in children),
+        report_job_count=len(reports),
+        groups=groups,
+        reports=reports,
+    )
+
+
+@router.post(
+    "/lands/assessment-reports/batch",
+    response_model=AssessmentBatchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@limiter.limit("2/minute")
+async def create_assessment_reports_batch(
+    request: Request,
+    body: AssessmentBatchRequest,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """同步 Smart 指定地块后，共享遥感窗口并逐地块生成选地报告。"""
+    del ctx  # 权限依赖仍需执行；当前认证关闭时不需要读取上下文内容。
+    from app.core.crops import crop_name_zh, normalize_crop_key, require_crop_key
+
+    try:
+        date_from, date_to, weather_days, years_used = resolve_assessment_window(
+            date_from=body.date_from,
+            years=body.years,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    requested_crop = normalize_crop_key(body.crop_type)
+    if body.crop_type and not requested_crop:
+        try:
+            requested_crop = require_crop_key(body.crop_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    batch_id = _assessment_batch_id(
+        body, date_from=date_from, date_to=date_to, crop_type=requested_crop
+    )
+    existing = await db.get(Job, batch_id)
+    if existing:
+        return await _assessment_batch_response(db, batch_id)
+
+    if not settings.mysql_source_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Smart/MySQL source is not enabled; set MYSQL_SOURCE_ENABLED=true",
+        )
+
+    try:
+        source_summary = await sync_selected_lands(body.land_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("assessment_batch_smart_sync_failed", batch_id=str(batch_id))
+        raise HTTPException(status_code=503, detail="Smart 地块数据同步失败") from exc
+
+    sync_status = source_summary.get("status")
+    if sync_status == "skipped_locked":
+        raise HTTPException(status_code=409, detail="Smart 地块同步正在进行，请稍后重试")
+    if sync_status == "not_found":
+        raise HTTPException(
+            status_code=404,
+            detail={"missing_land_ids": source_summary.get("missing_land_ids", [])},
+        )
+    if sync_status in {"filtered", "invalid"}:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "filtered_land_ids": source_summary.get("filtered_land_ids", []),
+                "invalid_land_ids": source_summary.get("invalid_land_ids", []),
+            },
+        )
+    if sync_status != "completed":
+        raise HTTPException(status_code=503, detail="Smart 地块数据同步未完成")
+
+    lands = (
+        await db.execute(
+            select(LandParcel).where(
+                LandParcel.land_id.in_(body.land_ids),
+                LandParcel.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    lands_by_id = {str(land.land_id): land for land in lands}
+    missing_after_sync = [land_id for land_id in body.land_ids if land_id not in lands_by_id]
+    if missing_after_sync:
+        raise HTTPException(status_code=404, detail={"missing_land_ids": missing_after_sync})
+    ordered_lands = [lands_by_id[land_id] for land_id in body.land_ids]
+
+    missing_crops: list[str] = []
+    land_crops: dict[str, str] = {}
+    for land in ordered_lands:
+        crop_key = requested_crop or normalize_crop_key(land.crop_type)
+        if not crop_key:
+            missing_crops.append(str(land.land_id))
+            continue
+        land_crops[str(land.land_id)] = crop_key
+        if land.crop_type != crop_key:
+            # Smart 源库的 planting_type 语义不强行映射；报告批次明确的公共作物
+            # 或地块已有作物才写入平台标准 crop_type，保证后续物候计算一致。
+            land.crop_type = crop_key
+    if missing_crops:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "crop_required",
+                "message": "请传入 crop_type，或先为所有地块绑定作物",
+                "missing_land_ids": missing_crops,
+            },
+        )
+
+    try:
+        groups, satellite_jobs = await asyncio.to_thread(
+            build_satellite_batch_jobs,
+            ordered_lands,
+            date_from=date.fromisoformat(date_from),
+            date_to=date.fromisoformat(date_to),
+            sensors=body.sensors,
+            force=body.force,
+            parent_job_id=batch_id,
+            id_namespace=batch_id,
+            chunk_days=settings.index_backfill_chunk_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    report_jobs: list[Job] = []
+    for land in ordered_lands:
+        land_id = str(land.land_id)
+        report_job_id = uuid.uuid5(batch_id, f"assessment_report:{land_id}")
+        report_jobs.append(
+            Job(
+                id=report_job_id,
+                land_id=land_id,
+                type="assessment_report",
+                status="pending",
+                parent_job_id=batch_id,
+                params_json={
+                    "kind": "land_assessment_plain",
+                    "batch_id": str(batch_id),
+                    "crop_type": land_crops[land_id],
+                    "crop_name_zh": crop_name_zh(land_crops[land_id]),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "years": years_used,
+                    "pull_data": True,
+                    "shared_satellite_batch": True,
+                },
+            )
+        )
+
+    parent = Job(
+        id=batch_id,
+        type="assessment_batch",
+        status="pending",
+        progress_json={
+            "stage": "queued",
+            "land_count": len(ordered_lands),
+            "group_count": len(groups),
+            "satellite_job_count": len(satellite_jobs),
+            "report_job_count": len(report_jobs),
+        },
+        params_json={
+            "land_ids": [str(land.land_id) for land in ordered_lands],
+            "date_from": date_from,
+            "date_to": date_to,
+            "years": years_used,
+            "sensors": list(body.sensors),
+            "force": body.force,
+            "source": "smart_mysql_selected",
+            "groups": [group.model_dump(mode="json") for group in groups],
+            "satellite_job_ids": [str(job.id) for job in satellite_jobs],
+            "report_job_ids": [str(job.id) for job in report_jobs],
+        },
+    )
+    db.add(parent)
+    for job in satellite_jobs:
+        db.add(job)
+    for job in report_jobs:
+        db.add(job)
+    await db.commit()
+
+    try:
+        from app.mq_publish import publish_api_task
+
+        # 先派发共享遥感任务，再派发天气/土壤和报告 follow-up，
+        # 确保报告任务天然等待同一批次的遥感覆盖，而不是重复逐地块下载。
+        for job in satellite_jobs:
+            task_id = str(job.id)
+            mq_task_id = await asyncio.to_thread(
+                publish_api_task,
+                type="satellite_batch",
+                land_id=str(job.land_id),
+                task_id=task_id,
+                extras={"job_id": task_id, "assessment_batch_id": str(batch_id)},
+            )
+            job.params_json = {
+                **(job.params_json or {}),
+                "dispatch_status": "queued",
+                "mq_task_id": mq_task_id,
+            }
+
+        report_by_land = {str(job.land_id): job for job in report_jobs}
+        for land in ordered_lands:
+            land_id = str(land.land_id)
+            report_job = report_by_land[land_id]
+            report_mq_task_id = uuid.uuid5(batch_id, f"report_mq:{land_id}")
+            bootstrap_task_id = uuid.uuid5(batch_id, f"bootstrap:{land_id}")
+            await asyncio.to_thread(
+                publish_api_task,
+                type="land_bootstrap",
+                land_id=land_id,
+                task_id=str(bootstrap_task_id),
+                extras={
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "days": weather_days,
+                    "weather_days": weather_days,
+                    "source": "assessment_batch",
+                    "skip_indices": True,
+                    "followup_assessment": {
+                        "job_id": str(report_job.id),
+                        "mq_task_id": str(report_mq_task_id),
+                        "crop_type": land_crops[land_id],
+                        "crop_name_zh": crop_name_zh(land_crops[land_id]),
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "years": years_used,
+                    },
+                },
+            )
+            report_job.params_json = {
+                **(report_job.params_json or {}),
+                "dispatch_status": "queued",
+                "bootstrap_task_id": str(bootstrap_task_id),
+                "mq_task_id": str(report_mq_task_id),
+            }
+
+        parent.status = "running"
+        parent.progress_json = {
+            **(parent.progress_json or {}),
+            "stage": "dispatched",
+            "percent": 5,
+        }
+        await db.commit()
+    except Exception as exc:
+        logger.exception("assessment_batch_dispatch_failed", batch_id=str(batch_id))
+        parent.status = "failed"
+        parent.error = "批量选地报告任务派发失败"
+        parent.progress_json = {
+            **(parent.progress_json or {}),
+            "stage": "dispatch_failed",
+        }
+        for job in satellite_jobs + report_jobs:
+            if (job.params_json or {}).get("dispatch_status") != "queued":
+                job.status = "failed"
+                job.error = "批量任务派发失败"
+        await db.commit()
+        raise HTTPException(status_code=503, detail="批量选地报告任务派发失败") from exc
+
+    return await _assessment_batch_response(db, batch_id)
+
+
+@router.get(
+    "/lands/assessment-reports/batch/{batch_id}",
+    response_model=AssessmentBatchResponse,
+)
+async def get_assessment_reports_batch(
+    batch_id: uuid.UUID,
+    ctx: Annotated[OrgContext, Depends(get_org_context)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """返回批量选地报告的聚合状态和每块地的 PDF Job 状态。"""
+    del ctx
+    return await _assessment_batch_response(db, batch_id)
 
 
 @router.post(

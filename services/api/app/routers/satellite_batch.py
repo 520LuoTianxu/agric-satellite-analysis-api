@@ -1,8 +1,6 @@
 """遥感地块清单聚合回填接口。"""
 
 import asyncio
-import uuid
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
-from app.models.tables import Job, LandParcel
+from app.models.tables import LandParcel
 from app.mq_publish import publish_api_task
 from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
-from app.services.satellite_batch import group_satellite_lands
+from app.services.satellite_batch import build_satellite_batch_jobs
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
@@ -48,41 +46,20 @@ async def backfill_satellite_batch(
     if missing:
         raise HTTPException(status_code=404, detail={"missing_land_ids": missing})
     try:
-        groups = await asyncio.to_thread(group_satellite_lands, lands)
+        groups, jobs = await asyncio.to_thread(
+            build_satellite_batch_jobs,
+            lands,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            sensors=body.sensors,
+            force=body.force,
+            chunk_days=settings.index_backfill_chunk_days,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    jobs = []
-    for group in groups:
-        cursor = body.date_from
-        while cursor <= body.date_to:
-            end = min(
-                cursor + timedelta(days=max(settings.index_backfill_chunk_days, 1) - 1),
-                body.date_to,
-            )
-            for sensor in body.sensors:
-                job = Job(
-                    id=uuid.uuid4(),
-                    land_id=group.anchor_land_id,
-                    type="satellite_batch",
-                    status="pending",
-                    params_json={
-                        "land_ids": group.land_ids,
-                        "anchor_land_id": group.anchor_land_id,
-                        "processing_window_km": 5.0,
-                        "oversized": group.oversized,
-                        "download_bbox": list(group.download_bbox),
-                        "aggregation_bbox": list(group.aggregation_bbox),
-                        "sensor": sensor,
-                        "date_from": cursor.isoformat(),
-                        "date_to": end.isoformat(),
-                        "force": body.force,
-                    },
-                )
-                db.add(job)
-                group.job_ids.append(str(job.id))
-                jobs.append(job)
-            cursor = end + timedelta(days=1)
+    for job in jobs:
+        db.add(job)
     # 先提交所有任务记录，下载机只需通过内部HTTP读job即可拿到地块列表与窗口。
     await db.commit()
     for index, job in enumerate(jobs):

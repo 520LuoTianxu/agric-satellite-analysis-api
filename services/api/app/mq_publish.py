@@ -90,66 +90,81 @@ def _fallback_celery(
         days = extras.get("days") or extras.get("weather_days")
         if days is not None:
             weather_kwargs["days"] = int(days)
-        send_task(
+        weather_result = send_task(
             "app.tasks.weather.backfill_weather_for_land",
             args=[land_id],
             kwargs=weather_kwargs,
         )
-        send_task("app.tasks.soil.fetch_soil_for_land", args=[land_id])
+        soil_result = send_task("app.tasks.soil.fetch_soil_for_land", args=[land_id])
         if not extras.get("skip_indices"):
             index_kwargs: dict[str, Any] = {}
             for key in ("sentinel_job_id", "date_from", "date_to"):
                 if extras.get(key) is not None:
                     index_kwargs[key] = extras[key]
-            send_task(
+            index_result = send_task(
                 "app.tasks.backfill.backfill_indices_for_land",
                 args=[land_id],
                 kwargs=index_kwargs,
             )
-            followup = extras.get("followup_assessment")
-            if isinstance(followup, dict) and followup.get("job_id"):
-                kwargs = {
-                    "job_id": str(followup["job_id"]),
-                    "land_id": land_id,
-                    "pull_data": True,
-                }
-                for key in (
-                    "crop_type",
-                    "crop_name_zh",
-                    "date_from",
-                    "date_to",
-                    "years",
-                    "mq_task_id",
-                ):
-                    if followup.get(key) is not None:
-                        kwargs[key] = followup[key]
-                send_task(
-                    "app.tasks.assessment_report.generate_assessment_report",
-                    kwargs=kwargs,
-                    queue="ingest",
-                )
-            followup_sg = extras.get("followup_season_growth")
-            if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
-                kwargs = {
-                    "job_id": str(followup_sg["job_id"]),
-                    "land_id": land_id,
-                    "pull_data": True,
-                }
-                for key in (
-                    "start_date",
-                    "end_date",
-                    "crops",
-                    "label",
-                    "material_keys",
-                    "mq_task_id",
-                ):
-                    if followup_sg.get(key) is not None:
-                        kwargs[key] = followup_sg[key]
-                send_task(
-                    "app.tasks.season_growth_report.generate_season_growth_report",
-                    kwargs=kwargs,
-                    queue="ingest",
-                )
+        else:
+            index_result = None
+
+        # 即使本次复用共享遥感批次而跳过单地块指数下载，也必须继续派发报告；
+        # 报告任务会通过 wait_celery_ids 等待天气/土壤，并自行校验共享遥感覆盖。
+        followup = extras.get("followup_assessment")
+        if isinstance(followup, dict) and followup.get("job_id"):
+            kwargs = {
+                "job_id": str(followup["job_id"]),
+                "land_id": land_id,
+                "pull_data": True,
+                "wait_celery_ids": [
+                    result.id
+                    for result in (weather_result, soil_result, index_result)
+                    if result is not None and getattr(result, "id", None)
+                ],
+            }
+            for key in (
+                "crop_type",
+                "crop_name_zh",
+                "date_from",
+                "date_to",
+                "years",
+                "mq_task_id",
+            ):
+                if followup.get(key) is not None:
+                    kwargs[key] = followup[key]
+            send_task(
+                "app.tasks.assessment_report.generate_assessment_report",
+                kwargs=kwargs,
+                queue="ingest",
+            )
+        followup_sg = extras.get("followup_season_growth")
+        if isinstance(followup_sg, dict) and followup_sg.get("job_id"):
+            kwargs = {
+                "job_id": str(followup_sg["job_id"]),
+                "land_id": land_id,
+                "pull_data": True,
+                "wait_celery_ids": [
+                    result.id
+                    for result in (weather_result, soil_result, index_result)
+                    if result is not None and getattr(result, "id", None)
+                ],
+            }
+            for key in (
+                "start_date",
+                "end_date",
+                "crops",
+                "label",
+                "material_keys",
+                "mq_task_id",
+            ):
+                if followup_sg.get(key) is not None:
+                    kwargs[key] = followup_sg[key]
+            send_task(
+                "app.tasks.season_growth_report.generate_season_growth_report",
+                kwargs=kwargs,
+                queue="ingest",
+            )
     elif type == "agri_bridge":
         send_task(
             "app.tasks.agri_bridge.bridge_land_stac_to_agri",

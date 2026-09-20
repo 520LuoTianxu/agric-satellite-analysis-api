@@ -13,6 +13,7 @@ import json
 import math
 import uuid
 from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -423,6 +424,7 @@ async def _apply_batch(
     date_from: date,
     date_to: date,
     summary: dict[str, Any],
+    create_rs_jobs: bool = True,
 ) -> None:
     ids = [record.land_id for record in records]
     existing_rows = (
@@ -497,6 +499,12 @@ async def _apply_batch(
             set_={field: getattr(land_insert.excluded, field) for field in land_update_fields},
         )
     )
+
+    if not create_rs_jobs:
+        # 批量选地报告会在上层统一创建共享 5×5 km satellite_batch Job；
+        # 这里仅同步 Smart 地块主数据，禁止再为每块地派发重复的单地块回填。
+        await db.commit()
+        return
 
     dispatch: list[tuple[SourceParcel, uuid.UUID, Job]] = []
     for record in records:
@@ -616,6 +624,142 @@ async def _record_audit(summary: dict[str, Any]) -> None:
             )
         )
         await db.commit()
+
+
+def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]]:
+    """构造 Smart 精确地块查询，参数名固定生成以避免拼接用户输入。"""
+    normalized = list(dict.fromkeys(str(value).strip() for value in land_ids))
+    if not normalized or any(not value for value in normalized):
+        raise ValueError("land_ids must contain at least one non-empty ID")
+
+    names = [f"selected_land_{index}" for index in range(len(normalized))]
+    placeholders = ", ".join(f":{name}" for name in names)
+    order_clause = "    ORDER BY lg.group_id, al.land_id"
+    source_text = SOURCE_SQL.text.replace(
+        order_clause,
+        f"      AND CAST(al.land_id AS CHAR) IN ({placeholders})\n{order_clause}",
+        1,
+    )
+    if source_text == SOURCE_SQL.text:
+        raise RuntimeError("selected Smart land query could not be constructed")
+    return text(source_text), dict(zip(names, normalized, strict=True))
+
+
+async def sync_selected_lands(
+    land_ids: Sequence[str], *, today: date | None = None
+) -> dict[str, Any]:
+    """从 Smart/MySQL 同步指定地块到 PostgreSQL，不派发单地块遥感任务。
+
+    批量选地报告需要先拿到请求地块的最新边界，再统一计算 5×5 km 共享窗口。
+    因此这里复用正式同步的标准化和 upsert 逻辑，但关闭其原本的单地块
+    ``satellite_analysis`` 派发，避免之后与批量窗口任务重复下载。
+    """
+    requested = list(dict.fromkeys(str(value).strip() for value in land_ids))
+    if not requested or any(not value for value in requested):
+        raise ValueError("land_ids must contain at least one non-empty ID")
+
+    summary: dict[str, Any] = {
+        "status": "running",
+        "mode": "selected",
+        "run_id": str(uuid.uuid4()),
+        "requested_land_ids": requested,
+        "source_rows": 0,
+        "synced_land_ids": [],
+        "missing_land_ids": [],
+        "filtered_land_ids": [],
+        "invalid_land_ids": [],
+    }
+    if not settings.mysql_source_enabled:
+        summary["status"] = "disabled"
+        return summary
+
+    from app.core.database import async_session, engine as target_engine
+
+    business_day = today or datetime.now(ZoneInfo(settings.mysql_sync_timezone)).date()
+    source_engine = _mysql_engine()
+    run_id = uuid.UUID(summary["run_id"])
+    try:
+        async with target_engine.connect() as lock_conn:
+            locked = await lock_conn.scalar(
+                text("SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
+                {"lock_key": SYNC_LOCK_KEY},
+            )
+            if not locked:
+                summary["status"] = "skipped_locked"
+                return summary
+
+            try:
+                source_query, source_params = _selected_source_query(requested)
+                async with source_engine.connect() as source_conn:
+                    result = await source_conn.execute(source_query, source_params)
+                    rows = [dict(row) for row in result.mappings().all()]
+
+                summary["source_rows"] = len(rows)
+                source_ids = {
+                    raw_id
+                    for row in rows
+                    if (raw_id := _string_or_none(row.get("land_id")))
+                }
+                missing = sorted(set(requested) - source_ids)
+                summary["missing_land_ids"] = missing
+
+                records: list[SourceParcel] = []
+                if not missing:
+                    for row in rows:
+                        raw_land_id = _string_or_none(row.get("land_id"))
+                        if (
+                            is_excluded_schedule_base_id(row.get("group_base_id"))
+                            or not is_scheduled_land_allowed(
+                                row.get("base_id"), row.get("land_area")
+                            )
+                        ):
+                            if raw_land_id:
+                                summary["filtered_land_ids"].append(raw_land_id)
+                            continue
+                        try:
+                            records.append(normalize_source_row(row))
+                        except (TypeError, ValueError):
+                            if raw_land_id:
+                                summary["invalid_land_ids"].append(raw_land_id)
+
+                if summary["missing_land_ids"]:
+                    summary["status"] = "not_found"
+                elif summary["filtered_land_ids"]:
+                    summary["status"] = "filtered"
+                elif summary["invalid_land_ids"]:
+                    summary["status"] = "invalid"
+                else:
+                    async with async_session() as target_db:
+                        await _apply_batch(
+                            target_db,
+                            records,
+                            run_id=run_id,
+                            date_from=business_day,
+                            date_to=business_day,
+                            summary=summary,
+                            create_rs_jobs=False,
+                        )
+                    summary["synced_land_ids"] = [record.land_id for record in records]
+                    summary["status"] = "completed"
+            finally:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
+                    {"lock_key": SYNC_LOCK_KEY},
+                )
+
+        await _record_audit(summary)
+        logger.info("mysql_selected_land_sync_completed", **summary)
+        return summary
+    except Exception:
+        summary["status"] = "failed"
+        try:
+            await _record_audit(summary)
+        except Exception:
+            logger.exception("mysql_selected_land_sync_audit_failed", run_id=str(run_id))
+        logger.exception("mysql_selected_land_sync_failed", run_id=str(run_id))
+        raise
+    finally:
+        await source_engine.dispose()
 
 
 async def run_land_sync(*, today: date | None = None) -> dict[str, Any]:
