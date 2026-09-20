@@ -66,6 +66,6 @@ def test_subtract_months_uses_calendar_months():
     assert subtract_months(date(2026, 9, 17), 24) == date(2024, 9, 17)
 
 
-def test_next_sync_at_is_beijing_23_00():
-    now = datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)
-    assert next_sync_at(now) == datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+def test_next_sync_at_is_beijing_22_00():
+    now = datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc)
+    assert next_sync_at(now) == datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)

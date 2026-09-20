@@ -879,7 +879,7 @@ async def overview_daily(
         "today": business_today().isoformat(),
         "schedule": {
             "enabled": common_settings.schedule_daily_satellite_enabled,
-            "time": "19:15",
+            "time": "01:00",
             "timezone": "Asia/Shanghai",
         },
     }

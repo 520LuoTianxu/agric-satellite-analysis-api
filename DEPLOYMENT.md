@@ -184,7 +184,7 @@ The API-machine override starts one `land_sync` service. It reads the source
 tables `agriculture_land` and `agriculture_land_group` with a read-only MySQL
 account, writes the canonical PostgreSQL tables `agric_satellite.farms` and
 `agric_satellite.land_parcels`, and dispatches a 24-calendar-month S1/S2
-backfill for new or boundary-changed parcels. It runs at 23:00 in
+backfill for new or boundary-changed parcels. It runs at 22:00 in
 `Asia/Shanghai`; the download machine uses a 5 km × 5 km square per land
 task and excludes any grouped land whose complete boundary crosses that
 square. The scheduler uses a PostgreSQL advisory lock so only one instance
