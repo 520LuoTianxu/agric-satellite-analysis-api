@@ -34,6 +34,42 @@ TERMINAL_SATELLITE_JOB_STATUSES = frozenset(
     {"completed", "succeeded", "failed", "cancelled"}
 )
 FAILED_SATELLITE_JOB_STATUSES = frozenset({"failed", "cancelled"})
+# 下载机任务的硬超时是30分钟；给网络抖动和worker重启留出余量后，
+# 超过2小时仍没有终态基本可以判定为worker丢失，不能让它永久阻塞每日汇总。
+STALE_SATELLITE_JOB_AFTER = timedelta(hours=2)
+STALE_SATELLITE_JOB_ERROR = "下载任务超过2小时无终态，已自动标记失败"
+
+
+def recover_stale_satellite_jobs(
+    jobs: list[Job], *, now: datetime | None = None
+) -> list[Job]:
+    """回收worker丢失或未成功入队的任务，让失败地块进入后续补偿队列。"""
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - STALE_SATELLITE_JOB_AFTER
+    recovered: list[Job] = []
+    for job in jobs:
+        if job.status not in {"pending", "running"}:
+            continue
+        # running优先看实际启动时间；旧数据没有started_at时退回created_at，
+        # pending只看创建时间，防止从未成功入队的任务永久阻塞父任务。
+        reference = job.started_at if job.status == "running" else job.created_at
+        if reference is None or reference >= cutoff:
+            continue
+        progress = dict(job.progress_json or {})
+        progress.update(
+            {
+                "stale_recovered": True,
+                "stale_recovered_at": current.isoformat(),
+                "stale_reason": STALE_SATELLITE_JOB_ERROR,
+            }
+        )
+        # 任务失败不应阻塞全国汇总；补偿任务可根据该标记和失败地块明细继续处理。
+        job.status = "failed"
+        job.finished_at = current
+        job.error = STALE_SATELLITE_JOB_ERROR
+        job.progress_json = progress
+        recovered.append(job)
+    return recovered
 
 
 def business_today() -> date:
@@ -356,6 +392,10 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         if ids
         else []
     )
+    recovered = recover_stale_satellite_jobs(jobs)
+    if recovered:
+        # 让后续状态统计立即看到回收结果；不提前写快照，快照仍由本次终态汇总统一提交。
+        await db.flush()
     # 失败地块交给后续补偿，不应阻塞本次全国汇总；只有未进入终态的任务才算 pending。
     pending = (
         sum(job.status not in TERMINAL_SATELLITE_JOB_STATUSES for job in jobs)
@@ -421,7 +461,9 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         "phase": "downloading" if pending else "waiting_results",
     }
     run.progress_json = progress
-    if (pending or missing) and not expired:
+    # 子任务未全部进入终态时不能因为父任务年龄过大而提前汇总；pending/running
+    # 会由上面的回收逻辑转成failed，只有此后才允许生成带失败明细的partial快照。
+    if pending or (missing and not expired):
         await db.commit()
         return run_summary(run)
     partial = bool(pending or missing or failed or progress.get("invalid_land_ids"))

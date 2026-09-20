@@ -338,6 +338,11 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
         job = get_job(job_id)
         if job.get("status") == "completed":
             return {"job_id": job_id, "status": "already_handled"}
+        if job.get("status") in {"failed", "cancelled"} and (
+            job.get("progress_json") or {}
+        ).get("stale_recovered"):
+            # API汇总已将丢失的worker任务回收为失败，迟到的旧worker不再重复消耗下载资源。
+            return {"job_id": job_id, "status": "stale_recovered"}
         params = job["params_json"]
         sensor = params["sensor"]
         if sensor not in {"S1", "S2"}:
