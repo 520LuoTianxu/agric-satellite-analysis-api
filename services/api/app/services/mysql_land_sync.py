@@ -24,6 +24,7 @@ from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
@@ -339,9 +340,10 @@ def next_sync_at(now: datetime | None = None) -> datetime:
 
 
 def _mysql_engine() -> AsyncEngine:
-    url = settings.mysql_source_url.strip()
-    if not url:
+    raw_url = settings.mysql_source_url.strip()
+    if not raw_url:
         raise RuntimeError("MYSQL_SOURCE_URL is required when MySQL sync is enabled")
+    url = _normalize_mysql_source_url(raw_url)
     return create_async_engine(
         url,
         pool_pre_ping=True,
@@ -350,6 +352,45 @@ def _mysql_engine() -> AsyncEngine:
         pool_recycle=3600,
         connect_args={"connect_timeout": 10},
     )
+
+
+def _normalize_mysql_source_url(raw_url: str | URL) -> URL:
+    """把 JDBC 风格的 Smart 连接串转换成 asyncmy 可接受的非 SSL URL。
+
+    测试环境沿用了 Java 客户端的连接参数；SQLAlchemy 会把这些参数原样
+    传给 asyncmy，而 asyncmy 不认识 ``useSSL``、``serverTimezone`` 等名称，
+    会在真正连接前抛出 ``unexpected keyword argument``。当前 API 机明确不
+    使用 SSL，因此 SSL 开关及其它 JDBC 专属参数都必须从 URL 中移除。
+    """
+    # 传入 URL 对象时保留已经解析好的特殊字符密码，避免再次转字符串后
+    # 把密码中的 ``@`` 误识别成凭据与 Host 的分隔符。
+    url = raw_url if isinstance(raw_url, URL) else make_url(raw_url)
+    query = dict(url.query)
+
+    character_encoding = query.pop("characterEncoding", None)
+    if character_encoding and "charset" not in query:
+        query["charset"] = character_encoding
+
+    use_unicode = query.pop("useUnicode", None)
+    if use_unicode is not None and "use_unicode" not in query:
+        query["use_unicode"] = (
+            "true"
+            if str(use_unicode).strip().lower() in {"1", "true", "yes", "on"}
+            else "false"
+        )
+
+    # 不把 JDBC/SSL 参数透传给 asyncmy；本地和测试 API 均按非 SSL 连接。
+    for key in (
+        "useSSL",
+        "use_ssl",
+        "ssl",
+        "zeroDateTimeBehavior",
+        "serverTimezone",
+        "allowMultiQueries",
+    ):
+        query.pop(key, None)
+
+    return url.set(query=query)
 
 
 def _farm_values(records: list[SourceParcel], now: datetime) -> list[dict[str, Any]]:

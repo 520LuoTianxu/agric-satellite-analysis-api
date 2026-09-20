@@ -10,10 +10,15 @@ from pydantic import ValidationError
 from pyproj import CRS, Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
+from sqlalchemy.engine import make_url
 
 from app.models.tables import Job
 from app.routers.assessment import AssessmentBatchRequest, _assessment_batch_id, create_assessment_reports_batch
-from app.services.mysql_land_sync import _selected_source_query, sync_selected_lands
+from app.services.mysql_land_sync import (
+    _normalize_mysql_source_url,
+    _selected_source_query,
+    sync_selected_lands,
+)
 from app.services.satellite_batch import build_satellite_batch_jobs
 
 
@@ -206,6 +211,31 @@ class AssessmentBatchRouteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SmartSelectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_mysql_url_converts_jdbc_options_without_ssl(self):
+        url = _normalize_mysql_source_url(
+            "mysql+asyncmy://agri:secret@mysql.test:3306/smart_agric?"
+            "useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&"
+            "useSSL=true&serverTimezone=GMT%2B8&allowMultiQueries=true"
+        )
+
+        self.assertEqual(url.query["charset"], "utf8")
+        self.assertEqual(url.query["use_unicode"], "true")
+        self.assertNotIn("useSSL", url.query)
+        self.assertNotIn("ssl", url.query)
+        self.assertNotIn("zeroDateTimeBehavior", url.query)
+        self.assertNotIn("serverTimezone", url.query)
+        self.assertNotIn("allowMultiQueries", url.query)
+
+    def test_mysql_url_preserves_special_character_password(self):
+        url = _normalize_mysql_source_url(
+            make_url("mysql+asyncmy://agri:secret@mysql.test:3306/smart_agric").set(
+                username="agric", password="Test#Password@123"
+            )
+        )
+
+        self.assertEqual(url.username, "agric")
+        self.assertEqual(url.password, "Test#Password@123")
+
     def test_query_uses_bound_parameters(self):
         query, params = _selected_source_query(["A", " A ", "B"])
         self.assertIn("CAST(al.land_id AS CHAR) IN (:selected_land_0, :selected_land_1)", query.text)
