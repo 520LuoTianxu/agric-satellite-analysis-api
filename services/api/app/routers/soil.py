@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.database import get_db
 from app.core.geo import geojson_centroid
 from app.core.logging import logger
@@ -132,7 +133,10 @@ async def refresh_soil(
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
-        type="soil_fetch", land_id=str(land_id), extras={"job_id": str(job.id)}
+        type="soil_fetch",
+        land_id=str(land_id),
+        extras={"job_id": str(job.id)},
+        priority=MANUAL_TASK_PRIORITY,
     )
 
     logger.info(

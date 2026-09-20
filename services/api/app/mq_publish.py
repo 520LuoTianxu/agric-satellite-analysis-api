@@ -12,6 +12,11 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from agric_satellite_analysis_common.task_priority import (
+    BACKGROUND_TASK_PRIORITY,
+    MANUAL_TASK_PRIORITY,
+    normalize_task_priority,
+)
 from app.core.logging import logger
 
 
@@ -33,8 +38,15 @@ def _fallback_celery(
     """Best-effort direct Celery dispatch for local/dev fallback."""
     from app.celery_client import send_task
 
+    # fallback 也必须复用同一优先级，否则本地直连 Celery 会绕过 MQ consumer
+    # 的优先级适配，导致报告申请和普通任务出现两套排序行为。
+    task_priority = normalize_task_priority(extras.get("priority"))
+
+    def dispatch(task_name: str, *args: Any, **kwargs: Any) -> Any:
+        return send_task(task_name, *args, priority=task_priority, **kwargs)
+
     if type == "satellite_batch":
-        send_task(
+        dispatch(
             "app.tasks.satellite_batch.process_satellite_batch",
             kwargs={"job_id": str(extras["job_id"])},
             queue="ingest",
@@ -42,14 +54,14 @@ def _fallback_celery(
     elif type == "weather_backfill":
         days = extras.get("days") or extras.get("weather_days")
         kwargs = {"days": int(days)} if days is not None else {}
-        send_task(
+        dispatch(
             "app.tasks.weather.backfill_weather_for_land", args=[land_id], kwargs=kwargs
         )
     elif type == "soil_fetch":
         args = [land_id]
         if extras.get("job_id"):
             args.append(str(extras["job_id"]))
-        send_task("app.tasks.soil.fetch_soil_for_land", args=args)
+        dispatch("app.tasks.soil.fetch_soil_for_land", args=args)
     elif type == "satellite_analysis":
         kwargs: dict[str, Any] = {
             "months": int(extras.get("months") or 24),
@@ -65,7 +77,7 @@ def _fallback_celery(
         ):
             if extras.get(key) is not None:
                 kwargs[key] = extras[key]
-        send_task(
+        dispatch(
             "app.tasks.backfill.backfill_indices_for_land",
             args=[land_id],
             kwargs=kwargs,
@@ -74,13 +86,13 @@ def _fallback_celery(
             bridge_kwargs: dict[str, Any] = {}
             if extras.get("bridge_job_id"):
                 bridge_kwargs["bridge_job_id"] = str(extras["bridge_job_id"])
-            send_task(
+            dispatch(
                 "app.tasks.agri_bridge.bridge_land_stac_to_agri",
                 args=[land_id],
                 kwargs=bridge_kwargs,
             )
             if extras.get("dispatch_alerts"):
-                send_task(
+                dispatch(
                     "app.tasks.agri_alerts.evaluate_agri_alerts_for_land",
                     args=[land_id],
                     kwargs={"replace_open": True},
@@ -90,18 +102,18 @@ def _fallback_celery(
         days = extras.get("days") or extras.get("weather_days")
         if days is not None:
             weather_kwargs["days"] = int(days)
-        weather_result = send_task(
+        weather_result = dispatch(
             "app.tasks.weather.backfill_weather_for_land",
             args=[land_id],
             kwargs=weather_kwargs,
         )
-        soil_result = send_task("app.tasks.soil.fetch_soil_for_land", args=[land_id])
+        soil_result = dispatch("app.tasks.soil.fetch_soil_for_land", args=[land_id])
         if not extras.get("skip_indices"):
             index_kwargs: dict[str, Any] = {}
             for key in ("sentinel_job_id", "date_from", "date_to"):
                 if extras.get(key) is not None:
                     index_kwargs[key] = extras[key]
-            index_result = send_task(
+            index_result = dispatch(
                 "app.tasks.backfill.backfill_indices_for_land",
                 args=[land_id],
                 kwargs=index_kwargs,
@@ -133,7 +145,7 @@ def _fallback_celery(
             ):
                 if followup.get(key) is not None:
                     kwargs[key] = followup[key]
-            send_task(
+            dispatch(
                 "app.tasks.assessment_report.generate_assessment_report",
                 kwargs=kwargs,
                 queue="ingest",
@@ -160,13 +172,13 @@ def _fallback_celery(
             ):
                 if followup_sg.get(key) is not None:
                     kwargs[key] = followup_sg[key]
-            send_task(
+            dispatch(
                 "app.tasks.season_growth_report.generate_season_growth_report",
                 kwargs=kwargs,
                 queue="ingest",
             )
     elif type == "agri_bridge":
-        send_task(
+        dispatch(
             "app.tasks.agri_bridge.bridge_land_stac_to_agri",
             args=[land_id],
         )
@@ -177,7 +189,7 @@ def _fallback_celery(
                 status_code=503,
                 detail="MQ_FALLBACK_CELERY assessment_report requires extras.job_id",
             )
-        send_task(
+        dispatch(
             "app.tasks.assessment_report.generate_assessment_report",
             kwargs={"job_id": str(job_id), "land_id": land_id},
             queue="ingest",
@@ -197,7 +209,7 @@ def _fallback_celery(
             kwargs["pull_data"] = bool(extras["pull_data"])
         if extras.get("wait_celery_ids"):
             kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-        send_task(
+        dispatch(
             "app.tasks.season_growth_report.generate_season_growth_report",
             kwargs=kwargs,
             queue="ingest",
@@ -215,11 +227,23 @@ def publish_api_task(
     land_id: str | None = None,
     extras: dict[str, Any] | None = None,
     task_id: str | None = None,
+    priority: int | None = None,
 ) -> str:
     """Publish a task with the canonical parcel land_id."""
     if not land_id:
         raise HTTPException(status_code=400, detail="land_id is required")
     extras = dict(extras or {})
+    if priority is None:
+        # 报告/建档类默认属于普通人工任务；真正的一键选地报告入口会显式
+        # 传入最高优先级，避免通用 MQ API 的任意调用方直接占用最高队列。
+        priority = (
+            MANUAL_TASK_PRIORITY
+            if type in ("assessment_report", "season_growth_report", "land_bootstrap")
+            else BACKGROUND_TASK_PRIORITY
+        )
+    resolved_priority = normalize_task_priority(priority)
+    # 由服务端覆盖 payload 中同名字段，防止通用接口调用方伪造最高优先级。
+    extras["priority"] = resolved_priority
     tid = task_id or str(uuid.uuid4())
     from agric_satellite_analysis_common.trace import get_or_create_trace_id, stamp_trace_on_payload
 
@@ -256,11 +280,7 @@ def publish_api_task(
                         "task_id": tid,
                     }
                 ),
-                priority=10
-                if type in ("assessment_report", "season_growth_report")
-                else 5
-                if type == "land_bootstrap"
-                else 0,
+                priority=resolved_priority,
                 idempotency_key=idem,
             )
             if work_id:
@@ -320,6 +340,7 @@ def publish_api_task(
         type=type,
         land_id=land_id,
         extras=extras,
+        priority=resolved_priority,
         trace_id=trace_id,
     )
     try:

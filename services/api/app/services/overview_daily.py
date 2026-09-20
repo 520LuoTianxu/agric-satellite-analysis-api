@@ -17,6 +17,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
 )
+from agric_satellite_analysis_common.task_priority import BACKGROUND_TASK_PRIORITY
 from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.mq_publish import publish_api_task
@@ -363,6 +364,7 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
             land_id=job.land_id,
             task_id=job_id,
             extras={"job_id": job_id},
+            priority=BACKGROUND_TASK_PRIORITY,
         )
         dispatched.add(job_id)
         progress["dispatched_job_ids"] = sorted(dispatched)

@@ -200,6 +200,9 @@ class AssessmentBatchRouteTests(unittest.IsolatedAsyncioTestCase):
             {call.kwargs["type"] for call in publish.call_args_list},
             {"satellite_batch", "land_bootstrap"},
         )
+        self.assertTrue(
+            all(call.kwargs["priority"] == 9 for call in publish.call_args_list)
+        )
 
 
 class SmartSelectionTests(unittest.IsolatedAsyncioTestCase):

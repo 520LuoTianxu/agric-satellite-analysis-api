@@ -15,6 +15,7 @@ class BatchDispatchTests(unittest.TestCase):
             type="satellite_batch",
             land_id="A",
             extras={"job_id": "job"},
+            priority=9,
         )
         with patch.object(
             handler.celery_client,
@@ -28,6 +29,7 @@ class BatchDispatchTests(unittest.TestCase):
         self.assertEqual(
             send.call_args.kwargs["kwargs"], {"job_id": "job", "mq_task_id": "task"}
         )
+        self.assertEqual(send.call_args.kwargs["priority"], 1)
         self.assertEqual(result["celery_ids"], ["celery"])
 
     def test_claim_reuses_group_dispatch(self):
@@ -47,9 +49,11 @@ class BatchDispatchTests(unittest.TestCase):
                         "task_id": "task",
                         "extras": {"job_id": "job"},
                     },
+                    "priority": 9,
                 }
             )
         self.assertEqual(dispatch.call_args.args[0].extras, {"job_id": "job"})
+        self.assertEqual(dispatch.call_args.args[0].priority, 9)
         self.assertEqual(result["work_item_id"], "work")
 
 

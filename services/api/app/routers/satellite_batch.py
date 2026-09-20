@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
@@ -70,6 +71,7 @@ async def backfill_satellite_batch(
                 land_id=job.land_id,
                 task_id=str(job.id),
                 extras={"job_id": str(job.id)},
+                priority=MANUAL_TASK_PRIORITY,
             )
         except HTTPException as exc:
             # 部分派发失败时明确标出未入队任务，响应保留已派发编号，方便调用方核对。

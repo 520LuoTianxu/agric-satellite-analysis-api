@@ -21,6 +21,11 @@ from agric_satellite_analysis_common.celery_app import (
     task_queue_for,
 )
 from agric_satellite_analysis_common.mq_schemas import TaskMessage
+from agric_satellite_analysis_common.task_priority import (
+    BACKGROUND_TASK_PRIORITY,
+    celery_priority_for,
+    normalize_task_priority,
+)
 from agric_satellite_analysis_common.trace import (
     attach_trace_header,
     bind_trace_from_mapping,
@@ -342,6 +347,7 @@ def _dispatch_report(
     work_id: str,
     land_id: str,
     extras: dict[str, Any],
+    priority: int | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "land_id": land_id,
@@ -369,11 +375,13 @@ def _dispatch_report(
         if wtype == "assessment_report"
         else "app.tasks.season_growth_report.generate_season_growth_report"
     )
-    async_result = celery_client.send_task(
-        task_name,
-        kwargs=kwargs,
-        queue=task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
-    )
+    options: dict[str, Any] = {
+        "kwargs": kwargs,
+        "queue": task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
+    }
+    if priority is not None and priority > BACKGROUND_TASK_PRIORITY:
+        options["priority"] = celery_priority_for(priority)
+    async_result = celery_client.send_task(task_name, **options)
     return {
         "dispatched": [task_name],
         "celery_id": async_result.id,
@@ -388,6 +396,7 @@ def _dispatch_via_handler(
     land_id: str,
     extras: dict[str, Any],
     task_id: str | None,
+    priority: int | None = None,
 ) -> dict[str, Any]:
     """Reuse the MQ dispatch functions without introducing an identity mapper."""
     from app.handler import (
@@ -403,6 +412,7 @@ def _dispatch_via_handler(
         type=wtype,
         land_id=land_id,
         extras=dict(extras),
+        priority=normalize_task_priority(priority),
         trace_id=current_trace_id(),
     )
     if wtype == "agri_bridge":
@@ -430,18 +440,21 @@ def _dispatch_via_handler(
 def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
     wtype = item.get("type") or ""
     work_id = str(item.get("id"))
+    priority = normalize_task_priority(item.get("priority"))
     if wtype == "admin_task":
         payload = dict(item.get("payload_json") or {})
         task_name = str(payload.get("task_name") or "")
         if task_name not in ADMIN_TASK_NAMES:
             raise ValueError(f"unsupported admin task: {task_name}")
         kwargs = dict(payload.get("kwargs") or {})
-        async_result = celery_client.send_task(
-            task_name,
-            kwargs=kwargs,
+        options: dict[str, Any] = {
+            "kwargs": kwargs,
             # 管理员任务属于 CPU/编排侧；下载机只负责按任务名做最终路由。
-            queue=task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
-        )
+            "queue": task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
+        }
+        if priority > BACKGROUND_TASK_PRIORITY:
+            options["priority"] = celery_priority_for(priority)
+        async_result = celery_client.send_task(task_name, **options)
         return {
             "dispatched": [task_name],
             "celery_id": async_result.id,
@@ -455,9 +468,11 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
     payload = dict(item.get("payload_json") or {})
     task_id = payload.get("task_id") or extras.get("task_id")
     if wtype in ("assessment_report", "season_growth_report"):
-        return _dispatch_report(wtype, work_id, land_id, extras)
+        return _dispatch_report(wtype, work_id, land_id, extras, priority)
     if wtype in COMPLETE_ON_DISPATCH_TYPES or wtype in DEFAULT_TYPES:
-        return _dispatch_via_handler(wtype, work_id, land_id, extras, task_id)
+        return _dispatch_via_handler(
+            wtype, work_id, land_id, extras, task_id, priority
+        )
     raise ValueError(f"unsupported work type for claim agent: {wtype}")
 
 

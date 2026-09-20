@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.task_priority import INTERACTIVE_REPORT_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
@@ -251,6 +252,7 @@ async def _maybe_enqueue_assessment_work(
     job_id: str,
     land_id: str,
     extras: dict,
+    priority: int = INTERACTIVE_REPORT_PRIORITY,
 ) -> str | None:
     """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
     from app.services.work_items import enqueue_work_item, should_enqueue_work_items
@@ -265,7 +267,7 @@ async def _maybe_enqueue_assessment_work(
         db,
         type="assessment_report",
         payload=payload,
-        priority=10,
+        priority=priority,
         idempotency_key=f"assessment_report:{job_id}",
     )
     await db.commit()
@@ -543,6 +545,7 @@ async def create_assessment_reports_batch(
                 land_id=str(job.land_id),
                 task_id=task_id,
                 extras={"job_id": task_id, "assessment_batch_id": str(batch_id)},
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             job.params_json = {
                 **(job.params_json or {}),
@@ -561,6 +564,7 @@ async def create_assessment_reports_batch(
                 type="land_bootstrap",
                 land_id=land_id,
                 task_id=str(bootstrap_task_id),
+                priority=INTERACTIVE_REPORT_PRIORITY,
                 extras={
                     "date_from": date_from,
                     "date_to": date_to,
@@ -778,6 +782,7 @@ async def create_assessment_report(
                 job_id=str(job.id),
                 land_id=str(land_id),
                 extras=assessment_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             if work_id:
                 logger.info(
@@ -820,6 +825,7 @@ async def create_assessment_report(
                 type="land_bootstrap",
                 land_id=str(land_id),
                 extras=bootstrap_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             logger.info(
                 "assessment_bootstrap_dispatched",
@@ -837,6 +843,7 @@ async def create_assessment_report(
                 type="assessment_report",
                 land_id=str(land_id),
                 extras=assessment_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             logger.info(
                 "assessment_job_dispatched",
