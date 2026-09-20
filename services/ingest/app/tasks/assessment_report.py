@@ -16,6 +16,9 @@ from app.reports.land_assessment.scorecard_view import scorecard_public_view
 from app.reports.land_assessment.service import generate_assessment_pdf
 from app.worker import celery_app
 
+ASSESSMENT_BATCH_MAX_COMPENSATIONS = 2
+ASSESSMENT_COMPENSATION_DELAY_SECONDS = 30
+
 
 def _update_job(
     session,
@@ -117,6 +120,202 @@ def _resolve_job(session, job_id: str | None) -> Job | None:
         return session.get(Job, uuid.UUID(str(job_id)))
     except (ValueError, TypeError):
         return None
+
+
+def _assessment_job_snapshot(
+    session, job: Job | None, job_id: str | None
+) -> tuple[dict, dict, str | None]:
+    """读取批次报告的补偿元数据，兼容 API 机与下载机分离部署。"""
+    params = dict(getattr(job, "params_json", None) or {})
+    progress = dict(getattr(job, "progress_json", None) or {})
+    land_id = str(getattr(job, "land_id", None) or "") or None
+    if params and land_id:
+        return params, progress, land_id
+    try:
+        from agric_satellite_analysis_common.internal_api import get_job, internal_api_enabled
+
+        if not job_id or not internal_api_enabled():
+            return params, progress, land_id
+        remote = get_job(str(job_id))
+        if not isinstance(remote, dict):
+            return params, progress, land_id
+        if not params and isinstance(remote.get("params_json"), dict):
+            params = dict(remote["params_json"])
+        if not progress and isinstance(remote.get("progress_json"), dict):
+            progress = dict(remote["progress_json"])
+        land_id = str(remote.get("land_id") or land_id or "") or None
+    except Exception as exc:
+        logger.warning(
+            "assessment_compensation_job_snapshot_failed",
+            job_id=job_id,
+            error=str(exc),
+        )
+    return params, progress, land_id
+
+
+def _compensation_progress(progress: dict, attempt: int, *, active: bool) -> dict:
+    """给任务进度补充可审计的总次数与当前补偿次数。"""
+    output = dict(progress or {})
+    output.update(
+        {
+            "compensation_attempt": attempt,
+            "compensation_count": attempt,
+            "compensation_max": ASSESSMENT_BATCH_MAX_COMPENSATIONS,
+            "total_attempt": attempt + 1,
+            "compensation_active_attempt": attempt if active else None,
+        }
+    )
+    return output
+
+
+def _active_compensation_attempt(progress: dict) -> int | None:
+    try:
+        value = progress.get("compensation_active_attempt")
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _schedule_assessment_compensation(
+    task,
+    session,
+    job: Job | None,
+    *,
+    task_kwargs: dict,
+    compensation_attempt: int,
+    error: str,
+) -> bool:
+    """失败批次报告按原 Job 幂等补偿，最多额外执行两次。"""
+    job_id = str(task_kwargs.get("job_id") or "") or None
+    if not job_id:
+        return False
+
+    params, current_progress, snapshot_land_id = _assessment_job_snapshot(
+        session, job, job_id
+    )
+    # 只有批量报告子任务进入补偿；单地块报告保持原有失败语义。
+    if not params.get("batch_id"):
+        return False
+
+    try:
+        completed_compensations = int(
+            current_progress.get("compensation_count")
+            or params.get("compensation_count")
+            or 0
+        )
+    except (TypeError, ValueError):
+        completed_compensations = 0
+    active_attempt = _active_compensation_attempt(current_progress)
+
+    # 旧任务的失败结果可能晚于补偿任务到达；已存在更高补偿序号时只认
+    # 已经入队的那一次，避免同一个地块被重复补偿并行执行。
+    if active_attempt is not None and active_attempt > compensation_attempt:
+        return True
+
+    next_attempt = max(completed_compensations, compensation_attempt) + 1
+    if next_attempt > ASSESSMENT_BATCH_MAX_COMPENSATIONS:
+        final_progress = _compensation_progress(
+            current_progress, completed_compensations, active=False
+        )
+        final_progress.update(
+            {
+                "stage": "failed",
+                "last_error": str(error)[:2000],
+            }
+        )
+        if job or job_id:
+            _update_job(
+                session,
+                job,
+                "failed",
+                progress=final_progress,
+                error=str(error)[:2000],
+                job_id=job_id,
+            )
+        return False
+
+    retry_kwargs = dict(task_kwargs)
+    retry_kwargs["job_id"] = job_id
+    retry_kwargs["land_id"] = (
+        retry_kwargs.get("land_id") or snapshot_land_id or params.get("land_id")
+    )
+    if not retry_kwargs.get("land_id"):
+        return False
+    for key in ("crop_type", "crop_name_zh", "date_from", "date_to", "years"):
+        if retry_kwargs.get(key) is None and params.get(key) is not None:
+            retry_kwargs[key] = params[key]
+    if retry_kwargs.get("pull_data") is None:
+        retry_kwargs["pull_data"] = bool(params.get("pull_data", True))
+    # 天气/土壤的旧 Celery ID 只属于上一次派发；补偿任务重新按现有数据判定，
+    # 不重复等待已经结束或失效的旧 ID。
+    retry_kwargs.pop("wait_celery_ids", None)
+    retry_kwargs["compensation_attempt"] = next_attempt
+    try:
+        job_uuid = uuid.UUID(job_id)
+        retry_kwargs["mq_task_id"] = str(
+            uuid.uuid5(job_uuid, f"assessment-compensation:{next_attempt}")
+        )
+    except (ValueError, TypeError):
+        retry_kwargs["mq_task_id"] = str(uuid.uuid4())
+
+    retry_progress = _compensation_progress(
+        current_progress, next_attempt, active=True
+    )
+    retry_progress.update(
+        {
+            "stage": "compensating",
+            "percent": min(95, max(5, int(current_progress.get("percent") or 5))),
+            "last_error": str(error)[:2000],
+        }
+    )
+    try:
+        # 先落库“补偿中”再投递，重复失败通知可以据此识别已入队的补偿。
+        _update_job(
+            session,
+            job,
+            "running",
+            progress=retry_progress,
+            job_id=job_id,
+        )
+        task.apply_async(
+            kwargs=retry_kwargs,
+            countdown=ASSESSMENT_COMPENSATION_DELAY_SECONDS,
+        )
+    except Exception as exc:
+        logger.exception(
+            "assessment_compensation_dispatch_failed",
+            job_id=job_id,
+            attempt=next_attempt,
+            error=str(exc),
+        )
+        failure_progress = _compensation_progress(
+            retry_progress, next_attempt, active=False
+        )
+        failure_progress.update(
+            {"stage": "failed", "last_error": str(exc)[:2000]}
+        )
+        try:
+            _update_job(
+                session,
+                job,
+                "failed",
+                progress=failure_progress,
+                error=f"补偿任务派发失败：{str(exc)[:1800]}",
+                job_id=job_id,
+            )
+        except Exception:
+            logger.exception(
+                "assessment_compensation_failure_state_update_failed",
+                job_id=job_id,
+            )
+        return False
+    logger.warning(
+        "assessment_compensation_scheduled",
+        job_id=job_id,
+        attempt=next_attempt,
+        max_compensations=ASSESSMENT_BATCH_MAX_COMPENSATIONS,
+    )
+    return True
 
 
 def _celery_ids_ready(wait_celery_ids: list[str] | None) -> tuple[bool, list[str]]:
@@ -431,6 +630,7 @@ def generate_assessment_report(
     years: int | None = None,
     pull_data: bool = False,
     wait_celery_ids: list | None = None,
+    compensation_attempt: int = 0,
 ) -> dict:
     """Generate land assessment PDF for one canonical land parcel.
 
@@ -448,8 +648,36 @@ def generate_assessment_report(
     land_id_str: str | None = str(land_id) if land_id else None
     job_id_str: str | None = str(job_id) if job_id else None
     job: Job | None = None
+    task_kwargs = {
+        "job_id": job_id_str,
+        "mq_task_id": mq_task_id,
+        "work_item_id": work_item_id,
+        "land_id": land_id_str,
+        "crop_type": crop_type,
+        "crop_name_zh": crop_name_zh,
+        "date_from": date_from,
+        "date_to": date_to,
+        "years": years,
+        "pull_data": pull_data,
+        "wait_celery_ids": wait_celery_ids,
+    }
     try:
         job = _resolve_job(session, job_id_str)
+        snapshot_params, snapshot_progress, _ = _assessment_job_snapshot(
+            session, job, job_id_str
+        )
+        active_attempt = _active_compensation_attempt(snapshot_progress)
+        if (
+            snapshot_params.get("batch_id")
+            and active_attempt is not None
+            and active_attempt > compensation_attempt
+        ):
+            # 旧任务可能因租约回收迟到执行；补偿已经入队时直接结束旧执行，
+            # 防止它覆盖新任务的进度或再次消耗补偿次数。
+            return {
+                "status": "compensating",
+                "compensation_attempt": active_attempt,
+            }
 
         if not land_id_str and job and job.land_id:
             land_id_str = str(job.land_id)
@@ -460,6 +688,18 @@ def generate_assessment_report(
                 job_id=job_id_str,
                 mq_task_id=mq_task_id,
             )
+            if _schedule_assessment_compensation(
+                self,
+                session,
+                job,
+                task_kwargs=task_kwargs,
+                compensation_attempt=compensation_attempt,
+                error="land_id required",
+            ):
+                return {
+                    "status": "compensating",
+                    "compensation_attempt": compensation_attempt + 1,
+                }
             if job or job_id_str:
                 _update_job(session, job, "failed", error="land_id required", job_id=job_id_str)
             _publish_mq_result(
@@ -531,6 +771,10 @@ def generate_assessment_report(
                     "celery_ready": status["celery_ready"],
                     "pending_celery": len(status["pending_celery_ids"]),
                 }
+                if compensation_attempt:
+                    progress_wait = _compensation_progress(
+                        progress_wait, compensation_attempt, active=True
+                    )
                 if job or job_id_str:
                     _update_job(session, job, "running", progress=progress_wait, job_id=job_id_str)
                 if retries < max_r:
@@ -569,12 +813,20 @@ def generate_assessment_report(
                     },
                 )
 
+        scoring_progress = {
+            "stage": "scoring",
+            "percent": 60 if pull_data else 10,
+        }
+        if compensation_attempt:
+            scoring_progress = _compensation_progress(
+                scoring_progress, compensation_attempt, active=True
+            )
         if job or job_id_str:
             _update_job(
                 session,
                 job,
                 "running",
-                progress={"stage": "scoring", "percent": 60 if pull_data else 10},
+                progress=scoring_progress,
                 job_id=job_id_str,
             )
 
@@ -583,6 +835,18 @@ def generate_assessment_report(
         )
         pdf_path = Path(result["out_path"])
         if not pdf_path.exists():
+            if _schedule_assessment_compensation(
+                self,
+                session,
+                job,
+                task_kwargs=task_kwargs,
+                compensation_attempt=compensation_attempt,
+                error="PDF not produced",
+            ):
+                return {
+                    "status": "compensating",
+                    "compensation_attempt": compensation_attempt + 1,
+                }
             if job or job_id_str:
                 _update_job(session, job, "failed", error="PDF not produced", job_id=job_id_str)
             _publish_mq_result(
@@ -597,16 +861,21 @@ def generate_assessment_report(
             )
             return {"error": "PDF not produced"}
 
+        uploading_progress = {
+            "stage": "uploading",
+            "percent": 70,
+            "score": result["score"],
+        }
+        if compensation_attempt:
+            uploading_progress = _compensation_progress(
+                uploading_progress, compensation_attempt, active=True
+            )
         if job or job_id_str:
             _update_job(
                 session,
                 job,
                 "running",
-                progress={
-                    "stage": "uploading",
-                    "percent": 70,
-                    "score": result["score"],
-                },
+                progress=uploading_progress,
                 job_id=job_id_str,
             )
 
@@ -697,6 +966,10 @@ def generate_assessment_report(
             progress["years"] = years
         if pull_data:
             progress["pull_data"] = True
+        if compensation_attempt:
+            progress = _compensation_progress(
+                progress, compensation_attempt, active=False
+            )
 
         # Soft note when series are sparse — PDF still generated with available data
         notes: list[str] = []
@@ -746,6 +1019,8 @@ def generate_assessment_report(
             mq_payload["crop_type"] = crop_type
         if crop_name_zh:
             mq_payload["crop_name_zh"] = crop_name_zh
+        if compensation_attempt:
+            mq_payload["compensation_attempt"] = compensation_attempt
 
         extras_out: dict = {"source": "assessment_report"}
         if job_id_str:
@@ -792,22 +1067,46 @@ def generate_assessment_report(
         try:
             if job is None and job_id_str:
                 job = _resolve_job(session, job_id_str)
-            if job:
-                land_id_str = land_id_str or (
-                    str(job.land_id) if job.land_id else None
+            if _schedule_assessment_compensation(
+                self,
+                session,
+                job,
+                task_kwargs=task_kwargs,
+                compensation_attempt=compensation_attempt,
+                error=str(exc),
+            ):
+                return {
+                    "status": "compensating",
+                    "compensation_attempt": compensation_attempt + 1,
+                }
+            if job or job_id_str:
+                if job and not land_id_str and job.land_id:
+                    land_id_str = str(job.land_id)
+                _update_job(
+                    session,
+                    job,
+                    "failed",
+                    error=str(exc)[:2000],
+                    job_id=job_id_str,
                 )
-                _update_job(session, job, "failed", error=str(exc)[:2000])
         except Exception:
-            pass
+            logger.exception(
+                "assessment_report_failure_state_update_failed",
+                job_id=job_id_str,
+            )
         extras_fail: dict = {"source": "assessment_report"}
         if job_id_str:
             extras_fail["job_id"] = job_id_str
+        if compensation_attempt:
+            extras_fail["compensation_attempt"] = compensation_attempt
         fail_payload = {
             "kind": "assessment_report",
             "land_id": land_id_str,
             "error": str(exc)[:2000],
             **({"job_id": job_id_str} if job_id_str else {}),
         }
+        if compensation_attempt:
+            fail_payload["compensation_attempt"] = compensation_attempt
         _publish_mq_result(
             mq_task_id=mq_task_id,
             status="failed",

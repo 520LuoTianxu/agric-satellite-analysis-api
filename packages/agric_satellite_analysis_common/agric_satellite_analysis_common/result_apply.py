@@ -590,6 +590,22 @@ def _apply_assessment_job_progress(
             progress[key] = payload[key]
     if isinstance(payload.get("scorecard"), dict):
         progress["scorecard"] = payload["scorecard"]
+    if payload.get("compensation_attempt") is not None:
+        try:
+            compensation_attempt = int(payload["compensation_attempt"])
+        except (TypeError, ValueError):
+            compensation_attempt = 0
+        if compensation_attempt > 0:
+            # 补偿成功后清除“补偿中”标记，但保留次数供运维审计。
+            progress.update(
+                {
+                    "compensation_attempt": compensation_attempt,
+                    "compensation_count": compensation_attempt,
+                    "compensation_max": 2,
+                    "total_attempt": compensation_attempt + 1,
+                    "compensation_active_attempt": None,
+                }
+            )
     session = SyncSession()
     try:
         row = session.execute(

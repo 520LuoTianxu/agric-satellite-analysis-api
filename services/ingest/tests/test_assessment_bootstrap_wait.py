@@ -171,5 +171,77 @@ class BootstrapPullsReadyTests(unittest.TestCase):
         self.assertEqual(started.hour, 3)
 
 
+class AssessmentCompensationTests(unittest.TestCase):
+    def test_batch_report_is_compensated_twice_then_stays_failed(self) -> None:
+        job = SimpleNamespace(
+            id=uuid.uuid4(),
+            land_id="land-1",
+            status="failed",
+            params_json={
+                "batch_id": str(uuid.uuid4()),
+                "crop_type": "rice",
+                "date_from": "2026-01-01",
+                "date_to": "2026-09-20",
+                "pull_data": True,
+            },
+            progress_json={},
+        )
+        task = SimpleNamespace(apply_async=MagicMock())
+
+        def update_job(_session, target, status, progress=None, **_kwargs):
+            target.status = status
+            if progress is not None:
+                target.progress_json = progress
+
+        task_kwargs = {
+            "job_id": str(job.id),
+            "land_id": job.land_id,
+            "pull_data": True,
+        }
+        with patch.object(ar, "_update_job", side_effect=update_job):
+            self.assertTrue(
+                ar._schedule_assessment_compensation(
+                    task,
+                    None,
+                    job,
+                    task_kwargs=task_kwargs,
+                    compensation_attempt=0,
+                    error="first failure",
+                )
+            )
+            self.assertTrue(
+                ar._schedule_assessment_compensation(
+                    task,
+                    None,
+                    job,
+                    task_kwargs=task_kwargs,
+                    compensation_attempt=1,
+                    error="second failure",
+                )
+            )
+            self.assertFalse(
+                ar._schedule_assessment_compensation(
+                    task,
+                    None,
+                    job,
+                    task_kwargs=task_kwargs,
+                    compensation_attempt=2,
+                    error="third failure",
+                )
+            )
+
+        self.assertEqual(task.apply_async.call_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs["kwargs"]["compensation_attempt"]
+                for call in task.apply_async.call_args_list
+            ],
+            [1, 2],
+        )
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.progress_json["compensation_count"], 2)
+        self.assertIsNone(job.progress_json["compensation_active_attempt"])
+
+
 if __name__ == "__main__":
     unittest.main()

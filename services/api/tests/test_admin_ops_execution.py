@@ -208,6 +208,58 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(_work_item_parent_id(item), report_job_id)
 
+    def test_assessment_batch_uses_terminal_children_for_group_status(self):
+        now = datetime.now(timezone.utc)
+        parent_id = uuid.uuid4()
+        child_ok_id = uuid.uuid4()
+        child_failed_id = uuid.uuid4()
+        parent = SimpleNamespace(
+            id=parent_id,
+            land_id=None,
+            type="assessment_batch",
+            status="running",
+            progress_json={"stage": "dispatched"},
+            params_json={},
+            error=None,
+            created_at=now,
+            started_at=now,
+            finished_at=None,
+        )
+        child_ok = SimpleNamespace(
+            id=child_ok_id,
+            land_id="land-1",
+            type="assessment_report",
+            status="succeeded",
+            progress_json={},
+            params_json={"parent_job_id": str(parent_id)},
+            error=None,
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+        )
+        child_failed = SimpleNamespace(
+            id=child_failed_id,
+            land_id="land-2",
+            type="assessment_report",
+            status="failed",
+            progress_json={},
+            params_json={"parent_job_id": str(parent_id)},
+            error="report failed",
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+        )
+
+        groups = _build_execution_groups(
+            [parent, child_ok, child_failed], []
+        )
+
+        self.assertEqual(len(groups), 1)
+        out = _to_execution_group_out(groups[0])
+        self.assertEqual(out.status, "partial")
+        self.assertEqual(out.child_counts["terminal"], 2)
+        self.assertEqual(out.child_counts["failed"], 1)
+
 
 if __name__ == "__main__":
     import unittest

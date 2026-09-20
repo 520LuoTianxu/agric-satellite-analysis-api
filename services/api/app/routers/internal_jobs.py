@@ -22,6 +22,7 @@ class InternalJobOut(BaseModel):
     id: uuid.UUID
     land_id: str | None = None
     type: str
+    parent_job_id: uuid.UUID | None = None
     status: str
     progress_json: dict[str, Any] | None = None
     error: str | None = None

@@ -1,5 +1,6 @@
 """按聚合窗口下载一次影像，在内存中裁到请求地块后回调 API 结果缓存。"""
 
+import uuid
 from datetime import date
 
 import numpy as np
@@ -55,6 +56,150 @@ from app.tasks.sentinel1 import (
 from app.worker import celery_app
 
 logger = structlog.get_logger()
+
+SATELLITE_BATCH_MAX_COMPENSATIONS = 2
+SATELLITE_COMPENSATION_DELAY_SECONDS = 30
+
+
+def _compensation_progress(progress: dict, attempt: int, *, active: bool) -> dict:
+    """记录共享遥感任务的补偿次数，便于旧任务回收和运维审计。"""
+    output = dict(progress or {})
+    output.update(
+        {
+            "compensation_attempt": attempt,
+            "compensation_count": attempt,
+            "compensation_max": SATELLITE_BATCH_MAX_COMPENSATIONS,
+            "total_attempt": attempt + 1,
+            "compensation_active_attempt": attempt if active else None,
+        }
+    )
+    return output
+
+
+def _active_compensation_attempt(progress: dict) -> int | None:
+    try:
+        value = progress.get("compensation_active_attempt")
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_assessment_batch_child(job: dict) -> bool:
+    """只对 assessment_batch 的共享下载子任务开启批次补偿。"""
+    params = job.get("params_json") or {}
+    return bool(job.get("parent_job_id") or params.get("assessment_batch_id"))
+
+
+def _schedule_satellite_compensation(
+    job_id: str,
+    job: dict,
+    *,
+    compensation_attempt: int,
+    error: str,
+) -> bool:
+    """失败的批次下载复用原 Job 重试，最多额外执行两次。"""
+    if not _is_assessment_batch_child(job):
+        return False
+
+    current_progress = dict(job.get("progress_json") or {})
+    try:
+        completed_compensations = int(current_progress.get("compensation_count") or 0)
+    except (TypeError, ValueError):
+        completed_compensations = 0
+    active_attempt = _active_compensation_attempt(current_progress)
+    # 旧 worker 迟到上报时，已经存在更高序号的补偿任务，不能再次派发。
+    if active_attempt is not None and active_attempt > compensation_attempt:
+        return True
+
+    next_attempt = max(completed_compensations, compensation_attempt) + 1
+    if next_attempt > SATELLITE_BATCH_MAX_COMPENSATIONS:
+        final_progress = _compensation_progress(
+            current_progress, completed_compensations, active=False
+        )
+        final_progress.update({"stage": "failed", "last_error": str(error)[:2000]})
+        patch_job(
+            job_id,
+            {
+                "status": "failed",
+                "touch_finished": True,
+                "progress_json": final_progress,
+                "error": str(error)[:2000],
+            },
+        )
+        return False
+
+    retry_progress = _compensation_progress(
+        current_progress, next_attempt, active=True
+    )
+    retry_progress.update(
+        {
+            "stage": "compensating",
+            "percent": min(95, max(5, int(current_progress.get("percent") or 5))),
+            "last_error": str(error)[:2000],
+        }
+    )
+    try:
+        # 先落库“补偿中”再投递，避免失败回调重复创建并行补偿任务。
+        patch_job(
+            job_id,
+            {
+                "status": "running",
+                "progress_json": retry_progress,
+                "error": f"第{next_attempt}次补偿中：{str(error)[:1800]}",
+            },
+        )
+        try:
+            task_id = str(
+                uuid.uuid5(uuid.UUID(str(job_id)), f"satellite-compensation:{next_attempt}")
+            )
+        except (ValueError, TypeError):
+            task_id = str(uuid.uuid4())
+        retry_kwargs = {
+            "job_id": job_id,
+            "compensation_attempt": next_attempt,
+        }
+        original_mq_task_id = (job.get("params_json") or {}).get("mq_task_id")
+        if original_mq_task_id:
+            retry_kwargs["mq_task_id"] = str(original_mq_task_id)
+        process_satellite_batch.apply_async(
+            kwargs=retry_kwargs,
+            countdown=SATELLITE_COMPENSATION_DELAY_SECONDS,
+            task_id=task_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "satellite_compensation_dispatch_failed",
+            job_id=job_id,
+            attempt=next_attempt,
+            error=str(exc),
+        )
+        failure_progress = _compensation_progress(
+            retry_progress, next_attempt, active=False
+        )
+        failure_progress.update({"stage": "failed", "last_error": str(exc)[:2000]})
+        try:
+            patch_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "touch_finished": True,
+                    "progress_json": failure_progress,
+                    "error": f"补偿任务派发失败：{str(exc)[:1800]}",
+                },
+            )
+        except Exception:
+            logger.exception(
+                "satellite_compensation_failure_state_update_failed", job_id=job_id
+            )
+        return False
+
+    logger.warning(
+        "satellite_compensation_scheduled",
+        job_id=job_id,
+        attempt=next_attempt,
+        max_compensations=SATELLITE_BATCH_MAX_COMPENSATIONS,
+    )
+    return True
 
 
 def crop_shared_array(
@@ -332,10 +477,28 @@ def _publish_land(
     time_limit=1800,
     soft_time_limit=1500,
 )
-def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
+def process_satellite_batch(
+    job_id: str,
+    mq_task_id: str | None = None,
+    compensation_attempt: int = 0,
+) -> dict:
     """一个组、传感器和时间分片共用下载，逐地块掩膜并报告任务进度。"""
+    job: dict | None = None
     try:
         job = get_job(job_id)
+        active_attempt = _active_compensation_attempt(job.get("progress_json") or {})
+        if (
+            _is_assessment_batch_child(job)
+            and active_attempt is not None
+            and active_attempt > compensation_attempt
+        ):
+            # 旧任务可能因 worker 租约回收迟到执行；补偿已入队时直接结束旧执行，
+            # 防止旧下载覆盖补偿任务的进度或再次消耗补偿次数。
+            return {
+                "job_id": job_id,
+                "status": "compensating",
+                "compensation_attempt": active_attempt,
+            }
         if job.get("status") == "completed":
             return {"job_id": job_id, "status": "already_handled"}
         if job.get("status") in {"failed", "cancelled"} and (
@@ -439,6 +602,10 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
             "failed_scene_ids": [],
             "published_products": [],
         }
+        if compensation_attempt:
+            progress = _compensation_progress(
+                progress, compensation_attempt, active=True
+            )
         for scene in scenes:
             selected = _scene_lands(scene, selected_lands, sensor)
             if selected:
@@ -507,6 +674,28 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
                         crop_type=land["crop_type"],
                     )
         status = "failed" if progress["failed"] else "completed"
+        if status == "failed":
+            current_job = {**job, "progress_json": progress}
+            if _schedule_satellite_compensation(
+                job_id,
+                current_job,
+                compensation_attempt=compensation_attempt,
+                error=f"{progress['failed']}个地块景处理失败",
+            ):
+                return {
+                    "job_id": job_id,
+                    "status": "compensating",
+                    "compensation_attempt": compensation_attempt + 1,
+                    **progress,
+                }
+            if _is_assessment_batch_child(job):
+                # 补偿达到上限或派发失败时，补偿函数已将 Job 落为最终失败，
+                # 不能再用本次 active=true 的进度覆盖最终状态。
+                return {"job_id": job_id, "status": "failed", **progress}
+        if compensation_attempt:
+            progress = _compensation_progress(
+                progress, compensation_attempt, active=False
+            )
         patch_job(
             job_id,
             {
@@ -521,6 +710,25 @@ def process_satellite_batch(job_id: str, mq_task_id: str | None = None) -> dict:
         return {"job_id": job_id, "status": status, **progress}
     except Exception as exc:
         # HTTP和下载错误必须可见，不得把未产出数据的分组默认为成功。
+        compensation_scheduled = False
+        try:
+            if job is None:
+                job = get_job(job_id)
+            if _is_assessment_batch_child(job):
+                compensation_scheduled = _schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=compensation_attempt,
+                    error=str(exc),
+                )
+        except Exception:
+            logger.exception("satellite_batch_compensation_failed", job_id=job_id)
+        if compensation_scheduled:
+            return {
+                "job_id": job_id,
+                "status": "compensating",
+                "compensation_attempt": compensation_attempt + 1,
+            }
         try:
             patch_job(
                 job_id, {"status": "failed", "touch_finished": True, "error": str(exc)}
