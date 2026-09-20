@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field as PydanticField, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.task_priority import INTERACTIVE_REPORT_PRIORITY
 from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
@@ -106,6 +107,7 @@ async def _maybe_enqueue_season_growth_work(
     job_id: str,
     land_id: str,
     extras: dict,
+    priority: int = INTERACTIVE_REPORT_PRIORITY,
 ) -> str | None:
     """Insert work_items row when WORK_QUEUE_MODE is claim|dual."""
     from app.services.work_items import enqueue_work_item, should_enqueue_work_items
@@ -120,7 +122,7 @@ async def _maybe_enqueue_season_growth_work(
         db,
         type="season_growth_report",
         payload=payload,
-        priority=10,
+        priority=priority,
         idempotency_key=f"season_growth_report:{job_id}",
     )
     await db.commit()
@@ -243,6 +245,7 @@ async def create_season_growth_report(
                 job_id=str(job.id),
                 land_id=str(land_id),
                 extras=season_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             if work_id:
                 logger.info(
@@ -284,6 +287,7 @@ async def create_season_growth_report(
                 type="land_bootstrap",
                 land_id=str(land_id),
                 extras=bootstrap_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             logger.info(
                 "season_growth_bootstrap_dispatched",
@@ -301,6 +305,7 @@ async def create_season_growth_report(
                 type="season_growth_report",
                 land_id=str(land_id),
                 extras=season_extras,
+                priority=INTERACTIVE_REPORT_PRIORITY,
             )
             logger.info(
                 "season_growth_job_dispatched",

@@ -6,7 +6,9 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+from agric_satellite_analysis_common.mq_schemas import TaskMessage
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,6 +23,34 @@ class _Task:
 
 
 class LandBootstrapExtrasTests(unittest.TestCase):
+    def test_report_priority_is_forwarded_to_all_bootstrap_children(self) -> None:
+        with (
+            patch.object(
+                handler_mod.celery_client,
+                "send_task",
+                return_value=SimpleNamespace(id="celery-high"),
+            ) as send,
+            patch.object(handler_mod, "publish_task_result"),
+        ):
+            handler_mod._dispatch_land_bootstrap(
+                TaskMessage(
+                    task_id="report-task",
+                    type="land_bootstrap",
+                    land_id="land-1",
+                    priority=9,
+                    extras={
+                        "days": 7,
+                        "followup_assessment": {"job_id": "report-1"},
+                    },
+                ),
+                "land-1",
+            )
+
+        self.assertGreaterEqual(send.call_count, 4)
+        self.assertTrue(
+            all(call.kwargs["priority"] == 1 for call in send.call_args_list)
+        )
+
     def test_forwards_date_window_and_days(self) -> None:
         sends: list[tuple] = []
 

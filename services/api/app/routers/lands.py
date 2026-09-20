@@ -26,6 +26,7 @@ from shapely.validation import explain_validity
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.crops import normalize_crop_key
 from app.core.database import get_db
 from app.core.logging import logger
@@ -259,7 +260,12 @@ async def create_land(
 
     from app.mq_publish import publish_api_task
 
-    publish_api_task(type="land_bootstrap", land_id=land_id, extras={})
+    publish_api_task(
+        type="land_bootstrap",
+        land_id=land_id,
+        extras={},
+        priority=MANUAL_TASK_PRIORITY,
+    )
     logger.info("land_created", land_id=land_id, farm_id=str(body.farm_id or ""))
     return _land_to_out(land)
 
@@ -547,7 +553,12 @@ async def backfill_land_indices(
 
     from app.mq_publish import publish_api_task
 
-    publish_api_task(type="satellite_analysis", land_id=land_id, extras=extras)
+    publish_api_task(
+        type="satellite_analysis",
+        land_id=land_id,
+        extras=extras,
+        priority=MANUAL_TASK_PRIORITY,
+    )
     return BackfillIndicesResponse(
         land_id=land_id,
         status="dispatched",

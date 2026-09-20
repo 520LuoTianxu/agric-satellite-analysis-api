@@ -9,6 +9,11 @@ from celery import Celery
 from celery.schedules import crontab
 
 from agric_satellite_analysis_common.settings import CommonSettings, settings
+from agric_satellite_analysis_common.task_priority import (
+    CELERY_PRIORITY_STEPS,
+    TASK_PRIORITY_MAX,
+    install_priority_signals,
+)
 
 # 业务队列按资源类型隔离：卫星数据任务不能堵住 CPU 计算任务，反之亦然。
 SATELLITE_DOWNLOAD_QUEUE = "satellite_download"
@@ -160,6 +165,9 @@ def celery_redis_transport_options(
         "socket_keepalive": cfg.celery_redis_socket_keepalive,
         "retry_on_timeout": cfg.celery_redis_retry_on_timeout,
         "health_check_interval": cfg.celery_redis_health_check_interval,
+        # Redis transport 以拆分 list 模拟优先级；细分为 0..9，避免 5/9
+        # 等业务优先级被默认的 0/3/6/9 粗粒度合并。
+        "priority_steps": list(CELERY_PRIORITY_STEPS),
     }
     if cfg.celery_redis_socket_keepalive:
         keepalive = redis_socket_keepalive_options()
@@ -173,7 +181,9 @@ def celery_app_config(cfg: CommonSettings | None = None) -> dict[str, Any]:
     cfg = cfg or settings
     transport = celery_redis_transport_options(cfg)
     backend_transport = {
-        key: value for key, value in transport.items() if key != "visibility_timeout"
+        key: value
+        for key, value in transport.items()
+        if key not in ("visibility_timeout", "priority_steps")
     }
     return {
         "broker_transport_options": transport,
@@ -213,6 +223,11 @@ def create_celery_app(
         "enable_utc": True,
         "task_acks_late": True,
         "task_reject_on_worker_lost": True,
+        # 只有空闲 worker 才会取下一条任务，避免普通任务预取后挡住报告请求。
+        "worker_prefetch_multiplier": 1,
+        "task_queue_max_priority": TASK_PRIORITY_MAX,
+        # 任务内部继续派发的子任务继承父任务优先级，保证遥感 fan-out 不降级。
+        "task_inherit_parent_priority": True,
         "worker_concurrency": 4,
         "task_time_limit": 1800,
         "task_soft_time_limit": 1500,
@@ -230,6 +245,7 @@ def create_celery_app(
     from agric_satellite_analysis_common.trace import install_trace_signals
 
     install_trace_signals()
+    install_priority_signals()
     return app
 
 

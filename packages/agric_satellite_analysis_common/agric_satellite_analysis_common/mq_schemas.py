@@ -7,6 +7,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from agric_satellite_analysis_common.task_priority import (
+    BACKGROUND_TASK_PRIORITY,
+    TASK_PRIORITY_MAX,
+    TASK_PRIORITY_MIN,
+)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -19,6 +25,12 @@ class TaskMessage(BaseModel):
     type: str = "satellite_analysis"
     land_id: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
+    # 业务层数值越大越优先；consumer 会在投递到 Redis Celery 时做反向适配。
+    priority: int = Field(
+        default=BACKGROUND_TASK_PRIORITY,
+        ge=TASK_PRIORITY_MIN,
+        le=TASK_PRIORITY_MAX,
+    )
     created_at: datetime = Field(default_factory=_utcnow)
     trace_id: str | None = None
 

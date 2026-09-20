@@ -63,6 +63,42 @@ class PublishEnqueueTests(unittest.TestCase):
         self.assertEqual(pub.call_args.args[0].land_id, "L1")
         self.assertTrue(pub.call_args.args[0].trace_id)
 
+    def test_explicit_report_priority_reaches_work_item_and_mq(self) -> None:
+        from app.mq_publish import publish_api_task
+
+        with (
+            patch(
+                "app.services.work_items.should_enqueue_work_items", return_value=True
+            ),
+            patch("app.services.work_items.should_publish_mq", return_value=True),
+            patch(
+                "app.services.work_items.enqueue_work_item_sync", return_value="work-9"
+            ) as enq,
+            patch(
+                "app.services.work_items.CLAIMABLE_TYPES",
+                frozenset({"land_bootstrap"}),
+            ),
+            patch(
+                "app.services.work_items.work_item_idempotency_key",
+                return_value="land_bootstrap:t9",
+            ),
+            patch("agric_satellite_analysis_common.settings.settings") as common_settings,
+            patch("agric_satellite_analysis_common.mq.publish_task") as pub,
+        ):
+            common_settings.cloudamqp_url = "amqps://example"
+            publish_api_task(
+                type="land_bootstrap",
+                land_id="L9",
+                task_id="t9",
+                priority=9,
+                extras={"days": 3, "priority": 0},
+            )
+
+        self.assertEqual(enq.call_args.kwargs["priority"], 9)
+        self.assertEqual(enq.call_args.kwargs["payload"]["extras"]["priority"], 9)
+        self.assertEqual(pub.call_args.args[0].priority, 9)
+        self.assertEqual(pub.call_args.args[0].extras["priority"], 9)
+
     def test_claim_enqueue_failure_raises(self) -> None:
         from app.mq_publish import publish_api_task
 

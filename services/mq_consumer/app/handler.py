@@ -13,6 +13,11 @@ from typing import Any
 from agric_satellite_analysis_common.celery_app import celery_client, task_queue_for
 from agric_satellite_analysis_common.mq_results import publish_task_result
 from agric_satellite_analysis_common.mq_schemas import TaskMessage
+from agric_satellite_analysis_common.task_priority import (
+    BACKGROUND_TASK_PRIORITY,
+    celery_priority_for,
+    normalize_task_priority,
+)
 from agric_satellite_analysis_common.trace import (
     bind_trace_from_mapping,
     clear_trace_id,
@@ -26,16 +31,26 @@ def _send_task(
     task_name: str,
     *args: Any,
     queue: str | None = None,
+    priority: int | None = None,
     **kwargs: Any,
 ) -> Any:
     """统一给 MQ consumer 的 producer 做资源队列路由。"""
     # 历史 handler 都传 queue=ingest；集中转换才能保证下载和 CPU 任务不互相堵塞。
+    options = dict(kwargs)
+    if priority is not None:
+        options["priority"] = celery_priority_for(priority)
     return celery_client.send_task(
         task_name,
         *args,
         queue=task_queue_for(task_name, requested_queue=queue),
-        **kwargs,
+        **options,
     )
+
+
+def _task_priority(task: TaskMessage) -> int | None:
+    """返回需要显式传给 Celery 的业务优先级；后台任务沿用默认钩子。"""
+    priority = normalize_task_priority(getattr(task, "priority", BACKGROUND_TASK_PRIORITY))
+    return priority if priority > BACKGROUND_TASK_PRIORITY else None
 
 SUPPORTED_TYPES = {
     "satellite_analysis",
@@ -72,6 +87,7 @@ def _dispatch_satellite_analysis(
             args=[land_id],
             kwargs={"mq_task_id": task.task_id},
             queue="ingest",
+            priority=_task_priority(task),
         )
         return {
             "dispatched": ["app.tasks.agri_bridge.bridge_land_stac_to_agri"],
@@ -97,6 +113,7 @@ def _dispatch_satellite_analysis(
         args=[land_id],
         kwargs=backfill_kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     dispatched = ["app.tasks.backfill.backfill_indices_for_land"]
     celery_ids = [backfill.id]
@@ -110,6 +127,7 @@ def _dispatch_satellite_analysis(
             args=[land_id],
             kwargs=bridge_kwargs,
             queue="ingest",
+            priority=_task_priority(task),
         )
         dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
         celery_ids.append(bridge.id)
@@ -119,6 +137,7 @@ def _dispatch_satellite_analysis(
                 args=[land_id],
                 kwargs={"replace_open": True},
                 queue="ingest",
+                priority=_task_priority(task),
             )
             dispatched.append("app.tasks.agri_alerts.evaluate_agri_alerts_for_land")
     else:
@@ -153,6 +172,7 @@ def _dispatch_satellite_batch(task: TaskMessage, land_id: str) -> dict[str, Any]
         name,
         kwargs={"job_id": str(job_id), "mq_task_id": task.task_id},
         queue="ingest",
+        priority=_task_priority(task),
     )
     return {"dispatched": [name], "celery_ids": [result.id], "job_id": str(job_id)}
 
@@ -170,6 +190,7 @@ def _dispatch_weather_backfill(
         args=[land_id],
         kwargs=kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     return {
         "dispatched": ["app.tasks.weather.backfill_weather_for_land"],
@@ -192,6 +213,7 @@ def _dispatch_soil_fetch(
         args=args,
         kwargs=kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     return {
         "dispatched": ["app.tasks.soil.fetch_soil_for_land"],
@@ -235,6 +257,7 @@ def _dispatch_land_bootstrap(
         args=[land_id],
         kwargs=weather_kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     dispatched.append("app.tasks.weather.backfill_weather_for_land")
     celery_ids.append(weather.id)
@@ -244,6 +267,7 @@ def _dispatch_land_bootstrap(
         args=[land_id],
         kwargs={},
         queue="ingest",
+        priority=_task_priority(task),
     )
     dispatched.append("app.tasks.soil.fetch_soil_for_land")
     celery_ids.append(soil.id)
@@ -266,6 +290,7 @@ def _dispatch_land_bootstrap(
             args=[land_id],
             kwargs=index_kwargs,
             queue="ingest",
+            priority=_task_priority(task),
         )
         dispatched.append("app.tasks.backfill.backfill_indices_for_land")
         celery_ids.append(indices.id)
@@ -280,6 +305,7 @@ def _dispatch_land_bootstrap(
                 args=[land_id],
                 kwargs=bridge_kwargs,
                 queue="ingest",
+                priority=_task_priority(task),
             )
             dispatched.append("app.tasks.agri_bridge.bridge_after_backfill")
             celery_ids.append(bridge.id)
@@ -303,6 +329,7 @@ def _dispatch_land_bootstrap(
             "app.tasks.assessment_report.generate_assessment_report",
             kwargs=assess_kwargs,
             queue="ingest",
+            priority=_task_priority(task),
         )
         dispatched.append("app.tasks.assessment_report.generate_assessment_report")
         celery_ids.append(result.id)
@@ -324,6 +351,7 @@ def _dispatch_land_bootstrap(
             "app.tasks.season_growth_report.generate_season_growth_report",
             kwargs=season_kwargs,
             queue="ingest",
+            priority=_task_priority(task),
         )
         dispatched.append(
             "app.tasks.season_growth_report.generate_season_growth_report"
@@ -378,6 +406,7 @@ def _dispatch_assessment_report(
         "app.tasks.assessment_report.generate_assessment_report",
         kwargs=kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     return {
         "dispatched": ["app.tasks.assessment_report.generate_assessment_report"],
@@ -410,6 +439,7 @@ def _dispatch_season_growth_report(
         "app.tasks.season_growth_report.generate_season_growth_report",
         kwargs=kwargs,
         queue="ingest",
+        priority=_task_priority(task),
     )
     return {
         "dispatched": ["app.tasks.season_growth_report.generate_season_growth_report"],

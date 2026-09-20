@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.geo import geojson_centroid
@@ -202,7 +203,10 @@ async def trigger_weather_backfill(
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
-        type="weather_backfill", land_id=str(land_id), extras={"days": body.days}
+        type="weather_backfill",
+        land_id=str(land_id),
+        extras={"days": body.days},
+        priority=MANUAL_TASK_PRIORITY,
     )
 
     logger.info(

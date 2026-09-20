@@ -9,6 +9,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from agric_satellite_analysis_common.task_priority import (
+    INTERACTIVE_REPORT_PRIORITY,
+    MANUAL_TASK_PRIORITY,
+)
 from app.middleware.auth import OrgContext, require_roles
 from app.core.logging import logger
 
@@ -56,10 +60,16 @@ async def enqueue_mq_task(
     from agric_satellite_analysis_common.settings import settings as common_settings
 
     task_id = body.task_id or str(uuid.uuid4())
+    priority = (
+        INTERACTIVE_REPORT_PRIORITY
+        if body.type in {"assessment_report", "season_growth_report"}
+        else MANUAL_TASK_PRIORITY
+    )
     publish_api_task(
         type=body.type,
         land_id=body.land_id,
         task_id=task_id,
+        priority=priority,
         extras={
             **(body.extras or {}),
             **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
