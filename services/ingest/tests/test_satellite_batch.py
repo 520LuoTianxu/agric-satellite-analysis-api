@@ -1,6 +1,7 @@
 """验证共享下载、HTTP边界及逐地块像元隔离。"""
 
 import unittest
+import uuid
 from datetime import date
 from unittest.mock import patch
 
@@ -35,6 +36,66 @@ def make_lands(sensor="S2"):
 
 
 class SharedWindowTests(unittest.TestCase):
+    def test_assessment_batch_download_is_compensated_twice_then_stays_failed(self):
+        job_id = str(uuid.uuid4())
+        job = {
+            "parent_job_id": str(uuid.uuid4()),
+            "status": "failed",
+            "params_json": {},
+            "progress_json": {},
+        }
+
+        def update_job(_job_id, body):
+            job.update(
+                {
+                    "status": body.get("status", job["status"]),
+                    "progress_json": body.get(
+                        "progress_json", job.get("progress_json")
+                    ),
+                }
+            )
+
+        with (
+            patch.object(batch, "patch_job", side_effect=update_job),
+            patch.object(batch.process_satellite_batch, "apply_async") as enqueue,
+        ):
+            self.assertTrue(
+                batch._schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=0,
+                    error="first failure",
+                )
+            )
+            self.assertTrue(
+                batch._schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=1,
+                    error="second failure",
+                )
+            )
+            self.assertFalse(
+                batch._schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=2,
+                    error="third failure",
+                )
+            )
+
+        self.assertEqual(enqueue.call_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs["kwargs"]["compensation_attempt"]
+                for call in enqueue.call_args_list
+            ],
+            [1, 2],
+        )
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["progress_json"]["compensation_count"], 2)
+        self.assertIsNone(job["progress_json"]["compensation_active_attempt"])
+
     def test_optical_download_once_and_publish_only_requested_lands(self):
         job = {
             "status": "pending",

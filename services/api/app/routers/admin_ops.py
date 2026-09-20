@@ -600,9 +600,18 @@ def _group_child_counts(group: _ExecutionGroup) -> dict[str, int]:
 
 
 def _group_status(group: _ExecutionGroup) -> str:
-    # 有真实父 Job 时优先使用父 Job 状态；overview_daily 的 partial 正是
-    # “子任务允许失败，但所有子任务已终态”的最终业务状态。
+    # assessment_batch 的父 Job 只在派发时写一次 running；所有子任务结束后
+    # 由子任务计数推导最终态，避免“失败 1、未终态 0”仍被显示为运行中。
     if group.parent_job is not None:
+        if group.parent_job.type == "assessment_batch":
+            counts = _group_child_counts(group)
+            if not counts["missing"] and not counts["pending"] and not counts["running"]:
+                if counts["failed"] and counts["completed"]:
+                    return "partial"
+                if counts["failed"]:
+                    return "failed"
+                if counts["completed"] == counts["total"] and counts["total"]:
+                    return "completed"
         return group.parent_job.status
     counts = _group_child_counts(group)
     child_job_ids = {job.id for job, _ in group.jobs}
