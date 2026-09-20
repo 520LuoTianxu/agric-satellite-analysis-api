@@ -253,6 +253,7 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
         run = run_with([job], age=age)
         db = MagicMock()
         db.commit = AsyncMock()
+        db.flush = AsyncMock()
         calls = [result(scalar_one_or_none=run), result(lands=[job])]
         if job.progress_json.get("published_products"):
             calls.append(result(scalar_one=missing))
@@ -280,6 +281,26 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pending_download_does_not_publish_snapshot(self):
         out, _, compute = await self.finalize(satellite_job("running"))
+        self.assertEqual(out["pending_jobs"], 1)
+        compute.assert_not_awaited()
+
+    async def test_stale_running_download_is_recovered_and_aggregated(self):
+        job = satellite_job("running")
+        job.started_at = datetime.now(timezone.utc) - (
+            daily.STALE_SATELLITE_JOB_AFTER + timedelta(minutes=1)
+        )
+        out, _, compute = await self.finalize(job)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.error, daily.STALE_SATELLITE_JOB_ERROR)
+        self.assertTrue(job.progress_json["stale_recovered"])
+        self.assertIsNotNone(job.finished_at)
+        self.assertEqual(out["status"], "partial")
+        self.assertEqual(out["pending_jobs"], 0)
+        self.assertEqual(out["failed_jobs"], 1)
+        compute.assert_awaited_once()
+
+    async def test_expired_pending_download_still_waits_for_terminal_state(self):
+        out, _, compute = await self.finalize(satellite_job("pending"), age=24)
         self.assertEqual(out["pending_jobs"], 1)
         compute.assert_not_awaited()
 

@@ -1,15 +1,18 @@
 """只聚合请求中的地块，使用当地米制投影计算5×5公里区域。"""
 
+import uuid
 import math
 from collections.abc import Sequence
+from datetime import date, timedelta
 
 from pyproj import CRS, Transformer
 from shapely.geometry import box
 from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
+from app.core.config import settings
 from app.core.geo import geojson_to_shape
-from app.models.tables import LandParcel
+from app.models.tables import Job, LandParcel
 from app.schemas.satellite_batch import SatelliteBatchGroup
 
 
@@ -85,3 +88,69 @@ def group_satellite_lands(lands: Sequence[LandParcel]) -> list[SatelliteBatchGro
             )
         )
     return groups
+
+
+def build_satellite_batch_jobs(
+    lands: Sequence[LandParcel],
+    *,
+    date_from: date,
+    date_to: date,
+    sensors: Sequence[str],
+    force: bool = False,
+    parent_job_id: uuid.UUID | None = None,
+    id_namespace: uuid.UUID | None = None,
+    chunk_days: int | None = None,
+) -> tuple[list[SatelliteBatchGroup], list[Job]]:
+    """为一批地块构造共享遥感 Job，不在这里提交数据库或派发消息。
+
+    批量选地报告和独立遥感回填都需要完全一致的 5×5 km 分组、日期分片
+    和任务参数；集中构造可以避免两个入口逐渐产生不同的聚合规则。
+    ``id_namespace`` 用于批量报告重试时生成稳定 Job ID，防止重复下载。
+    """
+    if date_from > date_to:
+        raise ValueError("date_from must be no later than date_to")
+
+    groups = group_satellite_lands(lands)
+    jobs: list[Job] = []
+    unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
+    chunk_days = max(
+        int(settings.index_backfill_chunk_days if chunk_days is None else chunk_days), 1
+    )
+    processing_window_km = 5.0
+
+    for group in groups:
+        cursor = date_from
+        while cursor <= date_to:
+            end = min(cursor + timedelta(days=chunk_days - 1), date_to)
+            for sensor in unique_sensors:
+                if id_namespace is None:
+                    job_id = uuid.uuid4()
+                else:
+                    job_id = uuid.uuid5(
+                        id_namespace,
+                        f"satellite_batch:{group.anchor_land_id}:{sensor}:"
+                        f"{cursor.isoformat()}:{end.isoformat()}",
+                    )
+                job = Job(
+                    id=job_id,
+                    land_id=group.anchor_land_id,
+                    type="satellite_batch",
+                    status="pending",
+                    parent_job_id=parent_job_id,
+                    params_json={
+                        "land_ids": group.land_ids,
+                        "anchor_land_id": group.anchor_land_id,
+                        "processing_window_km": processing_window_km,
+                        "oversized": group.oversized,
+                        "download_bbox": list(group.download_bbox),
+                        "aggregation_bbox": list(group.aggregation_bbox),
+                        "sensor": sensor,
+                        "date_from": cursor.isoformat(),
+                        "date_to": end.isoformat(),
+                        "force": force,
+                    },
+                )
+                group.job_ids.append(str(job.id))
+                jobs.append(job)
+            cursor = end + timedelta(days=1)
+    return groups, jobs

@@ -44,6 +44,7 @@ docs/*
 docs/adr/*
 !docs/adr/0001-split-web-and-backend-repositories.md
 !docs/adr/0026-daily-satellite-overview.md
+!docs/adr/0028-batch-assessment-report.md
 !docs/design/
 !docs/TaskList.md
 !docs/agri-first-data.md

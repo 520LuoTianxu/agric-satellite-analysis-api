@@ -77,6 +77,21 @@ async def patch_job(
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 
+    stale_recovered = isinstance(job.progress_json, dict) and job.progress_json.get(
+        "stale_recovered"
+    )
+    if (
+        stale_recovered
+        and (
+            body.progress_json is not None
+            or body.status in {"pending", "running", "succeeded", "completed"}
+        )
+    ):
+        # 旧下载机即使在回收后迟到上报，也不能把已判失败的任务重新改成成功，
+        # 也不能用不含回收标记的进度覆盖失败依据；否则父任务可能再次被错误地
+        # 标记为未完成或覆盖补偿依据。
+        return _to_out(job)
+
     now = datetime.now(timezone.utc)
     if body.status is not None:
         job.status = body.status
