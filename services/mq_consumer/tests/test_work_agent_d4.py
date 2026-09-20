@@ -18,7 +18,10 @@ class ClaimModeGuardTests(unittest.TestCase):
             {"WORKER_NAME": "download-east-01", "WORKER_ID": "legacy-id"},
             clear=False,
         ):
-            with patch.object(wa, "queue_depths", return_value={"ingest": 7}):
+            with (
+                patch.object(wa, "weather_daily_limit_reached", return_value=False),
+                patch.object(wa, "queue_depths", return_value={"ingest": 7}),
+            ):
                 self.assertEqual(wa.claim_batch(client), [])
         request = client.post.call_args
         self.assertEqual(request.kwargs["json"]["worker_name"], "download-east-01")
@@ -54,6 +57,34 @@ class ClaimModeGuardTests(unittest.TestCase):
             self.assertIn(t, wa.COMPLETE_ON_DISPATCH_TYPES)
         self.assertIn("admin_task", wa.DEFAULT_TYPES)
         self.assertIn("admin_task", wa.COMPLETE_ON_DISPATCH_TYPES)
+
+    def test_weather_type_is_removed_after_daily_api_limit(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WORK_CLAIM_TYPES": "weather_backfill,soil_fetch"},
+            clear=False,
+        ):
+            with patch.object(wa, "weather_daily_limit_reached", return_value=True):
+                self.assertEqual(wa.claim_types(), ["soil_fetch"])
+
+    def test_empty_claim_type_list_does_not_claim_all_types(self) -> None:
+        client = MagicMock()
+        with patch.object(wa, "claim_types", return_value=[]):
+            self.assertEqual(wa.claim_batch(client), [])
+        client.post.assert_not_called()
+
+    def test_explicit_claim_types_also_respect_daily_api_limit(self) -> None:
+        client = MagicMock()
+        client.post.return_value.json.return_value = {"items": []}
+        with (
+            patch.object(wa, "weather_daily_limit_reached", return_value=True),
+            patch.object(wa, "queue_depths", return_value={}),
+        ):
+            self.assertEqual(
+                wa.claim_batch(client, types=["weather_backfill", "soil_fetch"]),
+                [],
+            )
+        self.assertEqual(client.post.call_args.kwargs["json"]["types"], ["soil_fetch"])
 
     def test_admin_task_dispatch_does_not_require_land_id(self) -> None:
         result = MagicMock(id="celery-admin-1")

@@ -60,6 +60,7 @@ class WeatherScheduleHttpTests(unittest.TestCase):
         with (
             patch.object(wx, "_get_db_session") as get_db,
             patch.object(wx, "group", return_value=group_mock),
+            patch.object(wx, "weather_daily_limit_reached", return_value=False),
             patch(
                 "agric_satellite_analysis_common.internal_api.internal_api_enabled",
                 return_value=True,

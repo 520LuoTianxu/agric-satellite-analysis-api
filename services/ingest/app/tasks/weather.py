@@ -19,6 +19,11 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
 )
+from agric_satellite_analysis_common.weather_daily_limit import (
+    DAILY_API_LIMIT_MESSAGE,
+    mark_weather_daily_limit_reached,
+    weather_daily_limit_reached,
+)
 from app.core.admin_task_tracking import track_admin_task_run
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
@@ -194,6 +199,15 @@ def _calculate_gdd(
     return max(0.0, avg - base)
 
 
+def _is_daily_api_limit_response(response: httpx.Response | None) -> bool:
+    """只识别天气供应商明确返回的“当天配额耗尽”响应。"""
+    return bool(
+        response is not None
+        and response.status_code == 429
+        and DAILY_API_LIMIT_MESSAGE in response.text
+    )
+
+
 def _fetch_open_meteo(
     latitude: float,
     longitude: float,
@@ -279,6 +293,18 @@ def fetch_weather_for_land(
     Returns:
         dict with land_id, rows_upserted, status.
     """
+    if weather_daily_limit_reached():
+        logger.info(
+            "weather_fetch_skipped_daily_api_limit",
+            land_id=land_id,
+        )
+        return {
+            "land_id": land_id,
+            "rows_upserted": 0,
+            "status": "skipped",
+            "reason": "daily_api_limit_reached",
+        }
+
     from app.models.tables import WeatherDaily
 
     http_only = _http_only_weather()
@@ -464,6 +490,25 @@ def fetch_weather_for_land(
         }
 
     except httpx.HTTPStatusError as e:
+        if _is_daily_api_limit_response(e.response):
+            marked = mark_weather_daily_limit_reached()
+            logger.warning(
+                "weather_daily_api_limit_reached",
+                land_id=land_id,
+                marked=marked,
+                detail=DAILY_API_LIMIT_MESSAGE,
+            )
+            if session is not None:
+                session.rollback()
+            # 日配额当天不会恢复，不能继续 Celery retry，否则会让同一下载机
+            # 持续领取并重复请求天气接口；claim agent 会据此暂停天气类型。
+            return {
+                "land_id": land_id,
+                "rows_upserted": 0,
+                "status": "rate_limited",
+                "reason": "daily_api_limit_reached",
+                "error": DAILY_API_LIMIT_MESSAGE,
+            }
         logger.error(
             "weather_api_error",
             land_id=land_id,
@@ -551,6 +596,15 @@ def schedule_daily_weather_fetch(
 
     配了 API_BASE_URL 时，地块清单走 Internal HTTP，不在下载机查库。
     """
+    if weather_daily_limit_reached():
+        logger.info("weather_schedule_skipped_daily_api_limit")
+        return {
+            "lands": 0,
+            "batches": 0,
+            "http": False,
+            "reason": "daily_api_limit_reached",
+        }
+
     land_ids: list[str] = []
     batch_size = settings.weather_batch_size
     http = False
@@ -714,7 +768,9 @@ def backfill_weather_for_land(
                 status = "success"
                 if isinstance(result, dict) and result.get("status") in (
                     "error",
-                    "failed"):
+                    "failed",
+                    "rate_limited",
+                ):
                     status = "failed"
                 payload = None
                 if status == "success":
@@ -758,7 +814,12 @@ def backfill_weather_for_land(
                     status=status,
                     land_id=land_id,
                     error=(
-                        str(result.get("message") or result.get("detail") or "")[:500]
+                        str(
+                            result.get("message")
+                            or result.get("detail")
+                            or result.get("error")
+                            or ""
+                        )[:500]
                         if status == "failed" and isinstance(result, dict)
                         else None
                     ),
