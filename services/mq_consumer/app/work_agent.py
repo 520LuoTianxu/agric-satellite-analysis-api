@@ -33,6 +33,10 @@ from agric_satellite_analysis_common.trace import (
     current_trace_id,
     get_or_create_trace_id,
 )
+from agric_satellite_analysis_common.weather_daily_limit import (
+    WEATHER_WORK_TYPE,
+    weather_daily_limit_reached,
+)
 
 logger = logging.getLogger("work_agent")
 
@@ -43,7 +47,7 @@ DEFAULT_TYPES = [
     "satellite_analysis",
     "satellite_batch",
     "agri_bridge",
-    "weather_backfill",
+    WEATHER_WORK_TYPE,
     "soil_fetch",
     "admin_task",
 ]
@@ -86,9 +90,13 @@ def should_run_claim_agent() -> bool:
 
 def claim_types() -> list[str]:
     raw = _env("WORK_CLAIM_TYPES")
-    return (
+    configured = (
         [t.strip() for t in raw.split(",") if t.strip()] if raw else list(DEFAULT_TYPES)
     )
+    if not weather_daily_limit_reached():
+        return configured
+    # 天气 API 达到当天配额后只暂停天气类型，其他下载和计算任务继续领取。
+    return [task_type for task_type in configured if task_type != WEATHER_WORK_TYPE]
 
 
 def worker_name() -> str:
@@ -190,12 +198,21 @@ def claim_batch(
     types: list[str] | None = None,
     limit: int = 1,
 ) -> list[dict[str, Any]]:
+    requested_types = list(claim_types() if types is None else types)
+    if types is not None and weather_daily_limit_reached():
+        requested_types = [
+            task_type
+            for task_type in requested_types
+            if task_type != WEATHER_WORK_TYPE
+        ]
+    if not requested_types:
+        return []
     depths = queue_depths()
     pending = sum(depths.values()) if depths is not None else None
     body = {
         "worker_name": worker_name(),
         "worker_id": worker_id(),
-        "types": types or claim_types(),
+        "types": requested_types,
         "limit": limit,
         "lease_seconds": lease_seconds(),
         "interval_seconds": claim_interval_sec(),

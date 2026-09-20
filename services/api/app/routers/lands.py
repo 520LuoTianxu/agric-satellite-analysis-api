@@ -50,6 +50,7 @@ from app.schemas.farm import (
     LandParcelOut,
     LandParcelUpdate,
 )
+from app.services.mysql_land_sync import sync_selected_lands
 
 router = APIRouter()
 
@@ -145,6 +146,40 @@ async def _get_land_or_404(land_id: str, db: AsyncSession) -> LandParcel:
     if not land or land.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Land parcel not found")
     return land
+
+
+async def _get_land_or_sync(land_id: str, db: AsyncSession) -> LandParcel:
+    """查询地块；主库没有时同步 Smart 后再读取一次。"""
+    land = await db.get(LandParcel, land_id)
+    if land and land.deleted_at is None:
+        return land
+
+    try:
+        # 这里必须等待 Smart 同步完成，保证本次 GET 能直接拿到 farms 和
+        # land_parcels 的最新数据，而不是把首次查询转成异步后台任务后仍返回 404。
+        summary = await sync_selected_lands([land_id])
+    except Exception as exc:
+        logger.exception("land_lookup_smart_sync_failed", land_id=land_id)
+        raise HTTPException(status_code=503, detail="Smart 地块数据同步失败") from exc
+
+    # 首次查询可能已经开启了当前会话事务；同步使用独立会话提交后，先结束旧事务，
+    # 再读取新提交的数据，也能正确恢复此前被软删除的地块。
+    await db.rollback()
+    land = await db.get(LandParcel, land_id)
+    if land and land.deleted_at is None:
+        return land
+
+    sync_status = summary.get("status")
+    if sync_status == "skipped_locked":
+        raise HTTPException(status_code=409, detail="Smart 地块同步正在进行，请稍后重试")
+    if sync_status == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Smart/MySQL source is not enabled; set MYSQL_SOURCE_ENABLED=true",
+        )
+    if sync_status in {"filtered", "invalid"}:
+        raise HTTPException(status_code=422, detail="Smart 地块数据无法同步")
+    raise HTTPException(status_code=404, detail="Land parcel not found in Smart source")
 
 
 def _normalized_crop(value: str | None) -> str | None:
@@ -276,7 +311,7 @@ async def get_land(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    return _land_to_out(await _get_land_or_404(land_id, db))
+    return _land_to_out(await _get_land_or_sync(land_id, db))
 
 
 @router.put("/lands/{land_id}", response_model=LandParcelOut)
