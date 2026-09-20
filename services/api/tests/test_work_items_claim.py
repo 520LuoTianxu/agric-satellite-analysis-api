@@ -32,6 +32,17 @@ class WorkQueueModeTests(unittest.TestCase):
         with patch.object(wi.settings, "work_queue_mode", "wat"):
             self.assertEqual(wi.work_queue_mode(), "legacy")
 
+    def test_followup_report_job_id_is_indexed(self) -> None:
+        report_job_id = uuid.uuid4()
+        payload = {
+            "land_id": "land-1",
+            "extras": {
+                "followup_assessment": {"job_id": str(report_job_id)},
+            },
+        }
+
+        self.assertEqual(wi._parent_job_id_from_payload(payload), report_job_id)
+
 
 class _FakeResult:
     def __init__(self, rows: list[Any]):

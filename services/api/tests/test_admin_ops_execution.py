@@ -9,6 +9,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from app.routers.admin_ops import (
     _build_execution_groups,
+    _work_item_parent_id,
     _to_execution_group_out,
     execution_overview,
 )
@@ -74,6 +75,7 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
                 _FakeResult(rows=[]),
                 _FakeResult(rows=[]),
                 _FakeResult(items=[work_item]),
+                _FakeResult(items=[job.id]),
             ]
         )
 
@@ -108,6 +110,7 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
                 _FakeResult(rows=[(parent_id, 2, 2, 1, 1, 0, now, "child failed")]),
                 _FakeResult(rows=[(parent_id, 2, 1, 1, 1, 0, 0, now, None)]),
                 _FakeResult(items=[]),
+                _FakeResult(items=[parent_id]),
             ]
         )
 
@@ -191,6 +194,19 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
         self.assertEqual(out.child_counts["failed"], 1)
         # WorkItem 与 child Job 是同一执行单元的两条记录，进度不能重复计数。
         self.assertEqual(out.child_counts["terminal"], 2)
+
+    def test_nested_followup_work_item_is_linked_to_report_job(self):
+        report_job_id = uuid.uuid4()
+        item = SimpleNamespace(
+            parent_job_id=None,
+            payload_json={
+                "extras": {
+                    "followup_assessment": {"job_id": str(report_job_id)},
+                },
+            },
+        )
+
+        self.assertEqual(_work_item_parent_id(item), report_job_id)
 
 
 if __name__ == "__main__":

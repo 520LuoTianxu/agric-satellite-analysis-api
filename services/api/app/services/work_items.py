@@ -90,14 +90,26 @@ def _parent_job_id_from_payload(payload: dict[str, Any]) -> uuid.UUID | None:
     """从派发载荷提取父 Job，写入索引列供运维任务树快速查询。"""
     extras = payload.get("extras")
     extras = extras if isinstance(extras, dict) else {}
-    for value in (
+    # 普通任务直接把 job_id 放在 payload/extras；一键报告的下载机任务
+    # 会先执行 land_bootstrap，再通过 followup_* 派发报告，因此父 Job
+    # 还可能嵌套在 followup_assessment/followup_season_growth 中。
+    values = [
         payload.get("job_id"),
         payload.get("parent_job_id"),
         extras.get("job_id"),
         extras.get("parent_job_id"),
         extras.get("sentinel_job_id"),
         extras.get("bridge_job_id"),
-    ):
+    ]
+    for container in (payload, extras):
+        for followup_key in ("followup_assessment", "followup_season_growth"):
+            followup = container.get(followup_key)
+            if isinstance(followup, dict):
+                values.extend(
+                    [followup.get("job_id"), followup.get("parent_job_id")]
+                )
+
+    for value in values:
         if isinstance(value, uuid.UUID):
             return value
         if isinstance(value, str):

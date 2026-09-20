@@ -14,6 +14,7 @@ from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, get_org_context, require_roles
 from app.models.tables import Job, LandParcel
 from app.schemas.monitoring import JobCreateIndex, JobCreateNDVI, JobOut
+from app.services.report_urls import report_progress_for_response
 from app.tasks.indices import INDEX_TASK_MAP
 
 router = APIRouter()
@@ -141,24 +142,27 @@ async def get_job(
     job = await db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    progress = job.progress_json
     # Prefer live Redis hot-path counters when present (graceful no-op if down).
     try:
         from agric_satellite_analysis_common.job_progress_redis import merge_progress_for_api
 
-        merged = merge_progress_for_api(job.id, job.progress_json)
-        if merged is not None and merged is not job.progress_json:
-            # Build response without mutating the ORM row.
-            return JobOut(
-                id=job.id,
-                land_id=job.land_id,
-                type=job.type,
-                status=job.status,
-                progress_json=merged,
-                error=job.error,
-                created_at=job.created_at,
-                started_at=job.started_at,
-                finished_at=job.finished_at,
-            )
+        merged = merge_progress_for_api(job.id, progress)
+        if merged is not None:
+            progress = merged
     except Exception:
         pass
-    return job
+    if job.type == "assessment_report":
+        progress = report_progress_for_response(progress)
+    # 构造响应而不是修改 ORM，确保签名 URL不会落库，也不会污染 Redis 快照。
+    return JobOut(
+        id=job.id,
+        land_id=job.land_id,
+        type=job.type,
+        status=job.status,
+        progress_json=progress,
+        error=job.error,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )

@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.models.tables import AdminTaskRun, DownloadWorker, Job, WorkItem
 from app.middleware.auth import OrgContext, require_roles
 from app.services import work_items as wi
+from app.services.report_urls import report_progress_for_response
 
 router = APIRouter(prefix="/admin/ops", tags=["admin-ops"])
 _admin = require_roles("owner", "admin")
@@ -420,18 +421,74 @@ def _work_item_parent_id(item: WorkItem) -> uuid.UUID | None:
     payload = _json_dict(item.payload_json)
     extras = _json_dict(payload.get("extras"))
     # claim payload 的 job_id 通常放在 extras 内；保留顶层兼容旧任务和手工派发。
-    for value in (
+    values = [
         payload.get("job_id"),
         payload.get("parent_job_id"),
         extras.get("job_id"),
         extras.get("parent_job_id"),
         extras.get("sentinel_job_id"),
         extras.get("bridge_job_id"),
-    ):
+    ]
+    # 一键报告的 land_bootstrap WorkItem 会把最终报告 Job 放在 followup
+    # 中；这里要和入队时的索引规则保持一致，才能把历史记录归并回父任务。
+    for container in (payload, extras):
+        for followup_key in ("followup_assessment", "followup_season_growth"):
+            followup = _json_dict(container.get(followup_key))
+            values.extend([followup.get("job_id"), followup.get("parent_job_id")])
+
+    for value in values:
         parent_id = _as_uuid(value)
         if parent_id:
             return parent_id
     return None
+
+
+def _work_item_parent_json_expressions() -> tuple[Any, ...]:
+    """返回 JSONB 中所有兼容历史任务格式的 Job ID 表达式。"""
+    payload = WorkItem.payload_json
+    extras = payload["extras"]
+    return (
+        payload["job_id"].as_string(),
+        payload["parent_job_id"].as_string(),
+        extras["job_id"].as_string(),
+        extras["parent_job_id"].as_string(),
+        extras["sentinel_job_id"].as_string(),
+        extras["bridge_job_id"].as_string(),
+        extras["followup_assessment"]["job_id"].as_string(),
+        extras["followup_assessment"]["parent_job_id"].as_string(),
+        extras["followup_season_growth"]["job_id"].as_string(),
+        extras["followup_season_growth"]["parent_job_id"].as_string(),
+        payload["followup_assessment"]["job_id"].as_string(),
+        payload["followup_season_growth"]["job_id"].as_string(),
+    )
+
+
+def _work_item_parent_matches_job(job_id: Any) -> Any:
+    """按 WorkItem.parent_job_id 优先、JSON payload 兜底匹配一个 Job。"""
+    json_match = or_(*(
+        expression == cast(job_id, String)
+        for expression in _work_item_parent_json_expressions()
+    ))
+    # 只有索引列为空时才使用 JSON 兜底，和 _work_item_parent_id 的优先级一致，
+    # 避免历史脏数据同时带两个不同 Job ID 时在任务组中重复出现。
+    return or_(
+        WorkItem.parent_job_id == job_id,
+        and_(WorkItem.parent_job_id.is_(None), json_match),
+    )
+
+
+def _work_item_parent_matches_tree(tree: Any) -> Any:
+    """按任务树筛选 WorkItem，兼容已落库但尚未填索引列的旧记录。"""
+    tree_ids = select(tree.c.id)
+    json_tree_ids = select(cast(tree.c.id, String))
+    json_match = or_(*(
+        expression.in_(json_tree_ids)
+        for expression in _work_item_parent_json_expressions()
+    ))
+    return or_(
+        WorkItem.parent_job_id.in_(tree_ids),
+        and_(WorkItem.parent_job_id.is_(None), json_match),
+    )
 
 
 def _root_job_id(
@@ -655,7 +712,9 @@ def _to_job_detail_out(
     return JobDetailOut(
         **_to_job_monitor_out(job, parent_job_id).model_dump(),
         params_json=dict(job.params_json or {}) if job.params_json else None,
-        progress_json=dict(job.progress_json or {}) if job.progress_json else None,
+        progress_json=report_progress_for_response(
+            dict(job.progress_json or {}) if job.progress_json else None
+        ),
     )
 
 
@@ -851,7 +910,7 @@ async def _load_execution_group_summaries(
         )
     ).all()
 
-    direct_work_item = WorkItem.parent_job_id == tree.c.root_id
+    direct_work_item = _work_item_parent_matches_job(tree.c.root_id)
     work_item_rows = (
         await db.execute(
             select(
@@ -889,7 +948,7 @@ async def _load_execution_group_summaries(
                 .filter(direct_work_item)
                 .label("work_item_error"),
             )
-            .join(WorkItem, WorkItem.parent_job_id == tree.c.job_id)
+            .join(WorkItem, _work_item_parent_matches_job(tree.c.job_id))
             .group_by(tree.c.root_id)
         )
     ).all()
@@ -998,7 +1057,15 @@ async def _load_execution_group_summaries(
             .where(WorkItem.parent_job_id.is_(None))
         )
     ).scalars().all()
-    groups.extend(_build_execution_groups([], orphan_items))
+    # 历史 followup WorkItem 可能没有填 parent_job_id，但已经会被上面的
+    # JSON 关联归入已有 Job 组；从孤儿列表中排除它们，避免页面出现重复组。
+    all_job_ids = set((await db.execute(select(Job.id))).scalars().all())
+    unlinked_items: list[WorkItem] = []
+    for item in orphan_items:
+        parent_id = _work_item_parent_id(item)
+        if parent_id is None or parent_id not in all_job_ids:
+            unlinked_items.append(item)
+    groups.extend(_build_execution_groups([], unlinked_items))
     return groups
 
 
@@ -1028,12 +1095,11 @@ async def _load_execution_group(
                     .where(Job.id.in_(select(tree.c.id)))
                 )
             ).scalars().all()
-            tree_ids = select(tree.c.id)
             work_items = (
                 await db.execute(
                     select(WorkItem)
                     .options(load_only(*_WORK_ITEM_MONITOR_COLUMNS))
-                    .where(WorkItem.parent_job_id.in_(tree_ids))
+                    .where(_work_item_parent_matches_tree(tree))
                 )
             ).scalars().all()
             group = next(

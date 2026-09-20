@@ -35,6 +35,7 @@ from app.services.cdfinance_report_prefetch import (
     resolve_request_token,
 )
 from app.services.mysql_land_sync import sync_selected_lands
+from app.services.report_urls import report_progress_for_response, signed_report_url
 from app.services.satellite_batch import build_satellite_batch_jobs
 from pydantic import (
     AliasChoices,
@@ -193,6 +194,13 @@ class AssessmentBatchResponse(BaseModel):
     reports: list[AssessmentBatchReportOut]
 
 
+def _job_response_with_report_url(job: Job) -> JobOut:
+    """返回 Job 时动态签名 OSS 报告地址，不把临时链接写回数据库。"""
+    result = JobOut.model_validate(job)
+    result.progress_json = report_progress_for_response(result.progress_json)
+    return result
+
+
 class AssessmentDimensionOut(BaseModel):
     key: str
     score: float
@@ -316,7 +324,7 @@ async def _assessment_batch_response(
             job_id=job.id,
             land_id=str(job.land_id),
             status=job.status,
-            progress_json=job.progress_json,
+            progress_json=report_progress_for_response(job.progress_json),
             error=job.error,
         )
         for job in children
@@ -905,8 +913,8 @@ async def get_latest_assessment_report(
             status_code=404, detail="Report object not found in storage"
         )
 
-    # Prefer streaming from storage; public_url (OSS) is also in progress for
-    # process-host / frontend download without proxying through API.
+    # 仍由 API 读取并流式返回，避免下载机或浏览器因私有 OSS ACL 直接被拒绝；
+    # 如需直连，响应头会提供短期签名 URL。
     data = storage.get_bytes(object_key)
     filename = progress.get("filename") or "选地分析报告.pdf"
     # RFC 5987 for Chinese filenames
@@ -918,7 +926,7 @@ async def get_latest_assessment_report(
         "X-Assessment-Job-Id": str(job.id),
         "X-Assessment-Score": str(progress.get("score", "")),
     }
-    public_url = progress.get("public_url")
+    public_url = signed_report_url(object_key)
     if public_url:
         headers["X-Assessment-Public-Url"] = str(public_url)
     return Response(content=data, media_type="application/pdf", headers=headers)
@@ -1000,7 +1008,7 @@ async def get_latest_available_assessment_meta(
     ).scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="No assessment report yet")
-    return job
+    return _job_response_with_report_url(job)
 
 
 @router.get("/lands/{land_id}/assessment-report/latest/meta", response_model=JobOut)
@@ -1021,7 +1029,7 @@ async def get_latest_assessment_meta(
     )
     if not job:
         raise HTTPException(status_code=404, detail="No assessment report yet")
-    return job
+    return _job_response_with_report_url(job)
 
 
 def _scorecard_from_job(job: Job) -> dict[str, Any] | None:
