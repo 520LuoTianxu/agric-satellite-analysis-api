@@ -37,19 +37,19 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
         "label": "每日卫星刷新",
         "description": "准备每日卫星增量下载，并在结果齐备后生成态势快照。",
         "task_name": "app.tasks.overview_preagg.refresh_daily_satellite",
-        "schedule": "每天 19:15（北京时间）",
+        "schedule": "每天 01:00（北京时间）",
     },
     "overview-refresh": {
         "label": "总览预聚合",
         "description": "刷新全国和分省总览统计缓存。",
         "task_name": "app.tasks.overview_preagg.refresh_overview_stats",
-        "schedule": "每天 02:30（北京时间）",
+        "schedule": "每天 04:00（北京时间）",
     },
     "mysql-land-sync": {
         "label": "同步 MySQL 地块数据",
         "description": "从外部 MySQL 同步地块主数据到 PostgreSQL，并为新增或变更地块派发遥感处理任务。",
         "task_name": "app.services.mysql_land_sync.run_land_sync",
-        "schedule": "每天 23:00（北京时间，API 机）",
+        "schedule": "每天 22:00（北京时间，API 机）",
     },
 }
 

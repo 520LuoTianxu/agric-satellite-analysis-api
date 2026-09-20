@@ -327,13 +327,13 @@ def _job_id_for(parcel: SourceParcel, date_from: date, date_to: date) -> uuid.UU
 
 
 def next_sync_at(now: datetime | None = None) -> datetime:
-    """返回下一次北京时间 23:00 对应的 UTC 时间。"""
+    """返回下一次北京时间 22:00 对应的 UTC 时间。"""
     zone = ZoneInfo(settings.mysql_sync_timezone)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     local_now = current.astimezone(zone)
-    target = local_now.replace(hour=23, minute=0, second=0, microsecond=0)
+    target = local_now.replace(hour=22, minute=0, second=0, microsecond=0)
     if target <= local_now:
         target += timedelta(days=1)
     return target.astimezone(timezone.utc)
@@ -926,7 +926,7 @@ async def run_land_sync(*, today: date | None = None) -> dict[str, Any]:
 
 
 async def run_scheduler() -> None:
-    """API 机单实例调度器；容器重启后按下一个北京时间 23:00 继续。"""
+    """API 机单实例调度器；容器重启后按下一个北京时间 22:00 继续。"""
     while True:
         target = next_sync_at()
         while True:

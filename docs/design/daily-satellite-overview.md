@@ -1,6 +1,6 @@
 # 全国态势每日刷新运行说明
 
-所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间19:15（11:15 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。任务检查包含当天在内的近7个自然日S1/S2观测，并按数据库已有日期跳过已入库数据。只有子任务全部进入终态后才生成当天快照；`failed`/`cancelled`也属于终态，失败地块会被标记为部分数据并留待后续补偿，不会阻塞全国快照。成功发布的结果仍需确认异步入库，避免把尚未写入事实表的数据误算为“无数据”。
+所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间01:00（17:00 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。任务检查包含当天在内的近7个自然日S1/S2观测，并按数据库已有日期跳过已入库数据。只有子任务全部进入终态后才生成当天快照；`failed`/`cancelled`也属于终态，失败地块会被标记为部分数据并留待后续补偿，不会阻塞全国快照。成功发布的结果仍需确认异步入库，避免把尚未写入事实表的数据误算为“无数据”。
 
 `.env`配置：
 

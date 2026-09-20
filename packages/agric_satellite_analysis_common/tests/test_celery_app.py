@@ -24,10 +24,15 @@ from agric_satellite_analysis_common.settings import CommonSettings
 
 
 class CeleryRedisTransportTests(unittest.TestCase):
-    def test_daily_satellite_schedule_is_1915_china_time(self) -> None:
+    def test_daily_satellite_schedule_is_0100_china_time(self) -> None:
         schedule = BEAT_SCHEDULE["refresh-satellite-overview-daily"]["schedule"]
-        self.assertEqual(schedule.hour, {11})
-        self.assertEqual(schedule.minute, {15})
+        self.assertEqual(schedule.hour, {17})
+        self.assertEqual(schedule.minute, {0})
+
+    def test_overview_refresh_schedule_is_0400_china_time(self) -> None:
+        schedule = BEAT_SCHEDULE["refresh-overview-stats-daily"]["schedule"]
+        self.assertEqual(schedule.hour, {20})
+        self.assertEqual(schedule.minute, {0})
 
     def test_transport_options_set_timeouts_and_health_check(self) -> None:
         cfg = CommonSettings(

@@ -9,7 +9,7 @@ workers never receive the MySQL credentials and do not read the source DB.
 
 ## Schedule and flow
 
-`land_sync` runs once daily at 23:00 `Asia/Shanghai`. It holds the PostgreSQL
+`land_sync` runs once daily at 22:00 `Asia/Shanghai`. It holds the PostgreSQL
 advisory lock `agric-satellite:mysql-land-sync`, streams the MySQL snapshot in
 batches, validates the pipe-delimited WGS84 polygon, and commits each target
 batch before dispatching remote-sensing work.

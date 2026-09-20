@@ -89,12 +89,13 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
     },
     "refresh-satellite-overview-daily": {
         "task": "app.tasks.overview_preagg.refresh_daily_satellite",
-        # Celery显式使用UTC；11:15对应北京时间19:15，检查近7个自然日的S1/S2缺失观测。
-        "schedule": crontab(hour=11, minute=15),
+        # Celery显式使用UTC；17:00对应北京时间次日01:00，检查近7个自然日的S1/S2缺失观测。
+        "schedule": crontab(hour=17, minute=0),
     },
     "refresh-overview-stats-daily": {
         "task": "app.tasks.overview_preagg.refresh_overview_stats",
-        "schedule": crontab(hour=18, minute=30),
+        # Celery显式使用UTC；20:00对应北京时间04:00，避开卫星刷新后的数据准备窗口。
+        "schedule": crontab(hour=20, minute=0),
     },
 }
 

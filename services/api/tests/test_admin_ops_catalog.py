@@ -16,6 +16,12 @@ class AdminOpsCatalogTests(unittest.TestCase):
             _TASK_CATALOG["mysql-land-sync"]["task_name"],
             "app.services.mysql_land_sync.run_land_sync",
         )
+        self.assertEqual(_TASK_CATALOG["daily-satellite"]["schedule"], "每天 01:00（北京时间）")
+        self.assertEqual(_TASK_CATALOG["overview-refresh"]["schedule"], "每天 04:00（北京时间）")
+        self.assertEqual(
+            _TASK_CATALOG["mysql-land-sync"]["schedule"],
+            "每天 22:00（北京时间，API 机）",
+        )
 
     def test_mysql_sync_enabled_state_comes_from_api_source_switch(self) -> None:
         with patch("app.routers.admin_ops.settings.mysql_source_enabled", True):
