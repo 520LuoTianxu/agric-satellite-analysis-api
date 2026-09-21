@@ -716,7 +716,7 @@ def render_pdf(
     windows = (method.get("phenology") or {}).get("windows") or []
     season_txt = (
         "；".join(
-            f"{w.get('start_date') or '起点未覆盖'} 至 {w.get('end_date') or '终点未确认'}"
+            f"{w.get('start_date') or '起点未覆盖'} 至 {w.get('end_date') or '暂未识别到收获日'}"
             for w in windows
         )
         or "有效观测不足，未能推断生育窗口"

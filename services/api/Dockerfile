@@ -18,6 +18,8 @@ ENV PYTHONUNBUFFERED=1
 COPY packages/agric_satellite_analysis_common /packages/agric_satellite_analysis_common
 COPY services/api/pyproject.toml .
 COPY services/api/app ./app
+# TEMP(PROD-DB-INIT): 首次生产发布完成后删除这行及对应初始化逻辑。
+COPY ABflow/agric_satellite.sql /app/agric_satellite.sql
 
 RUN pip install --no-cache-dir /packages/agric_satellite_analysis_common \
     && pip install --no-cache-dir .

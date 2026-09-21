@@ -312,7 +312,7 @@ def render_report(snapshot: dict) -> bytes:
         for window in item["effective_windows"]:
             story.append(
                 p(
-                    f"起点：{window.get('start_date') or '未覆盖'}；终点：{window.get('end_date') or '尚未确认'}；观测峰值：{window.get('peak_date') or '未指定'}；可信程度：{'人工确认' if window['confidence'] == 'user' else '中' if window['confidence'] == 'medium' else '低'}。"
+                    f"起点：{window.get('start_date') or '未覆盖'}；终点：{window.get('end_date') or '暂未识别到收获日'}；观测峰值：{window.get('peak_date') or '未指定'}；可信程度：{'人工确认' if window['confidence'] == 'user' else '中' if window['confidence'] == 'medium' else '低'}。"
                 )
             )
         story.append(
