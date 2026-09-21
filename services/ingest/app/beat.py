@@ -5,6 +5,10 @@ Beat 只往本机 Redis 发布任务名，不导入栅格任务，也不查 Post
 """
 
 from agric_satellite_analysis_common.celery_app import CPU_COMPUTE_QUEUE, create_celery_app
+from agric_satellite_analysis_common.logging import setup_stdlib_logging
+
+# Beat 的调度日志也要落到统一目录，方便核对任务是否实际投递到下载机队列。
+setup_stdlib_logging()
 
 celery_app = create_celery_app(
     name="openfarm-ingest",

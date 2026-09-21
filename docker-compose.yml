@@ -88,6 +88,7 @@ services:
       # API向页面返回自动刷新配置状态；与下载机Beat使用相同.env开关。
       SCHEDULE_DAILY_SATELLITE_ENABLED: ${SCHEDULE_DAILY_SATELLITE_ENABLED:-false}
       WORK_REAPER_ON_CLAIM: ${WORK_REAPER_ON_CLAIM:-1}
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/api.log
       OPENFARM_SCRATCH_DIR: /data/scratch
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
@@ -102,6 +103,7 @@ services:
       CDFINANCE_SOIL_TIMEOUT_SECONDS: ${CDFINANCE_SOIL_TIMEOUT_SECONDS:-60}
     volumes:
       - scratch:/data/scratch
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       db:
         condition: service_healthy
@@ -164,6 +166,7 @@ services:
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
       CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/ingest.log
       OPENFARM_SCRATCH_DIR: /data/scratch
       API_BASE_URL: ${API_BASE_URL:-http://api:8000}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
@@ -172,6 +175,7 @@ services:
       BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
     volumes:
       - scratch:/data/scratch
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       db:
         condition: service_healthy
@@ -193,6 +197,8 @@ services:
   satellite:
     extends:
       service: ingest
+    environment:
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/satellite.log
     command: >
       celery -A app.worker worker
       -Q satellite_download
@@ -220,9 +226,11 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/storage.log
       OPENFARM_SCRATCH_DIR: /data/scratch
     volumes:
       - scratch:/data/scratch
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -253,6 +261,9 @@ services:
       SCHEDULE_DAILY_SATELLITE_ENABLED: ${SCHEDULE_DAILY_SATELLITE_ENABLED:-false}
       SCHEDULE_DAILY_WEATHER_ENABLED: ${SCHEDULE_DAILY_WEATHER_ENABLED:-false}
       SCHEDULE_OVERVIEW_REFRESH_ENABLED: ${SCHEDULE_OVERVIEW_REFRESH_ENABLED:-false}
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/beat.log
+    volumes:
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -288,6 +299,7 @@ services:
       dockerfile: services/mq_consumer/Dockerfile
     environment:
       <<: *celery-redis-env
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/mq_consumer.log
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
       CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
@@ -301,6 +313,8 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+    volumes:
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -315,6 +329,7 @@ services:
       context: .
       dockerfile: services/mq_result_writer/Dockerfile
     environment:
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/mq_result_writer.log
       CLOUDAMQP_URL: ${CLOUDAMQP_URL:-}
       CLOUDAMQP_DOWNLOAD_QUEUE: ${CLOUDAMQP_DOWNLOAD_QUEUE:-${CLOUDAMQP_TASK_QUEUE:-openfarm_download}}
       CLOUDAMQP_PROCESS_QUEUE: ${CLOUDAMQP_PROCESS_QUEUE:-${CLOUDAMQP_RESULT_QUEUE:-openfarm_process}}
@@ -327,6 +342,8 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
       OSS_BUCKET: ${OSS_BUCKET:-}
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
+    volumes:
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
     depends_on:
       db:
         condition: service_healthy
