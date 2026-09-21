@@ -657,6 +657,8 @@ class WorkItem(Base):
     )
     priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # lease_owner 只表示当前租约；该字段保留最近一次成功 claim 的下载机，便于追溯终态任务。
+    last_claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

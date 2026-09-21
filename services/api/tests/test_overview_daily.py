@@ -284,20 +284,48 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["pending_jobs"], 1)
         compute.assert_not_awaited()
 
-    async def test_stale_running_download_is_recovered_and_aggregated(self):
+    async def test_dispatch_failed_job_is_requeued_before_finalization(self):
+        job = satellite_job("failed")
+        job.error = "下载机任务连续3次未完成，已标记失败"
+        job.progress_json["work_item_failed"] = True
+        with patch.object(daily, "publish_api_task", return_value=str(job.id)) as publish:
+            out, _, compute = await self.finalize(job)
+        publish.assert_called_once_with(
+            type="satellite_batch",
+            land_id="A",
+            task_id=str(job.id),
+            extras={"job_id": str(job.id)},
+            priority=daily.BACKGROUND_TASK_PRIORITY,
+        )
+        self.assertEqual(job.status, "pending")
+        self.assertIsNone(job.error)
+        self.assertNotIn("work_item_failed", job.progress_json)
+        self.assertIsNotNone(job.started_at)
+        self.assertEqual(out["pending_jobs"], 1)
+        self.assertEqual(out["redispatched_job_ids"], [str(job.id)])
+        compute.assert_not_awaited()
+
+    async def test_legacy_stale_failed_job_can_be_requeued(self):
+        job = satellite_job("failed")
+        job.progress_json["stale_recovered"] = True
+        with patch.object(daily, "publish_api_task", return_value=str(job.id)) as publish:
+            out, _, compute = await self.finalize(job)
+        publish.assert_called_once()
+        self.assertEqual(job.status, "pending")
+        self.assertNotIn("stale_recovered", job.progress_json)
+        self.assertEqual(out["redispatched_job_ids"], [str(job.id)])
+        compute.assert_not_awaited()
+
+    async def test_old_running_download_still_waits_for_terminal_state(self):
         job = satellite_job("running")
         job.started_at = datetime.now(timezone.utc) - (
-            daily.STALE_SATELLITE_JOB_AFTER + timedelta(minutes=1)
+            timedelta(hours=48)
         )
         out, _, compute = await self.finalize(job)
-        self.assertEqual(job.status, "failed")
-        self.assertEqual(job.error, daily.STALE_SATELLITE_JOB_ERROR)
-        self.assertTrue(job.progress_json["stale_recovered"])
-        self.assertIsNotNone(job.finished_at)
-        self.assertEqual(out["status"], "partial")
-        self.assertEqual(out["pending_jobs"], 0)
-        self.assertEqual(out["failed_jobs"], 1)
-        compute.assert_awaited_once()
+        self.assertEqual(job.status, "running")
+        self.assertEqual(out["status"], "running")
+        self.assertEqual(out["pending_jobs"], 1)
+        compute.assert_not_awaited()
 
     async def test_expired_pending_download_still_waits_for_terminal_state(self):
         out, _, compute = await self.finalize(satellite_job("pending"), age=24)

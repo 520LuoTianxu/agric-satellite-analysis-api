@@ -11,6 +11,8 @@ import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from numbers import Integral, Real
+from typing import Any
 
 import httpx
 import rasterio
@@ -34,6 +36,19 @@ from app.worker import celery_app
 from app.core.soil_intelligence import evaluate_soil_alerts
 
 logger = structlog.get_logger()
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively normalize values before sending a JSON payload."""
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Real) and not isinstance(value, Integral):
+        normalized = float(value)
+        # SoilGrids/Rosetta 可能产生 NaN 或 Inf；JSON 不接受非有限浮点，需以 null 回写。
+        return normalized if math.isfinite(normalized) else None
+    return value
 
 # ── SoilGrids constants ─────────────────────────────────────────────
 
@@ -1294,7 +1309,7 @@ def fetch_soil_for_land(
                 from agric_satellite_analysis_common.internal_api import apply_results, http_writes_enabled
 
                 if http_writes_enabled():
-                    apply_results(soil_payload)
+                    apply_results(_json_safe(soil_payload))
             except Exception as e:
                 logger.warning(
                     "soil_http_apply_failed", land_id=land_id, error=str(e)

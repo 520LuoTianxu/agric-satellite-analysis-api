@@ -74,6 +74,9 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
     }
 )
 
+# 派发到下载机本地Celery失败时最多尝试三次；API侧会在第三次失败时收敛关联Job。
+MAX_WORK_ITEM_ATTEMPTS = 3
+
 
 def _env(name: str, default: str = "") -> str:
     return (os.getenv(name) or default).strip()
@@ -557,9 +560,20 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                 },
             )
     except Exception as exc:
-        logger.exception("work_item_dispatch_failed id=%s", work_id)
         try:
-            fail(client, work_id, str(exc), retry=False)
+            attempts = max(1, int(item.get("attempts") or 1))
+        except (TypeError, ValueError):
+            attempts = 1
+        retry = attempts < MAX_WORK_ITEM_ATTEMPTS
+        logger.exception(
+            "work_item_dispatch_failed id=%s attempt=%s/%s retry=%s",
+            work_id,
+            attempts,
+            MAX_WORK_ITEM_ATTEMPTS,
+            retry,
+        )
+        try:
+            fail(client, work_id, str(exc), retry=retry)
         except Exception:
             logger.exception("work_item_fail_report_failed id=%s", work_id)
     finally:
@@ -596,6 +610,7 @@ def run_forever() -> None:
 
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
+    "MAX_WORK_ITEM_ATTEMPTS",
     "ADMIN_TASK_NAMES",
     "DEFAULT_TYPES",
     "claim_batch",

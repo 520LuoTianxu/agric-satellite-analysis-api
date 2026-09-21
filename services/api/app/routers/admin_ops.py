@@ -123,6 +123,7 @@ class WorkItemMonitorOut(BaseModel):
     parent_job_id: uuid.UUID | None = None
     priority: int
     lease_owner: str | None = None
+    last_claimed_by: str | None = None
     lease_until: datetime | None = None
     attempts: int
     progress_summary: dict[str, Any] = Field(default_factory=dict)
@@ -345,6 +346,7 @@ _WORK_ITEM_MONITOR_COLUMNS = (
     WorkItem.parent_job_id,
     WorkItem.priority,
     WorkItem.lease_owner,
+    WorkItem.last_claimed_by,
     WorkItem.lease_until,
     WorkItem.attempts,
     WorkItem.progress_json,
@@ -737,6 +739,7 @@ def _to_work_item_monitor_out(
         parent_job_id=parent_job_id,
         priority=int(item.priority or 0),
         lease_owner=item.lease_owner,
+        last_claimed_by=item.last_claimed_by,
         lease_until=item.lease_until,
         attempts=int(item.attempts or 0),
         progress_summary=_progress_summary(item.progress_json),

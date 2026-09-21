@@ -10,9 +10,11 @@ Keep SyncSession PG writes until ``INGEST_PG_WRITES=0`` or claim+HTTP.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from numbers import Integral, Real
 from typing import Any
 
 import httpx
@@ -141,6 +143,19 @@ def _headers() -> dict[str, str]:
     if tid:
         headers[TRACE_HEADER] = tid
     return headers
+
+
+def _json_safe_payload(value: Any) -> Any:
+    """Recursively normalize values before encoding an internal API payload."""
+    if isinstance(value, dict):
+        return {key: _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_payload(item) for item in value]
+    if isinstance(value, Real) and not isinstance(value, Integral):
+        normalized = float(value)
+        # 所有 results/apply 调用统一清洗非有限浮点，避免 HTTP JSON 编码直接失败。
+        return normalized if math.isfinite(normalized) else None
+    return value
 
 
 @contextmanager
@@ -415,7 +430,10 @@ def apply_results(
     """POST /v1/internal/results/apply — domain upserts without a work_item lease."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post("/v1/internal/results/apply", json={"result": result})
+        r = c.post(
+            "/v1/internal/results/apply",
+            json={"result": _json_safe_payload(result)},
+        )
         _raise_for_status(r, context="results/apply")
         data = r.json()
         if not isinstance(data, dict):

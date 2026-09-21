@@ -264,6 +264,34 @@ class HttpWritesTests(unittest.TestCase):
         out = ia.apply_results({"kind": "weather_daily", "rows": []}, client=client)
         self.assertTrue(out["ok"])
 
+    def test_apply_results_sanitizes_non_finite_floats(self) -> None:
+        received: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            received.update(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        out = ia.apply_results(
+            {
+                "kind": "soil_profile",
+                "values": [float("nan"), float("inf"), float("-inf")],
+                "nested": {"missing": float("nan"), "valid": 1.25},
+            },
+            client=client,
+        )
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(
+            received["result"],
+            {
+                "kind": "soil_profile",
+                "values": [None, None, None],
+                "nested": {"missing": None, "valid": 1.25},
+            },
+        )
+
     def test_cache_results_client(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/v1/internal/results/cache")

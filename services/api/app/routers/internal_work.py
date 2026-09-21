@@ -47,6 +47,7 @@ class WorkItemOut(BaseModel):
     status: str
     priority: int
     lease_owner: str | None = None
+    last_claimed_by: str | None = None
     lease_until: datetime | None = None
     attempts: int
     idempotency_key: str | None = None

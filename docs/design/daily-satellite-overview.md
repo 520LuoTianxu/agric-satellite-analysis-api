@@ -1,6 +1,6 @@
 # 全国态势每日刷新运行说明
 
-所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间01:00（17:00 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。任务检查包含当天在内的近7个自然日S1/S2观测，并按数据库已有日期跳过已入库数据。只有子任务全部进入终态后才生成当天快照；`failed`/`cancelled`也属于终态，失败地块会被标记为部分数据并留待后续补偿，不会阻塞全国快照。成功发布的结果仍需确认异步入库，避免把尚未写入事实表的数据误算为“无数据”。
+所有周期任务默认关闭。设置`SCHEDULE_DAILY_SATELLITE_ENABLED=true`后，每天北京时间01:00（17:00 UTC），Beat触发`app.tasks.overview_preagg.refresh_daily_satellite`。任务检查包含当天在内的近7个自然日S1/S2观测，并按数据库已有日期跳过已入库数据。下载机派发失败时，工作项最多领取/派发三次后先记录失败；每日批次下一轮finalize会使用同一幂等任务ID恢复并重派该子任务，重派成功前父批次保持运行，不会因一次派发故障丢失数据。只有子任务全部进入终态后才生成当天快照；`failed`/`cancelled`也属于终态，真实执行失败的地块会被标记为部分数据并留待后续补偿，不会阻塞全国快照。成功发布的结果仍需确认异步入库，避免把尚未写入事实表的数据误算为“无数据”。
 
 `.env`配置：
 
@@ -37,7 +37,7 @@ celery -A app.worker call app.tasks.overview_preagg.refresh_daily_satellite --qu
 
 该任务自动发现地块、派发并每5分钟检查完成状态，无需手动轮询finalize。人工Internal HTTP诊断时使用现有Bearer内部令牌。`run_id`可以通过`GET /v1/jobs/{id}`查看全国批次，`params_json.job_ids`用于排查组任务；每组任务的`progress_json.published_products`为入库检查明细。
 
-批次阶段：dispatching → downloading → waiting_results → finished；状态为running、completed或partial。只有仍在运行或未派发的子任务计入pending_jobs；`failed`/`cancelled`子任务不阻塞最终写入。partial的原因记录在error，并保留pending_jobs、failed_jobs、failed_land_count和results_pending；失败任务还会记录失败地块和场景候选，便于定向补偿。无效边界记录invalid_land_ids。修复失败数据后可使用既有批量回填接口补拉；下一统计日重新检查并使用已有最新结果，已保存历史快照保持原值。
+批次阶段：dispatching → downloading → waiting_results → finished；状态为running、completed或partial。只有仍在运行或未派发的子任务计入pending_jobs；派发失败的子任务会先恢复为pending并继续重试，只有真实执行失败或取消的子任务才不阻塞最终写入。partial的原因记录在error，并保留pending_jobs、failed_jobs、failed_land_count和results_pending；失败任务还会记录失败地块和场景候选，便于定向补偿。无效边界记录invalid_land_ids。修复失败数据后可使用既有批量回填接口补拉；下一统计日重新检查并使用已有最新结果，已保存历史快照保持原值。
 
 首次或没有历史的地块同样只检查包含当天在内的近7个自然日；已有地块通过数据库中的S1/S2场景日期跳过已入库日期，按`INDEX_BACKFILL_CHUNK_DAYS`拆分缺失日期。多年历史从既有`POST /v1/lands/backfill-indices/batch`回填。部署前的日期不会自动拥有每日快照，可在区间分析查看已有历史影像；若人工用as_of重建历史，使用当前已入库的历史影像，它不代表当时实际已保存的实时态势。
 
