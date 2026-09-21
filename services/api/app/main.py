@@ -25,6 +25,7 @@ from app.routers import (
     farms,
     lands,
     project_monitoring,
+    parcel_insights,
     jobs,
     monitoring,
     orgs,
@@ -132,6 +133,7 @@ app.include_router(uploads.router, prefix=PREFIX, tags=["uploads"])
 app.include_router(storage.router, prefix=PREFIX, tags=["storage"])
 app.include_router(weather.router, prefix=PREFIX, tags=["weather"])
 app.include_router(soil.router, prefix=PREFIX, tags=["soil"])
+app.include_router(parcel_insights.router, prefix=PREFIX)
 app.include_router(mq_tasks.router, prefix=PREFIX, tags=["mq"])
 app.include_router(internal_work.router, prefix=PREFIX)
 app.include_router(internal_lands.router, prefix=PREFIX)

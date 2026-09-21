@@ -37,7 +37,7 @@ class SoilZhMappingTests(unittest.TestCase):
 
 class EmergenceEstimateTests(unittest.TestCase):
     def test_estimates_from_ndvi_rise(self) -> None:
-        # Spring low then sustained climb mid-June (post-wheat corn)
+        # 起升观测与实际出苗不同；保留相邻低值和高值给出的不确定区间。
         by_date = {
             "2025-05-20": {"NDVI": 0.18},
             "2025-06-01": {"NDVI": 0.17},
@@ -48,10 +48,11 @@ class EmergenceEstimateTests(unittest.TestCase):
             "2025-08-01": {"NDVI": 0.82},
         }
         em = estimate_emergence(by_date, 2025)
-        self.assertEqual(em["method"], "ndvi_rise")
+        self.assertEqual(em["method"], "observed_greenup")
         self.assertIsNotNone(em["date"])
         self.assertTrue(str(em["date"]).startswith("2025-06"))
-        self.assertIn("依据绿度抬升", em["note_zh"])
+        self.assertIn("实际出苗日需现场记录确认", em["note_zh"])
+        self.assertEqual(em["interval"], ["2025-06-18", "2025-06-25"])
 
     def test_insufficient_data(self) -> None:
         em = estimate_emergence({"2025-08-01": {"NDVI": 0.8}}, 2025)

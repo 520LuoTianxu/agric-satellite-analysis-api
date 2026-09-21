@@ -153,7 +153,9 @@ def generate_assessment_pdf(
             raise ValueError("land_id required when data_dir is omitted")
         land_id = str(land_id)
         try:
-            from agric_satellite_analysis_common.internal_api import internal_api_enabled
+            from agric_satellite_analysis_common.internal_api import (
+                internal_api_enabled,
+            )
 
             http_ok = internal_api_enabled()
         except ImportError:
@@ -240,7 +242,7 @@ def generate_assessment_pdf(
             year,
             pixel_dates=set(pixels_by_date.keys()) or None,
         )
-    peak_months = set((computed.get("meta") or {}).get("peak_months") or [7, 8])
+    peak_months = set((computed.get("meta") or {}).get("peak_months") or [])
     pheno = compute_phenology_stage_summary(
         stages_for_summary,
         computed["by_date"],
@@ -298,21 +300,7 @@ def generate_assessment_pdf(
     if isinstance(computed.get("risk"), dict):
         computed["risk"]["events"] = enriched_events
 
-    # Soft-update season start labels with estimated emergence (display only)
-    risk_obj = computed.get("risk") if isinstance(computed.get("risk"), dict) else None
-    if risk_obj and isinstance(risk_obj.get("seasons"), list):
-        for season in risk_obj["seasons"]:
-            if not isinstance(season, dict):
-                continue
-            start = str(season.get("start") or "")
-            try:
-                y = int(start[:4])
-            except (TypeError, ValueError):
-                continue
-            em_d = emergence_by_year.get(y)
-            if em_d:
-                season["start"] = em_d
-                season["emergence_estimated"] = True
+    # 推断窗口保留原始证据区间，不再用另一出苗估计覆盖起点。
 
     chart_paths = render_charts(
         computed["by_date"],
