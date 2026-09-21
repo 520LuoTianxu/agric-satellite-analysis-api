@@ -263,9 +263,6 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
                 "app.routers.agri_overview._compute_live_stats",
                 new=AsyncMock(return_value=template()),
             ) as compute,
-            patch(
-                "app.routers.agri_overview.ensure_overview_cache_table", new=AsyncMock()
-            ),
         ):
             out = await daily.finalize_daily(db, run.id)
         return out, db, compute
@@ -390,9 +387,6 @@ class FinalizeTests(unittest.IsolatedAsyncioTestCase):
                 "app.routers.agri_overview._compute_live_stats",
                 new=AsyncMock(return_value=template()),
             ) as compute,
-            patch(
-                "app.routers.agri_overview.ensure_overview_cache_table", new=AsyncMock()
-            ),
         ):
             out = await daily.finalize_daily(db, run.id)
 
@@ -429,9 +423,6 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
         db = MagicMock(execute=AsyncMock(return_value=result(first=None)))
         with (
             patch(
-                "app.routers.agri_overview.ensure_overview_cache_table", new=AsyncMock()
-            ),
-            patch(
                 "app.routers.agri_overview._compute_live_stats", new=AsyncMock()
             ) as compute,
         ):
@@ -450,12 +441,9 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
             metric_json=payload, updated_at=datetime(2026, 9, 15, tzinfo=timezone.utc)
         )
         db = MagicMock(execute=AsyncMock(return_value=result(first=row)))
-        with patch(
-            "app.routers.agri_overview.ensure_overview_cache_table", new=AsyncMock()
-        ):
-            out = await daily.read_daily_snapshot(
-                db, level="country", code=None, name=None, as_of=None
-            )
+        out = await daily.read_daily_snapshot(
+            db, level="country", code=None, name=None, as_of=None
+        )
         self.assertFalse(db.execute.call_args.args[1]["exact"])
         self.assertEqual(out.filters["as_of_date"], "2026-09-15")
 
@@ -626,10 +614,6 @@ class OverviewFinalizeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.routers.internal_schedule.get_storage", return_value=storage),
-            patch(
-                "app.routers.agri_overview.ensure_overview_cache_table",
-                new=AsyncMock(),
-            ),
         ):
             out = await finalize_overview(
                 OverviewRefreshFinalizeIn(result_oss_key="overview/preagg/output/result.json"),
@@ -642,26 +626,3 @@ class OverviewFinalizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.execute.call_args_list[0].args[1]), OVERVIEW_UPSERT_BATCH_SIZE)
         self.assertEqual(len(db.execute.call_args_list[1].args[1]), 1)
         db.commit.assert_awaited_once()
-
-
-class OverviewCacheInitTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cache_ddl_runs_once_per_api_process(self):
-        from app.routers import agri_overview
-
-        connection = MagicMock()
-        connection.execute = AsyncMock()
-        context = MagicMock()
-        context.__aenter__ = AsyncMock(return_value=connection)
-        context.__aexit__ = AsyncMock(return_value=False)
-        engine = MagicMock()
-        engine.begin.return_value = context
-
-        with (
-            patch.object(agri_overview, "_overview_cache_ready", False),
-            patch("app.core.database.engine", engine),
-        ):
-            await agri_overview.ensure_overview_cache_table(MagicMock())
-            await agri_overview.ensure_overview_cache_table(MagicMock())
-
-        engine.begin.assert_called_once()
-        self.assertEqual(connection.execute.await_count, 2)
