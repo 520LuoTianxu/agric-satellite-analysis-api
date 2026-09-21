@@ -6,14 +6,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from agric_satellite_analysis_common.trace import stamp_trace_on_payload
 
 from app.core.config import settings
 from app.core.logging import logger
-from app.models.tables import DownloadWorker, WorkItem
+from app.models.tables import DownloadWorker, Job, WorkItem
+
+MAX_WORK_ITEM_ATTEMPTS = 3
+WORK_ITEM_LEASE_EXHAUSTED_ERROR = "下载机任务连续3次未完成，已标记失败"
 
 CLAIMABLE_TYPES = frozenset(
     {
@@ -120,6 +123,34 @@ def _parent_job_id_from_payload(payload: dict[str, Any]) -> uuid.UUID | None:
     return None
 
 
+def _revive_failed_work_item(item: WorkItem, *, now: datetime) -> bool:
+    """重派同一幂等任务时恢复失败工作项，避免生成重复的下载任务。"""
+    if item.status != "failed":
+        return False
+    progress = dict(item.progress_json or {})
+    try:
+        requeue_count = int(progress.get("requeue_count") or 0) + 1
+    except (TypeError, ValueError):
+        requeue_count = 1
+    if item.error:
+        progress["last_failed_error"] = item.error
+    progress.update(
+        {
+            "requeue_count": requeue_count,
+            "requeued_at": now.isoformat(),
+        }
+    )
+    item.status = "pending"
+    item.lease_owner = None
+    item.lease_until = None
+    item.attempts = 0
+    item.error = None
+    item.result_json = None
+    item.progress_json = progress
+    item.updated_at = now
+    return True
+
+
 def enqueue_work_item_sync(
     *,
     type: str,
@@ -145,6 +176,10 @@ def enqueue_work_item_sync(
                 select(WorkItem).where(WorkItem.idempotency_key == idempotency_key)
             ).scalar_one_or_none()
             if existing:
+                if _revive_failed_work_item(
+                    existing, now=datetime.now(timezone.utc)
+                ):
+                    session.commit()
                 return str(existing.id)
         item = WorkItem(
             type=type,
@@ -172,28 +207,35 @@ def enqueue_work_item_sync(
 
 
 async def reaper_expired_leases(db: AsyncSession) -> int:
-    """Return expired leases to pending (attempts++)."""
+    """Return expired leases to pending; exhaust the third claim as failed."""
     now = datetime.now(timezone.utc)
     result = await db.execute(
-        update(WorkItem)
+        select(WorkItem)
         .where(
             WorkItem.status == "leased",
             WorkItem.lease_until.is_not(None),
             WorkItem.lease_until < now,
         )
-        .values(
-            status="pending",
-            lease_owner=None,
-            lease_until=None,
-            attempts=WorkItem.attempts + 1,
-            updated_at=now,
-        )
-        .returning(WorkItem.id)
+        .with_for_update(skip_locked=True)
     )
-    ids = list(result.scalars().all())
-    if ids:
-        logger.info("work_items_lease_reaped", count=len(ids))
-    return len(ids)
+    items = list(result.scalars().all())
+    for item in items:
+        item.lease_owner = None
+        item.lease_until = None
+        item.updated_at = now
+        # attempts只在真正领取时递增；这样“第三次领取后仍未完成”才是第三次失败。
+        if int(item.attempts or 0) >= MAX_WORK_ITEM_ATTEMPTS:
+            item.status = "failed"
+            item.error = WORK_ITEM_LEASE_EXHAUSTED_ERROR
+            await _mark_parent_job_failed(
+                db, item, error=WORK_ITEM_LEASE_EXHAUSTED_ERROR, now=now
+            )
+        else:
+            item.status = "pending"
+    if items:
+        await db.flush()
+        logger.info("work_items_lease_reaped", count=len(items))
+    return len(items)
 
 
 async def enqueue_work_item(
@@ -204,7 +246,7 @@ async def enqueue_work_item(
     priority: int = 0,
     idempotency_key: str | None = None,
 ) -> WorkItem:
-    """Insert a pending work_item (idempotent when key set)."""
+    """Insert a pending work_item; revive a failed row when the same key is retried."""
     payload = dict(payload or {})
     payload = stamp_trace_on_payload(payload)
     if idempotency_key:
@@ -214,6 +256,8 @@ async def enqueue_work_item(
             )
         ).scalar_one_or_none()
         if existing:
+            if _revive_failed_work_item(existing, now=datetime.now(timezone.utc)):
+                await db.flush()
             return existing
 
     item = WorkItem(
@@ -275,6 +319,8 @@ async def claim_work_items(
     for row in rows:
         row.status = "leased"
         row.lease_owner = worker_id
+        # 每次重新领取都覆盖最近领取机；租约释放时不清除此字段，保留完整追溯信息。
+        row.last_claimed_by = worker_id
         row.lease_until = lease_until
         row.attempts = int(row.attempts or 0) + 1
         row.updated_at = now
@@ -353,6 +399,36 @@ def _require_lease(item: WorkItem, worker_id: str | None) -> None:
         raise ValueError("lease_owner mismatch")
 
 
+async def _mark_parent_job_failed(
+    db: AsyncSession,
+    item: WorkItem,
+    *,
+    error: str,
+    now: datetime,
+) -> None:
+    """工作项重试耗尽时同步结束关联 Job，避免父任务永久等待。"""
+    job_id = item.parent_job_id or _parent_job_id_from_payload(
+        dict(item.payload_json or {})
+    )
+    if job_id is None:
+        return
+    job = await db.get(Job, job_id)
+    if job is None or job.status in {"completed", "succeeded", "failed", "cancelled"}:
+        return
+    progress = dict(job.progress_json or {})
+    progress.update(
+        {
+            "work_item_failed": True,
+            "work_item_id": str(item.id),
+            "work_item_attempts": int(item.attempts or 0),
+        }
+    )
+    job.status = "failed"
+    job.progress_json = progress
+    job.error = (error or WORK_ITEM_LEASE_EXHAUSTED_ERROR)[:4000]
+    job.finished_at = now
+
+
 async def heartbeat_work_item(
     db: AsyncSession,
     work_id: uuid.UUID,
@@ -408,6 +484,9 @@ async def complete_work_item(
     result_dict = dict(result or {})
     item.status = "done"
     item.result_json = result_dict
+    # lease_owner 是临时租约状态，last_claimed_by 才是需要长期保留的领取记录。
+    if not item.last_claimed_by:
+        item.last_claimed_by = item.lease_owner
     item.lease_owner = None
     item.lease_until = None
     item.error = None
@@ -455,13 +534,19 @@ async def fail_work_item(
         _require_lease(item, worker_id)
     now = datetime.now(timezone.utc)
     item.error = (error or "failed")[:4000]
+    # 失败或重试只释放当前租约，保留最近领取机用于排障和审计。
+    if not item.last_claimed_by:
+        item.last_claimed_by = item.lease_owner
     item.lease_owner = None
     item.lease_until = None
     item.updated_at = now
+    # 下载机派发失败可回队，但第三次领取仍失败时必须在API侧收敛为终态。
+    retry = bool(retry) and int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS
     if retry:
         item.status = "pending"
     else:
         item.status = "failed"
+        await _mark_parent_job_failed(db, item, error=item.error, now=now)
     await db.flush()
     logger.info(
         "work_item_failed",
@@ -475,6 +560,8 @@ async def fail_work_item(
 __all__ = [
     "CLAIMABLE_TYPES",
     "COMPLETE_ON_DISPATCH_TYPES",
+    "MAX_WORK_ITEM_ATTEMPTS",
+    "WORK_ITEM_LEASE_EXHAUSTED_ERROR",
     "claim_work_items",
     "complete_work_item",
     "enqueue_work_item",

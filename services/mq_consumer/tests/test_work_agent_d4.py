@@ -186,6 +186,31 @@ class ProcessItemTests(unittest.TestCase):
         monitor.assert_called_once_with(client, "run-2", "celery-admin-2")
         comp.assert_called_once()
 
+    def test_dispatch_failure_retries_until_third_claim(self) -> None:
+        for attempts, should_retry in ((1, True), (2, True), (3, False)):
+            client = MagicMock()
+            item = {
+                "id": f"w-fail-{attempts}",
+                "type": "satellite_batch",
+                "attempts": attempts,
+                "payload_json": {
+                    "land_id": "f1",
+                    "extras": {"job_id": "j1"},
+                },
+            }
+            with (
+                patch.object(
+                    wa,
+                    "_dispatch_celery",
+                    side_effect=RuntimeError("redis unavailable"),
+                ),
+                patch.object(wa, "fail") as fail,
+            ):
+                wa.process_item(client, item)
+            fail.assert_called_once_with(
+                client, f"w-fail-{attempts}", "redis unavailable", retry=should_retry
+            )
+
 
 class MainEntrypointTests(unittest.TestCase):
     def test_dual_uses_mq_not_claim(self) -> None:

@@ -18,6 +18,7 @@ class _FakeItem:
         self.status = kwargs.get("status", "leased")
         self.priority = kwargs.get("priority", 0)
         self.lease_owner = kwargs.get("lease_owner", "w1")
+        self.last_claimed_by = kwargs.get("last_claimed_by", self.lease_owner)
         self.lease_until = kwargs.get("lease_until")
         self.attempts = kwargs.get("attempts", 1)
         self.payload_json = kwargs.get("payload_json", {})

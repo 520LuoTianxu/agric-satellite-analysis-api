@@ -11,6 +11,7 @@ from app.routers.admin_ops import (
     _build_execution_groups,
     _work_item_parent_id,
     _to_execution_group_out,
+    _to_work_item_monitor_out,
     execution_overview,
 )
 
@@ -59,6 +60,7 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
             status="failed",
             priority=4,
             lease_owner="worker-1",
+            last_claimed_by="worker-1",
             lease_until=None,
             attempts=2,
             progress_json={"phase": "download", "completed": 1},
@@ -170,6 +172,7 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
             status="done",
             priority=1,
             lease_owner="worker-1",
+            last_claimed_by="worker-1",
             lease_until=None,
             attempts=1,
             progress_json={"completed": 1},
@@ -194,6 +197,8 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
         self.assertEqual(out.child_counts["failed"], 1)
         # WorkItem 与 child Job 是同一执行单元的两条记录，进度不能重复计数。
         self.assertEqual(out.child_counts["terminal"], 2)
+        monitor = _to_work_item_monitor_out(work_item)
+        self.assertEqual(monitor.last_claimed_by, "worker-1")
 
     def test_nested_followup_work_item_is_linked_to_report_job(self):
         report_job_id = uuid.uuid4()

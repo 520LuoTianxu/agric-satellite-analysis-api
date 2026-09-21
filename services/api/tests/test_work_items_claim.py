@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -54,6 +55,9 @@ class _FakeResult:
     def all(self) -> list[Any]:
         return list(self._rows)
 
+    def scalar_one_or_none(self) -> Any | None:
+        return self._rows[0] if self._rows else None
+
 
 class _FakeItem:
     def __init__(self, **kwargs: Any):
@@ -61,7 +65,9 @@ class _FakeItem:
         self.type = kwargs.get("type", "assessment_report")
         self.status = kwargs.get("status", "pending")
         self.priority = kwargs.get("priority", 0)
+        self.parent_job_id = kwargs.get("parent_job_id")
         self.lease_owner = kwargs.get("lease_owner")
+        self.last_claimed_by = kwargs.get("last_claimed_by")
         self.lease_until = kwargs.get("lease_until")
         self.attempts = kwargs.get("attempts", 0)
         self.payload_json = kwargs.get("payload_json", {})
@@ -86,6 +92,7 @@ class ClaimCompleteTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].status, "leased")
         self.assertEqual(rows[0].lease_owner, "w1")
+        self.assertEqual(rows[0].last_claimed_by, "w1")
         self.assertEqual(rows[0].attempts, 1)
         self.assertIsNotNone(rows[0].lease_until)
 
@@ -101,6 +108,7 @@ class ClaimCompleteTests(unittest.TestCase):
         self.assertEqual(out.status, "done")
         self.assertEqual(out.result_json, {"ok": True})
         self.assertIsNone(out.lease_owner)
+        self.assertEqual(out.last_claimed_by, "w1")
 
     def test_complete_owner_mismatch(self) -> None:
         item = _FakeItem(status="leased", lease_owner="other")
@@ -119,6 +127,7 @@ class ClaimCompleteTests(unittest.TestCase):
         out = asyncio.run(wi.fail_work_item(db, item.id, error="boom", worker_id="w1"))
         self.assertEqual(out.status, "failed")
         self.assertEqual(out.error, "boom")
+        self.assertEqual(out.last_claimed_by, "w1")
 
     def test_fail_retry_returns_pending(self) -> None:
         item = _FakeItem(status="leased", lease_owner="w1")
@@ -130,6 +139,54 @@ class ClaimCompleteTests(unittest.TestCase):
             wi.fail_work_item(db, item.id, error="temp", worker_id="w1", retry=True)
         )
         self.assertEqual(out.status, "pending")
+
+    def test_fail_retry_exhaustion_marks_item_failed(self) -> None:
+        parent_job_id = uuid.uuid4()
+        item = _FakeItem(
+            status="leased",
+            lease_owner="w1",
+            attempts=3,
+            parent_job_id=parent_job_id,
+        )
+        job = SimpleNamespace(status="running", progress_json={})
+        db = AsyncMock()
+        db.get = AsyncMock(side_effect=[item, job])
+        db.flush = AsyncMock()
+
+        out = asyncio.run(
+            wi.fail_work_item(
+                db,
+                item.id,
+                error="dispatch failed",
+                worker_id="w1",
+                retry=True,
+            )
+        )
+        self.assertEqual(out.status, "failed")
+        self.assertEqual(out.error, "dispatch failed")
+        self.assertEqual(job.status, "failed")
+        self.assertTrue(job.progress_json["work_item_failed"])
+        self.assertEqual(job.progress_json["work_item_attempts"], 3)
+
+    def test_enqueue_revives_failed_idempotent_work_item(self) -> None:
+        item = _FakeItem(status="failed", attempts=3, error="dispatch failed")
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_FakeResult([item]))
+        db.flush = AsyncMock()
+
+        out = asyncio.run(
+            wi.enqueue_work_item(
+                db,
+                type="satellite_batch",
+                payload={"land_id": "A", "extras": {"job_id": str(uuid.uuid4())}},
+                idempotency_key="satellite_batch:job-1",
+            )
+        )
+        self.assertIs(out, item)
+        self.assertEqual(item.status, "pending")
+        self.assertEqual(item.attempts, 0)
+        self.assertIsNone(item.error)
+        self.assertEqual(item.progress_json["requeue_count"], 1)
 
 
 class InternalAuthTests(unittest.TestCase):
