@@ -504,7 +504,6 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
     partial = bool(pending or missing or failed or progress.get("invalid_land_ids"))
     from app.routers.agri_overview import (
         _compute_live_stats,
-        ensure_overview_cache_table,
     )
     from app.routers.internal_schedule import _UPSERT_OVERVIEW_SQL
 
@@ -520,7 +519,6 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         allow_pixels=False,
         parcel_facts=facts,
     )
-    await ensure_overview_cache_table(db)
     snapshots = aggregate_snapshots(facts, template, day)
     upsert_rows: list[dict[str, Any]] = []
     for out in snapshots:
@@ -571,12 +569,10 @@ async def read_daily_snapshot(
     from app.routers.agri_overview import (
         _pad_adcode,
         _stats_from_cache_json,
-        ensure_overview_cache_table,
     )
 
     if level != "country" and not code and not name:
         raise HTTPException(400, "请选择行政区")
-    await ensure_overview_cache_table(db)
     row = (
         await db.execute(
             text("""
@@ -623,11 +619,10 @@ async def read_daily_history(
     to_d: date,
 ) -> list[dict[str, Any]]:
     """趋势数据保留缺失日期，不插值为零，也不使用后来补入的影像重算历史。"""
-    from app.routers.agri_overview import _pad_adcode, ensure_overview_cache_table
+    from app.routers.agri_overview import _pad_adcode
 
     if level != "country" and not code and not name:
         raise HTTPException(400, "请选择行政区")
-    await ensure_overview_cache_table(db)
     rows = (
         await db.execute(
             text("""

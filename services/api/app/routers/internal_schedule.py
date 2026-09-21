@@ -472,8 +472,6 @@ async def finalize_overview(
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise HTTPException(400, "总览 OSS 结果格式无效")
 
-    from app.routers.agri_overview import ensure_overview_cache_table
-
     window_from = payload.get("window_from")
     window_to = payload.get("window_to")
     crop_key = str(payload.get("crop") or "")
@@ -485,7 +483,6 @@ async def finalize_overview(
     except ValueError as exc:
         raise HTTPException(400, "总览 OSS 结果窗口日期无效") from exc
 
-    await ensure_overview_cache_table(db)
     as_of = date.today()
     upsert_rows: list[dict[str, Any]] = []
     from app.schemas.agri import OverviewStatsOut
@@ -571,14 +568,11 @@ async def _refresh_overview_preagg(
     from app.routers.agri_overview import (
         _compute_live_stats,
         _resolve_region_label,
-        ensure_overview_cache_table,
     )
 
     to_d = date.today()
     from_d = to_d - timedelta(days=int(window_days))
     crop_key = normalize_crop_key(crop) if crop else None
-    await ensure_overview_cache_table(db)
-
     results: list[dict[str, Any]] = []
 
     async def _one(
