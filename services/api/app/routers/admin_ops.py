@@ -22,6 +22,7 @@ from app.models.tables import AdminTaskRun, DownloadWorker, Job, WorkItem
 from app.middleware.auth import OrgContext, require_roles
 from app.services import work_items as wi
 from app.services.report_urls import report_progress_for_response
+from app.services.smart_land_backfill import SMART_BACKFILL_MAX_LANDS
 
 router = APIRouter(prefix="/admin/ops", tags=["admin-ops"])
 _admin = require_roles("owner", "admin")
@@ -623,10 +624,10 @@ def _group_child_counts(group: _ExecutionGroup) -> dict[str, int]:
 
 
 def _group_status(group: _ExecutionGroup) -> str:
-    # assessment_batch 的父 Job 只在派发时写一次 running；所有子任务结束后
-    # 由子任务计数推导最终态，避免“失败 1、未终态 0”仍被显示为运行中。
+    # 批量父 Job 只在派发时写一次 running；所有子任务结束后由子任务计数
+    # 推导最终态，避免“失败 1、未终态 0”仍被显示为运行中。
     if group.parent_job is not None:
-        if group.parent_job.type == "assessment_batch":
+        if group.parent_job.type in {"assessment_batch", "smart_land_backfill"}:
             counts = _group_child_counts(group)
             if not counts["missing"] and not counts["pending"] and not counts["running"]:
                 if counts["failed"] and counts["completed"]:
@@ -1232,6 +1233,7 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
                 date_to=date.fromisoformat(task_params["date_to"]),
                 sensors=task_params.get("sensors") or ["S1", "S2"],
                 force=bool(task_params.get("force", False)),
+                parent_job_id=run_id,
             )
         else:
             from app.services.mysql_land_sync import run_land_sync
@@ -1254,6 +1256,21 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
         if run is not None:
             run.status = "success"
             run.result_json = result
+            # 运行完成后把参数中的地块清单替换为实际入队清单，避免页面展示几万条
+            # 请求编号；原始数量和选择范围仍保留，便于核对被自动截断的原因。
+            selected_land_ids = result.get("selected_land_ids")
+            if isinstance(selected_land_ids, list):
+                run.params_json = {
+                    **(run.params_json or {}),
+                    "land_ids": selected_land_ids,
+                    "selected_land_ids": selected_land_ids,
+                    "selected_land_count": result.get("selected_land_count", len(selected_land_ids)),
+                    "skipped_land_count": result.get("skipped_land_count", 0),
+                    "selection_limit": result.get(
+                        "selection_limit", SMART_BACKFILL_MAX_LANDS
+                    ),
+                    "parent_job_id": result.get("parent_job_id"),
+                }
             run.finished_at = datetime.now(timezone.utc)
             run.updated_at = run.finished_at
             await db.commit()
@@ -1412,8 +1429,21 @@ async def trigger_task(
             )
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        resolved_land_ids = batch_request.resolved_land_ids()
+        requested_selector = (
+            {
+                "mode": "range",
+                "from_land_id": str(body.from_land_id),
+                "to_land_id": str(body.to_land_id),
+            }
+            if body.from_land_id is not None
+            else {"mode": "list", "count": len(resolved_land_ids)}
+        )
         params = {
-            "land_ids": batch_request.resolved_land_ids(),
+            "land_ids": resolved_land_ids,
+            "requested_land_count": len(resolved_land_ids),
+            "requested_selector": requested_selector,
+            "selection_limit": SMART_BACKFILL_MAX_LANDS,
             "years": body.years,
             "date_from": batch_request.date_from.isoformat(),
             "date_to": batch_request.date_to.isoformat(),

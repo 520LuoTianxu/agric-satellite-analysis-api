@@ -1,6 +1,7 @@
 """验证米制聚合边界、请求兼容和批量任务的完整派发。"""
 
 import unittest
+import uuid
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +16,7 @@ from shapely.ops import transform
 from app.routers.satellite_batch import backfill_satellite_batch
 from app.schemas.satellite_batch import SatelliteBatchRequest
 from app.services.satellite_batch import group_satellite_lands
+from app.services.smart_land_backfill import ensure_land_parcels, run_smart_land_backfill
 
 
 def local_land(land_id, x=0, y=0, size=100, latitude=35):
@@ -123,6 +125,16 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(body.resolved_land_ids(), ["1001", "1002", "1003"])
         self.assertEqual(body.date_from, date(2024, 2, 28))
 
+    def test_large_selection_is_accepted_and_capped_during_execution(self):
+        body = SatelliteBatchRequest.model_validate(
+            {"from_land_id": "15360", "to_land_id": "61229", "years": 3}
+        )
+        self.assertEqual(len(body.resolved_land_ids()), 45870)
+        explicit = SatelliteBatchRequest.model_validate(
+            {"landIdList": [str(value) for value in range(1001)]}
+        )
+        self.assertEqual(len(explicit.resolved_land_ids()), 1001)
+
     def test_list_and_range_are_mutually_exclusive(self):
         with self.assertRaises(ValidationError):
             SatelliteBatchRequest.model_validate(
@@ -134,7 +146,7 @@ class RequestTests(unittest.TestCase):
             )
 
     def test_bad_lists_and_dates_are_rejected(self):
-        for values in ([], [" "], [True], [None], ["A"] * 1001):
+        for values in ([], [" "], [True], [None]):
             with self.assertRaises(ValidationError):
                 SatelliteBatchRequest.model_validate({"landIdList": values})
         with self.assertRaises(ValidationError):
@@ -148,6 +160,71 @@ class RequestTests(unittest.TestCase):
 
 
 class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selection_caps_existing_lands_after_query(self):
+        requested = [str(value) for value in range(1001)]
+        db = fake_db([local_land(land_id) for land_id in requested])
+
+        lands, summary = await ensure_land_parcels(
+            db,
+            requested,
+            max_lands=1000,
+            allow_partial=True,
+        )
+
+        self.assertEqual(len(lands), 1000)
+        self.assertEqual(summary["selected_land_count"], 1000)
+        self.assertEqual(summary["selected_land_ids"], requested[:1000])
+        self.assertEqual(summary["skipped_land_count"], 1)
+
+    async def test_smart_backfill_creates_parent_job_for_satellite_children(self):
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=db)
+        session.__aexit__ = AsyncMock(return_value=None)
+        child = SimpleNamespace(
+            id=uuid.uuid4(),
+            land_id="A",
+            status="pending",
+            error=None,
+        )
+        group = SimpleNamespace(land_ids=["A"])
+        selection = {
+            "requested_land_count": 1,
+            "selected_land_ids": ["A"],
+            "selected_land_count": 1,
+            "skipped_land_count": 0,
+            "source_sync": None,
+        }
+
+        with (
+            patch("app.core.database.async_session", return_value=session),
+            patch(
+                "app.services.smart_land_backfill.ensure_land_parcels",
+                new=AsyncMock(return_value=([local_land("A")], selection)),
+            ),
+            patch(
+                "app.services.smart_land_backfill.build_satellite_batch_jobs",
+                return_value=([group], [child]),
+            ) as build_jobs,
+            patch("app.mq_publish.publish_api_task") as publish,
+        ):
+            result = await run_smart_land_backfill(
+                land_ids=["A"],
+                date_from=date(2026, 1, 1),
+                date_to=date(2026, 1, 1),
+                sensors=["S2"],
+            )
+
+        parent = db.add.call_args_list[0].args[0]
+        self.assertEqual(parent.type, "smart_land_backfill")
+        self.assertIs(db.add.call_args_list[1].args[0], child)
+        self.assertEqual(result["parent_job_id"], str(parent.id))
+        self.assertEqual(result["selected_land_ids"], ["A"])
+        self.assertEqual(build_jobs.call_args.kwargs["parent_job_id"], parent.id)
+        self.assertEqual(publish.call_count, 1)
+
     async def test_single_day_creates_one_group_job_per_sensor_after_commit(self):
         db = fake_db([local_land("A"), local_land("B", 2000)])
         body = SatelliteBatchRequest.model_validate(

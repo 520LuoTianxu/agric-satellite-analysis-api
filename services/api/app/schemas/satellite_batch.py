@@ -10,7 +10,6 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator, model_vali
 class SatelliteBatchRequest(BaseModel):
     land_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
         default=None,
-        max_length=1000,
         validation_alias=AliasChoices("landIdList", "landIdlist", "land_ids"),
         serialization_alias="landIdList",
     )
@@ -38,8 +37,6 @@ class SatelliteBatchRequest(BaseModel):
         if value is None:
             return value
         if isinstance(value, list):
-            if len(value) > 1000:
-                raise ValueError("landIdList最多包含1000个地块")
             if any(
                 isinstance(item, bool) or not isinstance(item, (str, int))
                 for item in value
@@ -98,7 +95,7 @@ class SatelliteBatchRequest(BaseModel):
             return day.replace(year=day.year - years, day=28)
 
     def _validate_land_id_range(self) -> None:
-        """限制闭区间只处理数字编号，避免误把大范围字符串当成批量任务。"""
+        """校验闭区间格式；地块数量上限由查询结果和任务编排层控制。"""
         try:
             start = int(self.from_land_id or "")
             end = int(self.to_land_id or "")
@@ -106,11 +103,9 @@ class SatelliteBatchRequest(BaseModel):
             raise ValueError("from_land_id和to_land_id必须是数字编号") from exc
         if start > end:
             raise ValueError("from_land_id不能大于to_land_id")
-        if end - start + 1 > 1000:
-            raise ValueError("地块闭区间最多包含1000个编号")
 
     def resolved_land_ids(self) -> list[str]:
-        """展开请求中的列表或闭区间，供数据库查询和任务幂等使用。"""
+        """展开请求中的列表或闭区间，实际执行时再按存在地块截取。"""
         if self.land_ids is not None:
             return list(self.land_ids)
         start = int(self.from_land_id or "")
@@ -132,6 +127,9 @@ class SatelliteBatchResponse(BaseModel):
     land_count: int
     group_count: int
     job_count: int
+    requested_land_count: int | None = None
+    selected_land_ids: list[str] = Field(default_factory=list)
+    skipped_land_count: int = 0
     date_from: date
     date_to: date
     groups: list[SatelliteBatchGroup]

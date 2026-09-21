@@ -13,7 +13,11 @@ from app.middleware.auth import OrgContext, require_roles
 from app.mq_publish import publish_api_task
 from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
 from app.services.satellite_batch import build_satellite_batch_jobs
-from app.services.smart_land_backfill import LandSelectionError, ensure_land_parcels
+from app.services.smart_land_backfill import (
+    SMART_BACKFILL_MAX_LANDS,
+    LandSelectionError,
+    ensure_land_parcels,
+)
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
@@ -32,7 +36,12 @@ async def backfill_satellite_batch(
     """支持清单/闭区间选地，缺失主数据时先从 Smart 补齐再派发 S1/S2。"""
     requested_land_ids = body.resolved_land_ids()
     try:
-        lands, _ = await ensure_land_parcels(db, requested_land_ids)
+        # 输入可以覆盖较大编号范围，但实际查询后最多只为1000个有效地块创建任务。
+        lands, selection = await ensure_land_parcels(
+            db,
+            requested_land_ids,
+            max_lands=SMART_BACKFILL_MAX_LANDS,
+        )
     except LandSelectionError as exc:
         detail: object = (
             {"missing_land_ids": exc.missing_land_ids}
@@ -85,6 +94,11 @@ async def backfill_satellite_batch(
         land_count=len(lands),
         group_count=len(groups),
         job_count=len(jobs),
+        requested_land_count=(
+            selection.get("requested_land_count") if selection else len(requested_land_ids)
+        ),
+        selected_land_ids=[str(land.land_id) for land in lands],
+        skipped_land_count=(selection.get("skipped_land_count", 0) if selection else 0),
         date_from=body.date_from,
         date_to=body.date_to,
         groups=groups,
