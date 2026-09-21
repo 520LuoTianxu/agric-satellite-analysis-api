@@ -134,6 +134,7 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
                     "p10": float(mean),
                     "p90": float(mean),
                     "quality_score": q,
+                    "official": True,
                 }
             )
     return out
@@ -257,7 +258,6 @@ def load_agri_pixel_date_index(
                END AS npix
         FROM agric_satellite.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
-          AND EXTRACT(MONTH FROM date) BETWEEN 6 AND 9
           AND {official_s2_sql("")}
         ORDER BY date
     """
@@ -451,7 +451,7 @@ def load_weather_history(
 
     Used for PDF narrative (not just ~30d summary). Returns empty dict if no rows.
     """
-    season_months = set(season_months or {6, 7, 8, 9})
+    season_months = set(season_months or [])
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=lookback_days)
     rows = (
@@ -694,9 +694,7 @@ def load_suitability_sync(
     return out
 
 
-def load_site_admission(
-    session: Session, land_id: str
-) -> dict[str, Any] | None:
+def load_site_admission(session: Session, land_id: str) -> dict[str, Any] | None:
     """Optional cdfinance site-admission questionnaire; soft-absent → None."""
     try:
         from app.models.tables import GroupSiteAdmission
@@ -785,15 +783,20 @@ def load_land_bundle(
     wsum, wstress = load_weather(session, land_id)
     from app.core.crops import (
         crop_name_zh,
-        get_crop_season,
         normalize_crop_key,
     )
 
     crop_key = normalize_crop_key(land.crop_type) or "corn"
-    season = get_crop_season(crop_key)
-    crop_label = f"{crop_name_zh(crop_key)}（{season.label_zh}）"
+    from agric_satellite_analysis_common.phenology import (
+        infer_index_rows,
+        window_months,
+    )
+
+    phenology = infer_index_rows(indices)
+    season_months = window_months(phenology["windows"])
+    crop_label = crop_name_zh(crop_key)
     weather_history = load_weather_history(
-        session, land_id, season.season_months, lookback_days=450
+        session, land_id, season_months, lookback_days=450
     )
 
     suit = load_suitability_sync(session, land_id, wsum, preferred_crop=crop_key)
@@ -809,9 +812,10 @@ def load_land_bundle(
             "crop_type": land.crop_type,
             "season": land.season,
             "area_ha": area_ha,
-            "tags": tags,
+            "tags": land.tags_json or [],
             "location": _location_from_land(land),
             "boundary": boundary,
+            "phenology": phenology,
             "crop_label": crop_label,
             "crop_key": crop_key,
             "land_id": land_id,
@@ -826,8 +830,6 @@ def load_land_bundle(
         "suitability": suit,
         "site_admission": site_admission,
     }
-
-
 
 
 def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
@@ -887,8 +889,8 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
             "location": field.get("location") or field.get("name") or "—",
             "boundary": field.get("boundary")
             or "测绘 WGS 坐标（档案地块，不是手画框）",
-            "crop_label": "玉米（默认6–9月生育期；可用自定义窗覆盖）",
-            "crop_key": "maize",
+            "crop_label": field.get("crop_type") or "作物未登记",
+            "crop_key": field.get("crop_type") or "unknown",
             "land_id": None,
             "boundary_source": "survey",
         },

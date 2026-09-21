@@ -712,13 +712,14 @@ def render_pdf(
     story.append(PageBreak())
     story.append(section_title("二、地块基础画像"))
     story.append(hr())
-    season_months = sorted(
-        (scorecard.get("method") or {}).get("season_months") or [6, 7, 8, 9]
-    )
-    peak_months = sorted((scorecard.get("method") or {}).get("peak_months") or [7, 8])
+    method = scorecard.get("method") or {}
+    windows = (method.get("phenology") or {}).get("windows") or []
     season_txt = (
-        f"默认{season_months[0]}–{season_months[-1]}月"
-        f"；峰值{peak_months[0]}–{peak_months[-1]}月"
+        "；".join(
+            f"{w.get('start_date') or '起点未覆盖'} 至 {w.get('end_date') or '终点未确认'}"
+            for w in windows
+        )
+        or "有效观测不足，未能推断生育窗口"
     )
     story.append(
         kv_card(

@@ -11,10 +11,12 @@ Rules:
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date as calendar_date, datetime
 from typing import Any
 
 import numpy as np
+
+from agric_satellite_analysis_common.phenology import infer_index_rows, window_months
 
 from app.reports.land_assessment.soil_labels import (
     soil_drainage_zh,
@@ -312,7 +314,7 @@ def compute_phenology_stage_summary(
         "maturity": "成熟回落",
     }
     ordered = ["seedling", "vegetative", "peak", "maturity"]
-    peak_months = peak_months or PEAK_MONTHS
+    peak_months = peak_months or set()
     out: list[dict[str, Any]] = []
     prev_mean: float | None = None
     for key in ordered:
@@ -402,14 +404,19 @@ def compute_assessment(
 
     from app.core.crops import (
         crop_name_zh,
-        get_crop_season,
         normalize_crop_key,
     )
 
     crop_key = normalize_crop_key(field_meta.get("crop_type")) or "corn"
-    season = get_crop_season(crop_key)
-    season_months = set(season.season_months)
-    peak_months = set(season.peak_months)
+    # 自动生育期只使用有效时序，未知窗口保持未知，不把夏玉米日历当成检测结果。
+    phenology = infer_index_rows(indices)
+    observed_windows = phenology["windows"]
+    season_months = set(window_months(observed_windows))
+    peak_months = {int(window["peak_date"][5:7]) for window in observed_windows}
+    season_label = (
+        "有效影像识别的冠层生长窗口" if observed_windows else "生育窗证据不足"
+    )
+    vigor_note = "窗口不等于精确播种、成熟或收获日；缺失边界不外推。"
     crop_label = crop_name_zh(crop_key)
 
     by: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
@@ -421,6 +428,13 @@ def compute_assessment(
             continue
         mean = r.get("mean")
         if mean is None:
+            continue
+        # NDVI 的低质量统计不能参与物候图表和阶段判断。
+        if (
+            str(layer).upper() == "NDVI"
+            and r.get("official") is not True
+            and float(r.get("quality_score") or r.get("quality") or 0) < 0.7
+        ):
             continue
         row = {
             "mean": float(mean),
@@ -441,9 +455,30 @@ def compute_assessment(
     def _wet_layer(d: str) -> dict[str, Any] | None:
         return by[d].get("NDWI") or by[d].get("MNDWI")
 
-    season_dates = [d for d in dates if _month(d) in season_months and "NDVI" in by[d]]
-    peak_dates = [d for d in dates if _month(d) in peak_months and "NDVI" in by[d]]
-    off_dates = [d for d in dates if _month(d) not in season_months and "NDVI" in by[d]]
+    # 按具体日期而不是月份并集分组，避免把另一年份、另一茬的季外影像混进来。
+    season_dates = [
+        d
+        for d in dates
+        if "NDVI" in by[d]
+        and any(
+            w["observed_start"] <= d[:10] <= w["observed_end"] for w in observed_windows
+        )
+    ]
+    peak_dates = [
+        d
+        for d in season_dates
+        if any(
+            abs(
+                (
+                    calendar_date.fromisoformat(d[:10])
+                    - calendar_date.fromisoformat(w["peak_date"])
+                ).days
+            )
+            <= 15
+            for w in observed_windows
+        )
+    ]
+    off_dates = [d for d in dates if d not in season_dates and "NDVI" in by[d]]
 
     ndvi_s = [by[d]["NDVI"]["mean"] for d in season_dates]
     ndvi_p = [by[d]["NDVI"]["mean"] for d in peak_dates]
@@ -487,7 +522,7 @@ def compute_assessment(
         e = by[d].get("EVI", {}).get("mean")
         wlayer = _wet_layer(d)
         w = wlayer["mean"] if wlayer else None
-        likely_bare = _month(d) in PEAK_MONTHS and n < UNCROPPED_NDVI
+        likely_bare = d in peak_dates and n < UNCROPPED_NDVI
         if likely_bare:
             continue
         if n < ndvi_p30 and (e is None or e < evi_p30):
@@ -506,18 +541,28 @@ def compute_assessment(
         e["secondary"] = None
         evs.append(e)
 
-    seasons = []
-    for y, info in year_peak.items():
-        seasons.append(
-            {
-                "start": f"{y}-06-01",
-                "peak": f"{y}-08-01",
-                "end": f"{y}-09-30",
-                "days": 122,
-                "peak_ndvi": info["max"],
-                "confidence": "中" if info["n"] >= 2 else "低",
-            }
-        )
+    seasons = [
+        {
+            "start": w["start_date"],
+            "peak": w["peak_date"],
+            "end": w["end_date"],
+            "days": (
+                calendar_date.fromisoformat(w["end_date"])
+                - calendar_date.fromisoformat(w["start_date"])
+            ).days
+            + 1
+            if w["start_date"] and w["end_date"]
+            else None,
+            "peak_ndvi": w["peak_ndvi"],
+            "confidence": "中" if w["confidence"] == "medium" else "低",
+            "observed_start": w["observed_start"],
+            "observed_end": w["observed_end"],
+            "start_interval": w["start_interval"],
+            "end_interval": w["end_interval"],
+            "status": w["status"],
+        }
+        for w in observed_windows
+    ]
 
     month_hits: dict[str, int] = defaultdict(int)
     for d in growth_flags + wet_flags:
@@ -549,7 +594,7 @@ def compute_assessment(
         "seasons": seasons,
         "month_hits": dict(month_hits),
         "method_note": (
-            f"长势与事件仅用{season.label_zh}；阈值来自生育期内部分位，非全年平均。"
+            f"长势与事件仅用{season_label}；阈值来自生育期内部分位，非全年平均。"
         ),
     }
 
@@ -630,10 +675,16 @@ def compute_assessment(
         "year_peak": year_peak,
         "possible_uncropped_years": uncropped_years,
         "uncropped_rule": (
-            f"峰值期(7–8月)地块均值 NDVI max < {UNCROPPED_NDVI} "
+            f"观测峰值附近地块均值 NDVI max < {UNCROPPED_NDVI} "
             "记为可能大面积未种植/绝产年"
         ),
     }
+
+    if not season_dates:
+        rs["rs_flood_level"] = "未知（生育窗证据不足）"
+        rs["rs_drought_level"] = "未知（生育窗证据不足）"
+        rs["ndvi_range"] = None
+        risk["focus"] = "生育窗证据不足，请核查历史种植与观测覆盖"
 
     # ---- dimension scores ----
     crop_suit = _pick_crop_suit(suitability, crop_key)
@@ -832,6 +883,8 @@ def compute_assessment(
 
     raw = sum(d["score"] * WEIGHTS[d["key"]] for d in dims)
     conf = 78
+    if not observed_windows:
+        conf -= 20
     if qmean < 0.4:
         conf -= 8
     if not dates:
@@ -854,13 +907,20 @@ def compute_assessment(
         one_liner = "短板明显，建议先核实种植记录再谈改种"
 
     thinking = (
-        f"按{season.label_zh}重算，不用全年 NDVI 平均。{season.vigor_note}"
+        f"按{season_label}重算，不用全年 NDVI 平均。{vigor_note}"
         f"峰值期均 NDVI≈{peak_mean:.2f}（最高≈{peak_max:.2f}），淡季≈{off_mean:.2f}。"
         f"{crop_label}适宜性 {crop_score}。土壤 {texture or '—'}、pH {ph:.2f}。"
         f"涝硬证据明水面={abs_water} 景；旱无成灾档案。"
         f"疑似未种植/极低绿度年份：{uncropped_years or '未发现（地块均值口径）'}。"
         f"分数仍是开源体检不是买地判决。"
     )
+
+    if not observed_windows:
+        one_liner = "生育窗尚未确认，综合分仅供参考，请补充历史有效影像和种植记录。"
+        thinking = (
+            "自动生育期推断依据不足，不套用固定 6–9 月；遥感长势分为中性占位。"
+            + thinking
+        )
 
     annual_means = [by[d]["NDVI"]["mean"] for d in dates if "NDVI" in by[d]]
     scorecard = {
@@ -885,6 +945,8 @@ def compute_assessment(
             "无硬涝/旱证据不打红灯。"
         ),
         "method": {
+            "phenology": phenology,
+            "season_source": "observed" if observed_windows else "unknown",
             "crop": crop_key,
             "crop_name_zh": crop_label,
             "season_months": sorted(season_months),
@@ -966,11 +1028,7 @@ def _phenology_stage_label(
     *,
     emergence_date: str | None = None,
 ) -> str:
-    """Map date to coarse maize-season stage label (display only).
-
-    When ``emergence_date`` is known, stages are anchored to days-after-emergence
-    instead of a fixed calendar (e.g. hard-coded 06-01).
-    """
+    """只解释事件与冠层起升观测的先后关系，避免用固定天数虚构农学阶段。"""
     try:
         d = datetime.fromisoformat(str(date_str)[:10]).date()
     except (TypeError, ValueError):
@@ -978,32 +1036,15 @@ def _phenology_stage_label(
 
     if emergence_date:
         try:
-            em = datetime.fromisoformat(str(emergence_date)[:10]).date()
-            das = (d - em).days
-            if das < -10:
-                return "季外"
-            if das < 18:
-                return "苗期"
-            if das < 40:
-                return "拔节—抽雄"
-            if das < 75:
-                return "旺长"
-            if das < 110:
-                return "成熟回落"
-            return "季外"
+            start = datetime.fromisoformat(str(emergence_date)[:10]).date()
+            return (
+                "观测生长起点之后（农学阶段待核实）"
+                if d >= start
+                else "观测生长起点之前"
+            )
         except (TypeError, ValueError):
             pass
-
-    m, day = d.month, d.day
-    if m <= 6:
-        return "苗期"
-    if m == 7 and day < 20:
-        return "拔节—抽雄"
-    if m in (7, 8):
-        return "旺长"
-    if m == 9:
-        return "成熟回落"
-    return "季外"
+    return "农学阶段待核实"
 
 
 def enrich_risk_events(
