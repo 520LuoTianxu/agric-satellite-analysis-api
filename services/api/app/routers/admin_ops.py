@@ -8,10 +8,10 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -50,6 +50,12 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
         "description": "从外部 MySQL 同步地块主数据到 PostgreSQL，并为新增或变更地块派发遥感处理任务。",
         "task_name": "app.services.mysql_land_sync.run_land_sync",
         "schedule": "每天 22:00（北京时间，API 机）",
+    },
+    "smart-land-backfill": {
+        "label": "Smart 参数化历史回填",
+        "description": "按地块清单或 land_id 闭区间从 Smart 补齐主数据，再拉取指定年限的 S1/S2 历史数据。",
+        "task_name": "app.services.smart_land_backfill.run_smart_land_backfill",
+        "schedule": "按参数手动运行（API 机）",
     },
 }
 
@@ -184,6 +190,21 @@ class TriggerTaskRequest(BaseModel):
     as_of: date | None = None
     window_days: int = Field(default=60, ge=1, le=365)
     crop: str | None = Field(default=None, max_length=64)
+    land_ids: list[Any] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("landIdList", "landIdlist", "land_ids"),
+    )
+    from_land_id: str | int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("fromLandId", "from_land_id", "land_id_from"),
+    )
+    to_land_id: str | int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("toLandId", "to_land_id", "land_id_to"),
+    )
+    years: int | None = Field(default=None, ge=1, le=10)
+    sensors: list[Literal["S1", "S2"]] | None = None
+    force: bool = False
 
 
 def _celery_task_state(task_id: str) -> tuple[str, Any | None, str | None]:
@@ -1167,7 +1188,7 @@ def _task_outputs() -> list[ScheduledTaskOut]:
         # 页面仍提供手动触发，但启用状态直接反映 API 的源开关。
         enabled = (
             settings.mysql_source_enabled
-            if key == "mysql-land-sync"
+            if key in {"mysql-land-sync", "smart-land-backfill"}
             else switch_name_by_key[key] in enabled_names
         )
         result.append(
@@ -1196,10 +1217,27 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
         await db.commit()
 
     try:
-        from app.services.mysql_land_sync import run_land_sync
+        async with async_session() as db:
+            task_run = await db.get(AdminTaskRun, run_id)
+            task_key = task_run.task_key if task_run else ""
+            task_params = dict(task_run.params_json or {}) if task_run else {}
 
-        # MySQL 凭据只在 API 机，不能通过 claim payload 或 Celery 传给下载机。
-        result = await run_land_sync()
+        if task_key == "smart-land-backfill":
+            from app.services.smart_land_backfill import run_smart_land_backfill
+
+            # Smart 凭据只在 API 机使用；运行参数中仅保留地块和日期，不下发到下载机。
+            result = await run_smart_land_backfill(
+                land_ids=task_params["land_ids"],
+                date_from=date.fromisoformat(task_params["date_from"]),
+                date_to=date.fromisoformat(task_params["date_to"]),
+                sensors=task_params.get("sensors") or ["S1", "S2"],
+                force=bool(task_params.get("force", False)),
+            )
+        else:
+            from app.services.mysql_land_sync import run_land_sync
+
+            # MySQL 凭据只在 API 机，不能通过 claim payload 或 Celery 传给下载机。
+            result = await run_land_sync()
     except Exception as exc:
         async with async_session() as db:
             run = await db.get(AdminTaskRun, run_id)
@@ -1356,6 +1394,32 @@ async def trigger_task(
         if body.crop:
             kwargs["crop"] = body.crop
             params["crop"] = body.crop
+    if body.task_key == "smart-land-backfill":
+        if body.years is None:
+            raise HTTPException(status_code=422, detail="years是Smart历史回填的必填参数")
+        try:
+            from app.schemas.satellite_batch import SatelliteBatchRequest
+
+            batch_request = SatelliteBatchRequest.model_validate(
+                {
+                    "land_ids": body.land_ids,
+                    "from_land_id": body.from_land_id,
+                    "to_land_id": body.to_land_id,
+                    "years": body.years,
+                    "sensors": body.sensors or ["S1", "S2"],
+                    "force": body.force,
+                }
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        params = {
+            "land_ids": batch_request.resolved_land_ids(),
+            "years": body.years,
+            "date_from": batch_request.date_from.isoformat(),
+            "date_to": batch_request.date_to.isoformat(),
+            "sensors": list(batch_request.sensors),
+            "force": body.force,
+        }
 
     run = AdminTaskRun(
         task_key=body.task_key,
@@ -1366,9 +1430,9 @@ async def trigger_task(
     )
     db.add(run)
     await db.flush()
-    if body.task_key == "mysql-land-sync":
-        # 该同步器会访问 API 机上的源 MySQL，并在 PostgreSQL 内做批量 upsert；
-        # 不放入下载机 claim 队列，避免泄露源库连接信息且不占用卫星下载 worker。
+    if body.task_key in {"mysql-land-sync", "smart-land-backfill"}:
+        # 两类任务都需要在 API 机访问 Smart/PostgreSQL；不放入下载机 claim 队列，
+        # 避免泄露源库连接信息且不占用卫星下载 worker。
         await db.commit()
         asyncio.create_task(_run_api_admin_task(run.id))
         return _to_task_out(run)
