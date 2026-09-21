@@ -51,6 +51,7 @@ services:
       INGEST_SCENE_MAX_WORKERS: "8"
     volumes:
       - scratch:/data/scratch
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
       - ${UNCRTAINTS_HOME_HOST:-/workspace/UnCRtainTS}:/opt/UnCRtainTS:ro
       - ${UNCRTAINTS_CHECKPOINT_HOST:-/workspace/UnCRtainTS/checkpoints}:/models/uncrtaints:ro
     command: >
@@ -100,8 +101,10 @@ services:
       CELERY_REDIS_RETRY_ON_TIMEOUT: ${CELERY_REDIS_RETRY_ON_TIMEOUT:-true}
       CELERY_REDIS_HEALTH_CHECK_INTERVAL: ${CELERY_REDIS_HEALTH_CHECK_INTERVAL:-25}
       CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-0}
+      OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/decloud.log
     volumes:
       - scratch:/data/scratch
+      - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
       - ${UNCRTAINTS_HOME_HOST:-/workspace/UnCRtainTS}:/opt/UnCRtainTS:ro
       - ${UNCRTAINTS_CHECKPOINT_HOST:-/workspace/UnCRtainTS/checkpoints}:/models/uncrtaints:ro
     command: >

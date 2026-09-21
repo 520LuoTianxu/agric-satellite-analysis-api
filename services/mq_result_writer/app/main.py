@@ -7,16 +7,11 @@ import sys
 
 from agric_satellite_analysis_common.mq import connection_label, consume_forever
 from agric_satellite_analysis_common.settings import settings
-from agric_satellite_analysis_common.trace import install_stdlib_trace_log_record
+from agric_satellite_analysis_common.logging import setup_stdlib_logging
 
 from app.writer import handle_result_message
 
-install_stdlib_trace_log_record()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s trace_id=%(trace_id)s %(message)s",
-    stream=sys.stdout,
-)
+setup_stdlib_logging()
 logger = logging.getLogger("mq_result_writer")
 
 

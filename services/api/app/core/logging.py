@@ -1,28 +1,5 @@
-"""Structured logging configuration using structlog."""
+"""Re-export the shared structured logger used by the API."""
 
-import logging
-import structlog
+from agric_satellite_analysis_common.logging import logger, setup_logging
 
-
-def setup_logging() -> None:
-    """Configure JSON structured logging for the API."""
-    from agric_satellite_analysis_common.trace import install_stdlib_trace_log_record
-
-    install_stdlib_trace_log_record()
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer(),
-            structlog.dev.set_exc_info,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-        context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
-
-
-logger = structlog.get_logger("openfarm.api")
+__all__ = ["logger", "setup_logging"]
