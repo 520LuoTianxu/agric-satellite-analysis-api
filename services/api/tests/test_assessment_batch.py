@@ -242,6 +242,12 @@ class SmartSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("'A'", query.text)
         self.assertEqual(params, {"selected_land_0": "A", "selected_land_1": "B"})
 
+    def test_manual_query_can_include_schedule_filtered_lands(self):
+        query, _ = _selected_source_query(
+            ["A"], include_excluded_schedule_lands=True
+        )
+        self.assertNotIn("lg.base_id <> 46", query.text)
+
     async def test_disabled_smart_source_does_not_open_database_connections(self):
         with patch("app.services.mysql_land_sync.settings.mysql_source_enabled", False):
             self.assertEqual(

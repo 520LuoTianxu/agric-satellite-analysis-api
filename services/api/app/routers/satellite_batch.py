@@ -4,17 +4,16 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
-from app.models.tables import LandParcel
 from app.mq_publish import publish_api_task
 from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
 from app.services.satellite_batch import build_satellite_batch_jobs
+from app.services.smart_land_backfill import LandSelectionError, ensure_land_parcels
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
@@ -30,22 +29,17 @@ async def backfill_satellite_batch(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """传入landIdList，按5×5公里分组并派发共享窗口的S1/S2回填。"""
-    lands = (
-        (
-            await db.execute(
-                select(LandParcel).where(
-                    LandParcel.land_id.in_(body.land_ids),
-                    LandParcel.deleted_at.is_(None),
-                )
-            )
+    """支持清单/闭区间选地，缺失主数据时先从 Smart 补齐再派发 S1/S2。"""
+    requested_land_ids = body.resolved_land_ids()
+    try:
+        lands, _ = await ensure_land_parcels(db, requested_land_ids)
+    except LandSelectionError as exc:
+        detail: object = (
+            {"missing_land_ids": exc.missing_land_ids}
+            if exc.missing_land_ids
+            else str(exc)
         )
-        .scalars()
-        .all()
-    )
-    missing = sorted(set(body.land_ids) - {land.land_id for land in lands})
-    if missing:
-        raise HTTPException(status_code=404, detail={"missing_land_ids": missing})
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     try:
         groups, jobs = await asyncio.to_thread(
             build_satellite_batch_jobs,

@@ -667,8 +667,10 @@ async def _record_audit(summary: dict[str, Any]) -> None:
         await db.commit()
 
 
-def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]]:
-    """构造 Smart 精确地块查询，参数名固定生成以避免拼接用户输入。"""
+def _selected_source_query(
+    land_ids: Sequence[str], *, include_excluded_schedule_lands: bool = False
+) -> tuple[Any, dict[str, str]]:
+    """构造 Smart 精确查询；参数名固定生成以避免拼接用户输入。"""
     normalized = list(dict.fromkeys(str(value).strip() for value in land_ids))
     if not normalized or any(not value for value in normalized):
         raise ValueError("land_ids must contain at least one non-empty ID")
@@ -676,7 +678,11 @@ def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]
     names = [f"selected_land_{index}" for index in range(len(normalized))]
     placeholders = ", ".join(f":{name}" for name in names)
     order_clause = "    ORDER BY lg.group_id, al.land_id"
-    source_text = SOURCE_SQL.text.replace(
+    source_text = SOURCE_SQL.text
+    if include_excluded_schedule_lands:
+        # 显式地块回填允许管理员指定自动调度过滤之外的地块；全量每日同步仍保留过滤。
+        source_text = source_text.replace("      AND lg.base_id <> 46\n", "", 1)
+    source_text = source_text.replace(
         order_clause,
         f"      AND CAST(al.land_id AS CHAR) IN ({placeholders})\n{order_clause}",
         1,
@@ -687,7 +693,10 @@ def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]
 
 
 async def sync_selected_lands(
-    land_ids: Sequence[str], *, today: date | None = None
+    land_ids: Sequence[str],
+    *,
+    today: date | None = None,
+    include_excluded_schedule_lands: bool = False,
 ) -> dict[str, Any]:
     """从 Smart/MySQL 同步指定地块到 PostgreSQL，不派发单地块遥感任务。
 
@@ -730,7 +739,10 @@ async def sync_selected_lands(
                 return summary
 
             try:
-                source_query, source_params = _selected_source_query(requested)
+                source_query, source_params = _selected_source_query(
+                    requested,
+                    include_excluded_schedule_lands=include_excluded_schedule_lands,
+                )
                 async with source_engine.connect() as source_conn:
                     result = await source_conn.execute(source_query, source_params)
                     rows = [dict(row) for row in result.mappings().all()]
@@ -748,7 +760,7 @@ async def sync_selected_lands(
                 if not missing:
                     for row in rows:
                         raw_land_id = _string_or_none(row.get("land_id"))
-                        if (
+                        if not include_excluded_schedule_lands and (
                             is_excluded_schedule_base_id(row.get("group_base_id"))
                             or not is_scheduled_land_allowed(
                                 row.get("base_id"), row.get("land_area")

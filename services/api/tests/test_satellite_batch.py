@@ -110,6 +110,29 @@ class RequestTests(unittest.TestCase):
             )
             self.assertEqual(body.land_ids, ["123", "456"])
 
+    def test_numeric_range_and_years_are_inclusive(self):
+        body = SatelliteBatchRequest.model_validate(
+            {
+                "from_land_id": 1001,
+                "to_land_id": 1003,
+                "years": 2,
+                "date_to": "2026-02-28",
+            }
+        )
+        self.assertIsNone(body.land_ids)
+        self.assertEqual(body.resolved_land_ids(), ["1001", "1002", "1003"])
+        self.assertEqual(body.date_from, date(2024, 2, 28))
+
+    def test_list_and_range_are_mutually_exclusive(self):
+        with self.assertRaises(ValidationError):
+            SatelliteBatchRequest.model_validate(
+                {"landIdList": ["A"], "from_land_id": "1", "to_land_id": "2"}
+            )
+        with self.assertRaises(ValidationError):
+            SatelliteBatchRequest.model_validate(
+                {"from_land_id": "A", "to_land_id": "B"}
+            )
+
     def test_bad_lists_and_dates_are_rejected(self):
         for values in ([], [" "], [True], [None], ["A"] * 1001):
             with self.assertRaises(ValidationError):
@@ -183,6 +206,42 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
         db.add.assert_not_called()
         db.commit.assert_not_awaited()
         send.assert_not_called()
+
+    async def test_missing_land_is_synced_from_smart_before_queueing(self):
+        initial = [local_land("1001")]
+        final = [local_land("1001"), local_land("1002", 2000)]
+
+        def result(lands):
+            value = MagicMock()
+            value.scalars.return_value.all.return_value = lands
+            return value
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[result(initial), result(final)])
+        db.commit = AsyncMock()
+        body = SatelliteBatchRequest.model_validate(
+            {
+                "from_land_id": "1001",
+                "to_land_id": "1002",
+                "years": 1,
+                "date_to": "2026-08-01",
+            }
+        )
+        with (
+            patch("app.services.smart_land_backfill.settings.mysql_source_enabled", True),
+            patch(
+                "app.services.smart_land_backfill.sync_selected_lands",
+                new_callable=AsyncMock,
+                return_value={"status": "completed", "synced_land_ids": ["1002"]},
+            ) as sync,
+            patch("app.routers.satellite_batch.publish_api_task"),
+        ):
+            response = await backfill_satellite_batch(body, None, db)
+
+        self.assertEqual(response.land_count, 2)
+        sync.assert_awaited_once_with(
+            ["1002"], include_excluded_schedule_lands=True
+        )
 
     async def test_partial_dispatch_failure_returns_all_job_ids(self):
         db = fake_db([local_land("A")])
