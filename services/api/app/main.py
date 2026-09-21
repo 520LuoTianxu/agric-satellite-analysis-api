@@ -3,7 +3,6 @@
 import asyncio
 import re
 from contextlib import asynccontextmanager
-from pathlib import Path
 from time import perf_counter
 
 import redis.asyncio as aioredis
@@ -50,125 +49,10 @@ from app.routers import (
 )
 
 
-# TEMP(PROD-DB-INIT): 首次生产发布完成后删除本段初始化逻辑及镜像中的 SQL 文件。
-_SCHEMA_INIT_LOCK_KEY = "agric_satellite.schema.init.v1"
-_SCHEMA_INIT_OBJECTS = (
-    "admin_task_runs",
-    "alembic_version",
-    "land_parcels",
-    "work_items",
-    "v_land_parcels_detail",
-)
-
-
-def _schema_init_sql_path() -> Path:
-    """定位发布镜像和本地源码中的一次性初始化 SQL。"""
-    candidates = (
-        Path("/app/agric_satellite.sql"),
-        Path(__file__).resolve().parents[3] / "ABflow" / "agric_satellite.sql",
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "找不到生产数据库初始化 SQL，期望路径: "
-        + ", ".join(str(candidate) for candidate in candidates)
-    )
-
-
-async def _initialize_agric_satellite_schema() -> None:
-    """启动时一次性创建业务表；已完成、并发或半初始化状态分别处理。"""
-    import asyncpg
-
-    sql_path = _schema_init_sql_path()
-    sql_text = sql_path.read_text(encoding="utf-8")
-    if not sql_text.strip():
-        raise RuntimeError(f"生产数据库初始化 SQL 为空: {sql_path}")
-
-    database_url = settings.database_url.replace(
-        "postgresql+asyncpg://", "postgresql://"
-    )
-    connection = await asyncpg.connect(
-        database_url,
-        timeout=15,
-        server_settings={"search_path": settings.database_schema},
-    )
-    try:
-        async with connection.transaction():
-            # 多个 API worker 可能同时启动，事务级 advisory lock 保证只执行一次。
-            await connection.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1))",
-                _SCHEMA_INIT_LOCK_KEY,
-            )
-
-            schema_exists = await connection.fetchval(
-                "SELECT to_regnamespace($1::text) IS NOT NULL",
-                settings.database_schema,
-            )
-            if not schema_exists:
-                raise RuntimeError(
-                    f"数据库中不存在 schema {settings.database_schema}，初始化已停止"
-                )
-
-            object_state: dict[str, bool] = {}
-            for object_name in _SCHEMA_INIT_OBJECTS:
-                qualified_name = f"{settings.database_schema}.{object_name}"
-                object_state[object_name] = await connection.fetchval(
-                    "SELECT to_regclass($1::text) IS NOT NULL", qualified_name
-                )
-
-            existing_objects = [
-                name for name, exists in object_state.items() if exists
-            ]
-            if len(existing_objects) == len(_SCHEMA_INIT_OBJECTS):
-                logger.info(
-                    "database_schema_init_skipped",
-                    schema=settings.database_schema,
-                    reason="already_initialized",
-                )
-                return
-            if existing_objects:
-                raise RuntimeError(
-                    "数据库检测到半初始化状态，已停止启动: "
-                    + ", ".join(existing_objects)
-                )
-
-            # 原生 asyncpg 执行完整 SQL，保留函数体、视图、触发器和多语句结构。
-            logger.warning(
-                "database_schema_init_started",
-                schema=settings.database_schema,
-                sql_file=str(sql_path),
-            )
-            await connection.execute(sql_text)
-
-            missing_objects: list[str] = []
-            for object_name in _SCHEMA_INIT_OBJECTS:
-                qualified_name = f"{settings.database_schema}.{object_name}"
-                exists = await connection.fetchval(
-                    "SELECT to_regclass($1::text) IS NOT NULL", qualified_name
-                )
-                if not exists:
-                    missing_objects.append(object_name)
-            if missing_objects:
-                raise RuntimeError(
-                    "初始化完成后缺少核心数据库对象: "
-                    + ", ".join(missing_objects)
-                )
-            logger.warning(
-                "database_schema_init_completed",
-                schema=settings.database_schema,
-            )
-    finally:
-        await connection.close()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
     setup_logging()
-
-    # TEMP(PROD-DB-INIT): 首次生产发布完成后删除此调用。
-    await _initialize_agric_satellite_schema()
 
     # Create shared httpx client for outbound HTTP (e.g., tile proxy)
     import httpx
