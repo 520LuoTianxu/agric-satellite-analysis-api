@@ -11,18 +11,22 @@ from decimal import Decimal
 import httpx
 import structlog
 from celery import group
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
+    scheduled_date_window,
+    scheduled_land_sql,
 )
 from agric_satellite_analysis_common.weather_daily_limit import (
     DAILY_API_LIMIT_MESSAGE,
     mark_weather_daily_limit_reached,
     weather_daily_limit_reached,
+)
+from agric_satellite_analysis_common.weather_window import (
+    resolve_historical_weather_window,
 )
 from app.core.admin_task_tracking import track_admin_task_run
 from app.core.config import settings
@@ -282,13 +286,18 @@ def _fetch_open_meteo(
 def fetch_weather_for_land(
     self,
     land_id: str,
-    backfill_days: int = 0) -> dict:
+    backfill_days: int = 0,
+    date_from: str | date | None = None,
+    date_to: str | date | None = None,
+) -> dict:
     """Fetch weather data from Open-Meteo for a single land parcel.
 
     Args:
         land_id: Canonical ``land_parcels.land_id``.
         backfill_days: If >0, fetch last N days via archive API.
             If 0, fetch yesterday + today via forecast API.
+        date_from/date_to: Explicit historical window used by an RS task. When
+            either is supplied, the archive API is used for that same window.
 
     Returns:
         dict with land_id, rows_upserted, status.
@@ -350,11 +359,20 @@ def fetch_weather_for_land(
         lat, lon = coords
 
         today = date.today()
-        if backfill_days > 0:
-            start_date = today - timedelta(days=backfill_days)
-            end_date = today - timedelta(days=1)
+        if backfill_days > 0 or date_from is not None or date_to is not None:
+            # 遥感任务传入的日期窗口优先级最高；统一裁剪到昨天，避免把当天
+            # 的预报误当成已归档实况，同时保留前端当天预报查询能力。
+            window = resolve_historical_weather_window(
+                today=today,
+                days=backfill_days or None,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            start_date = window.start
+            end_date = window.end
             use_archive = True
         else:
+            window = None
             start_date = today - timedelta(days=1)
             end_date = today
             use_archive = False
@@ -377,14 +395,17 @@ def fetch_weather_for_land(
             logger.warning("weather_no_daily_data", land_id=land_id)
             return {"land_id": land_id, "rows_upserted": 0, "status": "no_data"}
 
-        # Get last known cumulative GDD for this land parcel (skip when HTTP-only)
+        # 累计 GDD 必须从窗口起点之前的最后一条记录接续；不能从窗口之后
+        # 的最新记录倒推，否则前端选择较早年份时会出现累计值跳变。
         cumulative_gdd = 0.0
         if session is not None:
             last_gdd_row = session.execute(
                 select(WeatherDaily.gdd_cumulative, WeatherDaily.date)
                 .where(
                     WeatherDaily.land_id == land_id,
-                    WeatherDaily.gdd_cumulative.isnot(None))
+                    WeatherDaily.gdd_cumulative.isnot(None),
+                    WeatherDaily.date < start_date,
+                )
                 .order_by(WeatherDaily.date.desc())
                 .limit(1)
             ).first()
@@ -486,6 +507,9 @@ def fetch_weather_for_land(
             "land_id": land_id,
             "rows_upserted": rows_upserted,
             "status": "success",
+            "date_from": window.start.isoformat() if window else None,
+            "date_to": window.end.isoformat() if window else None,
+            "days": window.days if window else None,
             "pending_records": pending_records if http_only else None,
         }
 
@@ -538,8 +562,11 @@ def fetch_weather_for_land(
 
 
 def _update_water_balance(session, land_id: str) -> None:
-    """Update 30-day water balance and drought index for recent records."""
-    cutoff = date.today() - timedelta(days=90)
+    """Update rolling water balance for the whole land history.
+
+    长时间天气图表依赖历史每一天的 30 日滚动值，因此不能只重算最近 90
+    天；任务通常只回填一个窗口，但计算范围必须覆盖该地块的完整历史。
+    """
 
     # Compute 30-day rolling water balance (precip - ET0)
     session.execute(
@@ -568,11 +595,11 @@ def _update_water_balance(session, land_id: str) -> None:
                             ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                         ) AS stddev_wb
                 FROM weather_daily
-                WHERE land_id = :land_id AND date >= :cutoff
+                WHERE land_id = :land_id
             ) sub
             WHERE w.id = sub.id
         """),
-        {"land_id": land_id, "cutoff": cutoff})
+        {"land_id": land_id})
     session.commit()
 
 
@@ -606,6 +633,7 @@ def schedule_daily_weather_fetch(
         }
 
     land_ids: list[str] = []
+    date_windows: dict[str, dict[str, str]] = {}
     batch_size = settings.weather_batch_size
     http = False
 
@@ -613,9 +641,23 @@ def schedule_daily_weather_fetch(
         from agric_satellite_analysis_common.internal_api import internal_api_enabled, weather_land_ids
 
         if internal_api_enabled():
-            # 向 API 要 land_id，不在本机 SELECT land_parcels
+            # 向 API 要 land_id 和过期遥感窗口，不在本机 SELECT land_parcels。
             payload = weather_land_ids()
-            land_ids = [str(x) for x in (payload.get("land_ids") or [])]
+            items = payload.get("items") or []
+            if items:
+                for item in items:
+                    if not isinstance(item, dict) or not item.get("land_id"):
+                        continue
+                    land_id = str(item["land_id"])
+                    land_ids.append(land_id)
+                    if item.get("date_from") and item.get("date_to"):
+                        date_windows[land_id] = {
+                            "date_from": str(item["date_from"])[:10],
+                            "date_to": str(item["date_to"])[:10],
+                        }
+            else:
+                # 兼容尚未升级的 API，旧格式仍执行每日昨日/今日拉取。
+                land_ids = [str(x) for x in (payload.get("land_ids") or [])]
             batch_size = int(payload.get("batch_size") or batch_size)
             http = True
     except ImportError:
@@ -623,28 +665,34 @@ def schedule_daily_weather_fetch(
 
     if not http:
         # 未配 Internal HTTP 时才走本机库，仅给本地单机 compose 用
-        from app.models.tables import LandParcel
-
         session = _get_db_session()
         try:
-            land_ids = [
-                str(lid)
-                for lid in session.execute(
-                    select(LandParcel.land_id).where(
-                        LandParcel.deleted_at.is_(None),
-                        or_(
-                            LandParcel.base_id.is_(None),
-                            LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                        ),
-                        or_(
-                            LandParcel.land_area_mu.is_(None),
-                            LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
-                        ),
-                    )
-                )
-                .scalars()
-                .all()
-            ]
+            # 本地单机模式也按最新遥感日期计算增量窗口，确保天气与遥感
+            # 任务覆盖同一段历史；Internal HTTP 模式走 API 同样的规则。
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT l.land_id, max(p.date)::date AS latest_date
+                    FROM agric_satellite.land_parcels l
+                    LEFT JOIN agric_satellite.parcel_scene_products p
+                      ON p.land_id = l.land_id
+                    WHERE l.deleted_at IS NULL
+                      AND {scheduled_land_sql("l")}
+                    GROUP BY l.land_id
+                    ORDER BY l.land_id
+                    """
+                ),
+                {"max_schedule_area_mu": MAX_SCHEDULE_LAND_AREA_MU},
+            ).all()
+            today = date.today()
+            land_ids = [str(lid) for lid, _latest in rows]
+            for land_id, latest in rows:
+                window = scheduled_date_window(latest, today=today)
+                if window:
+                    date_windows[str(land_id)] = {
+                        "date_from": window[0].isoformat(),
+                        "date_to": window[1].isoformat(),
+                    }
         finally:
             session.close()
 
@@ -655,7 +703,12 @@ def schedule_daily_weather_fetch(
     batches = []
     for i in range(0, len(land_ids), batch_size):
         batch = land_ids[i : i + batch_size]
-        task_group = group(fetch_weather_for_land.s(str(land_id)) for land_id in batch)
+        task_group = group(
+            fetch_weather_for_land.s(
+                str(land_id), **date_windows.get(str(land_id), {})
+            )
+            for land_id in batch
+        )
         batches.append(task_group)
 
     for batch in batches:
@@ -674,14 +727,34 @@ def _num(val):
     return float(val) if val is not None else None
 
 
-def _weather_result_payload(land_id: str, *, days: int) -> dict:
+def _weather_result_payload(
+    land_id: str,
+    *,
+    days: int | None = None,
+    date_from: str | date | None = None,
+    date_to: str | date | None = None,
+) -> dict:
     """Serialize recent weather_daily rows for inline ResultMessage.payload."""
     from app.models.tables import WeatherDaily
 
     session = _get_db_session()
     try:
-        end = date.today()
-        start = end - timedelta(days=max(days, 1))
+        if date_from is not None:
+            start = (
+                date_from
+                if isinstance(date_from, date)
+                else date.fromisoformat(str(date_from)[:10])
+            )
+            end = (
+                date_to
+                if isinstance(date_to, date)
+                else date.fromisoformat(str(date_to)[:10])
+                if date_to is not None
+                else date.today() - timedelta(days=1)
+            )
+        else:
+            end = date.today() - timedelta(days=1)
+            start = end - timedelta(days=max(days or 1, 1) - 1)
         rows = (
             session.execute(
                 select(WeatherDaily)
@@ -735,7 +808,9 @@ def _weather_result_payload(land_id: str, *, days: int) -> dict:
         return {
             "kind": "weather_daily",
             "land_id": land_id,
-            "days": days,
+            "date_from": start.isoformat(),
+            "date_to": end.isoformat(),
+            "days": (end - start).days + 1,
             "rows_count": len(out_rows),
             "rows": out_rows,
         }
@@ -747,20 +822,36 @@ def _weather_result_payload(land_id: str, *, days: int) -> dict:
 def backfill_weather_for_land(
     land_id: str,
     days: int | None = None,
+    date_from: str | date | None = None,
+    date_to: str | date | None = None,
+    years: int | None = None,
     mq_task_id: str | None = None) -> dict:
     """Trigger a historical weather backfill for one land parcel.
 
     Called on land parcel creation or manually via API / CloudAMQP weather_backfill.
     When ``mq_task_id`` is set, publish a ResultMessage on completion.
     """
-    backfill = days or settings.weather_backfill_days
+    window = resolve_historical_weather_window(
+        days=days or settings.weather_backfill_days,
+        years=years,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    backfill = window.days
     logger.info(
         "weather_backfill_start",
         land_id=land_id,
         days=backfill,
+        date_from=window.start.isoformat(),
+        date_to=window.end.isoformat(),
         mq_task_id=mq_task_id)
     try:
-        result = fetch_weather_for_land(land_id, backfill_days=backfill)
+        result = fetch_weather_for_land(
+            land_id,
+            backfill_days=backfill,
+            date_from=window.start,
+            date_to=window.end,
+        )
         if mq_task_id:
             try:
                 from agric_satellite_analysis_common.mq_results import publish_task_result
@@ -784,7 +875,10 @@ def backfill_weather_for_land(
                     else:
                         try:
                             payload = _weather_result_payload(
-                                land_id, days=backfill
+                                land_id,
+                                days=backfill,
+                                date_from=window.start,
+                                date_to=window.end,
                             )
                         except Exception:
                             payload = None
@@ -826,6 +920,8 @@ def backfill_weather_for_land(
                     extras={
                         "source": "weather_backfill",
                         "days": backfill,
+                        "date_from": window.start.isoformat(),
+                        "date_to": window.end.isoformat(),
                         "rows_upserted": (
                             result.get("rows_upserted")
                             if isinstance(result, dict)
@@ -852,7 +948,12 @@ def backfill_weather_for_land(
                     status="failed",
                     land_id=land_id,
                     error=str(e)[:500],
-                    extras={"source": "weather_backfill", "days": backfill},
+                    extras={
+                        "source": "weather_backfill",
+                        "days": backfill,
+                        "date_from": window.start.isoformat(),
+                        "date_to": window.end.isoformat(),
+                    },
                     collect_parcel_urls=False,
                     upload_summary_if_empty=False)
             except Exception:

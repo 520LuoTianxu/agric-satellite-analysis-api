@@ -32,7 +32,12 @@ from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 from shapely.geometry import mapping
 
-from app.core.band_parallel import run_parallel_band_jobs, band_max_workers
+from app.core.band_parallel import (
+    BandReadResult,
+    band_max_workers,
+    gdal_read_slot,
+    run_parallel_band_jobs,
+)
 from app.core.config import settings, scene_max_workers
 from app.core.geo import geojson_to_shape
 from app.core.index_cogs import write_index_cogs_enabled
@@ -220,10 +225,10 @@ def search_s1_scenes(
     return scenes
 
 
-def _read_band_windowed_db(
+def _read_band_windowed_db_profiled(
     href: str, bounds: tuple, target_shape: tuple, target_transform
-) -> np.ndarray:
-    """Read GRD COG window, reproject to field grid, convert DN→dB.
+) -> BandReadResult[np.ndarray]:
+    """读取 GRD COG 窗口，并拆分远端 I/O 与目标网格重投影耗时。
 
     Sentinel-1 GRD COGs are often CRS-less with GCPs; WarpedVRT → EPSG:4326.
     """
@@ -231,7 +236,8 @@ def _read_band_windowed_db(
 
     s3_path = s1_open_path(href)
     dst = np.zeros(target_shape, dtype=np.float32)
-    with rasterio.Env(**s1_gdal_env()):
+    with gdal_read_slot(), rasterio.Env(**s1_gdal_env()):
+        t_io = time.perf_counter()
         with rasterio.open(s3_path) as src:
             # Always warp via VRT so GCP-only products work
             with WarpedVRT(
@@ -248,20 +254,36 @@ def _read_band_windowed_db(
                         href=href[:160],
                         bounds=list(bounds),
                     )
-                    return dst  # all-nan after dn_to_db of zeros→nan path
+                    io_ms = int((time.perf_counter() - t_io) * 1000)
+                    return BandReadResult(
+                        _dn_to_db(dst), io_ms=io_ms, reproject_ms=0
+                    )
                 window = window.round_offsets().round_lengths()
                 data = vrt.read(1, window=window, boundless=False)
                 src_transform = rasterio.windows.transform(window, vrt.transform)
-                reproject(
-                    source=data.astype(np.float32),
-                    destination=dst,
-                    src_transform=src_transform,
-                    src_crs="EPSG:4326",
-                    dst_transform=target_transform,
-                    dst_crs="EPSG:4326",
-                    resampling=Resampling.bilinear,
-                )
-    return _dn_to_db(dst)
+        io_ms = int((time.perf_counter() - t_io) * 1000)
+        t_reproject = time.perf_counter()
+        reproject(
+            source=data.astype(np.float32),
+            destination=dst,
+            src_transform=src_transform,
+            src_crs="EPSG:4326",
+            dst_transform=target_transform,
+            dst_crs="EPSG:4326",
+            resampling=Resampling.bilinear,
+        )
+        value = _dn_to_db(dst)
+        reproject_ms = int((time.perf_counter() - t_reproject) * 1000)
+    return BandReadResult(value, io_ms=io_ms, reproject_ms=reproject_ms)
+
+
+def _read_band_windowed_db(
+    href: str, bounds: tuple, target_shape: tuple, target_transform
+) -> np.ndarray:
+    """兼容旧调用方，返回窗口化后的 Sentinel-1 dB 数组。"""
+    return _read_band_windowed_db_profiled(
+        href, bounds, target_shape, target_transform
+    ).value
 
 
 def _write_index_cog(
@@ -605,10 +627,16 @@ def _process_one_s1_scene(
         try:
             pol = run_parallel_band_jobs(
                 {"vv": scene["vv_href"], "vh": scene["vh_href"]},
-                lambda _key, href: _read_band_windowed_db(
+                lambda _key, href: _read_band_windowed_db_profiled(
                     href, bounds, target_shape, target_transform
                 ),
                 scene_workers=scene_workers,
+                log_context={
+                    "job_id": job_id,
+                    "scene_id": scene_id,
+                    "date": scene["date"].isoformat(),
+                    "sensor": "S1",
+                },
             )
         except Exception as e:
             err = str(e)

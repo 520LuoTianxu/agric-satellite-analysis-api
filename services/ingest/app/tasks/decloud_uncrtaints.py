@@ -61,6 +61,7 @@ from app.core.decloud_cache import (
     read_window_array,
     write_window_array,
 )
+from app.core.band_parallel import run_parallel_band_jobs
 from app.core.uncrtaints import (
     S2_L2A_ASSET_MAP,
     S2_L2A_NO_B10,
@@ -349,7 +350,10 @@ def _read_s1_for_dates(
     target_transform,
 ) -> list[np.ndarray]:
     """Nearest S1 VV/VH (dB) per S2 date; zeros when none within S1_MATCH_DAYS."""
-    from app.tasks.sentinel1 import _read_band_windowed_db, search_s1_scenes
+    from app.tasks.sentinel1 import (
+        _read_band_windowed_db_profiled,
+        search_s1_scenes,
+    )
 
     if not dates:
         return []
@@ -369,13 +373,19 @@ def _read_s1_for_dates(
         if best is None:
             out.append(np.zeros((2, h, w), dtype=np.float32))
             continue
-        vv = _read_band_windowed_db(
-            best["vv_href"], bounds, target_shape, target_transform
+        pol = run_parallel_band_jobs(
+            {"vv": best["vv_href"], "vh": best["vh_href"]},
+            lambda _band, href: _read_band_windowed_db_profiled(
+                href, bounds, target_shape, target_transform
+            ),
+            scene_workers=1,
+            log_context={
+                "scene_id": best.get("id"),
+                "date": best["date"].isoformat(),
+                "sensor": "S1",
+            },
         )
-        vh = _read_band_windowed_db(
-            best["vh_href"], bounds, target_shape, target_transform
-        )
-        out.append(np.stack([vv, vh], axis=0))
+        out.append(np.stack([pol["vv"], pol["vh"]], axis=0))
     return out
 
 
@@ -664,7 +674,18 @@ def _cache_s2_scene(
             return cached["stack"]
     if not hrefs:
         return None
-    bands = read_bands_windowed_parallel(hrefs, bounds, target_shape, target_transform)
+    bands = read_bands_windowed_parallel(
+        hrefs,
+        bounds,
+        target_shape,
+        target_transform,
+        log_context={
+            "scene_id": scene.get("id") or scene.get("stac_id"),
+            "date": iso,
+            "sensor": "S2",
+            "land_id": str(land_id),
+        },
+    )
     stack = stack_s2_13(bands)
     write_window_array(str(land_id), iso, "S2", stack=stack)
     return stack

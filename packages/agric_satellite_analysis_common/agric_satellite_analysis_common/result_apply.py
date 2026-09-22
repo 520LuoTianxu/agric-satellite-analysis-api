@@ -357,7 +357,8 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
                                     ) AS stddev_wb
                             FROM weather_daily
                             WHERE land_id = :land_id
-                              AND date >= CURRENT_DATE - INTERVAL '90 days'
+                            -- 长时间天气回填后需要为整段历史重算 30 日滚动值，
+                            -- 否则前端切换到多年范围时，旧日期仍会缺少水分指标。
                         ) sub
                         WHERE w.id = sub.id
                         """

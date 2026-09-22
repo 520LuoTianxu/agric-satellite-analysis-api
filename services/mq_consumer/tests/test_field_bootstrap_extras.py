@@ -79,6 +79,8 @@ class LandBootstrapExtrasTests(unittest.TestCase):
         )
         weather = next(s for s in sends if "weather" in s[0])
         self.assertEqual(weather[2].get("days"), 1096)
+        self.assertEqual(weather[2].get("date_from"), "2023-09-14")
+        self.assertEqual(weather[2].get("date_to"), "2026-09-14")
         indices = next(s for s in sends if "backfill_indices" in s[0])
         self.assertEqual(indices[2].get("date_from"), "2023-09-14")
         self.assertEqual(indices[2].get("date_to"), "2026-09-14")
@@ -103,6 +105,36 @@ class LandBootstrapExtrasTests(unittest.TestCase):
         weather = next(s for s in sends if "weather" in s[0])
         self.assertEqual(weather[2].get("days"), 13)
         self.assertEqual(info.get("days"), 13)
+
+    def test_satellite_analysis_forwards_same_window_to_weather(self) -> None:
+        sends: list[tuple] = []
+
+        def fake_send(name, args=None, kwargs=None, queue=None):
+            sends.append((name, args or [], kwargs or {}, queue))
+            return SimpleNamespace(id=f"celery-{len(sends)}")
+
+        with (
+            patch.object(handler_mod.celery_client, "send_task", side_effect=fake_send),
+            patch.object(handler_mod, "publish_task_result"),
+        ):
+            handler_mod._dispatch_satellite_analysis(
+                TaskMessage(
+                    task_id="rs-task",
+                    type="satellite_analysis",
+                    land_id="land-1",
+                    extras={
+                        "date_from": "2024-01-01",
+                        "date_to": "2026-09-22",
+                        "with_bridge": False,
+                    },
+                ),
+                "land-1",
+            )
+
+        weather = next(s for s in sends if "weather" in s[0])
+        self.assertEqual(weather[1], ["land-1"])
+        self.assertEqual(weather[2]["date_from"], "2024-01-01")
+        self.assertEqual(weather[2]["date_to"], "2026-09-22")
 
 
     def test_indices_use_the_same_land_id(self) -> None:

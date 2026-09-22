@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
+
+from agric_satellite_analysis_common.scheduled_land_filter import scheduled_date_window
 
 # 最新栅格超过这么多天视为过期，需要补拉
 STALE_DAYS = 7
@@ -27,15 +29,4 @@ def weekly_date_window(
     stale_days: int = STALE_DAYS,
 ) -> tuple[date, date] | None:
     """过期地块返回 (起始日, 结束日)；仍新鲜则返回 None。"""
-    threshold = today - timedelta(days=stale_days)
-    if latest is not None and latest > threshold:
-        return None
-    date_from = (
-        (latest + timedelta(days=1))
-        if latest
-        else (today - timedelta(days=stale_days))
-    )
-    date_to = today
-    if date_from >= date_to:
-        return None
-    return date_from, date_to
+    return scheduled_date_window(latest, today=today, stale_days=stale_days)

@@ -12,11 +12,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
     scheduled_land_sql,
 )
@@ -25,7 +24,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
-from app.models.tables import Job, LandParcel
+from app.models.tables import Job
 from app.services.beat_schedule import (
     STAGGER_SECONDS,
     WEEKLY_INDEX_KEYS,
@@ -56,8 +55,15 @@ class WeeklyIndexPrepareOut(BaseModel):
     jobs_created: int = 0
 
 
+class WeatherLandItemOut(BaseModel):
+    land_id: str
+    date_from: str | None = None
+    date_to: str | None = None
+
+
 class WeatherLandsOut(BaseModel):
     land_ids: list[str] = Field(default_factory=list)
+    items: list[WeatherLandItemOut] = Field(default_factory=list)
     batch_size: int = 50
 
 
@@ -173,28 +179,39 @@ async def list_weather_lands(
     _: InternalAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """每日 Open-Meteo 拉取用的有效 land_id 列表。"""
-    land_ids = (
-        (
-            await db.execute(
-                select(LandParcel.land_id).where(
-                    LandParcel.deleted_at.is_(None),
-                    or_(
-                        LandParcel.base_id.is_(None),
-                        LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                    ),
-                    or_(
-                        LandParcel.land_area_mu.is_(None),
-                        LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
-                    ),
-                )
+    """返回天气地块及其与遥感一致的增量日期窗口。"""
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT l.land_id, max(p.date)::date AS latest_date
+                FROM agric_satellite.land_parcels AS l
+                LEFT JOIN agric_satellite.parcel_scene_products AS p
+                  ON p.land_id = l.land_id
+                WHERE l.deleted_at IS NULL
+                  AND {scheduled_land_sql("l")}
+                GROUP BY l.land_id
+                ORDER BY l.land_id
+                """,
+            ),
+            {"max_schedule_area_mu": MAX_SCHEDULE_LAND_AREA_MU},
+        )
+    ).all()
+    today = date.today()
+    items: list[WeatherLandItemOut] = []
+    for land_id, latest in rows:
+        window = weekly_date_window(latest, today=today)
+        items.append(
+            WeatherLandItemOut(
+                land_id=str(land_id),
+                date_from=window[0].isoformat() if window else None,
+                date_to=window[1].isoformat() if window else None,
             )
         )
-        .scalars()
-        .all()
-    )
     return WeatherLandsOut(
-        land_ids=[str(lid) for lid in land_ids],
+        # 保留旧字段，便于滚动升级期间的旧下载机继续工作。
+        land_ids=[item.land_id for item in items],
+        items=items,
         batch_size=settings.weather_batch_size,
     )
 

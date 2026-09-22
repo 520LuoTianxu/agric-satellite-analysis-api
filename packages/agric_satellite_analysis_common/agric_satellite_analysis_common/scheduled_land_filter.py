@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 from typing import Any
 
 # 这些基地不参与任何自动化遥感、天气、指数和报告任务。
@@ -46,10 +47,32 @@ def scheduled_land_sql(alias: str = "p", *, area_param: str = "max_schedule_area
     )
 
 
+def scheduled_date_window(
+    latest: date | None,
+    *,
+    today: date,
+    stale_days: int = 7,
+) -> tuple[date, date] | None:
+    """Return the incremental remote-sensing window for a scheduled land.
+
+    Weather scheduling reuses this exact window so a scheduled weather pull
+    cannot silently fall back to yesterday/today while the RS task backfills a
+    longer gap.
+    """
+    threshold = today - timedelta(days=stale_days)
+    if latest is not None and latest > threshold:
+        return None
+    date_from = (latest + timedelta(days=1)) if latest else threshold
+    if date_from >= today:
+        return None
+    return date_from, today
+
+
 __all__ = [
     "EXCLUDED_SCHEDULE_BASE_IDS",
     "MAX_SCHEDULE_LAND_AREA_MU",
     "is_excluded_schedule_base_id",
     "is_scheduled_land_allowed",
+    "scheduled_date_window",
     "scheduled_land_sql",
 ]

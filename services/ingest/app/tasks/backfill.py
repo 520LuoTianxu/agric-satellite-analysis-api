@@ -440,6 +440,17 @@ def _dispatch_weekly_index_items(items: list) -> int:
                 },
                 countdown=countdown,
             )
+            # 每周遥感补算使用的窗口也作为天气回填窗口，避免定时任务的
+            # 天气数据退化成固定最近几天，导致遥感/天气时间范围不一致。
+            celery_app.send_task(
+                "app.tasks.weather.backfill_weather_for_land",
+                args=[str(item["land_id"])],
+                kwargs={
+                    "date_from": item["date_from"],
+                    "date_to": item["date_to"],
+                },
+                countdown=countdown,
+            )
         else:
             celery_app.send_task(task_name, args=[str(job_id)], countdown=countdown)
         jobs_dispatched += 1
@@ -544,6 +555,16 @@ def schedule_weekly_index_compute(self) -> dict:
             celery_app.send_task(
                 "app.tasks.agri_lonlat.process_agri_optical_lonlat",
                 args=[str(job.id)],
+                countdown=countdown,
+            )
+            # 本地单机模式同样复用已写入 Job 的遥感日期窗口。
+            celery_app.send_task(
+                "app.tasks.weather.backfill_weather_for_land",
+                args=[str(land_id)],
+                kwargs={
+                    "date_from": date_from.isoformat(),
+                    "date_to": date_to.isoformat(),
+                },
                 countdown=countdown,
             )
             jobs_dispatched += 1
