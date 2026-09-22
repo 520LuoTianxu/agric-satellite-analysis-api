@@ -18,6 +18,7 @@ Fair and bad reconstructions are still written to OSS/MQ for audit.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -82,6 +83,57 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 S1_MATCH_DAYS = 6
+
+
+def _database_url_configured() -> bool:
+    """Detect an explicitly configured DB URL without opening a connection."""
+    if any(
+        (os.environ.get(name) or "").strip()
+        for name in ("DATABASE_URL", "DATABASE_URL_SYNC")
+    ):
+        return True
+    try:
+        from agric_satellite_analysis_common.settings import settings
+
+        # CommonSettings uses a development db default; model_fields_set lets us
+        # distinguish that fallback from a non-empty value loaded from .env.
+        fields_set = getattr(settings, "model_fields_set", set())
+        return bool({"database_url", "database_url_sync"} & set(fields_set))
+    except (ImportError, TypeError):
+        return False
+
+
+def _decloud_http_only() -> bool:
+    """Return whether decloud must use the API data plane instead of SyncSession.
+
+    Download-host ``.env`` files intentionally leave both database URLs blank.
+    Shared settings have a development ``db`` fallback, so checking the
+    configured environment before creating a session is required here.
+    """
+    # 没有显式数据库 URL 时无论 Internal HTTP 是否配置完整，都不能回退到
+    # Settings 的默认 db；配置错误应暴露为 HTTP 配置错误，而不是 PG 连接错误。
+    if not _database_url_configured():
+        return True
+
+    try:
+        from agric_satellite_analysis_common.internal_api import internal_api_enabled
+    except ImportError:
+        return False
+
+    if not internal_api_enabled():
+        return False
+
+    # 已显式切到 HTTP-only 的下载机继续复用统一判定；claim/空 URL 场景还要
+    # 额外避开 Settings 的默认 db 主机名，不能让 get_db_session 先被创建。
+    try:
+        from app.core.http_mode import ingest_http_only
+
+        if ingest_http_only():
+            return True
+    except ImportError:
+        pass
+
+    return False
 
 
 def enqueue_parcel_decloud(
@@ -433,8 +485,50 @@ def _rgb_stats(
     return rec_mean, raw_mean, rec_std, raw_std
 
 
+def _neighbor_ndvi_http(land_id: str, target: date) -> float | None:
+    """Read official S2 neighbor NDVI through the API internal data plane."""
+    from agric_satellite_analysis_common.internal_api import season_growth_inputs
+
+    window_from, window_to = neighbor_window(target)
+    try:
+        bundle = season_growth_inputs(
+            str(land_id),
+            date_from=window_from.isoformat(),
+            date_to=window_to.isoformat(),
+        )
+    except Exception as exc:
+        # 邻居 NDVI 只用于质量评分；HTTP 暂时不可用时仍允许本地缓存和
+        # 当前重建结果继续完成，不能退回下载机直连业务库。
+        logger.warning(
+            "decloud_neighbor_ndvi_http_failed",
+            land_id=str(land_id),
+            target=target.isoformat(),
+            error=str(exc),
+        )
+        return None
+
+    values: list[float] = []
+    for row in bundle.get("s2_rows") or []:
+        if str(row.get("date") or "")[:10] == target.isoformat():
+            continue
+        if not row.get("official"):
+            continue
+        try:
+            value = float(row.get("ndvi_avg"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
 def _neighbor_ndvi(session, land_id: str, target: date) -> float | None:
     """Mean NDVI of official-clear S2 neighbors in a +/- 45 day window."""
+    if session is None:
+        return _neighbor_ndvi_http(land_id, target)
+
     from app.core.agri_classify import official_s2_sql
 
     row = session.execute(
@@ -617,6 +711,7 @@ def _publish_decloud_product(
         row,
         mq_task_id=mq_task_id,
         oss_sensor=decloud_oss_sensor(),
+        result_delivery="http" if _decloud_http_only() else "mq",
         extra_extras={
             "source": DECLOUD_SOURCE,
             "decloud_quality": quality.quality,
@@ -937,12 +1032,37 @@ def _decloud_one_from_buffer(
 
 
 def _land_context(session, land_id: str):
-    from app.models.tables import LandParcel
+    if _decloud_http_only():
+        from app.core.http_mode import resolve_land_http
 
-    land = session.get(LandParcel, str(land_id))
-    if land is None or land.deleted_at is not None:
-        return None
-    land_geom = geojson_to_shape(land.boundary_geojson)
+        # claim 下载机不创建 SQLAlchemy session；canonical 地块几何和元数据
+        # 均由 API 从业务库读取后通过 Internal HTTP 返回。
+        remote = resolve_land_http(str(land_id))
+        if str(remote.get("land_id") or "") != str(land_id):
+            raise RuntimeError("internal land response does not match requested land_id")
+        land_geom_geojson = remote.get("boundary_geojson")
+        land_geom = geojson_to_shape(land_geom_geojson)
+        land_meta = {
+            "land_id": str(remote.get("land_id") or land_id),
+            "tile_id": remote.get("tile_id"),
+            "land_name": remote.get("land_name") or str(land_id),
+        }
+    else:
+        from app.models.tables import LandParcel
+
+        if session is None:
+            raise RuntimeError("decloud database session is required outside HTTP mode")
+        land = session.get(LandParcel, str(land_id))
+        if land is None or land.deleted_at is not None:
+            return None
+        land_geom_geojson = land.boundary_geojson
+        land_geom = geojson_to_shape(land_geom_geojson)
+        land_meta = {
+            "land_id": land.land_id,
+            "tile_id": land.tile_id,
+            "land_name": land.land_name or land.land_id,
+        }
+
     if land_geom is None:
         return None
     land_geom_geojson = mapping(land_geom)
@@ -950,11 +1070,7 @@ def _land_context(session, land_id: str):
         land_geom.bounds, land_geom
     )
     return {
-        "land_meta": {
-            "land_id": land.land_id,
-            "tile_id": land.tile_id,
-            "land_name": land.land_name or land.land_id,
-        },
+        "land_meta": land_meta,
         "land_geom_geojson": land_geom_geojson,
         "target_transform": target_transform,
         "target_shape": target_shape,
@@ -993,8 +1109,10 @@ def process_parcel_decloud(
         return {"status": "skipped", "reason": "below_cloud_threshold"}
 
     target = date.fromisoformat(str(date_str)[:10])
-    session = get_db_session()
+    session = None
     try:
+        if not _decloud_http_only():
+            session = get_db_session()
         ctx = _land_context(session, land_id)
         if ctx is None:
             return {"status": "error", "detail": "land_missing"}
@@ -1039,7 +1157,8 @@ def process_parcel_decloud(
             raise self.retry(exc=exc, countdown=RETRY_DELAYS[retry_num])
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 @celery_app.task(
@@ -1090,8 +1209,10 @@ def decloud_parcel_batch(
     if start > end:
         start, end = end, start
     pad = decloud_lookback_days()
-    session = get_db_session()
+    session = None
     try:
+        if not _decloud_http_only():
+            session = get_db_session()
         ctx = _land_context(session, land_id)
         if ctx is None:
             return {"status": "error", "detail": "land_missing"}
@@ -1203,4 +1324,5 @@ def decloud_parcel_batch(
             raise self.retry(exc=exc, countdown=RETRY_DELAYS[retry_num])
         raise
     finally:
-        session.close()
+        if session is not None:
+            session.close()

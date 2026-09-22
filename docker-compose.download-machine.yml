@@ -90,7 +90,9 @@ services:
       SYNC_DB_POOL_RECYCLE: "300"
       SYNC_DB_APP_NAME: "download-decloud"
       INGEST_SCENE_MAX_WORKERS: "2"
-      # Standalone service (not an ingest override) — must pass broker/DB explicitly.
+      # Standalone service (not an ingest override). In claim mode, API_BASE_URL /
+      # INTERNAL_API_TOKEN come from .env and DATABASE_URL* intentionally stay blank;
+      # decloud reads metadata over Internal HTTP and uses local Redis only as broker.
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC}
