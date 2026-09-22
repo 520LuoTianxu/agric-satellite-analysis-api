@@ -36,6 +36,76 @@ def make_lands(sensor="S2"):
 
 
 class SharedWindowTests(unittest.TestCase):
+    def test_scl_is_read_in_the_same_band_pool(self):
+        from rasterio.transform import from_origin
+
+        grid = (
+            from_origin(110, 35.01, 0.001, 0.001),
+            (4, 5),
+            np.ones((4, 5), dtype=bool),
+            (110, 35.006, 110.005, 35.01),
+        )
+        scene = {
+            "id": "scene",
+            "date": date(2026, 8, 1),
+            "band_hrefs": {
+                "B04": "https://example.test/red.tif",
+                "SCL": "https://example.test/scl.tif",
+                "visual": "https://example.test/visual.tif",
+            },
+        }
+
+        def _read(hrefs, _bounds, target_shape, _transform, **_kwargs):
+            return {
+                key: np.full(target_shape, 9 if key == "SCL" else 2, dtype=np.float32)
+                for key in hrefs
+            }
+
+        with (
+            patch.object(batch, "read_scene_window", return_value=None),
+            patch.object(batch, "window_cache_enabled", return_value=False),
+            patch.object(batch, "read_bands_windowed_parallel", side_effect=_read) as read,
+            patch.object(batch, "write_scene_window") as write_cache,
+        ):
+            bands, scl = batch._download_scene(scene, "S2", grid, job_id="job")
+
+        self.assertEqual(set(read.call_args.args[0]), {"B04", "SCL"})
+        self.assertEqual(
+            read.call_args.kwargs["resampling_by_band"]["SCL"],
+            batch.Resampling.nearest,
+        )
+        self.assertEqual(set(bands), {"B04"})
+        self.assertTrue(np.all(scl == 9))
+        write_cache.assert_called_once()
+
+    def test_window_cache_hit_skips_remote_reads(self):
+        from rasterio.transform import from_origin
+
+        grid = (
+            from_origin(110, 35.01, 0.001, 0.001),
+            (2, 2),
+            np.ones((2, 2), dtype=bool),
+            (110, 35.008, 110.002, 35.01),
+        )
+        cached = {
+            "B04": np.ones((2, 2), dtype=np.float32),
+            "SCL": np.full((2, 2), 4, dtype=np.float32),
+        }
+        scene = {
+            "id": "scene",
+            "date": date(2026, 8, 1),
+            "band_hrefs": {"B04": "red", "SCL": "scl"},
+        }
+        with (
+            patch.object(batch, "read_scene_window", return_value=cached),
+            patch.object(batch, "read_bands_windowed_parallel") as remote,
+        ):
+            bands, scl = batch._download_scene(scene, "S2", grid, job_id="job")
+
+        remote.assert_not_called()
+        self.assertEqual(set(bands), {"B04"})
+        self.assertTrue(np.all(scl == 4))
+
     def test_assessment_batch_download_is_compensated_twice_then_stays_failed(self):
         job_id = str(uuid.uuid4())
         job = {
@@ -249,7 +319,7 @@ class ParcelProductTests(unittest.TestCase):
         products = []
 
         def publish(row, **kwargs):
-            products.append((row, kwargs["mq_task_id"]))
+            products.append((row, kwargs))
             return "oss-url"
 
         with (
@@ -268,7 +338,10 @@ class ParcelProductTests(unittest.TestCase):
                 )
         self.assertAlmostEqual(products[0][0]["ndvi_avg"], 0.5, places=5)
         self.assertAlmostEqual(products[1][0]["ndvi_avg"], 0, places=5)
-        self.assertEqual([parent for _, parent in products], ["parent:A", "parent:B"])
+        self.assertEqual(
+            [kwargs["mq_task_id"] for _, kwargs in products],
+            ["parent:A", "parent:B"],
+        )
         self.assertEqual(
             [kwargs["result_delivery"] for _, kwargs in products],
             ["http", "http"],

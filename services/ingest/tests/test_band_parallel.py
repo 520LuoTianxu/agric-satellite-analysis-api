@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import patch
 
 from app.core.band_parallel import (
+    BandReadResult,
     band_max_workers,
+    band_read_max_attempts,
     effective_band_workers,
     gdal_read_slot,
     reset_band_gdal_limit,
@@ -21,10 +23,10 @@ class BandMaxWorkersTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_band_gdal_limit()
 
-    def test_default_is_16(self) -> None:
+    def test_default_is_8(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("INGEST_BAND_MAX_WORKERS", None)
-            self.assertEqual(band_max_workers(), 16)
+            self.assertEqual(band_max_workers(), 8)
 
     def test_parses_positive_int(self) -> None:
         with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "8"}):
@@ -34,7 +36,14 @@ class BandMaxWorkersTests(unittest.TestCase):
         with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "0"}):
             self.assertEqual(band_max_workers(), 1)
         with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "nope"}):
-            self.assertEqual(band_max_workers(), 16)
+            self.assertEqual(band_max_workers(), 8)
+
+    def test_band_read_attempts_default_and_bounds(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BAND_READ_MAX_ATTEMPTS", None)
+            self.assertEqual(band_read_max_attempts(), 3)
+        with patch.dict(os.environ, {"BAND_READ_MAX_ATTEMPTS": "99"}):
+            self.assertEqual(band_read_max_attempts(), 10)
 
 
 class EffectiveBandWorkersTests(unittest.TestCase):
@@ -155,6 +164,66 @@ class RunParallelBandJobsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 run_parallel_band_jobs({"a": 1, "b": 2, "c": 3}, _fn, scene_workers=1)
         self.assertIn("b", str(ctx.exception))
+
+    def test_retry_releases_gdal_slot_and_logs_profiled_context(self) -> None:
+        calls = 0
+        acquired_during_backoff = threading.Event()
+        logs: list[tuple[str, dict]] = []
+
+        def _fn(_key: str, _value: str):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("request timed out")
+            return BandReadResult(42, io_ms=12, reproject_ms=3)
+
+        def _backoff(_seconds: float) -> None:
+            def _probe() -> None:
+                with gdal_read_slot():
+                    acquired_during_backoff.set()
+
+            probe = threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            self.assertTrue(acquired_during_backoff.wait(1))
+            probe.join(timeout=1)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INGEST_BAND_MAX_WORKERS": "1",
+                    "BAND_READ_MAX_ATTEMPTS": "3",
+                    "BAND_READ_RETRY_DELAYS_SEC": "1,3",
+                },
+            ),
+            patch("app.core.band_parallel.time.sleep", side_effect=_backoff),
+            patch(
+                "app.core.band_parallel._band_log",
+                side_effect=lambda event, **fields: logs.append((event, fields)),
+            ),
+        ):
+            reset_band_gdal_limit()
+            result = run_parallel_band_jobs(
+                {"B04": "https://example.test/red.tif?sig=secret"},
+                _fn,
+                log_context={
+                    "job_id": "job",
+                    "scene_id": "scene",
+                    "date": "2026-09-22",
+                    "sensor": "S2",
+                },
+            )
+
+        self.assertEqual(result, {"B04": 42})
+        self.assertEqual(calls, 2)
+        self.assertTrue(acquired_during_backoff.is_set())
+        attempts = [fields for event, fields in logs if event == "band_read_attempt_done"]
+        self.assertEqual([row["outcome"] for row in attempts], ["retry", "success"])
+        self.assertEqual(attempts[0]["host"], "example.test")
+        self.assertNotIn("secret", str(attempts))
+        self.assertEqual(attempts[1]["io_ms"], 12)
+        self.assertEqual(attempts[1]["reproject_ms"], 3)
+        self.assertEqual(attempts[1]["job_id"], "job")
 
 
 if __name__ == "__main__":

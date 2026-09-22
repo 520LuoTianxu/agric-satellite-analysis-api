@@ -25,7 +25,14 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 | Env | Default | Meaning |
 |---|---|---|
 | `INGEST_SCENE_MAX_WORKERS` | `16` | Thread pool size for per-scene download+process. Independent of Celery `--concurrency` (compose ingest default is 4). |
-| `INGEST_BAND_MAX_WORKERS` | `16` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 4 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
+| `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 2 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
+| `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the GDAL semaphore. |
+| `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `60` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=30` also aborts stalled Range responses. |
+| `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |
+| `BAND_WINDOW_CACHE` | `1` (Compose) | Reuse versioned shared scene windows under scratch before reopening remote COGs. The library default is off outside deployment config. |
+| `BAND_WINDOW_CACHE_MAX_GB` | `20` | LRU capacity. Files are also evicted when free disk falls below `BAND_WINDOW_CACHE_MIN_FREE_GB` (default `2`). |
+| `INDEX_BACKFILL_CHUNK_DAYS` | `90` | Historical task window. Keep 90 initially; switch to 30-45 only if measured tails still require a smaller failure domain. |
+| `SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC` / `SATELLITE_BATCH_TIME_LIMIT_SEC` | `1500` / `1800` | Optional whole-task guard. Configure `540` / `600` for a strict ten-minute ceiling; the hard limit recycles a stuck Celery prefork child. |
 | `PROCESSING_WINDOW_KM` | `5.0` | Per-land STAC/raster processing square side length. The complete parcel polygon is used as the metric mask; a parcel crossing a shared window is not merged into that group. |
 | `WRITE_INDEX_COGS` | unset | Canonical optical path skips index TIF/COG uploads by default. `0` = never. `1` = always (storage-heavy). |
 | `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
@@ -43,7 +50,7 @@ simultaneous GDAL opens. `GDAL_NUM_THREADS` stays 1; each band worker
 opens its own `rasterio.Env()`.
 
 Look for `scene_parallel_start` / `scene_parallel_done` / `lonlat_upserted`
-in ingest logs. Band overlap shows as interleaved `band_read_start` /
-`band_read_done` (different `thread=ingest-band-*` names) and
-`band_parallel_done` `wall_ms` much smaller than the sum of per-band
-`elapsed_ms`. Agri jobs should log `cog_upload_skipped`, not `cog_uploaded`.
+in ingest logs. Each `band_read_attempt_done` includes
+`job_id/scene_id/date/sensor/band/host/attempt/outcome/wait_ms/io_ms/reproject_ms`.
+`band_parallel_done` adds P50/P95/max, timeout-retry and slow-band counts.
+Agri jobs should log `cog_upload_skipped`, not `cog_uploaded`.

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
+
+from agric_satellite_analysis_common.weather_window import (
+    DEFAULT_WEATHER_BACKFILL_DAYS,
+    MAX_WEATHER_HISTORY_DAYS,
+    resolve_historical_weather_window,
+)
 
 
 # ── Weather Daily Record ─────────────────────────────────────────────
@@ -90,7 +95,34 @@ class WeatherResponse(BaseModel):
 
 
 class WeatherBackfillRequest(BaseModel):
-    days: int = 90
+    days: int = Field(
+        DEFAULT_WEATHER_BACKFILL_DAYS,
+        ge=1,
+        le=MAX_WEATHER_HISTORY_DAYS,
+    )
+    years: int | None = Field(None, ge=1, le=10)
+    date_from: date | None = None
+    date_to: date | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self):
+        if self.date_from is not None and self.years is not None:
+            raise ValueError("date_from and years cannot be used together")
+        if (
+            self.date_from is not None
+            and self.date_to is not None
+            and self.date_to < self.date_from
+        ):
+            raise ValueError("date_to must be >= date_from")
+        # 在 schema 层复用任务层的同一规则，提前拦截未来日期和超长窗口，
+        # 避免请求已入队后才由下载机失败。
+        resolve_historical_weather_window(
+            days=self.days,
+            years=self.years,
+            date_from=self.date_from,
+            date_to=self.date_to,
+        )
+        return self
 
 
 class WeatherBackfillResponse(BaseModel):

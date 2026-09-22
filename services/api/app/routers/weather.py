@@ -12,6 +12,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
+from agric_satellite_analysis_common.weather_window import (
+    MAX_WEATHER_HISTORY_DAYS,
+    resolve_historical_weather_window,
+)
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.geo import geojson_centroid
@@ -126,9 +130,12 @@ async def get_field_weather(
     """Get weather data for a field within a date range."""
     land = await _get_field_or_404(land_id, ctx.org_id, db)
 
-    # Validate date range (max 365 days)
-    if (end_date - start_date).days > 365:
-        raise HTTPException(status_code=400, detail="Date range exceeds 365 days")
+    # 查询和回填共用同一历史上限，保证多年图表不会被旧的 365 天限制截断。
+    if (end_date - start_date).days + 1 > MAX_WEATHER_HISTORY_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range exceeds {MAX_WEATHER_HISTORY_DAYS} days",
+        )
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end_date must be >= start_date")
 
@@ -173,7 +180,12 @@ async def get_field_weather_summary(
     land_id: str,
     ctx: Annotated[OrgContext, Depends(get_org_context)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    days: int = Query(30, ge=1, le=365, description="Number of past days"),
+    days: int = Query(
+        30,
+        ge=1,
+        le=MAX_WEATHER_HISTORY_DAYS,
+        description="Number of past days",
+    ),
 ):
     """Quick weather summary for dashboard cards."""
     await _get_field_or_404(land_id, ctx.org_id, db)
@@ -197,28 +209,41 @@ async def trigger_weather_backfill(
     """Trigger a manual weather backfill for a field."""
     await _get_field_or_404(land_id, ctx.org_id, db)
 
-    if body.days < 1 or body.days > 365:
-        raise HTTPException(status_code=400, detail="days must be between 1 and 365")
+    window = resolve_historical_weather_window(
+        days=body.days,
+        years=body.years,
+        date_from=body.date_from,
+        date_to=body.date_to,
+    )
 
     from app.mq_publish import publish_api_task
 
     task_id = publish_api_task(
         type="weather_backfill",
         land_id=str(land_id),
-        extras={"days": body.days},
+        extras={
+            "days": window.days,
+            "date_from": window.start.isoformat(),
+            "date_to": window.end.isoformat(),
+        },
         priority=MANUAL_TASK_PRIORITY,
     )
 
     logger.info(
         "weather_backfill_triggered",
         land_id=str(land_id),
-        days=body.days,
+        days=window.days,
+        date_from=window.start.isoformat(),
+        date_to=window.end.isoformat(),
         mq_task_id=task_id,
     )
     return WeatherBackfillResponse(
         land_id=land_id,
         status="accepted",
-        message=f"Weather backfill for {body.days} days queued.",
+        message=(
+            f"Weather backfill for {window.days} days "
+            f"({window.start.isoformat()} to {window.end.isoformat()}) queued."
+        ),
     )
 
 

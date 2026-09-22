@@ -118,6 +118,24 @@ def _dispatch_satellite_analysis(
     dispatched = ["app.tasks.backfill.backfill_indices_for_land"]
     celery_ids = [backfill.id]
 
+    # 前端/报告把遥感窗口作为数据主窗口；天气必须复用同一窗口，不能再
+    # 按固定 90 天或默认范围单独拉取，避免两类曲线的时间边界不一致。
+    weather_kwargs: dict[str, Any] = {}
+    for key in ("date_from", "date_to", "years"):
+        if extras.get(key) is not None:
+            weather_kwargs[key] = str(extras[key])[:10] if key != "years" else int(extras[key])
+    if not extras.get("date_from") and extras.get("years") is None:
+        weather_kwargs["days"] = max(months * 30, 1)
+    weather = _send_task(
+        "app.tasks.weather.backfill_weather_for_land",
+        args=[land_id],
+        kwargs=weather_kwargs,
+        queue="ingest",
+        priority=_task_priority(task),
+    )
+    dispatched.append("app.tasks.weather.backfill_weather_for_land")
+    celery_ids.append(weather.id)
+
     if with_bridge:
         bridge_kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
         if bridge_job_id:
@@ -158,6 +176,7 @@ def _dispatch_satellite_analysis(
         "celery_ids": celery_ids,
         "mode": mode,
         "months": months,
+        "weather_window": weather_kwargs,
         "with_bridge": with_bridge,
     }
 
@@ -183,8 +202,14 @@ def _dispatch_weather_backfill(
 ) -> dict[str, Any]:
     extras = dict(task.extras or {})
     kwargs: dict[str, Any] = {"mq_task_id": task.task_id}
-    if extras.get("days") is not None:
-        kwargs["days"] = int(extras["days"])
+    days = extras.get("days") or extras.get("weather_days")
+    if days is not None:
+        kwargs["days"] = int(days)
+    for key in ("date_from", "date_to"):
+        if extras.get(key) is not None:
+            kwargs[key] = str(extras[key])[:10]
+    if extras.get("years") is not None:
+        kwargs["years"] = int(extras["years"])
     async_result = _send_task(
         "app.tasks.weather.backfill_weather_for_land",
         args=[land_id],
@@ -196,6 +221,8 @@ def _dispatch_weather_backfill(
         "dispatched": ["app.tasks.weather.backfill_weather_for_land"],
         "celery_ids": [async_result.id],
         "days": kwargs.get("days"),
+        "date_from": kwargs.get("date_from"),
+        "date_to": kwargs.get("date_to"),
     }
 
 
@@ -235,6 +262,11 @@ def _dispatch_land_bootstrap(
 
     weather_kwargs: dict[str, Any] = {}
     days = extras.get("days") or extras.get("weather_days")
+    for key in ("date_from", "date_to"):
+        if extras.get(key) is not None:
+            weather_kwargs[key] = str(extras[key])[:10]
+    if extras.get("years") is not None:
+        weather_kwargs["years"] = int(extras["years"])
     if days is None and extras.get("date_from"):
         try:
             from datetime import date as date_cls

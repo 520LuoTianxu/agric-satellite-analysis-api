@@ -2,6 +2,8 @@
 
 from pydantic_settings import BaseSettings
 
+from agric_satellite_analysis_common.weather_window import DEFAULT_WEATHER_BACKFILL_DAYS
+
 
 class Settings(BaseSettings):
     # Database
@@ -43,7 +45,7 @@ class Settings(BaseSettings):
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
     open_meteo_archive_url: str = "https://archive-api.open-meteo.com/v1/archive"
     open_meteo_api_key: str = ""
-    weather_backfill_days: int = 365
+    weather_backfill_days: int = DEFAULT_WEATHER_BACKFILL_DAYS
     weather_batch_size: int = 50
     weather_gdd_base_temp: float = 10.0
     weather_heat_stress_threshold: float = 32.0
@@ -67,7 +69,7 @@ class Settings(BaseSettings):
     ingest_scene_max_workers: int = 16
     # Process-wide cap on concurrent windowed band reads (GDAL/rasterio).
     # Nested under the scene pool; see app.core.band_parallel.
-    ingest_band_max_workers: int = 16
+    ingest_band_max_workers: int = 8
     soil_source_priority: str = "auto"  # auto | soilgrids | polaris
 
     # Email (Resend)

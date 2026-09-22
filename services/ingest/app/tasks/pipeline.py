@@ -28,7 +28,12 @@ from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
 
-from app.core.band_parallel import run_parallel_band_jobs, band_max_workers, gdal_read_slot
+from app.core.band_parallel import (
+    BandReadResult,
+    band_max_workers,
+    gdal_read_slot,
+    run_parallel_band_jobs,
+)
 from app.core.config import scene_max_workers
 from app.tasks.indices import IndexDef
 
@@ -49,6 +54,20 @@ os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff")
 os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
 os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "YES")
+os.environ.setdefault("CPL_VSIL_CURL_USE_HEAD", "NO")
+# 远程窗口很小，长尾主要来自连接或 Range 请求挂起。由 GDAL/curl 在 C 调用内部
+# 中断阻塞；Python Future 超时无法安全终止正在执行的 rasterio/GDAL 调用。
+os.environ.setdefault("GDAL_HTTP_CONNECTTIMEOUT", "10")
+os.environ.setdefault("GDAL_HTTP_TIMEOUT", "60")
+os.environ.setdefault("GDAL_HTTP_LOW_SPEED_LIMIT", "1")
+os.environ.setdefault("GDAL_HTTP_LOW_SPEED_TIME", "30")
+# 应用层统一尝试三次时，GDAL 内部只允许一次补偿，避免两层重试相乘。
+os.environ.setdefault("GDAL_HTTP_MAX_RETRY", "1")
+os.environ.setdefault("GDAL_HTTP_RETRY_DELAY", "1")
+# TCP keepalive 配置从 GDAL 3.6 起生效；旧运行时会忽略，不改变 SSL 校验。
+os.environ.setdefault("GDAL_HTTP_TCP_KEEPALIVE", "YES")
+os.environ.setdefault("GDAL_HTTP_TCP_KEEPIDLE", "30")
+os.environ.setdefault("GDAL_HTTP_TCP_KEEPINTVL", "15")
 os.environ.setdefault("VSI_CACHE", "TRUE")
 os.environ.setdefault("VSI_CACHE_SIZE", "5000000")
 # Scene and band threads each open their own datasets; keep GDAL's internal
@@ -385,6 +404,41 @@ def search_scenes(
 # ── Band reading ─────────────────────────────────────────────────────
 
 
+def _read_band_windowed_profiled(
+    href: str,
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    *,
+    resampling: Resampling = Resampling.bilinear,
+) -> BandReadResult[np.ndarray]:
+    """读取远程 COG 窗口，并分别记录远端 I/O 与本地重投影耗时。"""
+    # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
+    with gdal_read_slot(), rasterio.Env():
+        t_io = time.perf_counter()
+        with rasterio.open(href) as src:
+            src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
+            window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
+            data = src.read(1, window=window, boundless=True, fill_value=0)
+            source_transform = rasterio.windows.transform(window, src.transform)
+            source_crs = src.crs
+        io_ms = int((time.perf_counter() - t_io) * 1000)
+
+        t_reproject = time.perf_counter()
+        dst = np.zeros(target_shape, dtype=np.float32)
+        reproject(
+            source=data.astype(np.float32),
+            destination=dst,
+            src_transform=source_transform,
+            src_crs=source_crs,
+            dst_transform=target_transform,
+            dst_crs="EPSG:4326",
+            resampling=resampling,
+        )
+        reproject_ms = int((time.perf_counter() - t_reproject) * 1000)
+        return BandReadResult(dst, io_ms=io_ms, reproject_ms=reproject_ms)
+
+
 def read_band_windowed(
     href: str,
     bounds: tuple,
@@ -399,24 +453,13 @@ def read_band_windowed(
     this under their own ``rasterio.Env()`` (this function opens one).
     Categorical layers (SCL) must pass ``resampling=Resampling.nearest``.
     """
-    # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
-    with gdal_read_slot(), rasterio.Env():
-        with rasterio.open(href) as src:
-            src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
-            window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
-            data = src.read(1, window=window, boundless=True, fill_value=0)
-
-            dst = np.zeros(target_shape, dtype=np.float32)
-            reproject(
-                source=data.astype(np.float32),
-                destination=dst,
-                src_transform=rasterio.windows.transform(window, src.transform),
-                src_crs=src.crs,
-                dst_transform=target_transform,
-                dst_crs="EPSG:4326",
-                resampling=resampling,
-            )
-            return dst
+    return _read_band_windowed_profiled(
+        href,
+        bounds,
+        target_shape,
+        target_transform,
+        resampling=resampling,
+    ).value
 
 
 def read_bands_windowed_parallel(
@@ -426,13 +469,29 @@ def read_bands_windowed_parallel(
     target_transform,
     *,
     scene_workers: int = 1,
+    resampling_by_band: dict[str, Resampling] | None = None,
+    log_context: dict[str, object] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Windowed COG reads for one scene, overlapped across bands."""
+    """同景波段并行读取；可为 SCL 等分类波段指定 nearest 重采样。"""
 
-    def _one(_band_key: str, href: str) -> np.ndarray:
-        return read_band_windowed(href, bounds, target_shape, target_transform)
+    def _one(band_key: str, href: str) -> BandReadResult[np.ndarray]:
+        resampling = (resampling_by_band or {}).get(
+            band_key, Resampling.bilinear
+        )
+        return _read_band_windowed_profiled(
+            href,
+            bounds,
+            target_shape,
+            target_transform,
+            resampling=resampling,
+        )
 
-    return run_parallel_band_jobs(band_hrefs, _one, scene_workers=scene_workers)
+    return run_parallel_band_jobs(
+        band_hrefs,
+        _one,
+        scene_workers=scene_workers,
+        log_context=log_context,
+    )
 
 
 def read_rgb_windowed(
@@ -770,6 +829,12 @@ def process_scene(
         target_shape,
         target_transform,
         scene_workers=scene_workers,
+        log_context={
+            "job_id": str(getattr(job, "id", "")) or None,
+            "scene_id": scene_id,
+            "date": scene_date.isoformat(),
+            "sensor": "S2",
+        },
     )
     complete_step(session, job, "download_bands")
 

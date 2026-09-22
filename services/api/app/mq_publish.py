@@ -54,6 +54,11 @@ def _fallback_celery(
     elif type == "weather_backfill":
         days = extras.get("days") or extras.get("weather_days")
         kwargs = {"days": int(days)} if days is not None else {}
+        for key in ("date_from", "date_to"):
+            if extras.get(key) is not None:
+                kwargs[key] = str(extras[key])[:10]
+        if extras.get("years") is not None:
+            kwargs["years"] = int(extras["years"])
         dispatch(
             "app.tasks.weather.backfill_weather_for_land", args=[land_id], kwargs=kwargs
         )
@@ -82,6 +87,21 @@ def _fallback_celery(
             args=[land_id],
             kwargs=kwargs,
         )
+        # 本地 fallback 与 MQ consumer 保持相同的扇出规则：遥感日期窗口
+        # 是天气历史拉取的唯一来源，避免开发环境与生产行为分叉。
+        weather_kwargs: dict[str, Any] = {}
+        for key in ("date_from", "date_to"):
+            if extras.get(key) is not None:
+                weather_kwargs[key] = str(extras[key])[:10]
+        if extras.get("years") is not None:
+            weather_kwargs["years"] = int(extras["years"])
+        if not extras.get("date_from") and extras.get("years") is None:
+            weather_kwargs["days"] = max(int(extras.get("months") or 24) * 30, 1)
+        dispatch(
+            "app.tasks.weather.backfill_weather_for_land",
+            args=[land_id],
+            kwargs=weather_kwargs,
+        )
         if extras.get("with_bridge") or extras.get("bridge_job_id"):
             bridge_kwargs: dict[str, Any] = {}
             if extras.get("bridge_job_id"):
@@ -102,6 +122,11 @@ def _fallback_celery(
         days = extras.get("days") or extras.get("weather_days")
         if days is not None:
             weather_kwargs["days"] = int(days)
+        for key in ("date_from", "date_to"):
+            if extras.get(key) is not None:
+                weather_kwargs[key] = str(extras[key])[:10]
+        if extras.get("years") is not None:
+            weather_kwargs["years"] = int(extras["years"])
         weather_result = dispatch(
             "app.tasks.weather.backfill_weather_for_land",
             args=[land_id],

@@ -1,5 +1,6 @@
 """按聚合窗口下载一次影像，在内存中裁到请求地块后回调 API 结果缓存。"""
 
+import os
 import uuid
 from datetime import date
 
@@ -21,6 +22,11 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
 )
 from app.core.band_parallel import run_parallel_band_jobs
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
+from app.core.band_window_cache import (
+    read_scene_window,
+    window_cache_enabled,
+    write_scene_window,
+)
 from app.core.decloud import (
     decloud_enabled,
     decloud_s2_extra_assets,
@@ -43,12 +49,11 @@ from app.tasks.agri_lonlat import (
 from app.tasks.pipeline import (
     compute_target_grid,
     compute_zonal_stats,
-    read_band_windowed,
     read_bands_windowed_parallel,
     search_scenes_for_defs,
 )
 from app.tasks.sentinel1 import (
-    _read_band_windowed_db,
+    _read_band_windowed_db_profiled,
     _sample_s1_lonlat,
     _upsert_agri_s1,
     search_s1_scenes,
@@ -59,6 +64,24 @@ logger = structlog.get_logger()
 
 SATELLITE_BATCH_MAX_COMPENSATIONS = 2
 SATELLITE_COMPENSATION_DELAY_SECONDS = 30
+
+
+def _positive_limit_env(name: str, default: int) -> int:
+    try:
+        return max(60, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 默认保持现网 25/30 分钟；若业务要求绝对十分钟内退出，可配置为 540/600。
+# soft limit 可能无法打断 GDAL C 调用，最终由 hard limit 回收整个 prefork 子进程。
+SATELLITE_BATCH_TIME_LIMIT_SEC = _positive_limit_env(
+    "SATELLITE_BATCH_TIME_LIMIT_SEC", 1800
+)
+SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC = min(
+    SATELLITE_BATCH_TIME_LIMIT_SEC - 1,
+    _positive_limit_env("SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC", 1500),
+)
 
 
 def _compensation_progress(progress: dict, attempt: int, *, active: bool) -> dict:
@@ -325,37 +348,103 @@ def _scene_lands(scene, lands, sensor):
     return selected
 
 
-def _download_scene(scene, sensor, grid):
+def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
+    """下载一个共享景窗口；全部波段走同一并发池和统一重试/日志链路。"""
     shared_transform, shared_shape, _, bounds = grid
+    scene_date = scene.get("date")
+    log_context = {
+        "job_id": job_id,
+        "scene_id": scene.get("id"),
+        "date": scene_date.isoformat()
+        if hasattr(scene_date, "isoformat")
+        else str(scene_date)[:10],
+        "sensor": sensor,
+    }
+    if sensor == "S1":
+        hrefs = {"vv": scene["vv_href"], "vh": scene["vh_href"]}
+        resampling_by_band = {}
+    else:
+        hrefs = dict(scene["band_hrefs"])
+        # RGB预览复用光谱波段，不把 visual 三通道资产混入指数波段缓存。
+        hrefs.pop("visual", None)
+        resampling_by_band = {"SCL": Resampling.nearest}
+
+    cached = read_scene_window(
+        scene_id=str(scene.get("id") or ""),
+        sensor=sensor,
+        target_shape=shared_shape,
+        target_transform=shared_transform,
+        band_hrefs=hrefs,
+        resampling_by_band=resampling_by_band,
+    )
+    if cached is not None:
+        logger.info("satellite_window_cache_hit", **log_context, bands=len(cached))
+        scl = None if sensor == "S1" else cached.pop("SCL", None)
+        return cached, scl
+    if window_cache_enabled():
+        logger.info("satellite_window_cache_miss", **log_context)
+
     if sensor == "S1":
         bands = run_parallel_band_jobs(
-            {"vv": scene["vv_href"], "vh": scene["vh_href"]},
-            lambda _, href: _read_band_windowed_db(
+            hrefs,
+            lambda _, href: _read_band_windowed_db_profiled(
                 href, bounds, shared_shape, shared_transform
             ),
             scene_workers=1,
+            log_context=log_context,
         )
+        try:
+            write_scene_window(
+                scene_id=str(scene.get("id") or ""),
+                sensor=sensor,
+                target_shape=shared_shape,
+                target_transform=shared_transform,
+                band_hrefs=hrefs,
+                arrays=bands,
+                resampling_by_band=resampling_by_band,
+            )
+        except Exception as exc:
+            # 本地缓存是性能优化，磁盘满或缓存写失败不能影响已完成的远程读取。
+            logger.warning(
+                "satellite_window_cache_write_failed",
+                **log_context,
+                error=str(exc),
+            )
         return bands, None
-    hrefs = dict(scene["band_hrefs"])
-    scl_href = hrefs.pop("SCL", None)
-    # RGB预览复用光谱波段，不再为每个地块重复下载visual或周边窗口。
-    hrefs.pop("visual", None)
-    bands = read_bands_windowed_parallel(
-        hrefs, bounds, shared_shape, shared_transform, scene_workers=1
+    # SCL 与光谱波段一起进入线程池，避免所有光谱完成后再串行发起一次远程读取。
+    downloaded = read_bands_windowed_parallel(
+        hrefs,
+        bounds,
+        shared_shape,
+        shared_transform,
+        scene_workers=1,
+        resampling_by_band={"SCL": Resampling.nearest},
+        log_context=log_context,
     )
+    scl = downloaded.pop("SCL", None)
     # Sentinel-2零值为景外/无数据，先转NaN，避免EVI等公式把填充值算成有效像元。
-    for band in bands.values():
+    for band in downloaded.values():
         band[band == 0] = np.nan
-    scl = None
-    if scl_href:
-        scl = read_band_windowed(
-            scl_href,
-            bounds,
-            shared_shape,
-            shared_transform,
-            resampling=Resampling.nearest,
+    cache_arrays = dict(downloaded)
+    if scl is not None:
+        cache_arrays["SCL"] = scl
+    try:
+        write_scene_window(
+            scene_id=str(scene.get("id") or ""),
+            sensor=sensor,
+            target_shape=shared_shape,
+            target_transform=shared_transform,
+            band_hrefs=hrefs,
+            arrays=cache_arrays,
+            resampling_by_band=resampling_by_band,
         )
-    return bands, scl
+    except Exception as exc:
+        logger.warning(
+            "satellite_window_cache_write_failed",
+            **log_context,
+            error=str(exc),
+        )
+    return downloaded, scl
 
 
 def _publish_land(
@@ -474,8 +563,8 @@ def _publish_land(
 
 @celery_app.task(
     name="app.tasks.satellite_batch.process_satellite_batch",
-    time_limit=1800,
-    soft_time_limit=1500,
+    time_limit=SATELLITE_BATCH_TIME_LIMIT_SEC,
+    soft_time_limit=SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
 )
 def process_satellite_batch(
     job_id: str,
@@ -558,6 +647,18 @@ def process_satellite_batch(
             )
         if not selected_lands:
             raise RuntimeError("5 km processing window contains no complete land parcel")
+        if sensor == "S2" and params.get("overview_run_id"):
+            # 每日总览的 S1/S2 任务共用同一批地块和日期窗口，只在 S2 子任务
+            # 派发一次天气，避免同一遥感批次产生两份重复天气任务。
+            for land in selected_lands:
+                celery_app.send_task(
+                    "app.tasks.weather.backfill_weather_for_land",
+                    args=[str(land["meta"]["land_id"])],
+                    kwargs={
+                        "date_from": d0.isoformat(),
+                        "date_to": d1.isoformat(),
+                    },
+                )
         # 任务排队期间边界可能更新；按HTTP最新边界重新求范围，保证窗口与地块完整覆盖。
         union = unary_union([land["geom"] for land in selected_lands])
         grid = compute_target_grid(
@@ -610,7 +711,9 @@ def process_satellite_batch(
             selected = _scene_lands(scene, selected_lands, sensor)
             if selected:
                 try:
-                    shared_bands, scl = _download_scene(scene, sensor, grid)
+                    shared_bands, scl = _download_scene(
+                        scene, sensor, grid, job_id=job_id
+                    )
                 except Exception as exc:
                     progress["failed"] += len(selected)
                     record_failures(selected, scene["id"])

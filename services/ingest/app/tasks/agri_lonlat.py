@@ -58,7 +58,6 @@ from app.tasks.pipeline import (
     existing_agri_scene_dates,
     filter_scenes_skip_existing,
     get_db_session,
-    read_band_windowed,
     read_bands_windowed_parallel,
     read_rgb_windowed,
     search_scenes_for_defs,
@@ -567,26 +566,30 @@ def _process_one_optical_scene(
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
         hrefs = dict(scene.get("band_hrefs") or {})
-        scl_href = hrefs.pop("SCL", None)
         # Keep visual href for true-color preview only — never feed it into
         # spectral index formulas (NDVI/EVI/…).
         visual_href = hrefs.pop("visual", None)
-        bands = read_bands_windowed_parallel(
+        scene_date = scene.get("date")
+        log_context = {
+            "job_id": job_id,
+            "scene_id": scene_id,
+            "date": scene_date.isoformat()
+            if hasattr(scene_date, "isoformat")
+            else str(scene_date)[:10],
+            "sensor": "S2",
+        }
+        # SCL 与光谱波段共用波段池，避免光谱全部完成后再串行读取分类层。
+        downloaded = read_bands_windowed_parallel(
             hrefs,
             bounds,
             target_shape,
             target_transform,
             scene_workers=scene_workers,
+            resampling_by_band={"SCL": Resampling.nearest},
+            log_context=log_context,
         )
-        scl = None
-        if scl_href:
-            scl = read_band_windowed(
-                scl_href,
-                bounds,
-                target_shape,
-                target_transform,
-                resampling=Resampling.nearest,
-            )
+        scl = downloaded.pop("SCL", None)
+        bands = downloaded
         # Padded landscape window for large_rgb (field_rgb stays on parcel grid).
         scene_visual = None
         scene_bands = None
@@ -635,7 +638,7 @@ def _process_one_optical_scene(
                     for k in ("B04", "B03", "B02")
                     if k in hrefs
                 }
-                # hrefs already popped visual/SCL; spectral bands remain.
+                # hrefs 已移除 visual；这里仅挑选光谱 RGB，不会把 SCL 送入预览。
                 # Re-read from original scene hrefs if needed.
                 if len(rgb_hrefs) < 3:
                     orig = dict(scene.get("band_hrefs") or {})
@@ -652,6 +655,7 @@ def _process_one_optical_scene(
                             scene_shape,
                             scene_transform,
                             scene_workers=1,
+                            log_context=log_context,
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
