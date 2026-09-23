@@ -59,6 +59,7 @@ from app.tasks.sentinel1 import (
     search_s1_scenes,
 )
 from app.worker import celery_app
+from celery.exceptions import MaxRetriesExceededError, SoftTimeLimitExceeded
 
 logger = structlog.get_logger()
 
@@ -73,14 +74,43 @@ def _positive_limit_env(name: str, default: int) -> int:
         return default
 
 
-# 默认保持现网 25/30 分钟；若业务要求绝对十分钟内退出，可配置为 540/600。
-# soft limit 可能无法打断 GDAL C 调用，最终由 hard limit 回收整个 prefork 子进程。
-SATELLITE_BATCH_TIME_LIMIT_SEC = _positive_limit_env(
-    "SATELLITE_BATCH_TIME_LIMIT_SEC", 1800
+def _nonneg_int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 任务级软超时默认 12 分钟；硬超时略高以便 soft 路径可 retry。
+# soft 可能打断不了 GDAL C 调用，最终由 hard limit 回收 prefork 子进程；
+# hard 杀进程时依赖 task_acks_late + task_reject_on_worker_lost 重新入队。
+# 环境变量名沿用既有 SATELLITE_BATCH_*（非 INGEST_ 前缀）；也接受 INGEST_ 别名。
+def _batch_limit_env(primary: str, ingest_alias: str, default: int) -> int:
+    if os.environ.get(primary) is not None:
+        return _positive_limit_env(primary, default)
+    if os.environ.get(ingest_alias) is not None:
+        return _positive_limit_env(ingest_alias, default)
+    return _positive_limit_env(primary, default)
+
+
+SATELLITE_BATCH_TIME_LIMIT_SEC = _batch_limit_env(
+    "SATELLITE_BATCH_TIME_LIMIT_SEC",
+    "INGEST_SATELLITE_BATCH_TIME_LIMIT_SEC",
+    780,
 )
 SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC = min(
     SATELLITE_BATCH_TIME_LIMIT_SEC - 1,
-    _positive_limit_env("SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC", 1500),
+    _batch_limit_env(
+        "SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC",
+        "INGEST_SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC",
+        720,
+    ),
+)
+SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES = _nonneg_int_env(
+    "SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES", 6
+)
+SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC = _nonneg_int_env(
+    "SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC", 30
 )
 
 
@@ -870,11 +900,16 @@ def _process_one_batch_scene(
 
 
 @celery_app.task(
+    bind=True,
     name="app.tasks.satellite_batch.process_satellite_batch",
     time_limit=SATELLITE_BATCH_TIME_LIMIT_SEC,
     soft_time_limit=SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+    max_retries=SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES,
+    acks_late=True,
+    reject_on_worker_lost=True,
 )
 def process_satellite_batch(
+    self,
     job_id: str,
     mq_task_id: str | None = None,
     compensation_attempt: int = 0,
@@ -1209,6 +1244,84 @@ def process_satellite_batch(
             },
         )
         return {"job_id": job_id, "status": status, **progress}
+    except SoftTimeLimitExceeded as exc:
+        # 12 分钟软超时：不落永久 failed，保持 running 并 Celery retry 重入队列。
+        # 重入仍走 params.force（默认 false）+_load_lands 日期跳过，不重做已发布景。
+        retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+        logger.warning(
+            "satellite_batch_soft_time_limit",
+            job_id=job_id,
+            soft_time_limit_sec=SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+            time_limit_sec=SATELLITE_BATCH_TIME_LIMIT_SEC,
+            retries=retries,
+            max_retries=SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES,
+            countdown_sec=SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC,
+        )
+        try:
+            current = dict((job or {}).get("progress_json") or {})
+            current.update(
+                {
+                    "stage": "soft_timeout_requeue",
+                    "last_error": (
+                        f"soft_time_limit={SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC}s "
+                        f"retry={retries}/{SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES}"
+                    )[:2000],
+                    "soft_time_limit_sec": SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+                    "soft_timeout_retries": retries,
+                }
+            )
+            patch_job(
+                job_id,
+                {
+                    "status": "running",
+                    "progress_json": current,
+                    "error": (
+                        "任务软超时，稍后重试；已发布景将按日期跳过"
+                    )[:2000],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "satellite_batch_soft_timeout_state_update_failed", job_id=job_id
+            )
+        try:
+            raise self.retry(
+                exc=exc,
+                countdown=SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC,
+            )
+        except MaxRetriesExceededError:
+            logger.error(
+                "satellite_batch_soft_time_limit_exhausted",
+                job_id=job_id,
+                retries=retries,
+            )
+        # 仅当 soft-timeout 重试次数耗尽时落到此处；self.retry 的 Retry 信号会直接抛出。
+        compensation_scheduled = False
+        try:
+            if job is None:
+                job = get_job(job_id)
+            if _is_assessment_batch_child(job):
+                compensation_scheduled = _schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=compensation_attempt,
+                    error=str(exc),
+                )
+        except Exception:
+            logger.exception("satellite_batch_compensation_failed", job_id=job_id)
+        if compensation_scheduled:
+            return {
+                "job_id": job_id,
+                "status": "compensating",
+                "compensation_attempt": compensation_attempt + 1,
+            }
+        try:
+            patch_job(
+                job_id, {"status": "failed", "touch_finished": True, "error": str(exc)}
+            )
+        except Exception:
+            logger.exception("satellite_batch_failure_report_failed", job_id=job_id)
+        raise
     except Exception as exc:
         # HTTP和下载错误必须可见，不得把未产出数据的分组默认为成功。
         compensation_scheduled = False
