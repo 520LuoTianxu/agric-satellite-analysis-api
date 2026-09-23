@@ -59,18 +59,29 @@ async def enqueue_mq_task(
     from app.mq_publish import publish_api_task
     from agric_satellite_analysis_common.settings import settings as common_settings
 
-    if body.type == "satellite_analysis":
-        # 兼容旧的通用任务入口，但遥感任务统一先映射到 VPA10，不能再发起逐地块下载。
+    extras = body.extras or {}
+    needs_vpa10 = body.type == "satellite_analysis" or (
+        body.type == "land_bootstrap" and not extras.get("skip_indices")
+    )
+    if needs_vpa10:
+        # 兼容旧通用入口：凡是会触发指数回填，都先建 VPA10 共享任务再跳过旧单地块扇出。
+        from app.core.config import settings
         from app.services.smart_land_backfill import run_smart_land_backfill
 
-        extras = body.extras or {}
+        default_months = (
+            24 if body.type == "satellite_analysis" else settings.index_backfill_months
+        )
         try:
-            date_to = date.fromisoformat(str(extras.get("date_to") or date.today()))
+            date_to = date.fromisoformat(
+                str(extras.get("date_to") or date.today())[:10]
+            )
             date_from = (
-                date.fromisoformat(str(extras["date_from"]))
+                date.fromisoformat(str(extras["date_from"])[:10])
                 if extras.get("date_from")
                 else date_to
-                - timedelta(days=max(int(extras.get("months") or 24), 1) * 30)
+                - timedelta(
+                    days=max(int(extras.get("months") or default_months), 1) * 30
+                )
             )
             sensors = extras.get("sensors") or ["S1", "S2"]
             if isinstance(sensors, str):
@@ -112,7 +123,31 @@ async def enqueue_mq_task(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        # satellite_analysis 旧语义还会补齐相同日期范围的天气；遥感部分已由上方 VPA10 子任务负责。
+        if body.type == "land_bootstrap":
+            # bootstrap 保留天气/土壤及报告 follow-up，但遥感由独立 VPA10 Job 负责。
+            task_id = body.task_id or str(uuid.uuid4())
+            publish_api_task(
+                type="land_bootstrap",
+                land_id=body.land_id,
+                task_id=task_id,
+                priority=MANUAL_TASK_PRIORITY,
+                extras={
+                    **extras,
+                    "skip_indices": True,
+                    "vpa10_parent_job_id": result["parent_job_id"],
+                    "satellite_job_ids": result["queued_job_ids"],
+                    **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
+                    "enqueued_by": str(ctx.user.id),
+                },
+            )
+            return MqTaskEnqueued(
+                task_id=task_id,
+                type=body.type,
+                queue=common_settings.cloudamqp_download_queue,
+                created_at=datetime.now(timezone.utc),
+            )
+
+        # satellite_analysis 旧语义还会补齐相同日期范围的天气；遥感部分由上方 VPA10 子任务负责。
         if body.land_id in result["selected_land_ids"]:
             try:
                 publish_api_task(
