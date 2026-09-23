@@ -37,6 +37,8 @@ class VirtualAreaOperationOut(BaseModel):
     status: str
     parent_job_id: str
     land_count: int = 0
+    skipped_land_count: int = 0
+    skipped_land_ids: list[str] = Field(default_factory=list)
     new_area_count: int = 0
     matched_land_count: int = 0
     area_count: int = 0

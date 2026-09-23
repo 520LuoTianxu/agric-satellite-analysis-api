@@ -733,7 +733,9 @@ async def initialize_virtual_areas(
 
                 try:
                     sync_summary = await sync_selected_lands(
-                        missing, include_excluded_schedule_lands=True
+                        missing,
+                        include_excluded_schedule_lands=True,
+                        allow_partial=True,
                     )
                 except Exception as exc:
                     raise VirtualAreaInitializationError(
@@ -749,13 +751,15 @@ async def initialize_virtual_areas(
                     raise VirtualAreaInitializationError(
                         "Smart/MySQL 数据源未启用", status_code=503
                     )
-                if sync_status == "filtered":
+                filtered_ids = sync_summary.get("filtered_land_ids") or []
+                if sync_status == "filtered" or filtered_ids:
                     filtered_ids = sync_summary.get("filtered_land_ids") or missing
                     raise VirtualAreaInitializationError(
                         f"Smart 地块不符合同步条件: {', '.join(filtered_ids[:20])}",
                         status_code=422,
                     )
-                if sync_status == "invalid":
+                invalid_ids = sync_summary.get("invalid_land_ids") or []
+                if sync_status == "invalid" or invalid_ids:
                     invalid_errors = sync_summary.get("invalid_land_errors") or []
                     diagnostics = [
                         (
@@ -765,7 +769,7 @@ async def initialize_virtual_areas(
                         for item in invalid_errors[:10]
                         if isinstance(item, dict)
                     ]
-                    invalid_ids = sync_summary.get("invalid_land_ids") or missing
+                    invalid_ids = invalid_ids or missing
                     omitted_count = max(0, len(invalid_ids) - len(diagnostics))
                     if omitted_count:
                         diagnostics.append(f"另有 {omitted_count} 个地块校验失败")
@@ -775,13 +779,15 @@ async def initialize_virtual_areas(
                     raise VirtualAreaInitializationError(
                         f"Smart 地块数据校验失败: {detail}", status_code=422
                     )
-                if sync_status == "not_found":
-                    not_found = sync_summary.get("missing_land_ids") or missing
-                    raise VirtualAreaInitializationError(
-                        f"Smart 中不存在地块: {', '.join(not_found[:20])}",
-                        status_code=404,
+                skipped_land_ids = list(
+                    dict.fromkeys(
+                        str(value)
+                        for value in sync_summary.get("missing_land_ids", [])
                     )
-                if sync_status != "completed":
+                )
+                if sync_status == "not_found":
+                    skipped_land_ids = skipped_land_ids or missing
+                elif sync_status not in {"completed", "partial"}:
                     raise VirtualAreaInitializationError(
                         "Smart 地块同步未完成", status_code=503
                     )
@@ -790,13 +796,19 @@ async def initialize_virtual_areas(
                 snapshots = await load_land_snapshots(db, requested_ids)
                 synced_ids = {str(row["land_id"]) for row in snapshots}
                 still_missing = [
-                    land_id for land_id in requested_ids if land_id not in synced_ids
+                    land_id
+                    for land_id in requested_ids
+                    if land_id not in synced_ids and land_id not in skipped_land_ids
                 ]
                 if still_missing:
                     raise VirtualAreaInitializationError(
-                        f"Smart 同步后仍缺少地块: {', '.join(still_missing[:20])}",
-                        status_code=404,
+                        f"Smart 同步后地块未写入 PG: {', '.join(still_missing[:20])}",
+                        status_code=503,
                     )
+            else:
+                skipped_land_ids = []
+        else:
+            skipped_land_ids = []
         prepared = await prepare_vpa10_areas(
             db,
             snapshots,
@@ -814,8 +826,12 @@ async def initialize_virtual_areas(
                 "new_area_count": len(prepared["new_areas"]),
                 "matched_land_count": len(prepared["matched_land_ids"]),
                 "area_count": len(prepared["area_ids"]),
+                "skipped_land_count": len(skipped_land_ids),
             },
-            params_json={"land_ids": [row["land_id"] for row in snapshots]},
+            params_json={
+                "land_ids": [row["land_id"] for row in snapshots],
+                "skipped_land_ids": skipped_land_ids,
+            },
         )
         db.add(parent)
         await db.commit()
@@ -823,6 +839,8 @@ async def initialize_virtual_areas(
         "status": "completed",
         "parent_job_id": str(execution_id),
         "land_count": len(snapshots),
+        "skipped_land_count": len(skipped_land_ids),
+        "skipped_land_ids": skipped_land_ids,
         "new_area_count": len(prepared["new_areas"]),
         "matched_land_count": len(prepared["matched_land_ids"]),
         "area_count": len(prepared["area_ids"]),
