@@ -52,9 +52,7 @@ __all__ = [
     "season_growth_inputs",
     "weather_land_ids",
     "weekly_index_prepare",
-    "virtual_area_history_backfill",
-    "virtual_area_assets",
-    "upsert_virtual_area_asset",
+    "satellite_history_backfill",
 ]
 
 
@@ -655,104 +653,23 @@ def daily_satellite_finalize(
     )
 
 
-def virtual_area_history_backfill(
+def satellite_history_backfill(
     *, as_of: str | None = None, client: httpx.Client | None = None
 ) -> dict[str, Any]:
-    """请求 API 机按 vpa10 项目区调度历史共享下载。"""
+    """请求 API 机按地块动态规划 10km 窗口并调度历史下载。"""
     params = {"as_of": as_of} if as_of else None
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        response = c.post("/v1/internal/schedule/virtual-area-history", params=params)
-        _raise_for_status(response, context="schedule/virtual-area-history")
+        response = c.post("/v1/internal/schedule/satellite-history", params=params)
+        _raise_for_status(response, context="schedule/satellite-history")
         data = response.json()
         if not isinstance(data, dict):
-            raise InternalApiError("virtual-area-history returned non-object")
+            raise InternalApiError("satellite-history returned non-object")
         return data
 
     if client is not None:
         return _do(client)
     with internal_client(timeout=120.0) as c:
-        return _do(c)
-
-
-def virtual_area_assets(
-    tile_id: str,
-    *,
-    sensor: str,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    client: httpx.Client | None = None,
-) -> list[dict[str, Any]]:
-    """读取项目区已有压缩像素资产，供下载机优先复用 OSS。"""
-    params: dict[str, str] = {"sensor": str(sensor)}
-    if date_from:
-        params["date_from"] = str(date_from)[:10]
-    if date_to:
-        params["date_to"] = str(date_to)[:10]
-
-    def _do(c: httpx.Client) -> list[dict[str, Any]]:
-        response = c.get(
-            f"/v1/internal/virtual-project-areas/{tile_id}/assets", params=params
-        )
-        _raise_for_status(response, context="virtual-area/assets")
-        data = response.json()
-        if not isinstance(data, list):
-            raise InternalApiError("virtual-area/assets returned non-list")
-        return [item for item in data if isinstance(item, dict)]
-
-    if client is not None:
-        return _do(client)
-    with internal_client(timeout=60.0) as c:
-        return _do(c)
-
-
-def upsert_virtual_area_asset(
-    tile_id: str,
-    *,
-    sensor: str,
-    scene_date: str,
-    scene_id: str,
-    asset_kind: str,
-    oss_key: str,
-    grid_json: dict[str, Any],
-    checksum: str,
-    byte_size: int,
-    format: str = "json",
-    compression: str = "gzip",
-    status: str = "ready",
-    error: str | None = None,
-    client: httpx.Client | None = None,
-) -> dict[str, Any]:
-    """回报项目区资产元数据；原始像素始终先写 OSS 再写此行。"""
-    body = {
-        "sensor": sensor,
-        "scene_date": str(scene_date)[:10],
-        "scene_id": scene_id,
-        "asset_kind": asset_kind,
-        "oss_key": oss_key,
-        "format": format,
-        "compression": compression,
-        "grid_json": grid_json,
-        "checksum": checksum,
-        "byte_size": int(byte_size),
-        "status": status,
-        "error": error,
-    }
-
-    def _do(c: httpx.Client) -> dict[str, Any]:
-        response = c.put(
-            f"/v1/internal/virtual-project-areas/{tile_id}/assets",
-            json=body,
-        )
-        _raise_for_status(response, context="virtual-area/assets-upsert")
-        data = response.json()
-        if not isinstance(data, dict):
-            raise InternalApiError("virtual-area/assets-upsert returned non-object")
-        return data
-
-    if client is not None:
-        return _do(client)
-    with internal_client(timeout=60.0) as c:
         return _do(c)
 
 

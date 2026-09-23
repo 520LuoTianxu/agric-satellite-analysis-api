@@ -21,6 +21,9 @@ from sqlalchemy import create_engine, text
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SQL_FILE = ROOT / "ABflow" / "agric_satellite.sql"
+PROJECT_AREA_CLEANUP_SQL = (
+    ROOT / "scripts" / "agri_seed" / "005_remove_virtual_project_areas.sql"
+)
 DATABASE_SCHEMA = "agric_satellite"
 
 # 按当前发布配置保留默认连接；生产环境建议通过安全变量覆盖，避免凭据进入日志或镜像。
@@ -58,6 +61,16 @@ def _object_state(connection) -> dict[str, bool]:
             {"qualified_name": qualified_name},
         ).scalar_one()
     return state
+
+
+def _apply_project_area_cleanup(connection) -> bool:
+    """前向清理旧导出中随 schema 一起保留的项目区表和视图。"""
+    if not PROJECT_AREA_CLEANUP_SQL.is_file():
+        return False
+    cleanup_sql = PROJECT_AREA_CLEANUP_SQL.read_text(encoding="utf-8")
+    cleanup_sql = cleanup_sql.replace("BEGIN;", "").replace("COMMIT;", "")
+    connection.exec_driver_sql(cleanup_sql)
+    return True
 
 
 def initialize_schema(sql_file: Path) -> str:
@@ -98,7 +111,12 @@ def initialize_schema(sql_file: Path) -> str:
             state = _object_state(connection)
             existing = [name for name, exists in state.items() if exists]
             if len(existing) == len(REQUIRED_OBJECTS):
-                return "already_initialized"
+                # 已初始化的数据库也必须执行幂等清理迁移，不能因跳过 schema 导入而保留旧表。
+                return (
+                    "already_initialized_cleaned"
+                    if _apply_project_area_cleanup(connection)
+                    else "already_initialized"
+                )
             if existing:
                 raise RuntimeError(
                     "检测到部分初始化对象，已停止执行，请人工检查: "
@@ -107,6 +125,8 @@ def initialize_schema(sql_file: Path) -> str:
 
             # exec_driver_sql 保留原始 PostgreSQL DDL，支持函数体、视图和多条建表语句。
             connection.exec_driver_sql(sql_text)
+            # 旧导出快照仍包含遗留表；初始化结束时执行清理迁移，保持运行时 schema 一致。
+            _apply_project_area_cleanup(connection)
 
             final_state = _object_state(connection)
             missing = [name for name, exists in final_state.items() if not exists]
@@ -138,6 +158,8 @@ def main() -> int:
 
     if result == "already_initialized":
         print(f"数据库已初始化，跳过执行: {DATABASE_SCHEMA}")
+    elif result == "already_initialized_cleaned":
+        print(f"数据库已初始化，并已执行遗留项目区清理迁移: {DATABASE_SCHEMA}")
     else:
         print(f"数据库初始化完成: {DATABASE_SCHEMA}")
     return 0

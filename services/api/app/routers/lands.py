@@ -357,17 +357,17 @@ async def create_land(
         extras={"skip_indices": True},
         priority=MANUAL_TASK_PRIORITY,
     )
-    # 新建地块的历史遥感回填也走同一项目区窗口，land_bootstrap 只负责天气/土壤。
+    # 新建地块的历史遥感回填也走同一 10km 动态分组流程，land_bootstrap 只负责天气/土壤。
     try:
-        from app.services.virtual_area_service import backfill_virtual_area_history
+        from app.services.satellite_history import backfill_satellite_history
 
-        await backfill_virtual_area_history(
+        await backfill_satellite_history(
             land_ids=[land_id],
             years=5,
             sensors=("S1", "S2"),
         )
     except Exception:
-        logger.exception("land_created_vpa10_history_dispatch_failed", land_id=land_id)
+        logger.exception("land_created_satellite_history_dispatch_failed", land_id=land_id)
     logger.info("land_created", land_id=land_id, farm_id=str(body.farm_id or ""))
     return _land_to_out(land)
 
@@ -602,7 +602,7 @@ async def backfill_land_indices(
     ctx: Annotated[OrgContext, Depends(_admin)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    """将单地块回填纳入虚拟项目区共享下载，并保持原有状态查询语义。"""
+    """将单地块回填接入共享下载任务构造器，并保持原有状态查询语义。"""
     land = await _get_land_or_404(land_id, db)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -665,10 +665,10 @@ async def backfill_land_indices(
         extras.get("date_from")
         or (date_to - timedelta(days=months * 30)).isoformat()
     )
-    from app.services.virtual_area_service import build_vpa10_satellite_jobs
+    from app.services.satellite_batch import create_satellite_batch_jobs
 
     try:
-        _, jobs, _ = await build_vpa10_satellite_jobs(
+        _, jobs, _ = await create_satellite_batch_jobs(
             db,
             [land],
             date_from=date_from,
@@ -677,7 +677,6 @@ async def backfill_land_indices(
             force=bool(extras["force"]),
             parent_job_id=sentinel_id,
             job_land_id=land_id,
-            assigned_by="manual-land-backfill",
             chunk_days=settings.index_backfill_chunk_days,
             extra_params={
                 "is_backfill": True,
@@ -696,7 +695,7 @@ async def backfill_land_indices(
             await db.commit()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # sentinel 只标记任务拆分完成，实际进度由它下面的 S1/S2 项目区 Job 汇总。
+    # sentinel 只标记任务拆分完成，实际进度由它下面的 S1/S2 分组 Job 汇总。
     sentinel.status = "completed"
     sentinel.finished_at = datetime.now(timezone.utc)
     await db.commit()
@@ -715,8 +714,8 @@ async def backfill_land_indices(
             )
         except Exception as exc:
             job.status = "failed"
-            job.error = f"项目区回填任务派发失败：{str(exc)[:3900]}"
-    # 遥感已由 VPA10 共享任务负责；天气仍按地块拉取并复用同一回填时间窗。
+            job.error = f"10km 分组回填任务派发失败：{str(exc)[:3900]}"
+    # 遥感由 10km 共享任务负责；天气仍按地块拉取并复用同一回填时间窗。
     try:
         await asyncio.to_thread(
             publish_api_task,
@@ -736,7 +735,7 @@ async def backfill_land_indices(
         land_id=land_id,
         status="dispatched" if any(job.status != "failed" for job in jobs) else "failed",
         message=(
-            f"已启动 {land_id} 的虚拟项目区遥感回填。"
+            f"已启动 {land_id} 的 10km 遥感聚合回填。"
             if any(job.status != "failed" for job in jobs)
             else f"{land_id} 的遥感回填任务未能派发。"
         ),
@@ -827,9 +826,9 @@ async def backfill_all_lands(
     end_date = date.today()
     months = body.months if body else 60
     start_date = end_date - timedelta(days=months * 30)
-    from app.services.virtual_area_service import backfill_virtual_area_history
+    from app.services.satellite_history import backfill_satellite_history
 
-    result = await backfill_virtual_area_history(
+    result = await backfill_satellite_history(
         land_ids=[str(value) for value in lands],
         date_from=start_date,
         date_to=end_date,
@@ -839,7 +838,7 @@ async def backfill_all_lands(
     return {
         **result,
         "land_count": len(lands),
-        "message": "已按10×10公里虚拟项目区提交历史遥感回填。",
+        "message": "已按本次地块集合动态聚合10×10公里窗口并提交历史遥感回填。",
     }
 
 

@@ -31,10 +31,7 @@ from app.services.beat_schedule import (
 )
 from app.services.overview_daily import business_today, finalize_daily, prepare_daily
 from app.services.satellite_batch import satellite_land_geometry
-from app.services.virtual_area_service import (
-    create_vpa10_download_jobs,
-    prepare_vpa10_areas,
-)
+from app.services.satellite_batch import create_satellite_batch_jobs
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
 
@@ -92,7 +89,7 @@ async def prepare_daily_satellite(
     db: Annotated[AsyncSession, Depends(get_db)],
     as_of: date | None = Query(None),
 ) -> dict[str, Any]:
-    """每日发现全部有效地块，按10×10公里虚拟项目区派发增量S1/S2下载。"""
+    """每日发现全部有效地块，本轮动态聚合10×10公里窗口并派发增量S1/S2下载。"""
     from fastapi import HTTPException
 
     day = as_of or business_today()
@@ -116,7 +113,7 @@ async def prepare_weekly_index(
     _: InternalAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """把过期地块映射到项目区后，按共享窗口创建 S1/S2 增量 Job。"""
+    """为过期地块本轮动态规划 10km 共享窗口并创建 S1/S2 增量 Job。"""
     today = date.today()
     # 规范光学结果存于 parcel_scene_products；不再以历史 raster_layers
     # 作为另一套地块/遥感主链路。
@@ -172,55 +169,33 @@ async def prepare_weekly_index(
 
     items: list[WeeklyIndexJobOut] = []
     if valid_lands:
-        snapshots = [
-            {
-                "land_id": str(land.land_id),
-                "boundary_geojson": land.boundary_geojson,
-                "boundary_srid": land.boundary_srid,
-            }
-            for land in valid_lands
-        ]
-        prepared = await prepare_vpa10_areas(
+        # 每个组按最早缺口开始读共享影像；worker 仍依据地块已有景日期避免重复写入。
+        groups, jobs, _ = await create_satellite_batch_jobs(
             db,
-            snapshots,
+            valid_lands,
             date_from=min(window[0] for window in valid_windows.values()),
             date_to=today,
-            assigned_by="weekly-index-schedule",
+            sensors=("S1", "S2"),
+            force=False,
+            parent_job_id=None,
+            chunk_days=settings.index_backfill_chunk_days,
+            land_date_windows=valid_windows,
+            extra_params={"schedule": "weekly-index"},
         )
+        jobs_by_id = {str(job.id): job for job in jobs}
         countdown = 0
-        for area in prepared["areas"]:
-            area_land_ids = [
-                str(land_id)
-                for land_id in area.get("land_ids", [])
-                if str(land_id) in valid_windows
-            ]
-            if not area_land_ids:
-                continue
-            # 一个项目区中不同地块可能从不同日期开始补拉；共享窗口取最早缺口，
-            # 各地块仍由 worker 按已存在日期去重，只写回实际缺失的观测。
-            date_from = min(valid_windows[land_id][0] for land_id in area_land_ids)
+        for group in groups:
             weather_windows = [
                 {
                     "land_id": land_id,
                     "date_from": valid_windows[land_id][0].isoformat(),
                     "date_to": valid_windows[land_id][1].isoformat(),
                 }
-                for land_id in area_land_ids
+                for land_id in group.land_ids
+                if land_id in valid_windows
             ]
-            jobs = await create_vpa10_download_jobs(
-                db,
-                [area],
-                date_from=date_from,
-                date_to=today,
-                sensors=("S1", "S2"),
-                force=False,
-                parent_job_id=None,
-                chunk_days=settings.index_backfill_chunk_days,
-                target_land_ids=area_land_ids,
-                job_land_id=area_land_ids[0],
-                extra_params={"schedule": "weekly-index"},
-            )
-            for job in jobs:
+            for job_id in group.job_ids:
+                job = jobs_by_id[job_id]
                 params = job.params_json or {}
                 items.append(
                     WeeklyIndexJobOut(
@@ -247,15 +222,15 @@ async def prepare_weekly_index(
     )
 
 
-@router.post("/virtual-area-history")
-async def prepare_virtual_area_history(
+@router.post("/satellite-history")
+async def prepare_satellite_history(
     _: InternalAuth,
     as_of: date | None = Query(default=None),
 ) -> dict[str, Any]:
-    """Beat 通过 API 机触发五年 vpa10 历史共享回填。"""
-    from app.services.virtual_area_service import backfill_virtual_area_history
+    """Beat 通过 API 机触发五年历史遥感回填，按本次地块动态分组下载。"""
+    from app.services.satellite_history import backfill_satellite_history
 
-    return await backfill_virtual_area_history(
+    return await backfill_satellite_history(
         date_to=as_of,
         parent_job_id=uuid.uuid4(),
     )

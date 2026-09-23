@@ -36,7 +36,7 @@ from app.services.cdfinance_report_prefetch import (
 )
 from app.services.mysql_land_sync import sync_selected_lands
 from app.services.report_urls import report_progress_for_response, signed_report_url
-from app.services.virtual_area_service import build_vpa10_satellite_jobs
+from app.services.satellite_batch import create_satellite_batch_jobs
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -470,7 +470,7 @@ async def create_assessment_reports_batch(
         )
 
     try:
-        groups, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+        groups, satellite_jobs, _ = await create_satellite_batch_jobs(
             db,
             ordered_lands,
             date_from=date.fromisoformat(date_from),
@@ -478,7 +478,6 @@ async def create_assessment_reports_batch(
             sensors=body.sensors,
             force=body.force,
             parent_job_id=batch_id,
-            assigned_by="assessment-batch",
             chunk_days=settings.index_backfill_chunk_days,
         )
     except ValueError as exc:
@@ -534,8 +533,6 @@ async def create_assessment_reports_batch(
         },
     )
     db.add(parent)
-    for job in satellite_jobs:
-        db.add(job)
     for job in report_jobs:
         db.add(job)
     await db.commit()
@@ -801,10 +798,10 @@ async def create_assessment_report(
                 )
 
         if pull_data:
-            # 报告单地块入口也先建立虚拟项目区共享任务，bootstrap 只拉天气/土壤，
+            # 报告单地块入口也先建立 10km 共享窗口任务，bootstrap 只拉天气/土壤，
             # 避免同一个报告请求又启动旧的单地块遥感下载链路。
             # publish_api_task also inserts work_items when dual|claim (D4).
-            _, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+            _, satellite_jobs, _ = await create_satellite_batch_jobs(
                 db,
                 [field],
                 date_from=date.fromisoformat(date_from),
@@ -812,13 +809,12 @@ async def create_assessment_report(
                 sensors=("S1", "S2"),
                 force=False,
                 parent_job_id=job.id,
-                assigned_by="assessment-one-click",
                 chunk_days=settings.index_backfill_chunk_days,
             )
             satellite_job_ids = [str(item.id) for item in satellite_jobs]
             job.params_json = {
                 **(job.params_json or {}),
-                "virtual_area_job_ids": satellite_job_ids,
+                "satellite_batch_job_ids": satellite_job_ids,
             }
             await db.commit()
             for satellite_job in satellite_jobs:

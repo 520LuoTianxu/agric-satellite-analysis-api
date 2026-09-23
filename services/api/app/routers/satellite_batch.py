@@ -11,16 +11,41 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
 from app.mq_publish import publish_api_task
-from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
+from app.schemas.satellite_batch import (
+    SatelliteBatchRequest,
+    SatelliteBatchResponse,
+    SatelliteHistoryBackfillRequest,
+)
 from app.services.smart_land_backfill import (
     SMART_BACKFILL_MAX_LANDS,
     LandSelectionError,
     ensure_land_parcels,
 )
-from app.services.virtual_area_service import build_vpa10_satellite_jobs
+from app.services.satellite_batch import create_satellite_batch_jobs
+from app.services.satellite_history import backfill_satellite_history
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
+_admin = require_roles("owner", "admin")
+
+
+@router.post("/admin/satellite-batch/history-backfill", status_code=202)
+async def history_backfill(
+    body: SatelliteHistoryBackfillRequest,
+    _: Annotated[OrgContext, Depends(_admin)],
+):
+    """按本次地块集合临时聚合 10km 窗口并下发历史遥感下载。"""
+    try:
+        return await backfill_satellite_history(
+            land_ids=body.land_ids,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            years=body.years,
+            sensors=body.sensors,
+            force=body.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post(
@@ -41,6 +66,8 @@ async def backfill_satellite_batch(
             db,
             requested_land_ids,
             max_lands=SMART_BACKFILL_MAX_LANDS,
+            # 显式地块清单按可用数据尽力处理；Smart 中不存在或无效的编号只计入跳过数。
+            allow_partial=True,
         )
     except LandSelectionError as exc:
         detail: object = (
@@ -50,21 +77,18 @@ async def backfill_satellite_batch(
         )
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     try:
-        groups, jobs, _ = await build_vpa10_satellite_jobs(
+        groups, jobs, _ = await create_satellite_batch_jobs(
             db,
             lands,
             date_from=body.date_from,
             date_to=body.date_to,
             sensors=body.sensors,
             force=body.force,
-            assigned_by="manual-satellite-batch",
             chunk_days=settings.index_backfill_chunk_days,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    for job in jobs:
-        db.add(job)
     # 先提交所有任务记录，下载机只需通过内部HTTP读job即可拿到地块列表与窗口。
     await db.commit()
     for index, job in enumerate(jobs):

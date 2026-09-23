@@ -1,4 +1,4 @@
-"""Pydantic schemas for agric_satellite data (项目区 / 地块 / S1·S2 产品)."""
+"""Pydantic schemas for agric_satellite 地块与 S1/S2 产品数据。"""
 
 from __future__ import annotations
 
@@ -9,91 +9,6 @@ from pydantic import BaseModel, Field
 
 
 Sensor = Literal["S1", "S2"]
-
-
-class ProjectAreaOut(BaseModel):
-    """virtual_project_areas row (legacy 5 km or VPA10 10 km tile)."""
-
-    tile_id: str
-    project_key: str | None = None
-    anchor_land_id: str | None = None
-    assignment_type: str | None = None
-    parcel_count: int | None = None
-    tile_width_m: float | None = None
-    tile_height_m: float | None = None
-    group_id: str | None = None
-    group_name: str | None = None
-    base_id: str | None = None
-    org_code: str | None = None
-    org_name: str | None = None
-    province_name: str | None = None
-    city_name: str | None = None
-    county_name: str | None = None
-    boundary_geojson: dict[str, Any] | None = None
-    boundary_srid: int | None = None
-    min_lon: float | None = None
-    min_lat: float | None = None
-    max_lon: float | None = None
-    max_lat: float | None = None
-    algorithm_version: str | None = None
-    window_side_m: float | None = None
-    window_shape: str | None = None
-    planning_crs: str | None = None
-    grid_crs: str | None = None
-    center_x: float | None = None
-    center_y: float | None = None
-    status: str | None = None
-    data_from: date | None = None
-    data_to: date | None = None
-    manifest_oss_key: str | None = None
-    manifest_sha256: str | None = None
-    data_ready_ratio: float | None = None
-    last_planned_at: datetime | None = None
-    last_backfill_at: datetime | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    land_count: int | None = None
-
-
-class ProjectAreaAssetOut(BaseModel):
-    """项目区级像素/预览资产；download_url 为短期或长期签名地址。"""
-
-    tile_id: str
-    sensor: Sensor
-    scene_date: date
-    scene_id: str
-    asset_kind: str
-    oss_key: str
-    format: str
-    compression: str | None = None
-    grid_json: dict[str, Any] = Field(default_factory=dict)
-    checksum: str | None = None
-    byte_size: int | None = None
-    status: str
-    error: str | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    download_url: str | None = None
-
-
-class ProjectAreaLandOut(BaseModel):
-    """virtual_project_area_lands join row (+ optional parcel fields)."""
-
-    tile_id: str
-    land_id: str
-    assignment_type: str | None = None
-    is_anchor: bool | None = None
-    intersection_area_m2: float | None = None
-    coverage_ratio: float | None = None
-    land_name: str | None = None
-    land_area_mu: float | None = None
-    province_name: str | None = None
-    city_name: str | None = None
-    county_name: str | None = None
-    min_lon: float | None = None
-    min_lat: float | None = None
-    max_lon: float | None = None
-    max_lat: float | None = None
 
 
 class LandParcelOut(BaseModel):

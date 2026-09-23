@@ -41,22 +41,31 @@ def fake_db(lands):
     return db
 
 
+def added_jobs(db):
+    """合并 SQLAlchemy add/add_all mock 中暂存的 Job，便于检查派发载荷。"""
+    jobs = [call.args[0] for call in db.add.call_args_list]
+    for call in db.add_all.call_args_list:
+        jobs.extend(call.args[0])
+    return jobs
+
+
 class GroupTests(unittest.TestCase):
     def test_nearby_and_distant_lands_have_one_assignment(self):
-        lands = [local_land("C", 8000), local_land("B", 2000), local_land("A")]
+        lands = [local_land("C", 12_000), local_land("B", 2000), local_land("A")]
         groups = group_satellite_lands(lands)
         self.assertEqual([group.land_ids for group in groups], [["A", "B"], ["C"]])
-        self.assertLess(
-            groups[0].download_bbox[2] - groups[0].download_bbox[0],
-            groups[0].aggregation_bbox[2] - groups[0].aggregation_bbox[0],
+        by_id = {land.land_id: land for land in lands}
+        boundary = shape(groups[0].processing_boundary_geojson)
+        self.assertTrue(
+            all(boundary.covers(shape(by_id[land_id].boundary_geojson)) for land_id in groups[0].land_ids)
         )
 
     def test_rectangle_corner_and_full_boundary(self):
         lands = [local_land("A"), local_land("B", 2200, 2200), local_land("C", 2490)]
-        self.assertEqual(
-            [group.land_ids for group in group_satellite_lands(lands)],
-            [["A", "B"], ["C"]],
-        )
+        groups = group_satellite_lands(lands)
+        assigned = [land_id for group in groups for land_id in group.land_ids]
+        self.assertCountEqual(assigned, ["A", "B", "C"])
+        self.assertTrue(any(set(group.land_ids) == {"A", "B", "C"} for group in groups))
 
     def test_high_latitude_uses_kilometers(self):
         lands = [
@@ -64,17 +73,16 @@ class GroupTests(unittest.TestCase):
             local_land("B", 2200, latitude=70),
             local_land("C", 3000, latitude=70),
         ]
-        self.assertEqual(
-            [group.land_ids for group in group_satellite_lands(lands)],
-            [["A", "B"], ["C"]],
-        )
+        groups = group_satellite_lands(lands)
+        self.assertEqual(len(groups), 1)
+        self.assertCountEqual(groups[0].land_ids, ["A", "B", "C"])
 
     def test_oversized_land_keeps_full_bounds_and_is_not_grouped(self):
-        land = local_land("A", size=6000)
+        land = local_land("A", size=12_000)
         groups = group_satellite_lands([land, local_land("B")])
-        self.assertTrue(groups[0].oversized)
-        self.assertEqual(groups[0].land_ids, ["A"])
-        self.assertEqual(groups[0].download_bbox, shape(land.boundary_geojson).bounds)
+        oversized = next(group for group in groups if group.oversized)
+        self.assertEqual(oversized.land_ids, ["A"])
+        self.assertEqual(oversized.download_bbox, shape(land.boundary_geojson).bounds)
 
     def test_invalid_geometry_is_rejected(self):
         land = local_land("A")
@@ -247,9 +255,50 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
             (response.land_count, response.group_count, response.job_count), (2, 1, 2)
         )
         self.assertEqual(send.call_count, 2)
-        jobs = [call.args[0] for call in db.add.call_args_list]
+        jobs = added_jobs(db)
         self.assertEqual({job.params_json["sensor"] for job in jobs}, {"S1", "S2"})
         self.assertTrue(all(job.params_json["land_ids"] == ["A", "B"] for job in jobs))
+        self.assertTrue(all(job.params_json["processing_window_km"] == 10 for job in jobs))
+
+    async def test_smart_backfill_completes_when_all_requested_lands_are_missing(self):
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=db)
+        session.__aexit__ = AsyncMock(return_value=None)
+        selection = {
+            "requested_land_count": 1,
+            "selected_land_ids": [],
+            "selected_land_count": 0,
+            "skipped_land_count": 1,
+            "source_sync": {"status": "partial", "missing_land_count": 1},
+        }
+
+        with (
+            patch("app.core.database.async_session", return_value=session),
+            patch(
+                "app.services.smart_land_backfill.ensure_land_parcels",
+                new=AsyncMock(return_value=([], selection)),
+            ),
+            patch(
+                "app.services.smart_land_backfill.build_satellite_batch_jobs",
+                return_value=([], []),
+            ),
+            patch("app.mq_publish.publish_api_task") as publish,
+        ):
+            result = await run_smart_land_backfill(
+                land_ids=["missing"],
+                date_from=date(2025, 1, 1),
+                date_to=date(2025, 1, 2),
+            )
+
+        parent = db.add.call_args.args[0]
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["job_count"], 0)
+        self.assertEqual(parent.status, "completed")
+        self.assertEqual(parent.progress_json["stage"], "completed")
+        publish.assert_not_called()
 
     async def test_inclusive_chunks_do_not_miss_the_last_day(self):
         db = fake_db([local_land("A")])
@@ -267,22 +316,38 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await backfill_satellite_batch(body, None, db)
         self.assertEqual(response.job_count, 2)
-        jobs = [call.args[0] for call in db.add.call_args_list]
+        jobs = added_jobs(db)
         self.assertEqual(jobs[1].params_json["date_from"], "2026-08-04")
         self.assertEqual(jobs[1].params_json["date_to"], "2026-08-04")
 
-    async def test_missing_land_does_not_partially_queue(self):
+    async def test_missing_land_is_skipped_and_valid_land_is_queued(self):
         db = fake_db([local_land("A")])
         body = SatelliteBatchRequest.model_validate({"landIdList": ["A", "missing"]})
+        with patch("app.routers.satellite_batch.publish_api_task") as send:
+            response = await backfill_satellite_batch(body, None, db)
+        self.assertEqual(response.land_count, 1)
+        self.assertEqual(response.skipped_land_count, 1)
+        self.assertEqual(response.selected_land_ids, ["A"])
+        self.assertGreater(response.job_count, 0)
+        send.assert_called()
+
+    async def test_all_smart_missing_lands_are_skipped_when_partial_is_allowed(self):
+        db = fake_db([])
         with (
-            patch("app.routers.satellite_batch.publish_api_task") as send,
-            self.assertRaises(HTTPException) as error,
+            patch("app.services.smart_land_backfill.settings.mysql_source_enabled", True),
+            patch(
+                "app.services.smart_land_backfill.sync_selected_lands",
+                new=AsyncMock(
+                    return_value={"status": "not_found", "missing_land_ids": ["missing"]}
+                ),
+            ),
         ):
-            await backfill_satellite_batch(body, None, db)
-        self.assertEqual(error.exception.detail, {"missing_land_ids": ["missing"]})
-        db.add.assert_not_called()
-        db.commit.assert_not_awaited()
-        send.assert_not_called()
+            lands, summary = await ensure_land_parcels(
+                db, ["missing"], max_lands=1000, allow_partial=True
+            )
+        self.assertEqual(lands, [])
+        self.assertEqual(summary["selected_land_count"], 0)
+        self.assertEqual(summary["skipped_land_count"], 1)
 
     async def test_missing_land_is_synced_from_smart_before_queueing(self):
         initial = [local_land("1001")]
@@ -317,7 +382,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.land_count, 2)
         sync.assert_awaited_once_with(
-            ["1002"], include_excluded_schedule_lands=True
+            ["1002"], include_excluded_schedule_lands=True, allow_partial=True
         )
 
     async def test_partial_dispatch_failure_returns_all_job_ids(self):
@@ -335,12 +400,15 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
             await backfill_satellite_batch(body, None, db)
         self.assertEqual(len(error.exception.detail["queued_job_ids"]), 1)
         self.assertEqual(len(error.exception.detail["failed_job_ids"]), 1)
-        self.assertEqual(db.add.call_args_list[1].args[0].status, "failed")
+        self.assertEqual(
+            [job.status for job in added_jobs(db)].count("failed"), 1
+        )
 
 
 class HttpRouteTests(unittest.TestCase):
     def test_registered_endpoint_accepts_camelcase_ids(self):
         from app.core.database import get_db
+        from app.core.rate_limit import limiter
         from app.main import app
 
         db = fake_db([local_land("123")])
@@ -351,6 +419,7 @@ class HttpRouteTests(unittest.TestCase):
         app.dependency_overrides[get_db] = override_db
         try:
             with (
+                patch.object(limiter, "enabled", False),
                 patch("app.routers.satellite_batch.publish_api_task"),
                 TestClient(app) as client,
             ):
@@ -367,7 +436,7 @@ class HttpRouteTests(unittest.TestCase):
                     response.json()["date_from"], body.date_from.isoformat()
                 )
                 self.assertEqual(response.json()["date_to"], date.today().isoformat())
-                jobs = [call.args[0] for call in db.add.call_args_list]
+                jobs = added_jobs(db)
                 self.assertEqual(
                     min(job.params_json["date_from"] for job in jobs),
                     body.date_from.isoformat(),

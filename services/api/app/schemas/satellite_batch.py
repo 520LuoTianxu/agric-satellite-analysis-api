@@ -118,6 +118,7 @@ class SatelliteBatchGroup(BaseModel):
     land_ids: list[str]
     aggregation_bbox: tuple[float, float, float, float]
     download_bbox: tuple[float, float, float, float]
+    processing_boundary_geojson: dict
     oversized: bool = False
     job_ids: list[str] = Field(default_factory=list)
 
@@ -133,3 +134,40 @@ class SatelliteBatchResponse(BaseModel):
     date_from: date
     date_to: date
     groups: list[SatelliteBatchGroup]
+
+
+class SatelliteHistoryBackfillRequest(BaseModel):
+    """手动历史回填参数；未传 landIdList 时处理全部有效地块。"""
+
+    land_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("landIdList", "landIdlist", "land_ids"),
+        serialization_alias="landIdList",
+    )
+    date_from: date | None = None
+    date_to: date | None = None
+    years: int = Field(default=5, ge=1, le=10)
+    sensors: list[Literal["S1", "S2"]] = Field(
+        default_factory=lambda: ["S1", "S2"], min_length=1, max_length=2
+    )
+    force: bool = False
+
+    @field_validator("land_ids", mode="before")
+    @classmethod
+    def normalize_history_land_ids(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(
+            isinstance(item, bool) or not isinstance(item, (str, int))
+            for item in value
+        ):
+            raise ValueError("landIdList必须包含字符串或整数编号")
+        normalized = list(dict.fromkeys(str(item).strip() for item in value))
+        if not normalized or any(not item for item in normalized):
+            raise ValueError("landIdList不能为空")
+        return normalized
+
+    @field_validator("sensors")
+    @classmethod
+    def unique_history_sensors(cls, value):
+        return list(dict.fromkeys(value))
