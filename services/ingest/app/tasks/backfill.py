@@ -507,112 +507,11 @@ def schedule_weekly_index_compute(self) -> dict:
             "http": True,
         }
 
-    # 未配 Internal HTTP 时才查本机库，仅给本地单机 compose 用
-    from app.models.tables import Job, LandParcel
-
-    session = get_db_session()
-    stale_threshold = date.today() - timedelta(days=7)
-
-    try:
-        land_rows = session.execute(
-            select(LandParcel.land_id).where(
-                LandParcel.deleted_at.is_(None),
-                or_(
-                    LandParcel.base_id.is_(None),
-                    LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                ),
-                or_(
-                    LandParcel.land_area_mu.is_(None),
-                    LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
-                ),
-            )
-        ).all()
-
-        lands_checked = 0
-        lands_dispatched = 0
-        jobs_dispatched = 0
-        stagger_seconds = 15
-
-        for (land_id,) in land_rows:
-            lands_checked += 1
-
-            latest_date = session.execute(
-                text(
-                    "SELECT max(date)::date FROM agric_satellite.parcel_scene_products "
-                    "WHERE land_id = :land_id"
-                ),
-                {"land_id": land_id},
-            ).scalar_one_or_none()
-
-            if latest_date is not None and latest_date > stale_threshold:
-                continue
-
-            date_from = (
-                (latest_date + timedelta(days=1))
-                if latest_date
-                else (date.today() - timedelta(days=7))
-            )
-            date_to = date.today()
-            if date_from >= date_to:
-                continue
-
-            job = Job(
-                land_id=land_id,
-                type="agri_optical",
-                status="pending",
-                params_json={
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                    "is_backfill": True,
-                    "path": "agri_lonlat_direct",
-                },
-            )
-            session.add(job)
-            session.flush()
-
-            countdown = lands_dispatched * stagger_seconds
-            celery_app.send_task(
-                "app.tasks.agri_lonlat.process_agri_optical_lonlat",
-                args=[str(job.id)],
-                countdown=countdown,
-            )
-            # 本地单机模式同样复用已写入 Job 的遥感日期窗口。
-            celery_app.send_task(
-                "app.tasks.weather.backfill_weather_for_land",
-                args=[str(land_id)],
-                kwargs={
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                },
-                countdown=countdown,
-            )
-            jobs_dispatched += 1
-
-            lands_dispatched += 1
-
-        session.commit()
-
-        logger.info(
-            "weekly_index_compute_complete",
-            lands_checked=lands_checked,
-            lands_dispatched=lands_dispatched,
-            jobs_dispatched=jobs_dispatched,
-            http=False,
-        )
-        return {
-            "status": "completed",
-            "lands_checked": lands_checked,
-            "lands_dispatched": lands_dispatched,
-            "jobs_dispatched": jobs_dispatched,
-            "http": False,
-        }
-
-    except Exception as e:
-        logger.error("weekly_index_compute_failed", error=str(e))
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    # 项目区规划和资产索引由 API 数据库维护；缺少 Internal HTTP 时必须显式失败，
+    # 不能退回旧的逐地块下载，避免环境配置差异造成两套遥感数据链路。
+    raise RuntimeError(
+        "weekly satellite scheduling requires Internal HTTP for VPA10 planning"
+    )
 
 
 # ── Bulk backfill (all existing lands) ───────────────────────────────
