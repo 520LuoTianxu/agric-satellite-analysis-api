@@ -260,6 +260,7 @@ async def persist_vpa10_plans(
                 "data_to": date_to,
                 "data_ready_ratio": 0.0,
                 "last_planned_at": now,
+                "updated_at": now,
             }
         )
         relation_rows.extend(
