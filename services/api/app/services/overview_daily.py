@@ -23,7 +23,7 @@ from app.models.tables import Job, LandParcel
 from app.mq_publish import publish_api_task
 from app.schemas.agri import OverviewStatsOut
 from app.services.satellite_batch import satellite_land_geometry
-from app.services.virtual_area_service import build_vpa10_satellite_jobs
+from app.services.satellite_batch import create_satellite_batch_jobs
 
 WINDOW_DAYS = 60
 LOOKBACK_DAYS = 7
@@ -286,7 +286,7 @@ async def _redispatch_failed_work_item_jobs(
 
 
 async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
-    """按10×10公里虚拟项目区创建每日增量任务，并以统计日防止重复批次。"""
+    """按本日地块集合动态规划10×10公里窗口，并以统计日防止重复批次。"""
     await db.execute(
         text("SELECT pg_advisory_xact_lock(736401, :day)"), {"day": day.toordinal()}
     )
@@ -320,7 +320,7 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                 valid.append(land)
             except ValueError:
                 invalid.append(land.land_id)
-        groups, jobs, _ = await build_vpa10_satellite_jobs(
+        groups, jobs, _ = await create_satellite_batch_jobs(
             db,
             valid,
             date_from=download_start(None, day),
@@ -328,7 +328,6 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
             sensors=("S1", "S2"),
             force=False,
             parent_job_id=run_id_for(day),
-            assigned_by="daily-satellite",
             chunk_days=settings.index_backfill_chunk_days,
             extra_params={"overview_run_id": str(run_id_for(day))},
         )

@@ -16,18 +16,12 @@ from agric_satellite_analysis_common.internal_api import (
     get_job,
     patch_job,
     resolve_land,
-    virtual_area_assets,
 )
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
 from app.core.band_parallel import run_parallel_band_jobs
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
-from app.core.band_window_cache import (
-    read_scene_window,
-    window_cache_enabled,
-    write_scene_window,
-)
 from app.core.decloud import (
     decloud_enabled,
     decloud_s2_extra_assets,
@@ -40,7 +34,6 @@ from app.core.processing_window import (
     resolve_processing_window_km,
 )
 from app.core.true_color_preview import upload_field_rgb_preview
-from app.core.virtual_area_cache import load_virtual_area_scene, upload_virtual_area_scene
 from app.tasks.agri_lonlat import (
     INDEX_KEY_TO_PIXEL,
     SCL_STAC_ASSETS,
@@ -49,6 +42,7 @@ from app.tasks.agri_lonlat import (
     parcel_cloud_from_scl_window,
 )
 from app.tasks.pipeline import (
+    S2_PC_STAC_API_URL,
     compute_target_grid,
     compute_zonal_stats,
     read_bands_windowed_parallel,
@@ -301,51 +295,6 @@ def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=Non
     return lands
 
 
-def _load_cached_area_scenes(params: dict, sensor: str, date_from: date, date_to: date):
-    """读取项目区 OSS 像素资产；缓存不可用时由 STAC 路径继续补齐。"""
-    tile_id = params.get("virtual_area_tile_id")
-    if not params.get("virtual_area") or not tile_id:
-        return []
-    try:
-        assets = virtual_area_assets(
-            str(tile_id),
-            sensor=sensor,
-            date_from=date_from.isoformat(),
-            date_to=date_to.isoformat(),
-        )
-    except Exception as exc:
-        logger.warning(
-            "virtual_area_asset_list_failed",
-            tile_id=tile_id,
-            sensor=sensor,
-            error=str(exc),
-        )
-        return []
-    cached = []
-    for asset in assets:
-        try:
-            scene, arrays, grid = load_virtual_area_scene(asset)
-            scene_date = scene["date"]
-            if not (date_from <= scene_date <= date_to):
-                continue
-            cached.append(
-                {
-                    "scene": scene,
-                    "bands": arrays,
-                    "scl": arrays.pop("SCL", None),
-                    "grid": grid,
-                }
-            )
-        except Exception as exc:
-            logger.warning(
-                "virtual_area_asset_read_failed",
-                tile_id=tile_id,
-                asset_key=asset.get("oss_key"),
-                error=str(exc),
-            )
-    return cached
-
-
 def select_complete_processing_lands(
     lands,
     anchor_id: str,
@@ -368,20 +317,19 @@ def select_complete_processing_lands(
         return [anchor], box(*window_bounds)
 
     if processing_boundary is not None:
-        # vpa10 规划器已经把动态中心和完整边界持久化；下载机必须复用该
-        # 边界，不能再次按 anchor 质心重建，否则会把“项目区”退化成单地块窗口。
+        # API 将本轮动态规划的窗口边界放进 Job；下载机必须复用它以维持相同分组。
         processing_geom = (
             shape(processing_boundary)
             if isinstance(processing_boundary, dict)
             else processing_boundary
         )
         if processing_geom.is_empty or not processing_geom.is_valid:
-            raise ValueError("持久化的虚拟项目区边界无效")
+            raise ValueError("任务中的动态处理窗口边界无效")
         if not processing_geom.covers(anchor["geom"]):
-            raise ValueError("虚拟项目区边界未完整包含锚点地块")
+            raise ValueError("动态处理窗口未完整包含锚点地块")
         return [land for land in lands if processing_geom.covers(land["geom"])], processing_geom
 
-    # 只合并完整落在锚点5 km窗口内的地块；跨出窗口的地块不参与本批次。
+    # 旧任务缺少动态边界时，使用任务携带的窗口宽度临时构造兼容处理范围。
     processing_geom, anchor_oversized = build_complete_processing_window(
         anchor["geom"], processing_window_km
     )
@@ -413,6 +361,91 @@ def _scene_lands(scene, lands, sensor):
     return selected
 
 
+def _search_s2_options() -> dict:
+    extra_assets = {"SCL": SCL_STAC_ASSETS}
+    cloud_max = None
+    if decloud_enabled():
+        extra_assets.update(decloud_s2_extra_assets())
+        cloud_max = decloud_stac_cloud_max_pct()
+    return {
+        "index_defs": agri_optical_index_defs(),
+        "index_label": "satellite_batch",
+        "max_cloud_cover": cloud_max,
+        "extra_assets": extra_assets,
+        "cloud_dedupe": "none",
+        "max_items": 2000,
+    }
+
+
+def _search_s2_scenes(processing_geom, date_from: date, date_to: date) -> list[dict]:
+    """S2 先搜 Element84/AWS；搜索失败或无结果时才用 PC 签名 STAC 降级。"""
+    options = _search_s2_options()
+    primary_error: Exception | None = None
+    try:
+        scenes = search_scenes_for_defs(
+            mapping(processing_geom), date_from, date_to, **options
+        )
+    except Exception as exc:
+        primary_error = exc
+        scenes = []
+        logger.warning(
+            "s2_element84_stac_search_failed",
+            date_from=str(date_from),
+            date_to=str(date_to),
+            error=str(exc),
+        )
+    if scenes:
+        return scenes
+
+    try:
+        fallback_scenes = search_scenes_for_defs(
+            mapping(processing_geom),
+            date_from,
+            date_to,
+            **options,
+            catalog_url=S2_PC_STAC_API_URL,
+            planetary_computer_signing=True,
+            source_catalog="planetary_computer",
+        )
+    except Exception as fallback_error:
+        logger.exception(
+            "s2_planetary_computer_stac_search_failed",
+            date_from=str(date_from),
+            date_to=str(date_to),
+            error=str(fallback_error),
+        )
+        if primary_error is not None:
+            raise RuntimeError(
+                f"Element84 搜索失败，PC 降级搜索也失败：{fallback_error}"
+            ) from primary_error
+        raise
+    if fallback_scenes:
+        logger.warning(
+            "s2_planetary_computer_stac_fallback_used",
+            scene_count=len(fallback_scenes),
+            date_from=str(date_from),
+            date_to=str(date_to),
+        )
+    return fallback_scenes
+
+
+def _search_s2_scene_fallback(scene, processing_geom) -> list[dict]:
+    """AWS COG 读取失败时，按同一日期和窗口找 PC 的替代 Sentinel-2 景。"""
+    scene_date = scene.get("date")
+    if not isinstance(scene_date, date):
+        scene_date = date.fromisoformat(str(scene_date)[:10])
+    options = _search_s2_options()
+    return search_scenes_for_defs(
+        mapping(processing_geom),
+        scene_date,
+        scene_date,
+        **options,
+        catalog_url=S2_PC_STAC_API_URL,
+        planetary_computer_signing=True,
+        source_catalog="planetary_computer",
+    )
+
+
 def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
     """下载一个共享景窗口；全部波段走同一并发池和统一重试/日志链路。"""
     shared_transform, shared_shape, _, bounds = grid
@@ -434,21 +467,6 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
         hrefs.pop("visual", None)
         resampling_by_band = {"SCL": Resampling.nearest}
 
-    cached = read_scene_window(
-        scene_id=str(scene.get("id") or ""),
-        sensor=sensor,
-        target_shape=shared_shape,
-        target_transform=shared_transform,
-        band_hrefs=hrefs,
-        resampling_by_band=resampling_by_band,
-    )
-    if cached is not None:
-        logger.info("satellite_window_cache_hit", **log_context, bands=len(cached))
-        scl = None if sensor == "S1" else cached.pop("SCL", None)
-        return cached, scl
-    if window_cache_enabled():
-        logger.info("satellite_window_cache_miss", **log_context)
-
     if sensor == "S1":
         bands = run_parallel_band_jobs(
             hrefs,
@@ -458,23 +476,6 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
             scene_workers=1,
             log_context=log_context,
         )
-        try:
-            write_scene_window(
-                scene_id=str(scene.get("id") or ""),
-                sensor=sensor,
-                target_shape=shared_shape,
-                target_transform=shared_transform,
-                band_hrefs=hrefs,
-                arrays=bands,
-                resampling_by_band=resampling_by_band,
-            )
-        except Exception as exc:
-            # 本地缓存是性能优化，磁盘满或缓存写失败不能影响已完成的远程读取。
-            logger.warning(
-                "satellite_window_cache_write_failed",
-                **log_context,
-                error=str(exc),
-            )
         return bands, None
     # SCL 与光谱波段一起进入线程池，避免所有光谱完成后再串行发起一次远程读取。
     downloaded = read_bands_windowed_parallel(
@@ -490,25 +491,6 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
     # Sentinel-2零值为景外/无数据，先转NaN，避免EVI等公式把填充值算成有效像元。
     for band in downloaded.values():
         band[band == 0] = np.nan
-    cache_arrays = dict(downloaded)
-    if scl is not None:
-        cache_arrays["SCL"] = scl
-    try:
-        write_scene_window(
-            scene_id=str(scene.get("id") or ""),
-            sensor=sensor,
-            target_shape=shared_shape,
-            target_transform=shared_transform,
-            band_hrefs=hrefs,
-            arrays=cache_arrays,
-            resampling_by_band=resampling_by_band,
-        )
-    except Exception as exc:
-        logger.warning(
-            "satellite_window_cache_write_failed",
-            **log_context,
-            error=str(exc),
-        )
     return downloaded, scl
 
 
@@ -731,7 +713,6 @@ def process_satellite_batch(
                         "date_to": d1.isoformat(),
                     },
                 )
-        cached_area_scenes = _load_cached_area_scenes(params, sensor, d0, d1)
         # 任务排队期间边界可能更新；按HTTP最新边界重新求范围，保证窗口与地块完整覆盖。
         union = unary_union([land["geom"] for land in selected_lands])
         grid = compute_target_grid(
@@ -743,38 +724,10 @@ def process_satellite_batch(
                     mapping(processing_geom), d0, d1, dedupe_week=False
                 )
             else:
-                extra_assets = {"SCL": SCL_STAC_ASSETS}
-                if decloud_enabled():
-                    extra_assets.update(decloud_s2_extra_assets())
-                scenes = search_scenes_for_defs(
-                    mapping(processing_geom),
-                    d0,
-                    d1,
-                    agri_optical_index_defs(),
-                    index_label="satellite_batch",
-                    max_cloud_cover=decloud_stac_cloud_max_pct()
-                    if decloud_enabled()
-                    else None,
-                    extra_assets=extra_assets,
-                    cloud_dedupe="none",
-                    max_items=2000,
-                )
+                scenes = _search_s2_scenes(processing_geom, d0, d1)
         except Exception:
-            if not cached_area_scenes:
-                raise
-            logger.warning(
-                "satellite_stac_search_skipped_for_virtual_area_cache",
-                tile_id=params.get("virtual_area_tile_id"),
-                sensor=sensor,
-            )
-            scenes = []
-        # 缓存景先处理；同一日期的地块成功后，后续 STAC 景会被 existing 集合跳过。
-        scenes = cached_area_scenes + [
-            scene
-            for scene in scenes
-            if str(scene.get("id"))
-            not in {str(item["scene"].get("id")) for item in cached_area_scenes}
-        ]
+            # S1 沿用原有 Planetary Computer 搜索；S2 的 primary/fallback 已在 helper 中处理。
+            raise
         # 失败明细用于批次结束后的定向补偿；保留“失败过”的候选集合，重复补偿是幂等的。
         failed_land_ids: set[str] = set()
         failed_scene_ids: set[str] = set()
@@ -797,59 +750,87 @@ def process_satellite_batch(
             progress = _compensation_progress(
                 progress, compensation_attempt, active=True
             )
-        for scene_entry in scenes:
-            is_cached = isinstance(scene_entry, dict) and "scene" in scene_entry
-            scene = scene_entry["scene"] if is_cached else scene_entry
+        for scene in scenes:
             selected = _scene_lands(scene, selected_lands, sensor)
             if selected:
+                scene_products: list[tuple[dict, list, dict, np.ndarray | None]] = []
                 try:
-                    if is_cached:
-                        shared_bands = dict(scene_entry["bands"])
-                        scl = scene_entry.get("scl")
-                        scene_grid = scene_entry["grid"]
-                    else:
-                        shared_bands, scl = _download_scene(
-                            scene, sensor, grid, job_id=job_id
-                        )
-                        scene_grid = grid
-                        if params.get("virtual_area"):
-                            try:
-                                upload_virtual_area_scene(
-                                    tile_id=str(params["virtual_area_tile_id"]),
-                                    sensor=sensor,
-                                    scene=scene,
-                                    grid=scene_grid,
-                                    bands=shared_bands,
-                                    scl=scl,
-                                )
-                            except Exception as exc:
-                                # 项目区缓存是共享优化；单地块结果仍继续发布，
-                                # 后续补偿任务会重新登记缺失的资产元数据。
-                                logger.warning(
-                                    "virtual_area_asset_upload_failed",
-                                    tile_id=params.get("virtual_area_tile_id"),
-                                    scene_id=scene.get("id"),
-                                    error=str(exc),
-                                )
-                except Exception as exc:
-                    progress["failed"] += len(selected)
-                    record_failures(selected, scene["id"])
-                    logger.error(
-                        "satellite_batch_download_failed",
-                        job_id=job_id,
-                        scene_id=scene["id"],
-                        error=str(exc),
+                    shared_bands, scl = _download_scene(
+                        scene, sensor, grid, job_id=job_id
                     )
-                else:
-                    for land in selected:
+                    scene_products.append((scene, selected, shared_bands, scl))
+                except Exception as exc:
+                    # 只有 AWS/Element84 的 S2 COG 读取失败才试 PC；S1 路径不变。
+                    unresolved = {
+                        str(land["meta"]["land_id"]): land for land in selected
+                    }
+                    if sensor == "S2" and scene.get("source_catalog") != "planetary_computer":
+                        try:
+                            fallback_scenes = _search_s2_scene_fallback(
+                                scene, processing_geom
+                            )
+                        except Exception as fallback_error:
+                            fallback_scenes = []
+                            logger.warning(
+                                "s2_planetary_computer_cog_fallback_search_failed",
+                                job_id=job_id,
+                                scene_id=scene.get("id"),
+                                error=str(fallback_error),
+                            )
+                        # 一个窗口跨越 PC 瓦片边缘时按剩余覆盖地块数优先，必要时可由多景补齐。
+                        fallback_scenes.sort(
+                            key=lambda candidate: (
+                                -len(_scene_lands(candidate, list(unresolved.values()), "S2")),
+                                float(candidate.get("cloud_cover") or 100),
+                                str(candidate.get("id") or ""),
+                            )
+                        )
+                        for fallback_scene in fallback_scenes:
+                            fallback_selected = _scene_lands(
+                                fallback_scene, list(unresolved.values()), "S2"
+                            )
+                            if not fallback_selected:
+                                continue
+                            try:
+                                fallback_bands, fallback_scl = _download_scene(
+                                    fallback_scene, sensor, grid, job_id=job_id
+                                )
+                            except Exception as fallback_error:
+                                logger.warning(
+                                    "s2_planetary_computer_cog_fallback_failed",
+                                    job_id=job_id,
+                                    primary_scene_id=scene.get("id"),
+                                    fallback_scene_id=fallback_scene.get("id"),
+                                    error=str(fallback_error),
+                                )
+                                continue
+                            scene_products.append(
+                                (fallback_scene, fallback_selected, fallback_bands, fallback_scl)
+                            )
+                            for land in fallback_selected:
+                                unresolved.pop(str(land["meta"]["land_id"]), None)
+                    if unresolved:
+                        failed_lands = list(unresolved.values())
+                        progress["failed"] += len(failed_lands)
+                        record_failures(failed_lands, str(scene.get("id") or ""))
+                        logger.error(
+                            "satellite_batch_download_failed",
+                            job_id=job_id,
+                            scene_id=scene.get("id"),
+                            error=str(exc),
+                            unresolved_land_ids=sorted(unresolved),
+                        )
+
+                for product_scene, product_lands, shared_bands, scl in scene_products:
+                    for land in product_lands:
                         try:
                             if _publish_land(
-                                scene,
+                                product_scene,
                                 sensor,
                                 land,
                                 shared_bands,
                                 scl,
-                                scene_grid,
+                                grid,
                                 mq_task_id or job_id,
                                 processing_window_km,
                             ):
@@ -858,17 +839,17 @@ def process_satellite_batch(
                                 progress["published_products"].append(
                                     {
                                         "land_id": land["meta"]["land_id"],
-                                        "date": scene["date"].isoformat(),
+                                        "date": product_scene["date"].isoformat(),
                                     }
                                 )
                                 # 同日优先景成功后跳过后续重复景，避免重下载和同一消息编号覆盖。
                                 land["existing"].add(scene["date"])
                             else:
                                 progress["failed"] += 1
-                                record_failures([land], scene["id"])
+                                record_failures([land], product_scene.get("id"))
                         except Exception as exc:
                             progress["failed"] += 1
-                            record_failures([land], scene["id"])
+                            record_failures([land], product_scene.get("id"))
                             logger.error(
                                 "satellite_batch_land_failed",
                                 job_id=job_id,

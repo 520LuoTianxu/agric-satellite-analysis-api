@@ -155,6 +155,9 @@ class _BatchDb:
     def add(self, item):
         self.added.append(item)
 
+    def add_all(self, items):
+        self.added.extend(items)
+
     async def commit(self):
         self.commit_count += 1
 
@@ -170,6 +173,7 @@ class AssessmentBatchRouteTests(unittest.IsolatedAsyncioTestCase):
                 "landIdList": ["A", "B"],
                 "crop_type": "rice",
                 "date_from": "2026-08-01",
+                "date_to": "2026-08-01",
                 "sensors": ["S2"],
             }
         )

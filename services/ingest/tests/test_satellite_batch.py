@@ -36,7 +36,7 @@ def make_lands(sensor="S2"):
 
 
 class SharedWindowTests(unittest.TestCase):
-    def test_scl_is_read_in_the_same_band_pool(self):
+    def test_scl_is_read_with_spectral_bands_from_remote_cog(self):
         from rasterio.transform import from_origin
 
         grid = (
@@ -61,12 +61,9 @@ class SharedWindowTests(unittest.TestCase):
                 for key in hrefs
             }
 
-        with (
-            patch.object(batch, "read_scene_window", return_value=None),
-            patch.object(batch, "window_cache_enabled", return_value=False),
-            patch.object(batch, "read_bands_windowed_parallel", side_effect=_read) as read,
-            patch.object(batch, "write_scene_window") as write_cache,
-        ):
+        with patch.object(
+            batch, "read_bands_windowed_parallel", side_effect=_read
+        ) as read:
             bands, scl = batch._download_scene(scene, "S2", grid, job_id="job")
 
         self.assertEqual(set(read.call_args.args[0]), {"B04", "SCL"})
@@ -76,9 +73,9 @@ class SharedWindowTests(unittest.TestCase):
         )
         self.assertEqual(set(bands), {"B04"})
         self.assertTrue(np.all(scl == 9))
-        write_cache.assert_called_once()
+        read.assert_called_once()
 
-    def test_window_cache_hit_skips_remote_reads(self):
+    def test_remote_window_is_read_directly_without_local_or_oss_cache(self):
         from rasterio.transform import from_origin
 
         grid = (
@@ -87,7 +84,7 @@ class SharedWindowTests(unittest.TestCase):
             np.ones((2, 2), dtype=bool),
             (110, 35.008, 110.002, 35.01),
         )
-        cached = {
+        downloaded = {
             "B04": np.ones((2, 2), dtype=np.float32),
             "SCL": np.full((2, 2), 4, dtype=np.float32),
         }
@@ -96,15 +93,46 @@ class SharedWindowTests(unittest.TestCase):
             "date": date(2026, 8, 1),
             "band_hrefs": {"B04": "red", "SCL": "scl"},
         }
-        with (
-            patch.object(batch, "read_scene_window", return_value=cached),
-            patch.object(batch, "read_bands_windowed_parallel") as remote,
-        ):
+        with patch.object(
+            batch, "read_bands_windowed_parallel", return_value=downloaded
+        ) as remote:
             bands, scl = batch._download_scene(scene, "S2", grid, job_id="job")
 
-        remote.assert_not_called()
+        remote.assert_called_once()
         self.assertEqual(set(bands), {"B04"})
         self.assertTrue(np.all(scl == 4))
+
+    def test_s2_stac_search_uses_planetary_computer_after_element84_failure(self):
+        fallback = [{"id": "pc-scene", "source_catalog": "planetary_computer"}]
+        with patch.object(
+            batch,
+            "search_scenes_for_defs",
+            side_effect=[RuntimeError("Element84 unavailable"), fallback],
+        ) as search:
+            result = batch._search_s2_scenes(
+                box(110, 35, 110.01, 35.01), date(2026, 8, 1), date(2026, 8, 2)
+            )
+
+        self.assertEqual(result, fallback)
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(search.call_args.kwargs["catalog_url"], batch.S2_PC_STAC_API_URL)
+        self.assertTrue(search.call_args.kwargs["planetary_computer_signing"])
+        self.assertEqual(
+            search.call_args.kwargs["source_catalog"], "planetary_computer"
+        )
+
+    def test_s2_stac_search_uses_planetary_computer_when_aws_has_no_scene(self):
+        with patch.object(
+            batch,
+            "search_scenes_for_defs",
+            side_effect=[[], [{"id": "pc-scene"}]],
+        ) as search:
+            result = batch._search_s2_scenes(
+                box(110, 35, 110.01, 35.01), date(2026, 8, 1), date(2026, 8, 1)
+            )
+
+        self.assertEqual(result[0]["id"], "pc-scene")
+        self.assertEqual(search.call_count, 2)
 
     def test_assessment_batch_download_is_compensated_twice_then_stays_failed(self):
         job_id = str(uuid.uuid4())

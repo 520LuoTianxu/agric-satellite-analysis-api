@@ -201,6 +201,9 @@ class PrepareTests(unittest.IsolatedAsyncioTestCase):
         objects = {}
         db.get = AsyncMock(side_effect=lambda model, key: objects.get(key))
         db.add.side_effect = lambda obj: objects.setdefault(obj.id, obj)
+        db.add_all.side_effect = lambda batch: [
+            objects.setdefault(obj.id, obj) for obj in batch
+        ]
         db.commit = AsyncMock()
         db.execute = AsyncMock(
             side_effect=[result(), result(lands=lands), result(all=[]), result()]
@@ -209,15 +212,15 @@ class PrepareTests(unittest.IsolatedAsyncioTestCase):
             out = await daily.prepare_daily(db, DAY)
             again = await daily.prepare_daily(db, DAY)
         self.assertEqual(
-            (out["lands_checked"], out["group_count"], out["job_count"]), (4, 2, 4)
+            (out["lands_checked"], out["group_count"], out["job_count"]), (4, 1, 2)
         )
         self.assertEqual(out["invalid_land_ids"], ["bad"])
         self.assertEqual(again["run_id"], out["run_id"])
-        self.assertEqual(publish.call_count, 4)
+        self.assertEqual(publish.call_count, 2)
         jobs = [obj for obj in objects.values() if obj.type == "satellite_batch"]
         self.assertEqual(
             [job.params_json["land_ids"] for job in jobs],
-            [["A", "B"], ["A", "B"], ["C"], ["C"]],
+            [["A", "B", "C"], ["A", "B", "C"]],
         )
         self.assertEqual(
             {job.params_json["sensor"] for job in jobs},

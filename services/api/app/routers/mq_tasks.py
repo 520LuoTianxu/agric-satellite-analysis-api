@@ -60,11 +60,11 @@ async def enqueue_mq_task(
     from agric_satellite_analysis_common.settings import settings as common_settings
 
     extras = body.extras or {}
-    needs_vpa10 = body.type == "satellite_analysis" or (
+    needs_satellite_batch = body.type == "satellite_analysis" or (
         body.type == "land_bootstrap" and not extras.get("skip_indices")
     )
-    if needs_vpa10:
-        # 兼容旧通用入口：凡是会触发指数回填，都先建 VPA10 共享任务再跳过旧单地块扇出。
+    if needs_satellite_batch:
+        # 兼容旧通用入口：指数回填统一转成 10km 共享窗口任务，再跳过逐地块扇出。
         from app.core.config import settings
         from app.services.smart_land_backfill import run_smart_land_backfill
 
@@ -99,7 +99,7 @@ async def enqueue_mq_task(
         try:
             requested_parent_id = uuid.UUID(body.task_id) if body.task_id else uuid.uuid4()
         except ValueError:
-            # 旧调用方可能传入非 UUID 的消息 ID；项目区任务树使用独立 UUID 主任务。
+            # 旧调用方可能传入非 UUID 消息 ID；遥感分组任务树使用独立 UUID 主任务。
             requested_parent_id = uuid.uuid4()
 
         from app.services.smart_land_backfill import LandSelectionError
@@ -124,7 +124,7 @@ async def enqueue_mq_task(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if body.type == "land_bootstrap":
-            # bootstrap 保留天气/土壤及报告 follow-up，但遥感由独立 VPA10 Job 负责。
+            # bootstrap 保留天气/土壤及报告 follow-up，遥感由独立 10km Job 负责。
             task_id = body.task_id or str(uuid.uuid4())
             publish_api_task(
                 type="land_bootstrap",
@@ -134,7 +134,7 @@ async def enqueue_mq_task(
                 extras={
                     **extras,
                     "skip_indices": True,
-                    "vpa10_parent_job_id": result["parent_job_id"],
+                    "satellite_batch_parent_job_id": result["parent_job_id"],
                     "satellite_job_ids": result["queued_job_ids"],
                     **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
                     "enqueued_by": str(ctx.user.id),
@@ -147,7 +147,7 @@ async def enqueue_mq_task(
                 created_at=datetime.now(timezone.utc),
             )
 
-        # satellite_analysis 旧语义还会补齐相同日期范围的天气；遥感部分由上方 VPA10 子任务负责。
+        # satellite_analysis 旧语义还会补齐相同日期范围的天气；遥感由上方 10km 子任务负责。
         if body.land_id in result["selected_land_ids"]:
             try:
                 publish_api_task(
@@ -162,7 +162,7 @@ async def enqueue_mq_task(
                     },
                 )
             except Exception:
-                logger.exception("mq_vpa10_weather_dispatch_failed", land_id=body.land_id)
+                logger.exception("mq_satellite_batch_weather_dispatch_failed", land_id=body.land_id)
         if extras.get("with_bridge") or extras.get("bridge_job_id"):
             try:
                 publish_api_task(
@@ -181,7 +181,7 @@ async def enqueue_mq_task(
                     },
                 )
             except Exception:
-                logger.exception("mq_vpa10_bridge_dispatch_failed", land_id=body.land_id)
+                logger.exception("mq_satellite_batch_bridge_dispatch_failed", land_id=body.land_id)
         return MqTaskEnqueued(
             task_id=str(requested_parent_id),
             type=body.type,

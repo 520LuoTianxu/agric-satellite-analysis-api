@@ -20,7 +20,6 @@ from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.services.mysql_land_sync import sync_selected_lands
 from app.services.satellite_batch import build_satellite_batch_jobs
-from app.services.virtual_area_service import build_vpa10_satellite_jobs
 
 
 SMART_BACKFILL_MAX_LANDS = 1000
@@ -233,6 +232,13 @@ async def ensure_land_parcels(
         selected = _order_lands(lands_by_id.values(), requested)[:selection_limit]
 
     if not selected:
+        if allow_partial:
+            return [], _selection_summary(
+                requested,
+                [],
+                selection_limit=max_lands,
+                sync_summaries=sync_summaries,
+            )
         raise LandSelectionError(
             "Smart中不存在可处理的请求地块",
             missing_land_ids=missing[:SMART_BACKFILL_MAX_LANDS],
@@ -251,7 +257,7 @@ def _order_lands(lands: Sequence[LandParcel], requested: Sequence[str]) -> list[
     return [by_id[land_id] for land_id in requested if land_id in by_id]
 
 
-async def _build_smart_virtual_area_jobs(
+async def _build_smart_satellite_jobs(
     db: AsyncSession,
     lands: Sequence[LandParcel],
     *,
@@ -260,36 +266,19 @@ async def _build_smart_virtual_area_jobs(
     sensors: Sequence[str],
     force: bool,
     parent_job_id: uuid.UUID,
-) -> tuple[list[Any], list[Job], bool]:
-    """把 Smart 清单转换成 vpa10 项目区 Job；保留旧测试/旧库的安全回退。"""
-    # 线上 API 使用真实 AsyncSession；测试中的轻量 fake DB 仍走既有构造器，
-    # 避免为了验证任务树而要求连接真实 PostgreSQL。数据库脚本执行后线上必走 vpa10。
-    if not isinstance(db, AsyncSession):
-        groups, jobs = await asyncio.to_thread(
-            build_satellite_batch_jobs,
-            lands,
-            date_from=date_from,
-            date_to=date_to,
-            sensors=sensors,
-            force=force,
-            parent_job_id=parent_job_id,
-            id_namespace=parent_job_id,
-            chunk_days=settings.index_backfill_chunk_days,
-        )
-        return list(groups), list(jobs), False
-
-    groups, jobs, _ = await build_vpa10_satellite_jobs(
-        db,
+) -> tuple[list[Any], list[Job]]:
+    """Smart 新地块与普通请求共用同一套无状态 10km 贪心规划。"""
+    return await asyncio.to_thread(
+        build_satellite_batch_jobs,
         lands,
         date_from=date_from,
         date_to=date_to,
         sensors=sensors,
         force=force,
         parent_job_id=parent_job_id,
-        assigned_by="smart-sync",
+        id_namespace=parent_job_id,
         chunk_days=settings.index_backfill_chunk_days,
     )
-    return groups, jobs, True
 
 
 async def run_smart_land_backfill(
@@ -314,7 +303,7 @@ async def run_smart_land_backfill(
         )
         selected_land_ids = [str(land.land_id) for land in lands]
         execution_parent_id = parent_job_id or uuid.uuid4()
-        groups, jobs, using_virtual_areas = await _build_smart_virtual_area_jobs(
+        groups, jobs = await _build_smart_satellite_jobs(
             db,
             lands,
             date_from=date_from,
@@ -338,9 +327,7 @@ async def run_smart_land_backfill(
                 if selection
                 else len(land_ids),
                 "selected_land_count": len(selected_land_ids),
-                "algorithm_version": (
-                    "vpa10-greedy-v1" if using_virtual_areas else "legacy-5km-v1"
-                ),
+                "algorithm_version": "dynamic-window-greedy-10km-v1",
             },
             params_json={
                 "land_ids": selected_land_ids,
@@ -360,9 +347,7 @@ async def run_smart_land_backfill(
                 "job_ids": [str(job.id) for job in jobs],
                 "satellite_job_ids": [str(job.id) for job in jobs],
                 "admin_task_run_id": str(execution_parent_id),
-                "algorithm_version": (
-                    "vpa10-greedy-v1" if using_virtual_areas else "legacy-5km-v1"
-                ),
+                "algorithm_version": "dynamic-window-greedy-10km-v1",
             },
         )
         db.add(parent_job)
@@ -387,17 +372,19 @@ async def run_smart_land_backfill(
                 job.error = f"遥感聚合任务派发失败：{str(exc)[:3900]}"
                 failed_job_ids.append(str(job.id))
 
-        parent_job.status = "partial" if failed_job_ids else "running"
+        parent_job.status = (
+            "partial" if failed_job_ids else ("running" if jobs else "completed")
+        )
         parent_job.progress_json = {
             **(parent_job.progress_json or {}),
-            "stage": "dispatched",
+            "stage": "dispatched" if jobs else "completed",
             "queued_count": len(jobs) - len(failed_job_ids),
             "failed_count": len(failed_job_ids),
         }
         await db.commit()
 
     return {
-        "status": "partial" if failed_job_ids else "queued",
+        "status": "partial" if failed_job_ids else ("queued" if jobs else "completed"),
         "parent_job_id": str(execution_parent_id),
         "requested_land_count": selection["requested_land_count"] if selection else len(land_ids),
         "selected_land_ids": selected_land_ids,

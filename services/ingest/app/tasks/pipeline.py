@@ -44,6 +44,9 @@ logger = structlog.get_logger()
 STAC_API_URL = os.environ.get(
     "STAC_API_URL", "https://earth-search.aws.element84.com/v1"
 )
+S2_PC_STAC_API_URL = os.environ.get(
+    "S2_PC_STAC_API_URL", "https://planetarycomputer.microsoft.com/api/stac/v1"
+)
 STAC_COLLECTION = "sentinel-2-l2a"
 # STAC eo:cloud_cover filter (scene-level). Stricter than the 30% agri
 # product skip (parcel_cloud_cover_pct / drought display). Keep search
@@ -308,6 +311,9 @@ def search_scenes_for_defs(
     extra_assets: dict[str, tuple[str, ...]] | None = None,
     cloud_dedupe: str = "week",
     max_items: int | None = None,
+    catalog_url: str | None = None,
+    planetary_computer_signing: bool = False,
+    source_catalog: str | None = None,
 ) -> list[dict]:
     """Search Element84 STAC and resolve HREFs for the union of index bands.
 
@@ -325,7 +331,14 @@ def search_scenes_for_defs(
         dedupe = "week"
     item_cap = int(max_items) if max_items is not None else (2000 if dedupe == "none" else 100)
     t0 = time.perf_counter()
-    catalog = STACClient.open(STAC_API_URL)
+    selected_catalog_url = catalog_url or STAC_API_URL
+    if planetary_computer_signing:
+        # PC 的私有化签名链接必须通过官方 signer 即时生成 SAS，过期后不缓存。
+        import planetary_computer as pc
+
+        catalog = STACClient.open(selected_catalog_url, modifier=pc.sign_inplace)
+    else:
+        catalog = STACClient.open(selected_catalog_url)
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=land_geom_geojson,
@@ -384,6 +397,7 @@ def search_scenes_for_defs(
                     "band_hrefs": band_hrefs,
                     # 聚合下载需要按景覆盖范围筛选地块，避免写入景外的填充值。
                     "geometry": item.geometry,
+                    "source_catalog": source_catalog or "element84",
                 }
             )
         else:

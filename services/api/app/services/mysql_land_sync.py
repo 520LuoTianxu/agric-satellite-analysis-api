@@ -542,7 +542,7 @@ async def _apply_batch(
     )
 
     if not create_rs_jobs:
-        # 显式选地只同步 Smart 主数据；上层统一规划 VPA10 并创建共享遥感 Job，
+        # 显式选地只同步 Smart 主数据；上层按本次地块集合动态规划 10km 窗口，
         # 这里仅同步 Smart 地块主数据，禁止再为每块地派发重复的单地块回填。
         await db.commit()
         return
@@ -595,7 +595,7 @@ async def _apply_batch(
         await db.commit()
         return
 
-    from app.services.virtual_area_service import build_vpa10_satellite_jobs
+    from app.services.satellite_batch import create_satellite_batch_jobs
 
     selected_ids = [record.land_id for record, _, _ in dispatch]
     selected_lands = (
@@ -607,7 +607,7 @@ async def _apply_batch(
     ).scalars().all()
     batch_id = uuid.uuid5(
         run_id,
-        "vpa10-smart-sync:" + ",".join(sorted(selected_ids)),
+        "satellite-10km-smart-sync:" + ",".join(sorted(selected_ids)),
     )
     parent = Job(
         id=batch_id,
@@ -622,7 +622,7 @@ async def _apply_batch(
         progress_json={"stage": "planning", "land_count": len(selected_ids)},
     )
     db.add(parent)
-    groups, area_jobs, _ = await build_vpa10_satellite_jobs(
+    groups, area_jobs, _ = await create_satellite_batch_jobs(
         db,
         selected_lands,
         date_from=date_from,
@@ -630,7 +630,6 @@ async def _apply_batch(
         sensors=("S1", "S2"),
         force=False,
         parent_job_id=batch_id,
-        assigned_by="smart-land-sync",
         chunk_days=settings.index_backfill_chunk_days,
         extra_params={
             "is_backfill": True,
@@ -646,8 +645,8 @@ async def _apply_batch(
         sentinel.params_json = {
             **(sentinel.params_json or {}),
             "dispatch_status": "planning",
-            "vpa10_parent_job_id": str(batch_id),
-            "vpa10_job_ids": jobs_by_land.get(record.land_id, []),
+            "satellite_batch_parent_job_id": str(batch_id),
+            "satellite_batch_job_ids": jobs_by_land.get(record.land_id, []),
         }
     parent.params_json = {
         **(parent.params_json or {}),
@@ -679,13 +678,13 @@ async def _apply_batch(
         except Exception as exc:
             summary["dispatch_failed"] += 1
             logger.exception(
-                "mysql_land_sync_vpa10_dispatch_failed",
+                "mysql_land_sync_satellite_batch_dispatch_failed",
                 land_id=job.land_id,
                 job_id=str(job.id),
                 error=str(exc),
             )
             job.status = "failed"
-            job.error = f"虚拟项目区任务派发失败：{str(exc)[:3900]}"
+            job.error = f"10km 遥感分组任务派发失败：{str(exc)[:3900]}"
             failed_job_ids.append(str(job.id))
             continue
         job.params_json = {**(job.params_json or {}), "dispatch_status": "queued"}
@@ -783,7 +782,7 @@ async def sync_selected_lands(
 ) -> dict[str, Any]:
     """从 Smart/MySQL 同步指定地块到 PostgreSQL，不派发单地块遥感任务。
 
-    批量选地报告需要先拿到请求地块的最新边界，再统一规划 10×10 km 虚拟项目区。
+    批量选地报告需要先拿到请求地块的最新边界，再按本次请求动态规划 10×10 km 窗口。
     因此这里复用正式同步的标准化和 upsert 逻辑，但关闭其原本的单地块
     ``satellite_analysis`` 派发，避免之后与批量窗口任务重复下载。
     ``allow_partial`` 用于显式地块清单：能标准化的记录先落库，缺失或无效记录

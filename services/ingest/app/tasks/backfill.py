@@ -417,7 +417,7 @@ def _schedule_via_http() -> bool:
 
 
 def _dispatch_weekly_index_items(items: list) -> int:
-    """把 API 准备好的项目区任务及其地块天气补拉投到本机 Celery broker。"""
+    """把 API 准备好的 10km 动态分组任务及天气补拉投到本机 Celery broker。"""
     jobs_dispatched = 0
     weather_dispatched: set[str] = set()
     for item in items:
@@ -507,10 +507,10 @@ def schedule_weekly_index_compute(self) -> dict:
             "http": True,
         }
 
-    # 项目区规划和资产索引由 API 数据库维护；缺少 Internal HTTP 时必须显式失败，
+    # 地块规划与 Job 都由 API 数据库维护；缺少 Internal HTTP 时必须显式失败，
     # 不能退回旧的逐地块下载，避免环境配置差异造成两套遥感数据链路。
     raise RuntimeError(
-        "weekly satellite scheduling requires Internal HTTP for VPA10 planning"
+        "weekly satellite scheduling requires Internal HTTP for 10km grouping"
     )
 
 

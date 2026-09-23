@@ -20,7 +20,7 @@ INGEST_INCLUDES = [
     "app.tasks.assessment_report",
     "app.tasks.season_growth_report",
     "app.tasks.overview_preagg",
-    "app.tasks.virtual_area",
+    "app.tasks.satellite_history",
 ]
 
 celery_app = create_celery_app(

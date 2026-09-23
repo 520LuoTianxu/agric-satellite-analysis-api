@@ -29,8 +29,8 @@ This repository is the **agric-satellite-analysis** project, derived from **[Ope
 
 - Self-hostable services: Next.js ↔ FastAPI ↔ Aliyun OSS ↔ PostgreSQL/JSONB
 - Vegetation indices from Sentinel-2: NDVI, EVI, SAVI, NDWI, with 24-month backfill
-- [Batch backfill by landIdList](docs/design/satellite-batch-backfill.md): pull the past three years through today by default, map requested parcels to persistent 10×10 km virtual project areas, reuse shared S1/S2 pixel assets, and save cropped per-parcel results.
-- [Daily national overview](docs/design/daily-satellite-overview.md): opt in with `SCHEDULE_DAILY_SATELLITE_ENABLED=true` to check every active parcel at 01:00 China time, inspect the seven-calendar-day S1/S2 window including today, reuse or populate 10×10 km virtual-area caches, verify result ingestion, and preserve daily country/province/city/county snapshots. All periodic schedules default to disabled and have independent env switches.
+- [Batch backfill by landIdList](docs/design/satellite-batch-backfill.md): pull the past three years through today by default, dynamically group requested parcels into transient 10×10 km windows, re-read S1/S2 COGs, and save only per-parcel results.
+- [Daily national overview](docs/design/daily-satellite-overview.md): opt in with `SCHEDULE_DAILY_SATELLITE_ENABLED=true` to check every active parcel at 01:00 China time, dynamically plan 10×10 km S1/S2 windows, verify result ingestion, and preserve daily country/province/city/county snapshots. All periodic schedules default to disabled and have independent env switches.
 - Daily weather (Open-Meteo) plus agricultural indices (GDD, water balance, drought)
 - Soil intelligence from SoilGrids (global, 250 m) and POLARIS (US, 30 m)
 - Provenance: Element84 STAC → COG/scene JSON → Aliyun OSS
@@ -170,7 +170,6 @@ This fork treats the **`agric_satellite`** PostgreSQL schema as the only applica
 
 | Concept | Table | API |
 | --- | --- | --- |
-| 项目区 (~5km tile) | `agric_satellite.virtual_project_areas` | `GET /v1/agri/project-areas` |
 | 地块 | `agric_satellite.land_parcels` (`boundary_geojson`) | `GET /v1/agri/lands/{land_id}` |
 | S1/S2 产品时序 | `agric_satellite.parcel_scene_products` | `GET /v1/agri/lands/{land_id}/scenes` |
 

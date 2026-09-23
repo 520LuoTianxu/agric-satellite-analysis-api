@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     mysql_sync_timezone: str = "Asia/Shanghai"
     mysql_sync_batch_size: int = 500
     mysql_sync_rs_months: int = 24
-    mysql_sync_processing_window_km: float = 5.0
+    mysql_sync_processing_window_km: float = 10.0
 
     # Redis
     redis_url: str = "redis://redis:6379/0"

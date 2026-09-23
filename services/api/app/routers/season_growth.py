@@ -256,12 +256,12 @@ async def create_season_growth_report(
                 )
 
         if pull_data:
-            # 生育期报告也使用项目区共享下载；bootstrap 只负责天气/土壤，
+            # 生育期报告也使用 10km 共享窗口下载；bootstrap 只负责天气/土壤，
             # 防止报告入口重新走逐地块遥感链路。
             # publish_api_task also inserts work_items when dual|claim (D4).
-            from app.services.virtual_area_service import build_vpa10_satellite_jobs
+            from app.services.satellite_batch import create_satellite_batch_jobs
 
-            _, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+            _, satellite_jobs, _ = await create_satellite_batch_jobs(
                 db,
                 [field],
                 date_from=start,
@@ -269,12 +269,11 @@ async def create_season_growth_report(
                 sensors=("S1", "S2"),
                 force=False,
                 parent_job_id=job.id,
-                assigned_by="season-growth-one-click",
             )
             satellite_job_ids = [str(item.id) for item in satellite_jobs]
             job.params_json = {
                 **(job.params_json or {}),
-                "virtual_area_job_ids": satellite_job_ids,
+                "satellite_batch_job_ids": satellite_job_ids,
             }
             await db.commit()
             for satellite_job in satellite_jobs:

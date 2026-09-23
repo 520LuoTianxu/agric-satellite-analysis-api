@@ -14,16 +14,12 @@ advisory lock `agric-satellite:mysql-land-sync`, streams the MySQL snapshot in
 batches, validates the pipe-delimited WGS84 polygon, and commits each target
 batch before dispatching remote-sensing work.
 
-New or boundary-changed parcels are matched to an existing fully containing
-10×10 km virtual project area or planned into a new one. The API dispatches
-shared `satellite_batch` jobs covering the previous 24 calendar months for S1
-and S2. Full-window pixel assets are reused from OSS when available; on a miss,
-the project area is downloaded once, then cropped results are persisted for
-the selected parcels. Metadata-only changes do not trigger a historical pull.
-
-The project-area boundary is persistent and does not move to the incoming
-parcel's centroid. If an incoming geometry no longer fits its assigned area,
-the old membership is marked stale and the planner selects a replacement area.
+New or boundary-changed parcels are included in one transient 10×10 km grouping
+plan for that sync run. The API dispatches shared `satellite_batch` jobs covering
+the previous 24 calendar months for S1 and S2. Each job fetches fresh STAC/COG
+data, crops it in memory, and persists only parcel-level results. No project-area
+membership or full-window pixel assets are read or written. Metadata-only changes
+do not trigger a historical pull.
 
 ## Source-specific decisions
 

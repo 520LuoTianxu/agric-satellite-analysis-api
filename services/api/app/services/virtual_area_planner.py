@@ -1,8 +1,7 @@
-"""10×10 km 动态虚拟项目区规划器。
+"""10×10 km 动态窗口规划算法；纯几何计算，不持久化任何空间分组。
 
-该模块只负责几何规划，不直接访问数据库或消息队列。规划器以项目区为
-下载和缓存单位，使用局部米制投影计算候选窗口，并保证成员地块被完整
-包含。数据库编排、任务派发和 Smart 增量同步由上层服务负责。
+每次请求基于当前地块集合进行全局 anchor 候选、稀缺地块保护与紧凑度
+评分，输出本次下载任务使用的窗口边界和地块成员。
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from shapely.strtree import STRtree
 
 from app.core.geo import geojson_to_shape
 
-VPA10_ALGORITHM_VERSION = "vpa10-greedy-v1"
+VPA10_ALGORITHM_VERSION = "dynamic-window-greedy-10km-v1"
 DEFAULT_WINDOW_SIDE_M = 10_000.0
 # 全国初始化时每轮只保留一批全局候选，避免地块数增长后候选窗口呈平方级膨胀；
 # 稀缺度排序仍保证困难地块优先进入候选，调用方可在小规模专项规划中提高上限。
@@ -509,7 +508,7 @@ def plan_virtual_areas(
     anchor_limit: int = DEFAULT_ANCHOR_LIMIT,
     center_limit: int = DEFAULT_CENTER_LIMIT,
 ) -> list[VirtualAreaPlan]:
-    """全局 anchor + 稀缺地块保护的贪心项目区规划。"""
+    """全局 anchor + 稀缺地块保护的贪心动态窗口规划。"""
     if window_side_m <= 0:
         raise ValueError("window_side_m必须大于0")
     parcels = normalize_parcels(lands)
