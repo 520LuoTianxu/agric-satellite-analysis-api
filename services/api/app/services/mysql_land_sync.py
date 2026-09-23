@@ -704,9 +704,8 @@ async def sync_selected_lands(
     批量选地报告需要先拿到请求地块的最新边界，再统一计算 5×5 km 共享窗口。
     因此这里复用正式同步的标准化和 upsert 逻辑，但关闭其原本的单地块
     ``satellite_analysis`` 派发，避免之后与批量窗口任务重复下载。
-    ``allow_partial`` 仅供 Smart 参数化回填使用：源库中能标准化的记录先落库，
-    缺失或无效记录通过摘要返回，由上层继续寻找下一个可用地块；默认仍保持
-    全量同步的原子语义，避免影响报告和其他调用方。
+    ``allow_partial`` 用于显式地块清单：能标准化的记录先落库，缺失或无效记录
+    通过摘要返回；默认仍保持全量同步的原子语义，避免影响报告和其他调用方。
     """
     requested = list(dict.fromkeys(str(value).strip() for value in land_ids))
     if not requested or any(not value for value in requested):
@@ -722,6 +721,7 @@ async def sync_selected_lands(
         "missing_land_ids": [],
         "filtered_land_ids": [],
         "invalid_land_ids": [],
+        "invalid_land_errors": [],
     }
     if not settings.mysql_source_enabled:
         summary["status"] = "disabled"
@@ -774,9 +774,13 @@ async def sync_selected_lands(
                         continue
                     try:
                         records.append(normalize_source_row(row))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as exc:
                         if raw_land_id:
                             summary["invalid_land_ids"].append(raw_land_id)
+                            if len(summary["invalid_land_errors"]) < 100:
+                                summary["invalid_land_errors"].append(
+                                    {"land_id": raw_land_id, "reason": str(exc)}
+                                )
 
                 has_selection_errors = bool(
                     summary["missing_land_ids"]
@@ -791,7 +795,7 @@ async def sync_selected_lands(
                     else:
                         summary["status"] = "invalid"
                 else:
-                    # Smart 参数化回填允许部分成功，保证有效地块不会被同批无效编号拖住。
+                    # 显式地块清单允许部分成功，避免无数据或无效编号阻断有效地块同步。
                     if records:
                         async with async_session() as target_db:
                             await _apply_batch(
