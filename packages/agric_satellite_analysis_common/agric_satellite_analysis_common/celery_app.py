@@ -97,12 +97,18 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         # Celery显式使用UTC；20:00对应北京时间04:00，避开卫星刷新后的数据准备窗口。
         "schedule": crontab(hour=20, minute=0),
     },
+    "virtual-area-history-weekly": {
+        "task": "app.tasks.virtual_area.schedule_virtual_area_history_backfill",
+        # 周一 18:30 UTC = 北京时间周二 02:30；默认关闭，避免升级后自动拉取五年数据。
+        "schedule": crontab(day_of_week=1, hour=18, minute=30),
+    },
 }
 
 BEAT_SWITCHES = {
     "fetch-weather-daily": "schedule_daily_weather_enabled",
     "refresh-satellite-overview-daily": "schedule_daily_satellite_enabled",
     "refresh-overview-stats-daily": "schedule_overview_refresh_enabled",
+    "virtual-area-history-weekly": "schedule_virtual_area_history_enabled",
 }
 
 

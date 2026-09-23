@@ -174,6 +174,20 @@ async def prepare_weekly_index(
     )
 
 
+@router.post("/virtual-area-history")
+async def prepare_virtual_area_history(
+    _: InternalAuth,
+    as_of: date | None = Query(default=None),
+) -> dict[str, Any]:
+    """Beat 通过 API 机触发五年 vpa10 历史共享回填。"""
+    from app.services.virtual_area_service import backfill_virtual_area_history
+
+    return await backfill_virtual_area_history(
+        date_to=as_of,
+        parent_job_id=uuid.uuid4(),
+    )
+
+
 @router.get("/weather-lands", response_model=WeatherLandsOut)
 async def list_weather_lands(
     _: InternalAuth,

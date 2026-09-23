@@ -46,6 +46,8 @@ from app.routers import (
     admin_ops,
     internal_admin,
     satellite_batch,
+    virtual_areas,
+    internal_virtual_areas,
 )
 
 
@@ -120,6 +122,7 @@ app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(lands.router, prefix=PREFIX, tags=["lands"])
 app.include_router(project_monitoring.router, prefix=PREFIX, tags=["projects"])
 app.include_router(satellite_batch.router, prefix=PREFIX, tags=["lands"])
+app.include_router(virtual_areas.router, prefix=PREFIX)
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])
@@ -141,6 +144,7 @@ app.include_router(internal_jobs.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
 app.include_router(internal_results.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)
+app.include_router(internal_virtual_areas.router, prefix=PREFIX)
 app.include_router(admin_ops.router, prefix=PREFIX)
 app.include_router(internal_admin.router, prefix=PREFIX)
 

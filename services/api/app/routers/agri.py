@@ -28,6 +28,7 @@ from app.schemas.agri import (
     LandScenesSummaryOut,
     NdviDayGradeShareItem,
     NdviDayGradeSharesOut,
+    ProjectAreaAssetOut,
     ProjectAreaLandOut,
     ProjectAreaOut,
     SceneProductOut,
@@ -76,6 +77,7 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
             "boundary_geojson",
             "source_properties",
             "pixel_data",
+            "grid_json",
             "decloud_reasons",
         ) and isinstance(v, str):
             try:
@@ -237,6 +239,17 @@ def _sign_preview_url(key: str | None, fallback: str | None = None) -> str | Non
     return None
 
 
+def _sign_project_area_asset_url(key: Any) -> str | None:
+    """为项目区像素 JSON/PNG 生成浏览器可读地址；签名失败不影响元数据返回。"""
+    if not isinstance(key, str) or not key.strip():
+        return None
+    try:
+        return get_parcel_product_storage().presigned_get(key.strip())
+    except Exception as exc:  # noqa: BLE001 — OSS 签名失败时仍返回资产元数据
+        logger.warning("project_area_asset_presign_failed key=%s err=%s", key[:120], exc)
+        return None
+
+
 def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) -> None:
     """Fill preview URLs. DB columns (already on ``d``) win over OSS JSON media."""
     db_rgb = d.get("rgb_url")
@@ -291,6 +304,7 @@ async def agri_stats(
     tables = [
         "virtual_project_areas",
         "virtual_project_area_lands",
+        "virtual_project_area_assets",
         "land_parcels",
         "parcel_scene_products",
         "ingest_runs",
@@ -368,7 +382,11 @@ async def list_project_areas(
                        tile_width_m, tile_height_m, group_id, group_name, base_id,
                        org_code, org_name, province_name, city_name, county_name,
                        {boundary_expr}, boundary_srid,
-                       min_lon, min_lat, max_lon, max_lat, created_at, updated_at,
+                       min_lon, min_lat, max_lon, max_lat,
+                       algorithm_version, window_side_m, window_shape, planning_crs,
+                       grid_crs, center_x, center_y, status, data_from, data_to,
+                       manifest_oss_key, manifest_sha256, data_ready_ratio,
+                       last_planned_at, last_backfill_at, created_at, updated_at,
                        parcel_count AS land_count
                 FROM agric_satellite.virtual_project_areas
                 WHERE {wh}
@@ -408,6 +426,77 @@ async def get_project_area(
     if not row:
         raise HTTPException(status_code=404, detail="Project area (tile) not found")
     return ProjectAreaOut.model_validate(_row_to_dict(row))
+
+
+@router.get(
+    "/project-areas/{tile_id}/assets",
+    response_model=list[ProjectAreaAssetOut],
+)
+async def list_project_area_assets(
+    tile_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    sensor: Literal["S1", "S2"] | None = Query(None),
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
+    asset_kind: str | None = Query(None, pattern="^(pixel_json|preview_png)$"),
+):
+    """查询项目区缓存资产，前端可直接用签名 URL 读取像素 JSON 或 PNG。"""
+    await _agri_ready(db)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="from must be no later than to")
+    exists = (
+        await db.execute(
+            text(
+                """
+                SELECT 1 FROM agric_satellite.virtual_project_areas
+                WHERE tile_id = :tile_id
+                """
+            ),
+            {"tile_id": tile_id},
+        )
+    ).scalar()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Project area (tile) not found")
+
+    params: dict[str, Any] = {"tile_id": tile_id}
+    clauses = [
+        "tile_id = :tile_id",
+        "status = 'ready'",
+    ]
+    if sensor:
+        clauses.append("sensor = :sensor")
+        params["sensor"] = sensor
+    if date_from:
+        clauses.append("scene_date >= :date_from")
+        params["date_from"] = date_from
+    if date_to:
+        clauses.append("scene_date <= :date_to")
+        params["date_to"] = date_to
+    if asset_kind:
+        clauses.append("asset_kind = :asset_kind")
+        params["asset_kind"] = asset_kind
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT tile_id, sensor, scene_date, scene_id, asset_kind, oss_key,
+                       format, compression, grid_json, checksum, byte_size, status,
+                       error, created_at, updated_at
+                FROM agric_satellite.virtual_project_area_assets
+                WHERE {' AND '.join(clauses)}
+                ORDER BY scene_date, sensor, scene_id, asset_kind
+                """
+            ),
+            params,
+        )
+    ).fetchall()
+    items: list[ProjectAreaAssetOut] = []
+    for row in rows:
+        item = _row_to_dict(row)
+        item["download_url"] = _sign_project_area_asset_url(item.get("oss_key"))
+        items.append(ProjectAreaAssetOut.model_validate(item))
+    return items
 
 
 @router.get(
