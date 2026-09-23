@@ -32,6 +32,7 @@ __all__ = [
     "data_readiness",
     "daily_satellite_prepare",
     "daily_satellite_finalize",
+    "evaluate_land_alerts",
     "ensure_admin_task_run",
     "finalize_overview_stats",
     "fail_work",
@@ -396,6 +397,30 @@ def agri_scenes_summary(
     if client is not None:
         return _do(client)
     with internal_client() as c:
+        return _do(c)
+
+
+def evaluate_land_alerts(
+    land_id: str,
+    *,
+    replace_open: bool = True,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """POST /v1/internal/lands/{id}/alerts/evaluate; the API owns the database write."""
+    body = {"replace_open": bool(replace_open)}
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.post(f"/v1/internal/lands/{land_id}/alerts/evaluate", json=body)
+        _raise_for_status(r, context="lands/alerts/evaluate")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("lands/alerts/evaluate returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
         return _do(c)
 
 

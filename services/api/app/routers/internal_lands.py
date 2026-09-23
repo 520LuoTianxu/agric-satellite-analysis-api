@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.geo import geojson_centroid
+from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import LandParcel
 
@@ -57,6 +58,30 @@ class LandGeomOut(BaseModel):
 
 class LandTagsPatch(BaseModel):
     tags_json: list[str] | None = None
+
+
+class AlertEvaluationRequest(BaseModel):
+    replace_open: bool = True
+
+
+@router.post("/{land_id}/alerts/evaluate")
+async def evaluate_land_alerts(
+    land_id: str,
+    body: AlertEvaluationRequest,
+    _: InternalAuth,
+):
+    """让下载 Worker 通过 API 主库重算预警，不直接连接 Postgres。"""
+    from app.services.agri_alerts import evaluate_agri_alerts_for_land
+
+    try:
+        return await asyncio.to_thread(
+            evaluate_agri_alerts_for_land,
+            land_id,
+            replace_open=body.replace_open,
+        )
+    except Exception as exc:
+        logger.exception("internal_agri_alert_evaluation_failed", land_id=land_id)
+        raise HTTPException(status_code=500, detail="agri alert evaluation failed") from exc
 
 
 @router.get("/resolve", response_model=LandResolveOut)

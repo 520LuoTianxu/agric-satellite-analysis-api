@@ -12,10 +12,12 @@ import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import (
     APIRouter,
     Depends,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -41,6 +43,7 @@ from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, require_roles
 from app.models.tables import (
     AuditEvent,
+    Alert,
     Farm,
     LandParcel,
     Job,
@@ -52,6 +55,7 @@ from app.schemas.farm import (
     BackfillIndicesRequest,
     BackfillIndicesResponse,
     BackfillStatusResponse,
+    BoundaryReview,
     LandParcelCreate,
     LandParcelImportResponse,
     LandParcelOut,
@@ -243,11 +247,18 @@ async def create_land(
     body: LandParcelCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    hr_base_id: Annotated[str | None, Header(alias="Hr-Base-Id")] = None,
 ):
     """Create a parcel row and optionally start its data bootstrap."""
     land_id = body.land_id.strip()
     if not land_id:
         raise HTTPException(status_code=422, detail="land_id is required")
+    raw_base_id = (hr_base_id or "").strip()
+    if raw_base_id and (
+        not raw_base_id.isascii() or not raw_base_id.isdecimal() or int(raw_base_id) <= 0
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Hr-Base-Id")
+    base_id = str(int(raw_base_id)) if raw_base_id else None
     if body.farm_id is not None:
         farm = await db.get(Farm, body.farm_id)
         if not farm or farm.deleted_at is not None:
@@ -263,6 +274,8 @@ async def create_land(
         source_parcel_id=land_id,
         tile_id=body.tile_id or f"manual_{land_id}",
         farm_id=body.farm_id,
+        # 预警列表按基地隔离；新建地块继承当前基地，避免预警被租户过滤条件隐藏。
+        base_id=base_id,
         land_name=body.land_name,
         group_id=body.group_id,
         group_name=body.group_name,
@@ -297,6 +310,42 @@ async def create_land(
             metadata_json={"land_id": land_id, "farm_id": str(body.farm_id or "")},
         )
     )
+    review: BoundaryReview | None = body.boundary_review
+    if review is not None:
+        # OSM 建筑/居民区是边界复核线索；矢量底图缺少要素时不伪造“无建筑”结论。
+        alert_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        if review.building_count > 0:
+            db.add(
+                Alert(
+                    land_id=land_id,
+                    date=alert_date,
+                    severity="high" if review.building_count >= 5 else "medium",
+                    rule_name="boundary_building_overlap",
+                    rule_params_json={
+                        "source": review.source,
+                        "building_count": review.building_count,
+                    },
+                    message=(
+                        f"所画地块边界与地图中的 {review.building_count} 处建筑轮廓重叠；"
+                        "建筑数据可能不完整，请核对房屋是否被圈入农田。"
+                    ),
+                    status="open",
+                    index_type=None,
+                )
+            )
+        if review.residential_overlap:
+            db.add(
+                Alert(
+                    land_id=land_id,
+                    date=alert_date,
+                    severity="medium",
+                    rule_name="boundary_residential_overlap",
+                    rule_params_json={"source": review.source},
+                    message="所画地块边界与地图标记的居民区重叠；请核对是否把房区圈入农田地块。",
+                    status="open",
+                    index_type=None,
+                )
+            )
     await db.flush()
     await db.commit()
 

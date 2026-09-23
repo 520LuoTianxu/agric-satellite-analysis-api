@@ -501,6 +501,21 @@ async def complete_work_item(
             from agric_satellite_analysis_common.result_apply import apply_complete_result
 
             apply_stats = await asyncio.to_thread(apply_complete_result, result_dict)
+            # 场景或天气日数据入库后立即重算，使每日长势、干旱和洪涝信号进入预警列表。
+            from app.services.agri_alerts import evaluate_alerts_for_scene_result
+
+            try:
+                await asyncio.to_thread(
+                    evaluate_alerts_for_scene_result,
+                    result_dict,
+                    apply_stats,
+                )
+            except Exception as alert_exc:
+                logger.exception(
+                    "work_item_alert_evaluation_failed",
+                    work_id=str(work_id),
+                    error=str(alert_exc),
+                )
             # Stash apply stats only when something ran (avoid noise on ack payloads)
             if isinstance(apply_stats, dict) and not apply_stats.get("skipped"):
                 merged = dict(result_dict)

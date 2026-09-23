@@ -917,9 +917,21 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     oss_urls = envelope.get("oss_urls")
     if isinstance(oss_urls, dict) and oss_urls:
         downloaded, scene_n = _download_and_apply_oss(oss_urls, status=status)
-        stats["oss"] = {"labels": list(downloaded.keys()), "scene_upserts": scene_n}
+        # 返回天气实际入库行数，供 API 在同一结果链路触发干旱预警重算。
+        weather_n = sum(
+            int(item.get("weather_rows") or 0)
+            for item in downloaded.values()
+            if isinstance(item, dict)
+        )
+        stats["oss"] = {
+            "labels": list(downloaded.keys()),
+            "scene_upserts": scene_n,
+            "weather_upserts": weather_n,
+        }
         if scene_n:
             stats["scene_upserts"] = stats.get("scene_upserts", 0) + scene_n
+        if weather_n:
+            stats["weather_upserts"] = weather_n
 
     inline = envelope.get("payload")
     if inline is None:
