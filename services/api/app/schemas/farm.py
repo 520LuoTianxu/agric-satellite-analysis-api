@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator, Field as PydanticField
 
@@ -42,6 +42,14 @@ class FarmOut(BaseModel):
 # ── Canonical land parcel ───────────────────────────────────────────
 
 
+class BoundaryReview(BaseModel):
+    """前端当前可用的 OSM 矢量底图边界检查结果，仅作人工复核线索。"""
+
+    source: Literal["osm_pmtiles"] = "osm_pmtiles"
+    building_count: int = PydanticField(default=0, ge=0, le=10000)
+    residential_overlap: bool = False
+
+
 class LandParcelCreate(BaseModel):
     """Create one canonical parcel row; ``land_id`` is supplied by the caller."""
 
@@ -62,6 +70,7 @@ class LandParcelCreate(BaseModel):
     village_code: str | None = None
     village_name: str | None = None
     boundary_geojson: dict[str, Any]
+    boundary_review: BoundaryReview | None = None
     crop_type: str | None = None
     season: str | None = None
     tags_json: list[str] | None = None

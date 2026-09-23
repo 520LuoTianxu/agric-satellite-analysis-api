@@ -8,25 +8,34 @@ does not translate to a legacy UUID or consult a second parcel table.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+import asyncio
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import (
     APIRouter,
     Depends,
+    Header,
     HTTPException,
     Query,
     Request,
     UploadFile,
     status,
 )
+from agric_satellite_analysis_common.scheduled_land_filter import (
+    EXCLUDED_SCHEDULE_BASE_IDS,
+    MAX_SCHEDULE_LAND_AREA_MU,
+)
 from shapely.geometry import MultiPolygon, mapping, shape
 from shapely.ops import transform
 from shapely.validation import explain_validity
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
+from app.core.config import settings
 from app.core.crops import normalize_crop_key
 from app.core.database import get_db
 from app.core.logging import logger
@@ -34,6 +43,7 @@ from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, require_roles
 from app.models.tables import (
     AuditEvent,
+    Alert,
     Farm,
     LandParcel,
     Job,
@@ -45,6 +55,7 @@ from app.schemas.farm import (
     BackfillIndicesRequest,
     BackfillIndicesResponse,
     BackfillStatusResponse,
+    BoundaryReview,
     LandParcelCreate,
     LandParcelImportResponse,
     LandParcelOut,
@@ -236,11 +247,18 @@ async def create_land(
     body: LandParcelCreate,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    hr_base_id: Annotated[str | None, Header(alias="Hr-Base-Id")] = None,
 ):
     """Create a parcel row and optionally start its data bootstrap."""
     land_id = body.land_id.strip()
     if not land_id:
         raise HTTPException(status_code=422, detail="land_id is required")
+    raw_base_id = (hr_base_id or "").strip()
+    if raw_base_id and (
+        not raw_base_id.isascii() or not raw_base_id.isdecimal() or int(raw_base_id) <= 0
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Hr-Base-Id")
+    base_id = str(int(raw_base_id)) if raw_base_id else None
     if body.farm_id is not None:
         farm = await db.get(Farm, body.farm_id)
         if not farm or farm.deleted_at is not None:
@@ -256,6 +274,8 @@ async def create_land(
         source_parcel_id=land_id,
         tile_id=body.tile_id or f"manual_{land_id}",
         farm_id=body.farm_id,
+        # 预警列表按基地隔离；新建地块继承当前基地，避免预警被租户过滤条件隐藏。
+        base_id=base_id,
         land_name=body.land_name,
         group_id=body.group_id,
         group_name=body.group_name,
@@ -290,6 +310,42 @@ async def create_land(
             metadata_json={"land_id": land_id, "farm_id": str(body.farm_id or "")},
         )
     )
+    review: BoundaryReview | None = body.boundary_review
+    if review is not None:
+        # OSM 建筑/居民区是边界复核线索；矢量底图缺少要素时不伪造“无建筑”结论。
+        alert_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        if review.building_count > 0:
+            db.add(
+                Alert(
+                    land_id=land_id,
+                    date=alert_date,
+                    severity="high" if review.building_count >= 5 else "medium",
+                    rule_name="boundary_building_overlap",
+                    rule_params_json={
+                        "source": review.source,
+                        "building_count": review.building_count,
+                    },
+                    message=(
+                        f"所画地块边界与地图中的 {review.building_count} 处建筑轮廓重叠；"
+                        "建筑数据可能不完整，请核对房屋是否被圈入农田。"
+                    ),
+                    status="open",
+                    index_type=None,
+                )
+            )
+        if review.residential_overlap:
+            db.add(
+                Alert(
+                    land_id=land_id,
+                    date=alert_date,
+                    severity="medium",
+                    rule_name="boundary_residential_overlap",
+                    rule_params_json={"source": review.source},
+                    message="所画地块边界与地图标记的居民区重叠；请核对是否把房区圈入农田地块。",
+                    status="open",
+                    index_type=None,
+                )
+            )
     await db.flush()
     await db.commit()
 
@@ -298,9 +354,20 @@ async def create_land(
     publish_api_task(
         type="land_bootstrap",
         land_id=land_id,
-        extras={},
+        extras={"skip_indices": True},
         priority=MANUAL_TASK_PRIORITY,
     )
+    # 新建地块的历史遥感回填也走同一项目区窗口，land_bootstrap 只负责天气/土壤。
+    try:
+        from app.services.virtual_area_service import backfill_virtual_area_history
+
+        await backfill_virtual_area_history(
+            land_ids=[land_id],
+            years=5,
+            sensors=("S1", "S2"),
+        )
+    except Exception:
+        logger.exception("land_created_vpa10_history_dispatch_failed", land_id=land_id)
     logger.info("land_created", land_id=land_id, farm_id=str(body.farm_id or ""))
     return _land_to_out(land)
 
@@ -486,7 +553,10 @@ async def _fail_stale_backfill_jobs(db: AsyncSession, land_id: str) -> int:
     result = await db.execute(
         Job.__table__.update()
         .where(
-            Job.land_id == land_id,
+            or_(
+                Job.land_id == land_id,
+                Job.params_json["land_ids"].contains([land_id]),
+            ),
             Job.status.in_(["pending", "running"]),
             Job.params_json["is_backfill"].as_boolean().is_(True),
             Job.created_at < cutoff,
@@ -532,8 +602,8 @@ async def backfill_land_indices(
     ctx: Annotated[OrgContext, Depends(_admin)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    """Start a direct land-id backfill wave."""
-    await _get_land_or_404(land_id, db)
+    """将单地块回填纳入虚拟项目区共享下载，并保持原有状态查询语义。"""
+    land = await _get_land_or_404(land_id, db)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
         {"lock_key": f"backfill:{land_id}"},
@@ -543,7 +613,10 @@ async def backfill_land_indices(
     active = (
         await db.execute(
             select(Job.id).where(
-                Job.land_id == land_id,
+                or_(
+                    Job.land_id == land_id,
+                    Job.params_json["land_ids"].contains([land_id]),
+                ),
                 Job.status.in_(["pending", "running"]),
                 Job.params_json["is_backfill"].as_boolean().is_(True),
                 Job.created_at >= wave_start,
@@ -583,21 +656,90 @@ async def backfill_land_indices(
     )
     db.add(sentinel)
     await db.flush()
-    extras["sentinel_job_id"] = str(sentinel.id)
+    sentinel_id = sentinel.id
+    extras["sentinel_job_id"] = str(sentinel_id)
+    await db.commit()
+
+    date_to = date.fromisoformat(extras.get("date_to") or date.today().isoformat())
+    date_from = date.fromisoformat(
+        extras.get("date_from")
+        or (date_to - timedelta(days=months * 30)).isoformat()
+    )
+    from app.services.virtual_area_service import build_vpa10_satellite_jobs
+
+    try:
+        _, jobs, _ = await build_vpa10_satellite_jobs(
+            db,
+            [land],
+            date_from=date_from,
+            date_to=date_to,
+            sensors=("S1", "S2"),
+            force=bool(extras["force"]),
+            parent_job_id=sentinel_id,
+            job_land_id=land_id,
+            assigned_by="manual-land-backfill",
+            chunk_days=settings.index_backfill_chunk_days,
+            extra_params={
+                "is_backfill": True,
+                "sentinel_job_id": str(sentinel_id),
+                "season_months": extras.get("season_months"),
+                "growing_seasons": extras.get("growing_seasons"),
+            },
+        )
+    except ValueError as exc:
+        await db.rollback()
+        sentinel = await db.get(Job, sentinel_id)
+        if sentinel is not None:
+            sentinel.status = "failed"
+            sentinel.error = str(exc)[:3900]
+            sentinel.finished_at = datetime.now(timezone.utc)
+            await db.commit()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # sentinel 只标记任务拆分完成，实际进度由它下面的 S1/S2 项目区 Job 汇总。
+    sentinel.status = "completed"
+    sentinel.finished_at = datetime.now(timezone.utc)
     await db.commit()
 
     from app.mq_publish import publish_api_task
 
-    publish_api_task(
-        type="satellite_analysis",
-        land_id=land_id,
-        extras=extras,
-        priority=MANUAL_TASK_PRIORITY,
-    )
+    for job in jobs:
+        try:
+            await asyncio.to_thread(
+                publish_api_task,
+                type="satellite_batch",
+                land_id=job.land_id,
+                task_id=str(job.id),
+                extras={"job_id": str(job.id)},
+                priority=MANUAL_TASK_PRIORITY,
+            )
+        except Exception as exc:
+            job.status = "failed"
+            job.error = f"项目区回填任务派发失败：{str(exc)[:3900]}"
+    # 遥感已由 VPA10 共享任务负责；天气仍按地块拉取并复用同一回填时间窗。
+    try:
+        await asyncio.to_thread(
+            publish_api_task,
+            type="weather_backfill",
+            land_id=land_id,
+            task_id=str(uuid.uuid5(sentinel_id, "weather-backfill")),
+            extras={
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+            },
+            priority=MANUAL_TASK_PRIORITY,
+        )
+    except Exception:
+        logger.exception("manual_backfill_weather_dispatch_failed", land_id=land_id)
+    await db.commit()
     return BackfillIndicesResponse(
         land_id=land_id,
-        status="dispatched",
-        message=f"已启动 {land_id} 的遥感回填。",
+        status="dispatched" if any(job.status != "failed" for job in jobs) else "failed",
+        message=(
+            f"已启动 {land_id} 的虚拟项目区遥感回填。"
+            if any(job.status != "failed" for job in jobs)
+            else f"{land_id} 的遥感回填任务未能派发。"
+        ),
     )
 
 
@@ -620,7 +762,10 @@ async def get_backfill_status(
                 func.count().filter(Job.status == "completed").label("completed"),
                 func.count().filter(Job.status == "failed").label("failed"),
             ).where(
-                Job.land_id == land_id,
+                or_(
+                    Job.land_id == land_id,
+                    Job.params_json["land_ids"].contains([land_id]),
+                ),
                 Job.params_json["is_backfill"].as_boolean().is_(True),
                 Job.created_at >= wave_start,
                 Job.type.notin_(["backfill", "agri_bridge"]),
@@ -662,13 +807,40 @@ async def backfill_all_lands(
     ctx: Annotated[OrgContext, Depends(require_roles("owner"))] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    from app.celery_client import send_task
+    lands = (
+        await db.execute(
+            select(LandParcel.land_id)
+            .where(LandParcel.deleted_at.is_(None))
+            .where(
+                or_(
+                    LandParcel.base_id.is_(None),
+                    LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
+                ),
+                or_(
+                    LandParcel.land_area_mu.is_(None),
+                    LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
+                ),
+            )
+            .order_by(LandParcel.land_id)
+        )
+    ).scalars().all()
+    end_date = date.today()
+    months = body.months if body else 60
+    start_date = end_date - timedelta(days=months * 30)
+    from app.services.virtual_area_service import backfill_virtual_area_history
 
-    send_task(
-        "app.tasks.backfill.backfill_all_existing_lands",
-        kwargs={"months": body.months if body else 60},
+    result = await backfill_virtual_area_history(
+        land_ids=[str(value) for value in lands],
+        date_from=start_date,
+        date_to=end_date,
+        sensors=("S1", "S2"),
+        force=bool(body.force) if body else False,
     )
-    return {"status": "dispatched", "message": "已为所有地块提交遥感回填。"}
+    return {
+        **result,
+        "land_count": len(lands),
+        "message": "已按10×10公里虚拟项目区提交历史遥感回填。",
+    }
 
 
 @router.post("/admin/ensure-soil-weather", status_code=status.HTTP_202_ACCEPTED)

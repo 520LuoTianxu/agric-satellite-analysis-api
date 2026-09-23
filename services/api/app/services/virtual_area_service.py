@@ -22,7 +22,9 @@ from shapely.geometry import shape
 from shapely.strtree import STRtree
 
 from app.core.config import settings
+from app.core.logging import logger
 from app.models.tables import Job, LandParcel
+from app.schemas.satellite_batch import SatelliteBatchGroup
 from app.services.virtual_area_planner import (
     DEFAULT_WINDOW_SIDE_M,
     ExistingArea,
@@ -645,34 +647,56 @@ async def create_vpa10_download_jobs(
     date_to: date,
     sensors: Sequence[str] = ("S1", "S2"),
     force: bool = False,
-    parent_job_id: uuid.UUID,
+    parent_job_id: uuid.UUID | None,
     chunk_days: int | None = None,
+    target_land_ids: Sequence[str] | None = None,
+    job_land_id: str | None = None,
+    extra_params: Mapping[str, Any] | None = None,
 ) -> list[Job]:
     """一个项目区对应共享窗口下载 Job；Job 内携带精确动态边界。"""
     if date_from > date_to:
         raise ValueError("date_from must be no later than date_to")
     chunk = max(int(chunk_days or settings.index_backfill_chunk_days), 1)
     unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
+    selected_land_ids = (
+        {str(value) for value in target_land_ids}
+        if target_land_ids is not None
+        else None
+    )
     jobs: list[Job] = []
     for area in areas:
         tile_id = str(area["tile_id"])
-        land_ids = list(dict.fromkeys(str(value) for value in area.get("land_ids", [])))
+        area_land_ids = list(
+            dict.fromkeys(str(value) for value in area.get("land_ids", []))
+        )
+        land_ids = (
+            [land_id for land_id in area_land_ids if land_id in selected_land_ids]
+            if selected_land_ids is not None
+            else area_land_ids
+        )
         if not land_ids:
             continue
-        anchor = str(area.get("anchor_land_id") or land_ids[0])
+        # 只处理部分成员时，下载机要求 anchor 必须在当前 Job 的 land_ids 中；
+        # 项目区本身仍复用持久化的完整边界，不会因此改变窗口位置。
+        preferred_anchor = str(area.get("anchor_land_id") or "")
+        anchor = preferred_anchor if preferred_anchor in land_ids else land_ids[0]
         props = dict(area.get("source_properties") or {})
         cursor = date_from
         while cursor <= date_to:
             end = min(cursor + timedelta(days=chunk - 1), date_to)
             for sensor in unique_sensors:
-                job_id = uuid.uuid5(
-                    parent_job_id,
-                    f"vpa10:{tile_id}:{sensor}:{cursor.isoformat()}:{end.isoformat()}",
+                job_id = (
+                    uuid.uuid5(
+                        parent_job_id,
+                        f"vpa10:{tile_id}:{sensor}:{cursor.isoformat()}:{end.isoformat()}",
+                    )
+                    if parent_job_id is not None
+                    else uuid.uuid4()
                 )
                 jobs.append(
                     Job(
                         id=job_id,
-                        land_id=anchor,
+                        land_id=job_land_id or anchor,
                         type="satellite_batch",
                         status="pending",
                         parent_job_id=parent_job_id,
@@ -695,12 +719,98 @@ async def create_vpa10_download_jobs(
                             "date_from": cursor.isoformat(),
                             "date_to": end.isoformat(),
                             "force": force,
+                            **dict(extra_params or {}),
                         },
                     )
                 )
             cursor = end + timedelta(days=1)
     db.add_all(jobs)
     return jobs
+
+
+async def build_vpa10_satellite_jobs(
+    db: AsyncSession,
+    lands: Sequence[LandParcel],
+    *,
+    date_from: date,
+    date_to: date,
+    sensors: Sequence[str] = ("S1", "S2"),
+    force: bool = False,
+    parent_job_id: uuid.UUID | None = None,
+    assigned_by: str = "vpa10-satellite-pipeline",
+    chunk_days: int | None = None,
+    extra_params: Mapping[str, Any] | None = None,
+) -> tuple[list[SatelliteBatchGroup], list[Job], dict[str, Any]]:
+    """统一把调用方地块规划/匹配到 10×10 km 项目区并构造共享下载任务。"""
+    snapshots = [
+        {
+            "land_id": str(land.land_id),
+            "boundary_geojson": land.boundary_geojson,
+            "boundary_srid": land.boundary_srid,
+        }
+        for land in lands
+    ]
+    target_land_ids = [row["land_id"] for row in snapshots]
+    prepared = await prepare_vpa10_areas(
+        db,
+        snapshots,
+        date_from=date_from,
+        date_to=date_to,
+        assigned_by=assigned_by,
+    )
+    jobs = await create_vpa10_download_jobs(
+        db,
+        prepared["areas"],
+        date_from=date_from,
+        date_to=date_to,
+        sensors=sensors,
+        force=force,
+        parent_job_id=parent_job_id,
+        chunk_days=chunk_days,
+        target_land_ids=target_land_ids,
+        extra_params=extra_params,
+    )
+
+    jobs_by_tile: dict[str, list[str]] = {}
+    for job in jobs:
+        tile_id = str((job.params_json or {}).get("virtual_area_tile_id") or "")
+        jobs_by_tile.setdefault(tile_id, []).append(str(job.id))
+    selected_ids = set(target_land_ids)
+    groups: list[SatelliteBatchGroup] = []
+    for area in prepared["areas"]:
+        members = [
+            str(land_id)
+            for land_id in area.get("land_ids", [])
+            if str(land_id) in selected_ids
+        ]
+        tile_id = str(area["tile_id"])
+        if not members or tile_id not in jobs_by_tile:
+            continue
+        preferred_anchor = str(area.get("anchor_land_id") or "")
+        anchor = preferred_anchor if preferred_anchor in members else members[0]
+        groups.append(
+            SatelliteBatchGroup(
+                anchor_land_id=anchor,
+                land_ids=members,
+                aggregation_bbox=(
+                    float(area["min_lon"]),
+                    float(area["min_lat"]),
+                    float(area["max_lon"]),
+                    float(area["max_lat"]),
+                ),
+                download_bbox=(
+                    float(area["min_lon"]),
+                    float(area["min_lat"]),
+                    float(area["max_lon"]),
+                    float(area["max_lat"]),
+                ),
+                oversized=bool(
+                    (area.get("source_properties") or {}).get("oversized", False)
+                ),
+                job_ids=jobs_by_tile[tile_id],
+            )
+        )
+    return groups, jobs, prepared
 
 
 async def initialize_virtual_areas(
@@ -759,37 +869,29 @@ async def initialize_virtual_areas(
                         status_code=422,
                     )
                 invalid_ids = sync_summary.get("invalid_land_ids") or []
-                if sync_status == "invalid" or invalid_ids:
-                    invalid_errors = sync_summary.get("invalid_land_errors") or []
-                    diagnostics = [
-                        (
-                            f"{item.get('land_id')}: "
-                            f"{str(item.get('reason', '数据校验失败'))[:120]}"
-                        )
-                        for item in invalid_errors[:10]
-                        if isinstance(item, dict)
-                    ]
-                    invalid_ids = invalid_ids or missing
-                    omitted_count = max(0, len(invalid_ids) - len(diagnostics))
-                    if omitted_count:
-                        diagnostics.append(f"另有 {omitted_count} 个地块校验失败")
-                    detail = "; ".join(diagnostics)
-                    if not detail:
-                        detail = ", ".join(invalid_ids[:20])
-                    raise VirtualAreaInitializationError(
-                        f"Smart 地块数据校验失败: {detail}", status_code=422
-                    )
                 skipped_land_ids = list(
                     dict.fromkeys(
                         str(value)
-                        for value in sync_summary.get("missing_land_ids", [])
+                        for value in [
+                            *(sync_summary.get("missing_land_ids") or []),
+                            *invalid_ids,
+                        ]
                     )
                 )
                 if sync_status == "not_found":
-                    skipped_land_ids = skipped_land_ids or missing
-                elif sync_status not in {"completed", "partial"}:
+                    skipped_land_ids.extend(
+                        land_id for land_id in missing if land_id not in skipped_land_ids
+                    )
+                elif sync_status not in {"completed", "partial", "invalid"}:
                     raise VirtualAreaInitializationError(
                         "Smart 地块同步未完成", status_code=503
+                    )
+                if invalid_ids:
+                    invalid_errors = sync_summary.get("invalid_land_errors") or []
+                    logger.warning(
+                        "vpa10_initialize_invalid_lands_skipped",
+                        invalid_land_ids=invalid_ids,
+                        invalid_land_errors=invalid_errors[:10],
                     )
 
                 # 重新读取 Smart 已写入 PG 的地块快照；这里只同步地块主数据，不创建遥感下载任务。
@@ -887,6 +989,11 @@ async def backfill_virtual_area_history(
             sensors=sensors,
             force=force,
             parent_job_id=execution_id,
+            target_land_ids=(
+                [str(row["land_id"]) for row in snapshots]
+                if land_ids is not None
+                else None
+            ),
         )
         parent = Job(
             id=execution_id,
@@ -953,6 +1060,7 @@ __all__ = [
     "VPA10_ASSIGNMENT_TYPE",
     "VPA10_HISTORY_YEARS",
     "backfill_virtual_area_history",
+    "build_vpa10_satellite_jobs",
     "create_vpa10_download_jobs",
     "default_history_window",
     "initialize_virtual_areas",

@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
@@ -24,14 +24,17 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
-from app.models.tables import Job
+from app.models.tables import Job, LandParcel
 from app.services.beat_schedule import (
     STAGGER_SECONDS,
-    WEEKLY_INDEX_KEYS,
-    index_task_name,
     weekly_date_window,
 )
 from app.services.overview_daily import business_today, finalize_daily, prepare_daily
+from app.services.satellite_batch import satellite_land_geometry
+from app.services.virtual_area_service import (
+    create_vpa10_download_jobs,
+    prepare_vpa10_areas,
+)
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
 
@@ -40,12 +43,15 @@ OVERVIEW_UPSERT_BATCH_SIZE = 200
 
 class WeeklyIndexJobOut(BaseModel):
     land_id: str
+    land_ids: list[str] = Field(default_factory=list)
     job_id: str
     task_name: str
     countdown: int = 0
     date_from: str
     date_to: str
     index: str
+    sensor: str | None = None
+    weather_windows: list[dict[str, str]] = Field(default_factory=list)
 
 
 class WeeklyIndexPrepareOut(BaseModel):
@@ -86,7 +92,7 @@ async def prepare_daily_satellite(
     db: Annotated[AsyncSession, Depends(get_db)],
     as_of: date | None = Query(None),
 ) -> dict[str, Any]:
-    """每日发现全部有效地块，按5×5公里窗口派发增量S1/S2下载。"""
+    """每日发现全部有效地块，按10×10公里虚拟项目区派发增量S1/S2下载。"""
     from fastapi import HTTPException
 
     day = as_of or business_today()
@@ -110,7 +116,7 @@ async def prepare_weekly_index(
     _: InternalAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """列出过期的统一地块，在 API 建 Job，返回给下载机执行。"""
+    """把过期地块映射到项目区后，按共享窗口创建 S1/S2 增量 Job。"""
     today = date.today()
     # 规范光学结果存于 parcel_scene_products；不再以历史 raster_layers
     # 作为另一套地块/遥感主链路。
@@ -132,44 +138,111 @@ async def prepare_weekly_index(
         )
     ).all()
 
-    items: list[WeeklyIndexJobOut] = []
-    lands_dispatched = 0
+    stale_windows: dict[str, tuple[date, date]] = {}
     for land_id, latest in rows:
         window = weekly_date_window(latest, today=today)
         if window is None:
             continue
-        date_from, date_to = window
-        countdown = lands_dispatched * STAGGER_SECONDS
-        for idx_key in WEEKLY_INDEX_KEYS:
-            job = Job(
-                land_id=land_id,
-                type=idx_key,
-                status="pending",
-                params_json={
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                },
-            )
-            db.add(job)
-            await db.flush()
-            items.append(
-                WeeklyIndexJobOut(
-                    land_id=land_id,
-                    job_id=str(job.id),
-                    task_name=index_task_name(idx_key),
-                    countdown=countdown,
-                    date_from=date_from.isoformat(),
-                    date_to=date_to.isoformat(),
-                    index=idx_key,
+        stale_windows[str(land_id)] = window
+
+    lands = (
+        (
+            await db.execute(
+                select(LandParcel).where(
+                    LandParcel.land_id.in_(list(stale_windows)),
+                    LandParcel.deleted_at.is_(None),
                 )
             )
-        lands_dispatched += 1
+        )
+        .scalars()
+        .all()
+        if stale_windows
+        else []
+    )
+    valid_lands = []
+    valid_windows: dict[str, tuple[date, date]] = {}
+    for land in lands:
+        try:
+            satellite_land_geometry(land)
+        except ValueError:
+            continue
+        land_id = str(land.land_id)
+        valid_lands.append(land)
+        valid_windows[land_id] = stale_windows[land_id]
+
+    items: list[WeeklyIndexJobOut] = []
+    if valid_lands:
+        snapshots = [
+            {
+                "land_id": str(land.land_id),
+                "boundary_geojson": land.boundary_geojson,
+                "boundary_srid": land.boundary_srid,
+            }
+            for land in valid_lands
+        ]
+        prepared = await prepare_vpa10_areas(
+            db,
+            snapshots,
+            date_from=min(window[0] for window in valid_windows.values()),
+            date_to=today,
+            assigned_by="weekly-index-schedule",
+        )
+        countdown = 0
+        for area in prepared["areas"]:
+            area_land_ids = [
+                str(land_id)
+                for land_id in area.get("land_ids", [])
+                if str(land_id) in valid_windows
+            ]
+            if not area_land_ids:
+                continue
+            # 一个项目区中不同地块可能从不同日期开始补拉；共享窗口取最早缺口，
+            # 各地块仍由 worker 按已存在日期去重，只写回实际缺失的观测。
+            date_from = min(valid_windows[land_id][0] for land_id in area_land_ids)
+            weather_windows = [
+                {
+                    "land_id": land_id,
+                    "date_from": valid_windows[land_id][0].isoformat(),
+                    "date_to": valid_windows[land_id][1].isoformat(),
+                }
+                for land_id in area_land_ids
+            ]
+            jobs = await create_vpa10_download_jobs(
+                db,
+                [area],
+                date_from=date_from,
+                date_to=today,
+                sensors=("S1", "S2"),
+                force=False,
+                parent_job_id=None,
+                chunk_days=settings.index_backfill_chunk_days,
+                target_land_ids=area_land_ids,
+                job_land_id=area_land_ids[0],
+                extra_params={"schedule": "weekly-index"},
+            )
+            for job in jobs:
+                params = job.params_json or {}
+                items.append(
+                    WeeklyIndexJobOut(
+                        land_id=str(job.land_id),
+                        land_ids=list(params.get("land_ids", [])),
+                        job_id=str(job.id),
+                        task_name="app.tasks.satellite_batch.process_satellite_batch",
+                        countdown=countdown,
+                        date_from=params["date_from"],
+                        date_to=params["date_to"],
+                        index="agri_optical",
+                        sensor=params.get("sensor"),
+                        weather_windows=weather_windows,
+                    )
+                )
+                countdown += STAGGER_SECONDS
 
     await db.commit()
     return WeeklyIndexPrepareOut(
         items=items,
         lands_checked=len(rows),
-        lands_dispatched=lands_dispatched,
+        lands_dispatched=len(valid_lands),
         jobs_created=len(items),
     )
 

@@ -12,12 +12,12 @@ from app.core.database import get_db
 from app.middleware.auth import OrgContext, require_roles
 from app.mq_publish import publish_api_task
 from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
-from app.services.satellite_batch import build_satellite_batch_jobs
 from app.services.smart_land_backfill import (
     SMART_BACKFILL_MAX_LANDS,
     LandSelectionError,
     ensure_land_parcels,
 )
+from app.services.virtual_area_service import build_vpa10_satellite_jobs
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
@@ -50,13 +50,14 @@ async def backfill_satellite_batch(
         )
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     try:
-        groups, jobs = await asyncio.to_thread(
-            build_satellite_batch_jobs,
+        groups, jobs, _ = await build_vpa10_satellite_jobs(
+            db,
             lands,
             date_from=body.date_from,
             date_to=body.date_to,
             sensors=body.sensors,
             force=body.force,
+            assigned_by="manual-satellite-batch",
             chunk_days=settings.index_backfill_chunk_days,
         )
     except ValueError as exc:

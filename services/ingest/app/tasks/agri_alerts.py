@@ -1,340 +1,30 @@
-"""Evaluate RS alerts from agric_satellite.parcel_scene_products (lonlat_v1).
-
-All alert evaluation reads the canonical ``land_parcels`` identity and the
-directly keyed scene products. No legacy field UUID or tag-derived identity is
-consulted.
-"""
+"""下载 Worker 只通过 Internal HTTP 请求 API 重算预警。"""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import select, text
 
-from app.tasks.indices import INDEX_REGISTRY, IndexDef
-from app.tasks.pipeline import _get_weather_context, get_db_session
 from app.worker import celery_app
 
 logger = structlog.get_logger()
-
-# parcel_scene_products average columns ↔ IndexDef.key
-AGRI_AVG_COLUMNS: dict[str, str] = {
-    "ndvi": "ndvi_avg",
-    "evi": "evi_avg",
-    "ndmi": "ndmi_avg",
-    "ndre": "ndre_avg",
-    "cire": "cire_avg",
-    "mndwi": "mndwi_avg",
-}
-
-# Primary stress indices evaluated on refresh / ingest (avoid alert floods).
-DEFAULT_INDEX_KEYS: tuple[str, ...] = ("ndvi", "evi", "ndmi")
-
-
-def _load_land_meta(session, land_id: str) -> dict[str, Any] | None:
-    from app.models.tables import LandParcel
-
-    land = session.get(LandParcel, str(land_id))
-    if not land or land.deleted_at is not None:
-        return None
-    return {"land_id": land.land_id}
-
-
-def _load_s2_series(session, land_id: str) -> list[dict[str, Any]]:
-    """Return S2 scenes for land_id ordered by date ascending."""
-    rows = (
-        session.execute(
-            text(
-                """
-            SELECT date, cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
-                   ndvi_avg, evi_avg, ndmi_avg, ndre_avg, cire_avg, mndwi_avg,
-                   scene_id, pixel_data->>'source' AS source,
-                   pixel_data->>'decloud_quality' AS decloud_quality
-            FROM agric_satellite.parcel_scene_products
-            WHERE land_id = :lid AND sensor = 'S2'
-            ORDER BY date ASC
-            """
-            ),
-            {"lid": str(land_id)})
-        .mappings()
-        .all()
-    )
-    return [dict(r) for r in rows]
-
-
-def _is_clear(scene: dict[str, Any]) -> bool:
-    from app.core.agri_classify import is_official_optical_product
-
-    return is_official_optical_product(
-        source=scene.get("source"),
-        scene_id=scene.get("scene_id"),
-        decloud_quality=scene.get("decloud_quality"),
-        parcel_cloud_cover_pct=scene.get("parcel_cloud_cover_pct"),
-        cloud_cover=scene.get("cloud_cover"),
-        cloud_cover_over_30=scene.get("cloud_cover_over_30"),
-    )
-
-
-def _pick_eval_scene(
-    series: list[dict[str, Any]],
-    *,
-    scene_date: date | None,
-    avg_col: str) -> dict[str, Any] | None:
-    usable = [
-        s
-        for s in series
-        if s.get(avg_col) is not None and isinstance(s.get(avg_col), (int, float))
-    ]
-    if not usable:
-        return None
-    if scene_date is not None:
-        for s in usable:
-            if s["date"] == scene_date:
-                return s
-        return None
-    # Prefer latest clear scene; fallback to latest with a value.
-    clear = [s for s in usable if _is_clear(s)]
-    return (clear or usable)[-1]
-
-
-def _delete_open_rs_alerts(
-    session, land_id: str, index_keys: list[str], keep_keys: set[tuple[date, str]]
-) -> int:
-    from app.models.tables import Alert
-
-    rule_names: list[str] = []
-    for key in index_keys:
-        rule_names.append(f"{key}_threshold")
-        rule_names.append(f"{key}_drop")
-    result = session.execute(
-        select(Alert).where(
-            Alert.land_id == str(land_id),
-            Alert.status == "open",
-            Alert.rule_name.in_(rule_names))
-    )
-    # 同日同规则仍触发时保留原预警 ID，避免重算删除关联的个人已读记录。
-    rows = [
-        row for row in result.scalars().all()
-        if (row.date, row.rule_name) not in keep_keys
-    ]
-    for row in rows:
-        session.delete(row)
-    return len(rows)
-
-
-def _existing_alert_keys(session, land_id: str) -> set[tuple[date, str]]:
-    from app.models.tables import Alert
-
-    rows = session.execute(
-        select(Alert.date, Alert.rule_name).where(Alert.land_id == str(land_id))
-    ).all()
-    return {(r[0], r[1]) for r in rows}
-
-
-def _emit_rules(
-    session,
-    *,
-    land_id: str,
-    scene_date: date,
-    current_mean: float,
-    historical_means: list[float],
-    index_def: IndexDef,
-    weather_ctx: dict | None,
-    existing: set[tuple[date, str]],
-    active_keys: set[tuple[date, str]]) -> int:
-    from app.models.tables import Alert
-
-    created = 0
-    alert_cfg = index_def.alerts
-    label = index_def.label
-
-    if current_mean < alert_cfg.threshold:
-        rule = f"{index_def.key}_threshold"
-        active_keys.add((scene_date, rule))
-        if (scene_date, rule) not in existing:
-            severity = "high" if current_mean < alert_cfg.threshold_high else "medium"
-            session.add(
-                Alert(
-
-                    land_id=land_id,
-                    date=scene_date,
-                    severity=severity,
-                    rule_name=rule,
-                    rule_params_json={
-                        "threshold": alert_cfg.threshold,
-                        "source": "agri",
-                    },
-                    message=(
-                        f"{label} mean ({current_mean:.3f}) below threshold "
-                        f"({alert_cfg.threshold}). Consider scouting."
-                    ),
-                    status="open",
-                    index_type=index_def.key,
-                    weather_context=weather_ctx)
-            )
-            existing.add((scene_date, rule))
-            created += 1
-
-    if len(historical_means) >= 2:
-        window = historical_means[-alert_cfg.drop_window :]
-        rolling_avg = sum(window) / len(window)
-        if rolling_avg > 0:
-            drop_pct = ((rolling_avg - current_mean) / rolling_avg) * 100
-            if drop_pct >= alert_cfg.drop_pct:
-                rule = f"{index_def.key}_drop"
-                active_keys.add((scene_date, rule))
-                if (scene_date, rule) not in existing:
-                    severity = (
-                        "high"
-                        if drop_pct >= 30
-                        else "medium"
-                        if drop_pct >= 20
-                        else "low"
-                    )
-                    session.add(
-                        Alert(
-
-                            land_id=land_id,
-                            date=scene_date,
-                            severity=severity,
-                            rule_name=rule,
-                            rule_params_json={
-                                "drop_pct": alert_cfg.drop_pct,
-                                "window": alert_cfg.drop_window,
-                                "source": "agri",
-                            },
-                            message=(
-                                f"{label} dropped {drop_pct:.1f}% "
-                                f"(from avg {rolling_avg:.3f} to {current_mean:.3f}). "
-                                f"Investigate crop stress."
-                            ),
-                            status="open",
-                            index_type=index_def.key,
-                            weather_context=weather_ctx)
-                    )
-                    existing.add((scene_date, rule))
-                    created += 1
-    return created
 
 
 def evaluate_agri_rs_alerts_for_land(
     land_id: str,
     *,
-    scene_date: date | str | None = None,
-    index_keys: list[str] | None = None,
-    replace_open: bool = True) -> dict[str, Any]:
-    """Evaluate threshold/drop alerts from agri S2 averages.
+    replace_open: bool = True,
+) -> dict[str, Any]:
+    """把重算请求交给 API 主库执行，下载机不读取或写入 PostgreSQL。"""
+    from agric_satellite_analysis_common.internal_api import (
+        evaluate_land_alerts,
+        internal_api_enabled,
+    )
 
-    Default behaviour (refresh / post-ingest): evaluate the latest clear scene
-    and retain matching open alerts so personal read records survive retries.
-
-    When ``scene_date`` is set (single-date ingest), only that date is evaluated
-    and existing alerts for other dates are left alone unless ``replace_open``.
-    """
-    land_id = str(land_id).strip()
-    session = get_db_session()
-    try:
-        meta = _load_land_meta(session, land_id)
-        if not meta:
-            return {
-                "land_id": land_id,
-                "status": "error",
-                "detail": "Land parcel not found",
-            }
-        lid = meta["land_id"]
-
-        keys = list(index_keys or DEFAULT_INDEX_KEYS)
-        keys = [k for k in keys if k in AGRI_AVG_COLUMNS and k in INDEX_REGISTRY]
-        if not keys:
-            return {"land_id": lid, "status": "skipped", "reason": "no_indices"}
-
-        series = _load_s2_series(session, lid)
-        if not series:
-            return {
-                "land_id": lid,
-                "land_id": lid,
-                "status": "skipped",
-                "reason": "no_s2_scenes",
-            }
-
-        target_date: date | None
-        if scene_date is None:
-            target_date = None
-        elif isinstance(scene_date, date):
-            target_date = scene_date
-        else:
-            target_date = date.fromisoformat(str(scene_date)[:10])
-
-        removed = 0
-        active_keys: set[tuple[date, str]] = set()
-        existing = _existing_alert_keys(session, lid)
-        created = 0
-        evaluated: list[dict[str, Any]] = []
-
-        for key in keys:
-            avg_col = AGRI_AVG_COLUMNS[key]
-            index_def = INDEX_REGISTRY[key]
-            scene = _pick_eval_scene(series, scene_date=target_date, avg_col=avg_col)
-            if not scene:
-                continue
-            sd: date = scene["date"]
-            # History up to and excluding current (then include current like pipeline)
-            hist = [
-                float(s[avg_col])
-                for s in series
-                if s["date"] < sd
-                and s.get(avg_col) is not None
-                and isinstance(s.get(avg_col), (int, float))
-            ]
-            mean = float(scene[avg_col])
-            hist.append(mean)
-            weather_ctx = _get_weather_context(session, lid, sd)
-            n = _emit_rules(
-                session,
-
-                land_id=lid,
-                scene_date=sd,
-                current_mean=mean,
-                historical_means=hist,
-                index_def=index_def,
-                weather_ctx=weather_ctx,
-                existing=existing,
-                active_keys=active_keys)
-            created += n
-            evaluated.append(
-                {
-                    "index": key,
-                    "date": sd.isoformat(),
-                    "mean": round(mean, 4),
-                    "alerts_created": n,
-                }
-            )
-
-        if replace_open:
-            removed = _delete_open_rs_alerts(session, lid, keys, active_keys)
-        session.commit()
-        result = {
-            "land_id": lid,
-            "land_id": lid,
-            "status": "ok",
-            "removed_open": removed,
-            "created": created,
-            "evaluated": evaluated,
-            "at": datetime.now(timezone.utc).isoformat(),
-        }
-        logger.info(
-            "agri_rs_alerts_evaluated",
-            **{
-                k: result[k] for k in ("land_id", "created", "removed_open")
-            })
-        return result
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    if not internal_api_enabled():
+        raise RuntimeError("agri alert evaluation requires API_BASE_URL and INTERNAL_API_TOKEN")
+    return evaluate_land_alerts(land_id, replace_open=replace_open)
 
 
 @celery_app.task(
@@ -342,21 +32,28 @@ def evaluate_agri_rs_alerts_for_land(
     bind=True,
     max_retries=2,
     time_limit=300,
-    soft_time_limit=240)
+    soft_time_limit=240,
+)
 def evaluate_agri_alerts_for_land(
     self,
     land_id: str,
     scene_date: str | None = None,
-    replace_open: bool = True) -> dict:
-    """Celery entry: agri lonlat → agric-satellite-analysis alerts."""
+    replace_open: bool = True,
+) -> dict[str, Any]:
+    """Celery 接口兼容旧任务消息；实际重算统一在 API 上完成。"""
     try:
-        return evaluate_agri_rs_alerts_for_land(
+        result = evaluate_agri_rs_alerts_for_land(
             land_id,
-            scene_date=scene_date,
-            replace_open=replace_open)
-    except Exception as e:
-        logger.error(
-            "agri_rs_alerts_failed",
+            replace_open=replace_open,
+        )
+        logger.info(
+            "agri_alerts_evaluated_via_api",
             land_id=land_id,
-            error=str(e))
-        raise
+            scene_date=scene_date,
+            created=result.get("created"),
+            removed_open=result.get("removed_open"),
+        )
+        return result
+    except Exception as exc:
+        logger.exception("agri_alerts_api_evaluation_failed", land_id=land_id)
+        raise self.retry(exc=exc, countdown=60)

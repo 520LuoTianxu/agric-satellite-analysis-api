@@ -542,7 +542,7 @@ async def _apply_batch(
     )
 
     if not create_rs_jobs:
-        # 批量选地报告会在上层统一创建共享 5×5 km satellite_batch Job；
+        # 显式选地只同步 Smart 主数据；上层统一规划 VPA10 并创建共享遥感 Job，
         # 这里仅同步 Smart 地块主数据，禁止再为每块地派发重复的单地块回填。
         await db.commit()
         return
@@ -591,44 +591,126 @@ async def _apply_batch(
             continue
         dispatch.append((record, job_id, job))
 
+    if not dispatch:
+        await db.commit()
+        return
+
+    from app.services.virtual_area_service import build_vpa10_satellite_jobs
+
+    selected_ids = [record.land_id for record, _, _ in dispatch]
+    selected_lands = (
+        await db.execute(
+            select(LandParcel)
+            .where(LandParcel.land_id.in_(selected_ids))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    batch_id = uuid.uuid5(
+        run_id,
+        "vpa10-smart-sync:" + ",".join(sorted(selected_ids)),
+    )
+    parent = Job(
+        id=batch_id,
+        type="smart_land_sync_satellite",
+        status="running",
+        params_json={
+            "land_ids": sorted(selected_ids),
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "source": SOURCE_SYSTEM,
+        },
+        progress_json={"stage": "planning", "land_count": len(selected_ids)},
+    )
+    db.add(parent)
+    groups, area_jobs, _ = await build_vpa10_satellite_jobs(
+        db,
+        selected_lands,
+        date_from=date_from,
+        date_to=date_to,
+        sensors=("S1", "S2"),
+        force=False,
+        parent_job_id=batch_id,
+        assigned_by="smart-land-sync",
+        chunk_days=settings.index_backfill_chunk_days,
+        extra_params={
+            "is_backfill": True,
+            "source": SOURCE_SYSTEM,
+            "sync_run_id": str(run_id),
+        },
+    )
+    jobs_by_land = {land_id: [] for land_id in selected_ids}
+    for area_job in area_jobs:
+        for land_id in (area_job.params_json or {}).get("land_ids", []):
+            jobs_by_land.setdefault(str(land_id), []).append(str(area_job.id))
+    for record, job_id, sentinel in dispatch:
+        sentinel.params_json = {
+            **(sentinel.params_json or {}),
+            "dispatch_status": "planning",
+            "vpa10_parent_job_id": str(batch_id),
+            "vpa10_job_ids": jobs_by_land.get(record.land_id, []),
+        }
+    parent.params_json = {
+        **(parent.params_json or {}),
+        "job_ids": [str(job.id) for job in area_jobs],
+        "area_count": len(groups),
+    }
+    parent.progress_json = {
+        "stage": "dispatching",
+        "land_count": len(selected_ids),
+        "area_count": len(groups),
+        "job_count": len(area_jobs),
+        "dispatched_job_ids": [],
+    }
     await db.commit()
 
-    for record, job_id, job in dispatch:
+    dispatched_job_ids: list[str] = []
+    failed_job_ids: list[str] = []
+    for job in area_jobs:
         try:
             from app.mq_publish import publish_api_task
 
-            # 任务 ID 与源几何 hash 稳定绑定，claim/MQ 重试不会无限创建新任务。
             await asyncio.to_thread(
                 publish_api_task,
-                type="satellite_analysis",
-                land_id=record.land_id,
-                task_id=str(job_id),
-                extras={
-                    "months": settings.mysql_sync_rs_months,
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                    "force": False,
-                    "with_bridge": False,
-                    "source": SOURCE_SYSTEM,
-                    "sync_run_id": str(run_id),
-                    "sentinel_job_id": str(job_id),
-                    "processing_window_km": settings.mysql_sync_processing_window_km,
-                },
+                type="satellite_batch",
+                land_id=job.land_id,
+                task_id=str(job.id),
+                extras={"job_id": str(job.id)},
             )
         except Exception as exc:
             summary["dispatch_failed"] += 1
             logger.exception(
-                "mysql_land_sync_rs_dispatch_failed",
-                land_id=record.land_id,
-                job_id=str(job_id),
+                "mysql_land_sync_vpa10_dispatch_failed",
+                land_id=job.land_id,
+                job_id=str(job.id),
                 error=str(exc),
             )
+            job.status = "failed"
+            job.error = f"虚拟项目区任务派发失败：{str(exc)[:3900]}"
+            failed_job_ids.append(str(job.id))
             continue
         job.params_json = {**(job.params_json or {}), "dispatch_status": "queued"}
+        dispatched_job_ids.append(str(job.id))
         summary["rs_dispatched"] += 1
 
-    if dispatch:
-        await db.commit()
+    for record, _, sentinel in dispatch:
+        land_job_ids = jobs_by_land.get(record.land_id, [])
+        failed_for_land = any(job_id in failed_job_ids for job_id in land_job_ids)
+        sentinel.status = "failed" if failed_for_land else "completed"
+        sentinel.finished_at = now
+        sentinel.params_json = {
+            **(sentinel.params_json or {}),
+            "dispatch_status": "partial" if failed_for_land else "queued",
+        }
+
+    parent.progress_json = {
+        **(parent.progress_json or {}),
+        "stage": "dispatched",
+        "dispatched_job_ids": dispatched_job_ids,
+        "failed_count": len(area_jobs) - len(dispatched_job_ids),
+    }
+    parent.status = "partial" if failed_job_ids else "completed"
+    parent.finished_at = now
+    await db.commit()
 
 
 async def _soft_delete_missing_source_lands(
@@ -701,7 +783,7 @@ async def sync_selected_lands(
 ) -> dict[str, Any]:
     """从 Smart/MySQL 同步指定地块到 PostgreSQL，不派发单地块遥感任务。
 
-    批量选地报告需要先拿到请求地块的最新边界，再统一计算 5×5 km 共享窗口。
+    批量选地报告需要先拿到请求地块的最新边界，再统一规划 10×10 km 虚拟项目区。
     因此这里复用正式同步的标准化和 upsert 逻辑，但关闭其原本的单地块
     ``satellite_analysis`` 派发，避免之后与批量窗口任务重复下载。
     ``allow_partial`` 用于显式地块清单：能标准化的记录先落库，缺失或无效记录

@@ -14,19 +14,16 @@ advisory lock `agric-satellite:mysql-land-sync`, streams the MySQL snapshot in
 batches, validates the pipe-delimited WGS84 polygon, and commits each target
 batch before dispatching remote-sensing work.
 
-New or boundary-changed parcels receive a deterministic backfill job covering
-the previous 24 calendar months. The task is dispatched as
-`satellite_analysis`, so both S2 optical indices and S1 VV/VH products use the
-existing download and result-ingest pipeline. Metadata-only changes do not
-re-download two years of imagery.
+New or boundary-changed parcels are matched to an existing fully containing
+10×10 km virtual project area or planned into a new one. The API dispatches
+shared `satellite_batch` jobs covering the previous 24 calendar months for S1
+and S2. Full-window pixel assets are reused from OSS when available; on a miss,
+the project area is downloaded once, then cropped results are persisted for
+the selected parcels. Metadata-only changes do not trigger a historical pull.
 
-Each download-host parcel task uses a 5 km × 5 km square centered on the
-parcel centroid for STAC search and raster reads. Products and statistics are
-still masked by the original parcel polygon. For grouped daily jobs, only
-parcels whose complete boundary is covered by the anchor parcel's square are
-included; a parcel crossing the square boundary is excluded from that group.
-An oversized anchor parcel is processed independently using its complete
-bounding rectangle.
+The project-area boundary is persistent and does not move to the incoming
+parcel's centroid. If an incoming geometry no longer fits its assigned area,
+the old membership is marked stale and the planner selects a replacement area.
 
 ## Source-specific decisions
 
@@ -47,4 +44,5 @@ bounding rectangle.
 Keep `MYSQL_SOURCE_URL` only in the API-machine private `.env`. Grant the
 MySQL account `SELECT` on the two source tables, restrict MySQL network access
 to the API machine, and inspect `AuditEvent(event_type='mysql_land_sync')` plus
-the generated `backfill` jobs when a run is partial.
+the generated `smart_land_sync_satellite` parent jobs and `satellite_batch`
+children when a run is partial.

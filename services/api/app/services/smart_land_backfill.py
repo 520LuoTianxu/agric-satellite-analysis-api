@@ -10,7 +10,6 @@ import asyncio
 import uuid
 from collections.abc import Sequence
 from datetime import date
-from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -21,10 +20,7 @@ from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.services.mysql_land_sync import sync_selected_lands
 from app.services.satellite_batch import build_satellite_batch_jobs
-from app.services.virtual_area_service import (
-    create_vpa10_download_jobs,
-    prepare_vpa10_areas,
-)
+from app.services.virtual_area_service import build_vpa10_satellite_jobs
 
 
 SMART_BACKFILL_MAX_LANDS = 1000
@@ -282,46 +278,17 @@ async def _build_smart_virtual_area_jobs(
         )
         return list(groups), list(jobs), False
 
-    snapshots = [
-        {
-            "land_id": str(land.land_id),
-            "boundary_geojson": land.boundary_geojson,
-            "boundary_srid": land.boundary_srid,
-        }
-        for land in lands
-    ]
-    prepared = await prepare_vpa10_areas(
+    groups, jobs, _ = await build_vpa10_satellite_jobs(
         db,
-        snapshots,
-        date_from=date_from,
-        date_to=date_to,
-        assigned_by="smart-sync",
-    )
-    jobs = await create_vpa10_download_jobs(
-        db,
-        prepared["areas"],
+        lands,
         date_from=date_from,
         date_to=date_to,
         sensors=sensors,
         force=force,
         parent_job_id=parent_job_id,
+        assigned_by="smart-sync",
         chunk_days=settings.index_backfill_chunk_days,
     )
-    groups = [
-        SimpleNamespace(
-            anchor_land_id=area.get("anchor_land_id"),
-            land_ids=list(area.get("land_ids", [])),
-            job_ids=[],
-            virtual_area_tile_id=area.get("tile_id"),
-        )
-        for area in prepared["areas"]
-    ]
-    jobs_by_area: dict[str, list[str]] = {}
-    for job in jobs:
-        tile_id = str((job.params_json or {}).get("virtual_area_tile_id") or "")
-        jobs_by_area.setdefault(tile_id, []).append(str(job.id))
-    for group in groups:
-        group.job_ids = jobs_by_area.get(str(group.virtual_area_tile_id), [])
     return groups, jobs, True
 
 
