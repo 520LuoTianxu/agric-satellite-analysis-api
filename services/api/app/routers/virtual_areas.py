@@ -13,6 +13,7 @@ from app.schemas.virtual_area import (
     VirtualAreaOperationRequest,
 )
 from app.services.virtual_area_service import (
+    VirtualAreaInitializationError,
     backfill_virtual_area_history,
     initialize_virtual_areas,
 )
@@ -34,6 +35,8 @@ async def initialize(
             land_ids=body.land_ids,
             parent_job_id=uuid.uuid4(),
         )
+    except VirtualAreaInitializationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return VirtualAreaOperationOut.model_validate(result)
