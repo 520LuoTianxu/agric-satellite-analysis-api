@@ -722,6 +722,7 @@ async def sync_selected_lands(
         "missing_land_ids": [],
         "filtered_land_ids": [],
         "invalid_land_ids": [],
+        "invalid_land_errors": [],
     }
     if not settings.mysql_source_enabled:
         summary["status"] = "disabled"
@@ -774,9 +775,13 @@ async def sync_selected_lands(
                         continue
                     try:
                         records.append(normalize_source_row(row))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as exc:
                         if raw_land_id:
                             summary["invalid_land_ids"].append(raw_land_id)
+                            if len(summary["invalid_land_errors"]) < 100:
+                                summary["invalid_land_errors"].append(
+                                    {"land_id": raw_land_id, "reason": str(exc)}
+                                )
 
                 has_selection_errors = bool(
                     summary["missing_land_ids"]

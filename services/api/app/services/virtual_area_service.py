@@ -749,9 +749,31 @@ async def initialize_virtual_areas(
                     raise VirtualAreaInitializationError(
                         "Smart/MySQL 数据源未启用", status_code=503
                     )
-                if sync_status in {"filtered", "invalid"}:
+                if sync_status == "filtered":
+                    filtered_ids = sync_summary.get("filtered_land_ids") or missing
                     raise VirtualAreaInitializationError(
-                        "Smart 地块数据无法同步", status_code=422
+                        f"Smart 地块不符合同步条件: {', '.join(filtered_ids[:20])}",
+                        status_code=422,
+                    )
+                if sync_status == "invalid":
+                    invalid_errors = sync_summary.get("invalid_land_errors") or []
+                    diagnostics = [
+                        (
+                            f"{item.get('land_id')}: "
+                            f"{str(item.get('reason', '数据校验失败'))[:120]}"
+                        )
+                        for item in invalid_errors[:10]
+                        if isinstance(item, dict)
+                    ]
+                    invalid_ids = sync_summary.get("invalid_land_ids") or missing
+                    omitted_count = max(0, len(invalid_ids) - len(diagnostics))
+                    if omitted_count:
+                        diagnostics.append(f"另有 {omitted_count} 个地块校验失败")
+                    detail = "; ".join(diagnostics)
+                    if not detail:
+                        detail = ", ".join(invalid_ids[:20])
+                    raise VirtualAreaInitializationError(
+                        f"Smart 地块数据校验失败: {detail}", status_code=422
                     )
                 if sync_status == "not_found":
                     not_found = sync_summary.get("missing_land_ids") or missing
