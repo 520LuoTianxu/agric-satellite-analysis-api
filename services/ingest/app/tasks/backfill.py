@@ -417,14 +417,33 @@ def _schedule_via_http() -> bool:
 
 
 def _dispatch_weekly_index_items(items: list) -> int:
-    """把 API 准备好的规范地块任务投到本机 Celery broker。"""
+    """把 API 准备好的项目区任务及其地块天气补拉投到本机 Celery broker。"""
     jobs_dispatched = 0
+    weather_dispatched: set[str] = set()
     for item in items:
         task_name = item.get("task_name") if isinstance(item, dict) else None
         job_id = item.get("job_id") if isinstance(item, dict) else None
         if not task_name or not job_id:
             continue
         countdown = int(item.get("countdown") or 0)
+        if task_name == "app.tasks.satellite_batch.process_satellite_batch":
+            celery_app.send_task(task_name, args=[str(job_id)], countdown=countdown)
+            for window in item.get("weather_windows") or []:
+                land_id = str(window.get("land_id") or "")
+                if not land_id or land_id in weather_dispatched:
+                    continue
+                weather_dispatched.add(land_id)
+                celery_app.send_task(
+                    "app.tasks.weather.backfill_weather_for_land",
+                    args=[land_id],
+                    kwargs={
+                        "date_from": window["date_from"],
+                        "date_to": window["date_to"],
+                    },
+                    countdown=countdown,
+                )
+            jobs_dispatched += 1
+            continue
         # 下载机没有 API 数据库连接，必须把规范 land_id 和日期窗口直接
         # 传给 HTTP-only worker；不再把 API 端的 Job/旧身份当作地块键。
         if task_name == "app.tasks.agri_lonlat.process_agri_optical_lonlat":

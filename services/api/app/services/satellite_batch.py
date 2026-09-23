@@ -1,4 +1,4 @@
-"""只聚合请求中的地块，使用当地米制投影计算5×5公里区域。"""
+"""旧5×5 km任务构造兼容层；新增遥感入口统一使用虚拟项目区服务。"""
 
 import uuid
 import math
@@ -101,11 +101,11 @@ def build_satellite_batch_jobs(
     id_namespace: uuid.UUID | None = None,
     chunk_days: int | None = None,
 ) -> tuple[list[SatelliteBatchGroup], list[Job]]:
-    """为一批地块构造共享遥感 Job，不在这里提交数据库或派发消息。
+    """兼容旧调用，为一批地块构造5×5 km共享Job；新入口不得使用此方法。
 
-    批量选地报告和独立遥感回填都需要完全一致的 5×5 km 分组、日期分片
-    和任务参数；集中构造可以避免两个入口逐渐产生不同的聚合规则。
-    ``id_namespace`` 用于批量报告重试时生成稳定 Job ID，防止重复下载。
+    正常API入口使用``build_vpa10_satellite_jobs``，仅保留此函数供旧模式
+    滚动兼容和轻量调用替代，不会创建带OSS虚拟项目区缓存标记的任务。
+    ``id_namespace`` 用于旧批量报告重试时生成稳定 Job ID。
     """
     if date_from > date_to:
         raise ValueError("date_from must be no later than date_to")

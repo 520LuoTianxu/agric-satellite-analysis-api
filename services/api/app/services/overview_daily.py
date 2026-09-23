@@ -22,7 +22,8 @@ from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.mq_publish import publish_api_task
 from app.schemas.agri import OverviewStatsOut
-from app.services.satellite_batch import group_satellite_lands, satellite_land_geometry
+from app.services.satellite_batch import satellite_land_geometry
+from app.services.virtual_area_service import build_vpa10_satellite_jobs
 
 WINDOW_DAYS = 60
 LOOKBACK_DAYS = 7
@@ -285,7 +286,7 @@ async def _redispatch_failed_work_item_jobs(
 
 
 async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
-    """以统计日和事务锁防止重复建批次，任务仍走既有MQ/HTTP claim派发。"""
+    """按10×10公里虚拟项目区创建每日增量任务，并以统计日防止重复批次。"""
     await db.execute(
         text("SELECT pg_advisory_xact_lock(736401, :day)"), {"day": day.toordinal()}
     )
@@ -319,43 +320,18 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                 valid.append(land)
             except ValueError:
                 invalid.append(land.land_id)
-        groups = await asyncio.to_thread(group_satellite_lands, valid)
-        jobs = []
-        for group in groups:
-            for sensor in ("S1", "S2"):
-                cursor = download_start(None, day)
-                while cursor <= day:
-                    end = min(
-                        cursor
-                        + timedelta(
-                            days=max(settings.index_backfill_chunk_days, 1) - 1
-                        ),
-                        day,
-                    )
-                    job = Job(
-                        id=uuid.uuid4(),
-                        land_id=group.anchor_land_id,
-                        type="satellite_batch",
-                        status="pending",
-                        # 预先写入父任务 ID，任务树查询无需再解析 overview_run_id。
-                        parent_job_id=run_id_for(day),
-                        params_json={
-                            "land_ids": group.land_ids,
-                            "anchor_land_id": group.anchor_land_id,
-                            "processing_window_km": 5.0,
-                            "oversized": group.oversized,
-                            "sensor": sensor,
-                            "download_bbox": list(group.download_bbox),
-                            "aggregation_bbox": list(group.aggregation_bbox),
-                            "date_from": cursor.isoformat(),
-                            "date_to": end.isoformat(),
-                            "force": False,
-                            "overview_run_id": str(run_id_for(day)),
-                        },
-                    )
-                    db.add(job)
-                    jobs.append(job)
-                    cursor = end + timedelta(days=1)
+        groups, jobs, _ = await build_vpa10_satellite_jobs(
+            db,
+            valid,
+            date_from=download_start(None, day),
+            date_to=day,
+            sensors=("S1", "S2"),
+            force=False,
+            parent_job_id=run_id_for(day),
+            assigned_by="daily-satellite",
+            chunk_days=settings.index_backfill_chunk_days,
+            extra_params={"overview_run_id": str(run_id_for(day))},
+        )
         run = Job(
             id=run_id_for(day),
             type=RUN_TYPE,

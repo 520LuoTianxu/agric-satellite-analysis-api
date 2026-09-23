@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,6 +58,101 @@ async def enqueue_mq_task(
         )
     from app.mq_publish import publish_api_task
     from agric_satellite_analysis_common.settings import settings as common_settings
+
+    if body.type == "satellite_analysis":
+        # 兼容旧的通用任务入口，但遥感任务统一先映射到 VPA10，不能再发起逐地块下载。
+        from app.services.smart_land_backfill import run_smart_land_backfill
+
+        extras = body.extras or {}
+        try:
+            date_to = date.fromisoformat(str(extras.get("date_to") or date.today()))
+            date_from = (
+                date.fromisoformat(str(extras["date_from"]))
+                if extras.get("date_from")
+                else date_to
+                - timedelta(days=max(int(extras.get("months") or 24), 1) * 30)
+            )
+            sensors = extras.get("sensors") or ["S1", "S2"]
+            if isinstance(sensors, str):
+                sensors = [sensors]
+            sensors = list(dict.fromkeys(str(sensor).upper() for sensor in sensors))
+            if not sensors or any(sensor not in {"S1", "S2"} for sensor in sensors):
+                raise ValueError("sensors只允许S1或S2")
+            if date_from > date_to:
+                raise ValueError("date_from必须不晚于date_to")
+            if (date_to - date_from).days > 3660:
+                raise ValueError("回填时间范围最多10年")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            requested_parent_id = uuid.UUID(body.task_id) if body.task_id else uuid.uuid4()
+        except ValueError:
+            # 旧调用方可能传入非 UUID 的消息 ID；项目区任务树使用独立 UUID 主任务。
+            requested_parent_id = uuid.uuid4()
+
+        from app.services.smart_land_backfill import LandSelectionError
+
+        try:
+            result = await run_smart_land_backfill(
+                land_ids=[body.land_id],
+                date_from=date_from,
+                date_to=date_to,
+                sensors=sensors,
+                force=bool(extras.get("force", False)),
+                parent_job_id=requested_parent_id,
+            )
+        except LandSelectionError as exc:
+            detail: object = (
+                {"missing_land_ids": exc.missing_land_ids}
+                if exc.missing_land_ids
+                else str(exc)
+            )
+            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # satellite_analysis 旧语义还会补齐相同日期范围的天气；遥感部分已由上方 VPA10 子任务负责。
+        if body.land_id in result["selected_land_ids"]:
+            try:
+                publish_api_task(
+                    type="weather_backfill",
+                    land_id=body.land_id,
+                    task_id=str(uuid.uuid5(requested_parent_id, "weather-backfill")),
+                    extras={
+                        "date_from": date_from.isoformat(),
+                        "date_to": date_to.isoformat(),
+                        **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
+                        "enqueued_by": str(ctx.user.id),
+                    },
+                )
+            except Exception:
+                logger.exception("mq_vpa10_weather_dispatch_failed", land_id=body.land_id)
+        if extras.get("with_bridge") or extras.get("bridge_job_id"):
+            try:
+                publish_api_task(
+                    type="agri_bridge",
+                    land_id=body.land_id,
+                    task_id=str(uuid.uuid5(requested_parent_id, "agri-bridge")),
+                    extras={
+                        **(
+                            {"bridge_job_id": str(extras["bridge_job_id"])}
+                            if extras.get("bridge_job_id")
+                            else {}
+                        ),
+                        "dispatch_alerts": bool(extras.get("dispatch_alerts")),
+                        **({"org_id": str(ctx.org_id)} if ctx.org_id else {}),
+                        "enqueued_by": str(ctx.user.id),
+                    },
+                )
+            except Exception:
+                logger.exception("mq_vpa10_bridge_dispatch_failed", land_id=body.land_id)
+        return MqTaskEnqueued(
+            task_id=str(requested_parent_id),
+            type=body.type,
+            queue=common_settings.cloudamqp_download_queue,
+            created_at=datetime.now(timezone.utc),
+        )
 
     task_id = body.task_id or str(uuid.uuid4())
     priority = (

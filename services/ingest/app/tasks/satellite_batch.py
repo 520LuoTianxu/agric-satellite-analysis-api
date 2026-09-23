@@ -246,7 +246,7 @@ def crop_shared_array(
     return destination
 
 
-def _load_lands(land_ids, sensor, force):
+def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=None):
     """严格通过Internal HTTP读取地块与已有景日期，禁止回退直连API数据库。"""
     lands = []
     for land_id in land_ids:
@@ -288,8 +288,11 @@ def _load_lands(land_ids, sensor, force):
                 "geom": geom,
                 "grid": compute_target_grid(geom.bounds, geom),
                 "existing": existing,
+                # 显式回填的轮作月份优先于作物默认季节，避免区域下载误过滤用户选定窗口。
                 "season_months": normalize_season_months(
-                    crop_type=remote.get("crop_type")
+                    season_months=season_months,
+                    growing_seasons=growing_seasons,
+                    crop_type=remote.get("crop_type"),
                 ),
                 "crop_type": remote.get("crop_type"),
                 "raw_results": [],
@@ -666,7 +669,13 @@ def process_satellite_batch(
             date.fromisoformat(params["date_to"]),
         )
         patch_job(job_id, {"status": "running", "touch_started": True})
-        lands = _load_lands(params["land_ids"], sensor, params.get("force", False))
+        lands = _load_lands(
+            params["land_ids"],
+            sensor,
+            params.get("force", False),
+            season_months=params.get("season_months"),
+            growing_seasons=params.get("growing_seasons"),
+        )
         if not lands:
             patch_job(
                 job_id,

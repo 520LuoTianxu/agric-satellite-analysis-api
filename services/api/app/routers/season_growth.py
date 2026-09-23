@@ -256,10 +256,36 @@ async def create_season_growth_report(
                 )
 
         if pull_data:
-            # Do NOT publish season_growth_report in parallel — that raced PDF ahead
-            # of RS pulls (empty 2026 S1/S2 windows). Bootstrap fans out canonical
-            # pulls and enqueues season growth as followup after Celery ids.
+            # 生育期报告也使用项目区共享下载；bootstrap 只负责天气/土壤，
+            # 防止报告入口重新走逐地块遥感链路。
             # publish_api_task also inserts work_items when dual|claim (D4).
+            from app.services.virtual_area_service import build_vpa10_satellite_jobs
+
+            _, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+                db,
+                [field],
+                date_from=start,
+                date_to=end,
+                sensors=("S1", "S2"),
+                force=False,
+                parent_job_id=job.id,
+                assigned_by="season-growth-one-click",
+            )
+            satellite_job_ids = [str(item.id) for item in satellite_jobs]
+            job.params_json = {
+                **(job.params_json or {}),
+                "virtual_area_job_ids": satellite_job_ids,
+            }
+            await db.commit()
+            for satellite_job in satellite_jobs:
+                publish_api_task(
+                    type="satellite_batch",
+                    land_id=satellite_job.land_id,
+                    task_id=str(satellite_job.id),
+                    extras={"job_id": str(satellite_job.id)},
+                    priority=INTERACTIVE_REPORT_PRIORITY,
+                )
+
             season_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
                 "date_from": body.start_date,
@@ -267,7 +293,8 @@ async def create_season_growth_report(
                 "days": weather_days,
                 "weather_days": weather_days,
                 "source": "season_growth_one_click",
-                "with_bridge": True,
+                "skip_indices": True,
+                "satellite_job_ids": satellite_job_ids,
                 "followup_season_growth": {
                     "job_id": str(job.id),
                     "mq_task_id": season_mq_task_id,

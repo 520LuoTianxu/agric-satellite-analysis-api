@@ -36,7 +36,7 @@ from app.services.cdfinance_report_prefetch import (
 )
 from app.services.mysql_land_sync import sync_selected_lands
 from app.services.report_urls import report_progress_for_response, signed_report_url
-from app.services.satellite_batch import build_satellite_batch_jobs
+from app.services.virtual_area_service import build_vpa10_satellite_jobs
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -470,15 +470,15 @@ async def create_assessment_reports_batch(
         )
 
     try:
-        groups, satellite_jobs = await asyncio.to_thread(
-            build_satellite_batch_jobs,
+        groups, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+            db,
             ordered_lands,
             date_from=date.fromisoformat(date_from),
             date_to=date.fromisoformat(date_to),
             sensors=body.sensors,
             force=body.force,
             parent_job_id=batch_id,
-            id_namespace=batch_id,
+            assigned_by="assessment-batch",
             chunk_days=settings.index_backfill_chunk_days,
         )
     except ValueError as exc:
@@ -801,10 +801,36 @@ async def create_assessment_report(
                 )
 
         if pull_data:
-            # Do NOT publish assessment_report in parallel — that raced PDF ahead of
-            # weather/RS (soil-only reports). Bootstrap fans out canonical pulls and
-            # enqueues assessment as followup after Celery ids are known.
+            # 报告单地块入口也先建立虚拟项目区共享任务，bootstrap 只拉天气/土壤，
+            # 避免同一个报告请求又启动旧的单地块遥感下载链路。
             # publish_api_task also inserts work_items when dual|claim (D4).
+            _, satellite_jobs, _ = await build_vpa10_satellite_jobs(
+                db,
+                [field],
+                date_from=date.fromisoformat(date_from),
+                date_to=date.fromisoformat(date_to),
+                sensors=("S1", "S2"),
+                force=False,
+                parent_job_id=job.id,
+                assigned_by="assessment-one-click",
+                chunk_days=settings.index_backfill_chunk_days,
+            )
+            satellite_job_ids = [str(item.id) for item in satellite_jobs]
+            job.params_json = {
+                **(job.params_json or {}),
+                "virtual_area_job_ids": satellite_job_ids,
+            }
+            await db.commit()
+            for satellite_job in satellite_jobs:
+                await asyncio.to_thread(
+                    publish_api_task,
+                    type="satellite_batch",
+                    land_id=satellite_job.land_id,
+                    task_id=str(satellite_job.id),
+                    extras={"job_id": str(satellite_job.id)},
+                    priority=INTERACTIVE_REPORT_PRIORITY,
+                )
+
             assessment_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {
                 "date_from": date_from,
@@ -813,7 +839,8 @@ async def create_assessment_report(
                 "weather_days": weather_days,
                 "years": years_used,
                 "source": "assessment_one_click",
-                "with_bridge": True,
+                "skip_indices": True,
+                "satellite_job_ids": satellite_job_ids,
                 "followup_assessment": {
                     "job_id": str(job.id),
                     "mq_task_id": assessment_mq_task_id,
