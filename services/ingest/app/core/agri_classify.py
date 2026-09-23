@@ -643,10 +643,12 @@ def official_s2_sql(
     missing (nodata counted as clear / invented zeros). Legacy window-fill
     parcel (~82% on small padded fields) falls back to STAC ``cloud_cover``.
     ``cloud_cover_over_30`` is not used alone because old writes set it from
-    that fill ratio.
+    that fill ratio. Scene metadata is stored in scalar columns so this
+    predicate does not have to decompress the large ``pixel_data`` JSONB.
     """
     a = f"{alias}." if alias else ""
     trusted = ",".join(f"'{s}'" for s in sorted(PARCEL_CLOUD_SOURCES_TRUSTED))
+    # 业务筛选字段已在入库时从 pixel_data 提取，避免项目列表请求重复解析像元 JSON。
     effective = f"""(
         CASE
           WHEN {a}parcel_cloud_cover_pct IS NOT NULL
@@ -654,7 +656,7 @@ def official_s2_sql(
                AND {a}parcel_cloud_cover_pct <= {SUSPICIOUS_CLEAR_PARCEL_MAX}
                AND {a}cloud_cover >= {SUSPICIOUS_STAC_OVERCAST_MIN}
           THEN {a}cloud_cover
-          WHEN {a}pixel_data->>'parcel_cloud_source' IN ({trusted})
+          WHEN {a}parcel_cloud_source IN ({trusted})
           THEN coalesce({a}parcel_cloud_cover_pct, {a}cloud_cover)
           WHEN {a}parcel_cloud_cover_pct IS NOT NULL
                AND {a}cloud_cover IS NOT NULL
@@ -668,16 +670,16 @@ def official_s2_sql(
       )"""
     return f"""(
       (
-        COALESCE({a}pixel_data->>'source', '') <> '{DECLOUD_SOURCE}'
+        COALESCE({a}product_source, '') <> '{DECLOUD_SOURCE}'
         AND COALESCE({a}scene_id, '') NOT LIKE '%{DECLOUD_SCENE_ID_SUFFIX}'
         AND NOT ({effective} > :{cloud_param})
       )
       OR (
         (
-          {a}pixel_data->>'source' = '{DECLOUD_SOURCE}'
+          {a}product_source = '{DECLOUD_SOURCE}'
           OR {a}scene_id LIKE '%{DECLOUD_SCENE_ID_SUFFIX}'
         )
-        AND {a}pixel_data->>'decloud_quality' = '{DECLOUD_QUALITY_GOOD}'
+        AND {a}decloud_quality = '{DECLOUD_QUALITY_GOOD}'
       )
     )"""
 
