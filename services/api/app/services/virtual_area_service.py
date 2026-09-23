@@ -22,6 +22,7 @@ from shapely.geometry import shape
 from shapely.strtree import STRtree
 
 from app.core.config import settings
+from app.core.logging import logger
 from app.models.tables import Job, LandParcel
 from app.schemas.satellite_batch import SatelliteBatchGroup
 from app.services.virtual_area_planner import (
@@ -868,37 +869,29 @@ async def initialize_virtual_areas(
                         status_code=422,
                     )
                 invalid_ids = sync_summary.get("invalid_land_ids") or []
-                if sync_status == "invalid" or invalid_ids:
-                    invalid_errors = sync_summary.get("invalid_land_errors") or []
-                    diagnostics = [
-                        (
-                            f"{item.get('land_id')}: "
-                            f"{str(item.get('reason', '数据校验失败'))[:120]}"
-                        )
-                        for item in invalid_errors[:10]
-                        if isinstance(item, dict)
-                    ]
-                    invalid_ids = invalid_ids or missing
-                    omitted_count = max(0, len(invalid_ids) - len(diagnostics))
-                    if omitted_count:
-                        diagnostics.append(f"另有 {omitted_count} 个地块校验失败")
-                    detail = "; ".join(diagnostics)
-                    if not detail:
-                        detail = ", ".join(invalid_ids[:20])
-                    raise VirtualAreaInitializationError(
-                        f"Smart 地块数据校验失败: {detail}", status_code=422
-                    )
                 skipped_land_ids = list(
                     dict.fromkeys(
                         str(value)
-                        for value in sync_summary.get("missing_land_ids", [])
+                        for value in [
+                            *(sync_summary.get("missing_land_ids") or []),
+                            *invalid_ids,
+                        ]
                     )
                 )
                 if sync_status == "not_found":
-                    skipped_land_ids = skipped_land_ids or missing
-                elif sync_status not in {"completed", "partial"}:
+                    skipped_land_ids.extend(
+                        land_id for land_id in missing if land_id not in skipped_land_ids
+                    )
+                elif sync_status not in {"completed", "partial", "invalid"}:
                     raise VirtualAreaInitializationError(
                         "Smart 地块同步未完成", status_code=503
+                    )
+                if invalid_ids:
+                    invalid_errors = sync_summary.get("invalid_land_errors") or []
+                    logger.warning(
+                        "vpa10_initialize_invalid_lands_skipped",
+                        invalid_land_ids=invalid_ids,
+                        invalid_land_errors=invalid_errors[:10],
                     )
 
                 # 重新读取 Smart 已写入 PG 的地块快照；这里只同步地块主数据，不创建遥感下载任务。
