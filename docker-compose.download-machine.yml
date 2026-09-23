@@ -48,7 +48,8 @@ services:
       SYNC_DB_MAX_OVERFLOW: "8"
       SYNC_DB_POOL_RECYCLE: "300"
       SYNC_DB_APP_NAME: "download-ingest"
-      INGEST_SCENE_MAX_WORKERS: "8"
+      INGEST_SCENE_MAX_WORKERS: "16"
+      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-30}
     volumes:
       - scratch:/data/scratch
       - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
@@ -65,6 +66,7 @@ services:
   satellite:
     extends:
       service: ingest
+    depends_on: !reset []
     command: >
       celery -A app.worker worker
       -Q satellite_download

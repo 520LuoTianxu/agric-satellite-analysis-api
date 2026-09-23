@@ -1,9 +1,10 @@
 """按聚合窗口下载一次影像，在内存中裁到请求地块后回调 API 结果缓存。"""
 
 import os
+import time
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 
 import numpy as np
@@ -23,7 +24,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
 from app.core.band_parallel import band_max_workers, run_parallel_band_jobs
-from app.core.config import scene_max_workers
+from app.core.config import scene_max_workers, scene_straggler_timeout_sec
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
     decloud_enabled,
@@ -639,25 +640,52 @@ def _process_one_batch_scene(
     progress: dict,
     failed_land_ids: set[str],
     failed_scene_ids: set[str],
+    abandon_event: threading.Event,
+    active_reservations: dict,
 ) -> None:
-    """处理单个景：占位 → 下载(含PC降级) → 发布；进度在锁内合并。"""
+    """处理单个景：占位 → 下载(含PC降级) → 发布；进度在锁内合并。
+
+    ``abandon_event`` 在批次因 straggler 超时放弃剩余景时置位。线程无法强杀
+    阻塞中的 GDAL/HTTP，因此此处只做 best-effort：停止发布、释放占位、不再回写进度
+    （父任务已把该景记入 failed / scenes_done）。
+    """
 
     def record_failures(lands_to_record, scene_id: str | None) -> None:
         failed_land_ids.update(str(land["meta"]["land_id"]) for land in lands_to_record)
         if scene_id:
             failed_scene_ids.add(str(scene_id))
 
+    def reservation_key() -> str:
+        return str(scene.get("id") or id(scene))
+
+    def clear_active_reservation() -> None:
+        active_reservations.pop(reservation_key(), None)
+
+    def abandoned_cleanup(reserved_lands) -> bool:
+        """若批次已放弃本景，释放占位并跳过进度回写。返回 True 表示调用方应直接 return。"""
+        if not abandon_event.is_set():
+            return False
+        _release_scene_date_reservation(reserved_lands, scene_date)
+        clear_active_reservation()
+        return True
+
     scene_date = scene["date"]
 
     with state_lock:
+        if abandon_event.is_set():
+            return
         selected = _scene_lands(scene, selected_lands, sensor)
         # 同日多景并发时先占位，避免重复下载；成功保留，失败再释放。
         for land in selected:
             land["existing"].add(scene_date)
         reserved = list(selected)
+        if reserved:
+            active_reservations[reservation_key()] = (scene_date, list(reserved))
 
     if not reserved:
         with state_lock:
+            if abandon_event.is_set():
+                return
             progress["failed_land_ids"] = sorted(failed_land_ids)
             progress["failed_scene_ids"] = sorted(failed_scene_ids)
             progress["scenes_done"] += 1
@@ -751,8 +779,19 @@ def _process_one_batch_scene(
                     unresolved.pop(str(land["meta"]["land_id"]), None)
 
     with state_lock:
+        if abandoned_cleanup(reserved):
+            return
         published_land_ids: set[str] = set()
         for product_scene, product_lands, shared_bands, scl in scene_products:
+            if abandon_event.is_set():
+                leftover = [
+                    land
+                    for land in reserved
+                    if str(land["meta"]["land_id"]) not in published_land_ids
+                ]
+                _release_scene_date_reservation(leftover, scene_date)
+                clear_active_reservation()
+                return
             for land in product_lands:
                 land_id = str(land["meta"]["land_id"])
                 try:
@@ -820,6 +859,10 @@ def _process_one_batch_scene(
             if leftover:
                 _release_scene_date_reservation(leftover, scene_date)
 
+        clear_active_reservation()
+        if abandon_event.is_set():
+            # 父任务已把本景记入 abandoned/failed；已发布结果保留，不再重复累计 scenes_done。
+            return
         progress["failed_land_ids"] = sorted(failed_land_ids)
         progress["failed_scene_ids"] = sorted(failed_scene_ids)
         progress["scenes_done"] += 1
@@ -960,6 +1003,8 @@ def process_satellite_batch(
             "failed_scene_ids": [],
             "published_products": [],
             "scene_workers": 1,
+            "straggler_timeout_sec": scene_straggler_timeout_sec(),
+            "straggler_abandoned_scene_ids": [],
         }
         if compensation_attempt:
             progress = _compensation_progress(
@@ -968,6 +1013,10 @@ def process_satellite_batch(
 
         workers = min(scene_max_workers(), max(1, len(scenes))) if scenes else 1
         progress["scene_workers"] = workers
+        straggler_timeout = scene_straggler_timeout_sec()
+        progress["straggler_timeout_sec"] = straggler_timeout
+        abandon_event = threading.Event()
+        active_reservations: dict = {}
         logger.info(
             "scene_parallel_start",
             job_id=job_id,
@@ -975,11 +1024,15 @@ def process_satellite_batch(
             scenes=len(scenes),
             workers=workers,
             band_gdal_cap=band_max_workers(),
+            straggler_timeout_sec=straggler_timeout,
         )
         patch_job(job_id, {"progress_json": dict(progress)})
 
         if scenes:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            # 不用 with：默认 shutdown(wait=True) 会在 straggler 放弃后仍永久卡住。
+            # cancel_futures 只能取消尚未开跑的任务；已在跑的 GDAL/HTTP 线程只能孤儿化。
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
                 futures = {
                     pool.submit(
                         _process_one_batch_scene,
@@ -996,30 +1049,107 @@ def process_satellite_batch(
                         progress=progress,
                         failed_land_ids=failed_land_ids,
                         failed_scene_ids=failed_scene_ids,
+                        abandon_event=abandon_event,
+                        active_reservations=active_reservations,
                     ): scene
                     for scene in scenes
                 }
-                for fut in as_completed(futures):
-                    scene = futures[fut]
-                    try:
-                        fut.result()
-                    except Exception as exc:
-                        # 单景未捕获异常仍计入失败，避免整个 batch 默默丢景。
+                pending = set(futures)
+                # 滚动宽限：时钟从并行开始（零完成兜底）或最近一次景完成时刻起算。
+                last_completion = time.monotonic()
+                while pending:
+                    remaining = straggler_timeout - (time.monotonic() - last_completion)
+                    if remaining <= 0:
+                        done, not_done = set(), set(pending)
+                    else:
+                        done, not_done = wait(
+                            pending,
+                            timeout=remaining,
+                            return_when=FIRST_COMPLETED,
+                        )
+                    if not done:
+                        # 超时窗口内可能刚好有 future 结束；再扫一遍避免误杀刚完成的景。
+                        done = {fut for fut in pending if fut.done()}
+                        not_done = pending - done
+                    for fut in done:
+                        pending.discard(fut)
+                        scene = futures[fut]
+                        try:
+                            fut.result()
+                        except Exception as exc:
+                            # 单景未捕获异常仍计入失败，避免整个 batch 默默丢景。
+                            with state_lock:
+                                if not abandon_event.is_set():
+                                    progress["failed"] += 1
+                                    sid = str(scene.get("id") or "")
+                                    if sid:
+                                        failed_scene_ids.add(sid)
+                                    progress["failed_land_ids"] = sorted(
+                                        failed_land_ids
+                                    )
+                                    progress["failed_scene_ids"] = sorted(
+                                        failed_scene_ids
+                                    )
+                                    progress["scenes_done"] += 1
+                                    patch_job(
+                                        job_id, {"progress_json": dict(progress)}
+                                    )
+                            logger.exception(
+                                "satellite_batch_scene_worker_crashed",
+                                job_id=job_id,
+                                scene_id=scene.get("id"),
+                                error=str(exc),
+                            )
+                        last_completion = time.monotonic()
+                    if done and pending:
+                        continue
+                    if not_done and not done:
+                        abandon_event.set()
+                        abandoned_ids: list[str] = []
                         with state_lock:
-                            progress["failed"] += 1
-                            sid = str(scene.get("id") or "")
-                            if sid:
-                                failed_scene_ids.add(sid)
+                            for fut in list(not_done):
+                                scene = futures[fut]
+                                sid = str(scene.get("id") or "")
+                                key = sid or str(id(scene))
+                                info = active_reservations.pop(key, None)
+                                if info is None and sid:
+                                    info = active_reservations.pop(str(id(scene)), None)
+                                if info is not None:
+                                    _release_scene_date_reservation(
+                                        info[1], info[0]
+                                    )
+                                if sid:
+                                    failed_scene_ids.add(sid)
+                                    abandoned_ids.append(sid)
+                                else:
+                                    abandoned_ids.append(key)
+                                progress["failed"] += 1
+                                progress["scenes_done"] += 1
+                                fut.cancel()
                             progress["failed_land_ids"] = sorted(failed_land_ids)
                             progress["failed_scene_ids"] = sorted(failed_scene_ids)
-                            progress["scenes_done"] += 1
+                            progress["straggler_abandoned_scene_ids"] = sorted(
+                                set(
+                                    progress.get("straggler_abandoned_scene_ids")
+                                    or []
+                                ).union(abandoned_ids)
+                            )
                             patch_job(job_id, {"progress_json": dict(progress)})
-                        logger.exception(
-                            "satellite_batch_scene_worker_crashed",
+                        logger.warning(
+                            "scene_straggler_timeout",
                             job_id=job_id,
-                            scene_id=scene.get("id"),
-                            error=str(exc),
+                            index=f"satellite_batch_{sensor}",
+                            timeout_sec=straggler_timeout,
+                            abandoned=len(not_done),
+                            abandoned_scene_ids=abandoned_ids,
+                            scenes_done=progress["scenes_done"],
+                            scenes_total=progress["scenes_total"],
+                            products_published=progress["products_published"],
                         )
+                        pending.clear()
+                        break
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
         logger.info(
             "scene_parallel_done",

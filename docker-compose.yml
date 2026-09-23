@@ -74,6 +74,7 @@ services:
       MYSQL_SYNC_PROCESSING_WINDOW_KM: ${MYSQL_SYNC_PROCESSING_WINDOW_KM:-10}
       STAC_API_URL: ${STAC_API_URL}
       S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      PC_SDK_SAS_URL: ${PC_SDK_SAS_URL:-https://planetarycomputer.microsoft.com/api/sas/v1/token}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-agric-satellite-analysis <noreply@openfarm.earth>}
       APP_URL: ${APP_URL:-http://localhost:3000}
@@ -143,12 +144,14 @@ services:
       OSS_PREFIX: ${OSS_PREFIX:-s1s2_parcel/json/}
       STAC_API_URL: ${STAC_API_URL}
       S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      PC_SDK_SAS_URL: ${PC_SDK_SAS_URL:-https://planetarycomputer.microsoft.com/api/sas/v1/token}
       SOILGRIDS_WCS_BASE_URL: ${SOILGRIDS_WCS_BASE_URL}
       POLARIS_S3_BUCKET: ${POLARIS_S3_BUCKET}
       SOIL_FETCH_TIMEOUT_SECONDS: ${SOIL_FETCH_TIMEOUT_SECONDS}
       SOIL_FETCH_MAX_WORKERS: ${SOIL_FETCH_MAX_WORKERS:-12}
       SOIL_SOURCE_PRIORITY: ${SOIL_SOURCE_PRIORITY}
       INGEST_SCENE_MAX_WORKERS: ${INGEST_SCENE_MAX_WORKERS:-16}
+      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-30}
       INGEST_BAND_MAX_WORKERS: ${INGEST_BAND_MAX_WORKERS:-8}
       BAND_READ_MAX_ATTEMPTS: ${BAND_READ_MAX_ATTEMPTS:-3}
       BAND_READ_RETRY_DELAYS_SEC: ${BAND_READ_RETRY_DELAYS_SEC:-1,3}
