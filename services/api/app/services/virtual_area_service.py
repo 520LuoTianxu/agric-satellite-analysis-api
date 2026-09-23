@@ -37,6 +37,14 @@ VPA10_SOURCE = "vpa10:greedy"
 VPA10_HISTORY_YEARS = 5
 
 
+class VirtualAreaInitializationError(ValueError):
+    """Smart 地块补齐失败时保留可映射到 HTTP 的业务状态码。"""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def default_history_window(
     *, as_of: date | None = None, years: int = VPA10_HISTORY_YEARS
 ) -> tuple[date, date]:
@@ -708,12 +716,65 @@ async def initialize_virtual_areas(
     execution_id = parent_job_id or uuid.uuid4()
     async with async_session() as db:
         snapshots = await load_land_snapshots(db, land_ids)
-        if land_ids and len(snapshots) != len(set(str(value) for value in land_ids)):
-            missing = sorted(
-                set(str(value) for value in land_ids)
-                - {str(row["land_id"]) for row in snapshots}
+        if land_ids:
+            requested_ids = list(
+                dict.fromkeys(
+                    str(value).strip() for value in land_ids if str(value).strip()
+                )
             )
-            raise ValueError(f"land parcels not found: {', '.join(missing[:20])}")
+            existing_ids = {str(row["land_id"]) for row in snapshots}
+            missing = [
+                land_id for land_id in requested_ids if land_id not in existing_ids
+            ]
+            if missing:
+                # Smart 同步使用独立会话；结束只读事务后再同步，释放连接并读取新提交。
+                await db.rollback()
+                from app.services.mysql_land_sync import sync_selected_lands
+
+                try:
+                    sync_summary = await sync_selected_lands(
+                        missing, include_excluded_schedule_lands=True
+                    )
+                except Exception as exc:
+                    raise VirtualAreaInitializationError(
+                        "Smart 地块数据同步失败", status_code=503
+                    ) from exc
+
+                sync_status = sync_summary.get("status")
+                if sync_status == "skipped_locked":
+                    raise VirtualAreaInitializationError(
+                        "Smart 地块同步正在进行，请稍后重试", status_code=409
+                    )
+                if sync_status == "disabled":
+                    raise VirtualAreaInitializationError(
+                        "Smart/MySQL 数据源未启用", status_code=503
+                    )
+                if sync_status in {"filtered", "invalid"}:
+                    raise VirtualAreaInitializationError(
+                        "Smart 地块数据无法同步", status_code=422
+                    )
+                if sync_status == "not_found":
+                    not_found = sync_summary.get("missing_land_ids") or missing
+                    raise VirtualAreaInitializationError(
+                        f"Smart 中不存在地块: {', '.join(not_found[:20])}",
+                        status_code=404,
+                    )
+                if sync_status != "completed":
+                    raise VirtualAreaInitializationError(
+                        "Smart 地块同步未完成", status_code=503
+                    )
+
+                # 重新读取 Smart 已写入 PG 的地块快照；这里只同步地块主数据，不创建遥感下载任务。
+                snapshots = await load_land_snapshots(db, requested_ids)
+                synced_ids = {str(row["land_id"]) for row in snapshots}
+                still_missing = [
+                    land_id for land_id in requested_ids if land_id not in synced_ids
+                ]
+                if still_missing:
+                    raise VirtualAreaInitializationError(
+                        f"Smart 同步后仍缺少地块: {', '.join(still_missing[:20])}",
+                        status_code=404,
+                    )
         prepared = await prepare_vpa10_areas(
             db,
             snapshots,
