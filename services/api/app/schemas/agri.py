@@ -12,7 +12,7 @@ Sensor = Literal["S1", "S2"]
 
 
 class ProjectAreaOut(BaseModel):
-    """virtual_project_areas row (项目区 / ~5km tile)."""
+    """virtual_project_areas row (legacy 5 km or VPA10 10 km tile)."""
 
     tile_id: str
     project_key: str | None = None
@@ -35,9 +35,45 @@ class ProjectAreaOut(BaseModel):
     min_lat: float | None = None
     max_lon: float | None = None
     max_lat: float | None = None
+    algorithm_version: str | None = None
+    window_side_m: float | None = None
+    window_shape: str | None = None
+    planning_crs: str | None = None
+    grid_crs: str | None = None
+    center_x: float | None = None
+    center_y: float | None = None
+    status: str | None = None
+    data_from: date | None = None
+    data_to: date | None = None
+    manifest_oss_key: str | None = None
+    manifest_sha256: str | None = None
+    data_ready_ratio: float | None = None
+    last_planned_at: datetime | None = None
+    last_backfill_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     land_count: int | None = None
+
+
+class ProjectAreaAssetOut(BaseModel):
+    """项目区级像素/预览资产；download_url 为短期或长期签名地址。"""
+
+    tile_id: str
+    sensor: Sensor
+    scene_date: date
+    scene_id: str
+    asset_kind: str
+    oss_key: str
+    format: str
+    compression: str | None = None
+    grid_json: dict[str, Any] = Field(default_factory=dict)
+    checksum: str | None = None
+    byte_size: int | None = None
+    status: str
+    error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    download_url: str | None = None
 
 
 class ProjectAreaLandOut(BaseModel):

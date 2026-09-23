@@ -58,6 +58,18 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
         "task_name": "app.services.smart_land_backfill.run_smart_land_backfill",
         "schedule": "按参数手动运行（API 机）",
     },
+    "virtual-area-initialize": {
+        "label": "初始化 10×10 km 虚拟项目区",
+        "description": "使用动态窗口、全局锚点和稀缺地块保护算法建立 vpa10 项目区归属。",
+        "task_name": "app.services.virtual_area_service.initialize_virtual_areas",
+        "schedule": "按参数手动运行（API 机）",
+    },
+    "virtual-area-history": {
+        "label": "虚拟项目区五年历史回填",
+        "description": "以项目区为下载单位共享拉取 S1/S2 历史数据；同项目区只请求一次影像窗口。",
+        "task_name": "app.tasks.virtual_area.schedule_virtual_area_history_backfill",
+        "schedule": "每周二 02:30（北京时间，默认关闭）",
+    },
 }
 
 # 取消后的运行记录不再读取 Celery 结果覆盖，避免页面重新刷新后恢复成运行中。
@@ -1182,16 +1194,20 @@ def _task_outputs() -> list[ScheduledTaskOut]:
         "daily-weather": "fetch-weather-daily",
         "daily-satellite": "refresh-satellite-overview-daily",
         "overview-refresh": "refresh-overview-stats-daily",
+        "virtual-area-history": "virtual-area-history-weekly",
     }
     result: list[ScheduledTaskOut] = []
     for key, item in _TASK_CATALOG.items():
         # MySQL 源只允许 API 机访问，所以它不是 Celery/download worker 任务，
         # 页面仍提供手动触发，但启用状态直接反映 API 的源开关。
-        enabled = (
-            settings.mysql_source_enabled
-            if key in {"mysql-land-sync", "smart-land-backfill"}
-            else switch_name_by_key[key] in enabled_names
-        )
+        if key in {"mysql-land-sync", "smart-land-backfill"}:
+            enabled = settings.mysql_source_enabled
+        elif key == "virtual-area-initialize":
+            # 项目区初始化只读取 API 本地地块表，不依赖 Smart/MySQL 源开关。
+            enabled = True
+        else:
+            # 历史回填的 enabled 仅表示周期开关，手动按钮仍可单独触发。
+            enabled = switch_name_by_key[key] in enabled_names
         result.append(
             ScheduledTaskOut(
                 key=key,
@@ -1231,6 +1247,23 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
                 land_ids=task_params["land_ids"],
                 date_from=date.fromisoformat(task_params["date_from"]),
                 date_to=date.fromisoformat(task_params["date_to"]),
+                sensors=task_params.get("sensors") or ["S1", "S2"],
+                force=bool(task_params.get("force", False)),
+                parent_job_id=run_id,
+            )
+        elif task_key == "virtual-area-initialize":
+            from app.services.virtual_area_service import initialize_virtual_areas
+
+            result = await initialize_virtual_areas(
+                land_ids=task_params.get("land_ids"),
+                parent_job_id=run_id,
+            )
+        elif task_key == "virtual-area-history":
+            from app.services.virtual_area_service import backfill_virtual_area_history
+
+            result = await backfill_virtual_area_history(
+                land_ids=task_params.get("land_ids"),
+                years=int(task_params.get("years") or 5),
                 sensors=task_params.get("sensors") or ["S1", "S2"],
                 force=bool(task_params.get("force", False)),
                 parent_job_id=run_id,
@@ -1450,6 +1483,13 @@ async def trigger_task(
             "sensors": list(batch_request.sensors),
             "force": body.force,
         }
+    if body.task_key in {"virtual-area-initialize", "virtual-area-history"}:
+        params = {
+            "land_ids": [str(value) for value in body.land_ids] if body.land_ids else None,
+            "years": body.years or 5,
+            "sensors": list(body.sensors or ["S1", "S2"]),
+            "force": body.force,
+        }
 
     run = AdminTaskRun(
         task_key=body.task_key,
@@ -1460,8 +1500,13 @@ async def trigger_task(
     )
     db.add(run)
     await db.flush()
-    if body.task_key in {"mysql-land-sync", "smart-land-backfill"}:
-        # 两类任务都需要在 API 机访问 Smart/PostgreSQL；不放入下载机 claim 队列，
+    if body.task_key in {
+        "mysql-land-sync",
+        "smart-land-backfill",
+        "virtual-area-initialize",
+        "virtual-area-history",
+    }:
+        # 这些任务都需要在 API 机访问 PostgreSQL/Smart；不放入下载机 claim 队列，
         # 避免泄露源库连接信息且不占用卫星下载 worker。
         await db.commit()
         asyncio.create_task(_run_api_admin_task(run.id))

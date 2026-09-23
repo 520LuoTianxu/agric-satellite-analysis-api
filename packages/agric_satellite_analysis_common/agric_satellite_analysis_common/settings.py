@@ -23,6 +23,8 @@ class CommonSettings(BaseSettings):
     schedule_daily_satellite_enabled: bool = False
     schedule_daily_weather_enabled: bool = False
     schedule_overview_refresh_enabled: bool = False
+    # 五年项目区历史回填默认关闭，开启后按周触发一次共享窗口补齐。
+    schedule_virtual_area_history_enabled: bool = False
 
     # Celery / kombu Redis transport. Defaults match a remote broker over a
     # flaky path (download-machine, nested Docker NAT). 0 max retries = forever.

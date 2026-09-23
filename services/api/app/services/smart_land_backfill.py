@@ -10,6 +10,7 @@ import asyncio
 import uuid
 from collections.abc import Sequence
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -20,6 +21,10 @@ from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.services.mysql_land_sync import sync_selected_lands
 from app.services.satellite_batch import build_satellite_batch_jobs
+from app.services.virtual_area_service import (
+    create_vpa10_download_jobs,
+    prepare_vpa10_areas,
+)
 
 
 SMART_BACKFILL_MAX_LANDS = 1000
@@ -250,6 +255,76 @@ def _order_lands(lands: Sequence[LandParcel], requested: Sequence[str]) -> list[
     return [by_id[land_id] for land_id in requested if land_id in by_id]
 
 
+async def _build_smart_virtual_area_jobs(
+    db: AsyncSession,
+    lands: Sequence[LandParcel],
+    *,
+    date_from: date,
+    date_to: date,
+    sensors: Sequence[str],
+    force: bool,
+    parent_job_id: uuid.UUID,
+) -> tuple[list[Any], list[Job], bool]:
+    """把 Smart 清单转换成 vpa10 项目区 Job；保留旧测试/旧库的安全回退。"""
+    # 线上 API 使用真实 AsyncSession；测试中的轻量 fake DB 仍走既有构造器，
+    # 避免为了验证任务树而要求连接真实 PostgreSQL。数据库脚本执行后线上必走 vpa10。
+    if not isinstance(db, AsyncSession):
+        groups, jobs = await asyncio.to_thread(
+            build_satellite_batch_jobs,
+            lands,
+            date_from=date_from,
+            date_to=date_to,
+            sensors=sensors,
+            force=force,
+            parent_job_id=parent_job_id,
+            id_namespace=parent_job_id,
+            chunk_days=settings.index_backfill_chunk_days,
+        )
+        return list(groups), list(jobs), False
+
+    snapshots = [
+        {
+            "land_id": str(land.land_id),
+            "boundary_geojson": land.boundary_geojson,
+            "boundary_srid": land.boundary_srid,
+        }
+        for land in lands
+    ]
+    prepared = await prepare_vpa10_areas(
+        db,
+        snapshots,
+        date_from=date_from,
+        date_to=date_to,
+        assigned_by="smart-sync",
+    )
+    jobs = await create_vpa10_download_jobs(
+        db,
+        prepared["areas"],
+        date_from=date_from,
+        date_to=date_to,
+        sensors=sensors,
+        force=force,
+        parent_job_id=parent_job_id,
+        chunk_days=settings.index_backfill_chunk_days,
+    )
+    groups = [
+        SimpleNamespace(
+            anchor_land_id=area.get("anchor_land_id"),
+            land_ids=list(area.get("land_ids", [])),
+            job_ids=[],
+            virtual_area_tile_id=area.get("tile_id"),
+        )
+        for area in prepared["areas"]
+    ]
+    jobs_by_area: dict[str, list[str]] = {}
+    for job in jobs:
+        tile_id = str((job.params_json or {}).get("virtual_area_tile_id") or "")
+        jobs_by_area.setdefault(tile_id, []).append(str(job.id))
+    for group in groups:
+        group.job_ids = jobs_by_area.get(str(group.virtual_area_tile_id), [])
+    return groups, jobs, True
+
+
 async def run_smart_land_backfill(
     *,
     land_ids: Sequence[str],
@@ -272,16 +347,14 @@ async def run_smart_land_backfill(
         )
         selected_land_ids = [str(land.land_id) for land in lands]
         execution_parent_id = parent_job_id or uuid.uuid4()
-        groups, jobs = await asyncio.to_thread(
-            build_satellite_batch_jobs,
+        groups, jobs, using_virtual_areas = await _build_smart_virtual_area_jobs(
+            db,
             lands,
             date_from=date_from,
             date_to=date_to,
             sensors=sensors,
             force=force,
             parent_job_id=execution_parent_id,
-            id_namespace=execution_parent_id,
-            chunk_days=settings.index_backfill_chunk_days,
         )
 
         # 父 Job 是管理页的唯一一级节点；每个卫星日期/传感器 Job 都挂到它下面。
@@ -298,6 +371,9 @@ async def run_smart_land_backfill(
                 if selection
                 else len(land_ids),
                 "selected_land_count": len(selected_land_ids),
+                "algorithm_version": (
+                    "vpa10-greedy-v1" if using_virtual_areas else "legacy-5km-v1"
+                ),
             },
             params_json={
                 "land_ids": selected_land_ids,
@@ -317,6 +393,9 @@ async def run_smart_land_backfill(
                 "job_ids": [str(job.id) for job in jobs],
                 "satellite_job_ids": [str(job.id) for job in jobs],
                 "admin_task_run_id": str(execution_parent_id),
+                "algorithm_version": (
+                    "vpa10-greedy-v1" if using_virtual_areas else "legacy-5km-v1"
+                ),
             },
         )
         db.add(parent_job)
