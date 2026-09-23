@@ -279,6 +279,9 @@ class OfficialGateTests(unittest.TestCase):
         self.assertIn("decloud_quality", sql)
         self.assertIn("'good'", sql)
         self.assertIn("_decloud", sql)
+        self.assertIn("product_source", sql)
+        self.assertIn("parcel_cloud_source", sql)
+        self.assertNotIn("pixel_data->>", sql)
 
 
 class BatchPlanTests(unittest.TestCase):

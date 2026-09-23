@@ -61,6 +61,7 @@ UPSERT_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
+  product_source, decloud_quality, parcel_cloud_source,
   json_oss_key, pixel_count, generated_at_shanghai,
   pixel_data_url,
   ndvi_avg, ndvi_min, ndvi_max,
@@ -73,6 +74,7 @@ INSERT INTO agric_satellite.parcel_scene_products (
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, 'S2', %(scene_id)s, %(land_name)s,
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
+  %(product_source)s, %(decloud_quality)s, %(parcel_cloud_source)s,
   %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
   %(pixel_data_url)s,
   %(ndvi_avg)s, %(ndvi_min)s, %(ndvi_max)s,
@@ -89,6 +91,9 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
+  product_source = EXCLUDED.product_source,
+  decloud_quality = EXCLUDED.decloud_quality,
+  parcel_cloud_source = EXCLUDED.parcel_cloud_source,
   json_oss_key = COALESCE(EXCLUDED.json_oss_key, agric_satellite.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
@@ -533,6 +538,10 @@ def process_date(
         "cloud_cover": None,
         "cloud_cover_over_30": cloud_over_30,
         "parcel_cloud_cover_pct": parcel_cloud,
+        # 桥接产品通常没有云量来源，但保留标量元数据接口，避免回退解析 JSONB。
+        "product_source": pixel_data.get("source"),
+        "decloud_quality": pixel_data.get("decloud_quality"),
+        "parcel_cloud_source": pixel_data.get("parcel_cloud_source"),
         "pixel_count": len(pixels),
         "generated_at_shanghai": datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S%z"

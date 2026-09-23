@@ -99,6 +99,7 @@ UPSERT_SCENE_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
+  product_source, decloud_quality, parcel_cloud_source,
   json_oss_key, pixel_count, generated_at_shanghai,
   pixel_data_url,
   rgb_url, large_rgb_url, rgb_oss_key,
@@ -114,6 +115,7 @@ INSERT INTO agric_satellite.parcel_scene_products (
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
+  %(product_source)s, %(decloud_quality)s, %(parcel_cloud_source)s,
   %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
   %(pixel_data_url)s,
   %(rgb_url)s, %(large_rgb_url)s, %(rgb_oss_key)s,
@@ -133,6 +135,9 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
+  product_source = EXCLUDED.product_source,
+  decloud_quality = EXCLUDED.decloud_quality,
+  parcel_cloud_source = EXCLUDED.parcel_cloud_source,
   json_oss_key = COALESCE(EXCLUDED.json_oss_key, agric_satellite.parcel_scene_products.json_oss_key),
   pixel_count = EXCLUDED.pixel_count,
   generated_at_shanghai = EXCLUDED.generated_at_shanghai,
@@ -213,11 +218,21 @@ def apply_parcel_scene_product(
 ) -> None:
     """Upsert one lonlat_v1 scene product into agric_satellite.parcel_scene_products."""
     pixel_data = obj.get("pixel_data")
+    pixel_data_obj: dict[str, Any] = {}
     if isinstance(pixel_data, dict):
+        pixel_data_obj = pixel_data
         pixel_data_str = json.dumps(pixel_data, separators=(",", ":"))
     else:
         pixel_data_str = pixel_data
+        if isinstance(pixel_data, str):
+            try:
+                parsed = json.loads(pixel_data)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                pixel_data_obj = parsed
     sensor = obj.get("sensor") or "S2"
+    # 查询高频筛选字段单独落列，避免每次项目监测请求都解析像元 JSONB。
     params = {
         "land_id": obj["land_id"],
         "tile_id": obj.get("tile_id") or "",
@@ -228,6 +243,14 @@ def apply_parcel_scene_product(
         "cloud_cover": obj.get("cloud_cover"),
         "cloud_cover_over_30": obj.get("cloud_cover_over_30"),
         "parcel_cloud_cover_pct": obj.get("parcel_cloud_cover_pct"),
+        "product_source": pixel_data_obj.get("source") or obj.get("source"),
+        "decloud_quality": (
+            pixel_data_obj.get("decloud_quality") or obj.get("decloud_quality")
+        ),
+        "parcel_cloud_source": (
+            pixel_data_obj.get("parcel_cloud_source")
+            or obj.get("parcel_cloud_source")
+        ),
         "json_oss_key": json_oss_key or obj.get("json_oss_key"),
         "pixel_count": obj.get("pixel_count"),
         "generated_at_shanghai": obj.get("generated_at_shanghai"),

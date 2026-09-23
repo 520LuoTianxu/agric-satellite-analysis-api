@@ -835,6 +835,9 @@ CREATE TABLE agric_satellite.parcel_scene_products (
     cloud_cover double precision,
     cloud_cover_over_30 boolean,
     parcel_cloud_cover_pct double precision,
+    product_source text,
+    decloud_quality text,
+    parcel_cloud_source text,
     json_oss_key text,
     pixel_count integer,
     generated_at_shanghai text,
@@ -1197,6 +1200,9 @@ CREATE VIEW agric_satellite.v_parcel_scene_products_meta AS
     parcel_scene_products.cloud_cover,
     parcel_scene_products.cloud_cover_over_30,
     parcel_scene_products.parcel_cloud_cover_pct,
+    parcel_scene_products.product_source,
+    parcel_scene_products.decloud_quality,
+    parcel_scene_products.parcel_cloud_source,
     parcel_scene_products.json_oss_key,
     parcel_scene_products.pixel_data_url,
     parcel_scene_products.rgb_url,
@@ -1718,6 +1724,10 @@ CREATE INDEX idx_psp_sensor ON agric_satellite.parcel_scene_products USING btree
 --
 
 CREATE INDEX idx_psp_tile_date ON agric_satellite.parcel_scene_products USING btree (tile_id, date);
+
+-- 项目监测按地块、传感器和日期倒序查找最新有效场景。
+CREATE INDEX idx_psp_land_sensor_date_monitoring
+    ON agric_satellite.parcel_scene_products USING btree (land_id, sensor, date DESC, scene_id);
 
 --
 -- Name: land_parcels_bbox_idx; Type: INDEX; Schema: agric_satellite; Owner: -
