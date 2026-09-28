@@ -11,14 +11,16 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from agric_satellite_analysis_common.task_priority import INTERACTIVE_REPORT_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
+from app.core.request_body import safe_upload_filename
 from app.core.rate_limit import limiter
 from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
@@ -931,15 +933,18 @@ async def get_latest_assessment_report(
         raise HTTPException(status_code=404, detail="Report file missing")
 
     storage = get_storage()
-    if not storage.exists(object_key):
+    if not await run_in_threadpool(storage.exists, object_key):
         raise HTTPException(
             status_code=404, detail="Report object not found in storage"
         )
 
     # 仍由 API 读取并流式返回，避免下载机或浏览器因私有 OSS ACL 直接被拒绝；
     # 如需直连，响应头会提供短期签名 URL。
-    data = storage.get_bytes(object_key)
-    filename = progress.get("filename") or "选地分析报告.pdf"
+    stored_filename = progress.get("filename")
+    filename = safe_upload_filename(
+        stored_filename if isinstance(stored_filename, str) else None,
+        "选地分析报告.pdf",
+    )
     # RFC 5987 for Chinese filenames
     disp = (
         f"attachment; filename=\"assessment.pdf\"; filename*=UTF-8''{quote(filename)}"
@@ -952,7 +957,10 @@ async def get_latest_assessment_report(
     public_url = signed_report_url(object_key)
     if public_url:
         headers["X-Assessment-Public-Url"] = str(public_url)
-    return Response(content=data, media_type="application/pdf", headers=headers)
+    # 报告可能较大，使用OSS分块迭代器避免整份PDF占用API进程内存。
+    return StreamingResponse(
+        storage.iter_bytes(object_key), media_type="application/pdf", headers=headers
+    )
 
 
 async def _latest_report_job_for_meta(

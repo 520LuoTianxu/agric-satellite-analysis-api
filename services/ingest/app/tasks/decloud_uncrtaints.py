@@ -75,7 +75,6 @@ from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
     compute_target_grid,
-    compute_zonal_stats,
     get_db_session,
     read_bands_windowed_parallel,
 )
@@ -84,6 +83,7 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 S1_MATCH_DAYS = 6
+DECLOUD_ALGORITHM_VERSION = "uncrtaints-decloud-v5"
 
 
 def _database_url_configured() -> bool:
@@ -224,6 +224,10 @@ def cache_optical_s2_window(
     band_hrefs: dict[str, str] | None,
     cloud_cover: float | None,
     stac_id: str | None,
+    target_shape: tuple[int, int],
+    target_transform,
+    target_crs: str,
+    field_mask: np.ndarray,
 ) -> None:
     """Store a parcel-window S2 stack from the optical download (not a full scene)."""
     hrefs = {k: v for k, v in (band_hrefs or {}).items() if k != "SCL" and v}
@@ -238,10 +242,21 @@ def cache_optical_s2_window(
     if not bands:
         return
     from app.core.uncrtaints import stack_s2_13
+    from app.core.decloud_cache import window_grid_key
 
     stack = stack_s2_13(bands)
+    grid_key = window_grid_key(
+        target_crs, target_shape, target_transform, field_mask
+    )
     try:
-        write_window_array(str(land_id), date_str, "S2", stack=stack)
+        write_window_array(
+            str(land_id),
+            date_str,
+            "S2",
+            grid_key=grid_key,
+            stack=stack,
+            field_mask=field_mask,
+        )
     except OSError as exc:
         logger.warning(
             "decloud_cache_array_write_failed",
@@ -400,10 +415,12 @@ def _read_s1_for_dates(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
 ) -> list[np.ndarray]:
-    """Nearest S1 VV/VH (dB) per S2 date; zeros when none within S1_MATCH_DAYS."""
+    """为每个S2日期匹配最近的S1双极化特征；匹配窗口内无场景时填零特征。"""
     from app.tasks.sentinel1 import (
         _read_band_windowed_db_profiled,
+        _s1_radiometric_calibration,
         search_s1_scenes,
     )
 
@@ -425,10 +442,17 @@ def _read_s1_for_dates(
         if best is None:
             out.append(np.zeros((2, h, w), dtype=np.float32))
             continue
+        # 去云模型的S1辅助特征必须沿用单景发布的Sigma0定标，避免训练/推理特征尺度漂移。
+        _s1_radiometric_calibration(best)
         pol = run_parallel_band_jobs(
             {"vv": best["vv_href"], "vh": best["vh_href"]},
-            lambda _band, href: _read_band_windowed_db_profiled(
-                href, bounds, target_shape, target_transform
+            lambda band, href: _read_band_windowed_db_profiled(
+                href,
+                bounds,
+                target_shape,
+                target_transform,
+                target_crs,
+                calibration_href=best.get(f"{band}_calibration_href"),
             ),
             scene_workers=1,
             log_context={
@@ -480,12 +504,17 @@ def _index_arrays_from_reflectance(
 def _rgb_stats(
     rec_01: np.ndarray, raw_dn: np.ndarray, land_mask: np.ndarray
 ) -> tuple[float, float, float, float]:
-    """Return (rgb_mean, rgb_mean_raw, rgb_std, rgb_std_raw) in 0-1 units."""
+    """只用地块内重建值与原始值都有效的RGB样本计算质量统计。"""
     rec_rgb = rec_01[[1, 2, 3]]  # B02, B03, B04
     raw_rgb = raw_dn[[1, 2, 3]] / 10000.0
-    mask = land_mask & np.isfinite(rec_rgb[0])
+    mask = (
+        np.asarray(land_mask, dtype=bool)
+        & np.all(np.isfinite(rec_rgb), axis=0)
+        & np.all(np.isfinite(raw_rgb), axis=0)
+    )
     if not np.any(mask):
-        mask = np.isfinite(rec_rgb[0])
+        # 没有地块内配对样本时返回非有限值，让质量门判为bad；不能拿窗口外背景替代。
+        return (float("nan"),) * 4
     rec_vals = rec_rgb[:, mask]
     raw_vals = raw_rgb[:, mask]
     rec_mean = float(np.nanmean(rec_vals)) if rec_vals.size else 0.0
@@ -573,7 +602,9 @@ def _publish_decloud_product(
     date_str: str,
     land_id_str: str,
     index_arrays: dict[str, np.ndarray],
+    field_mask: np.ndarray,
     transform,
+    target_crs: str,
     geom4326: dict,
     quality: DecloudQualityResult,
     raw_scene_id: str | None,
@@ -590,22 +621,29 @@ def _publish_decloud_product(
         _stats,
     )
 
-    pixels = _sample_lonlat(geom4326, index_arrays, transform, "EPSG:4326")
+    pixels = _sample_lonlat(geom4326, index_arrays, transform, target_crs)
     if not pixels:
         pixels = _sample_lonlat(
             geom4326,
             index_arrays,
             transform,
-            "EPSG:4326",
+            target_crs,
             require_finite_ndvi=False,
         )
 
     def _avg_triple(pix_key: str):
         if pix_key not in index_arrays:
             return None, None, None
-        return _stats(index_arrays[pix_key])
+        data = index_arrays[pix_key]
+        if tuple(data.shape) != tuple(field_mask.shape):
+            raise ValueError("decloud index array and land mask dimensions differ")
+        # 像元发布仍按几何采样；地块均值只能统计掩膜内网格，不能混入外接矩形背景。
+        return _stats(data[field_mask])
 
-    index_avgs = {key: _avg_triple(key)[0] for key in EMIT_PIXEL_KEYS}
+    # 每个指数只扫描一次地块掩膜；发布均值和分位统计复用同一结果，避免大栅格重复遍历。
+    index_stats = {key: _avg_triple(key) for key in EMIT_PIXEL_KEYS}
+    index_avgs = {key: stats[0] for key, stats in index_stats.items()}
+    sampled_pixels = bool(pixels)
     if not pixels:
         centroid = geojson_ring_centroid(geom4326)
         lon, lat = centroid if centroid else (None, None)
@@ -614,7 +652,6 @@ def _publish_decloud_product(
             index_avgs=index_avgs,
             lon=lon,
             lat=lat,
-            allow_zero_stub=True,
         )
         logger.info(
             "decloud_pixels_fallback",
@@ -624,9 +661,8 @@ def _publish_decloud_product(
             quality=quality.quality,
         )
 
-    # Prefer array stats; if reconstruction collapsed to stub pixels, fill avgs from pixels
-    # so UI alt series (fair/bad) is not dropped for null ndvi_avg.
-    if pixels:
+    # 仅真实地块采样点可补充稀疏网格统计；质心占位点的0只表示缺测，不能回填指数均值。
+    if sampled_pixels:
         for key in EMIT_PIXEL_KEYS:
             if index_avgs.get(key) is not None:
                 continue
@@ -665,6 +701,25 @@ def _publish_decloud_product(
         pixels=pixels,
         metrics=metrics,
     )
+    # 网格投影和缓存掩膜口径变更后升级版本，便于把新重建结果与历史结果区分。
+    pixel_data["algorithm_version"] = DECLOUD_ALGORITHM_VERSION
+    from app.tasks.pipeline import describe_target_grid
+
+    pixel_data["analysis_grid"] = describe_target_grid(
+        transform, index_arrays["NDVI"].shape, target_crs
+    )
+    # 质量统计已明确无有效NDVI时保持NULL；不能用零值伪装成真实的低绿度。
+    quality_ndvi = (
+        quality_inputs.ndvi_mean if quality_inputs is not None else None
+    )
+    if quality_inputs is not None:
+        ndvi_avg = float(quality_ndvi) if quality_ndvi is not None else None
+    else:
+        ndvi_avg = (
+            index_avgs.get("NDVI")
+            if index_avgs.get("NDVI") is not None
+            else index_stats["NDVI"][0]
+        )
     row = {
         "land_id": meta["land_id"],
         "tile_id": meta["tile_id"],
@@ -684,32 +739,24 @@ def _publish_decloud_product(
             "%Y-%m-%d %H:%M:%S%z"
         ),
         "pixel_data_url": f"decloud://land/{land_id_str}/{date_str}",
-        "ndvi_avg": (
-            float(quality_inputs.ndvi_mean)
-            if quality_inputs is not None
-            else (
-                index_avgs.get("NDVI")
-                if index_avgs.get("NDVI") is not None
-                else _avg_triple("NDVI")[0]
-            )
-        ),
-        "ndvi_min": _avg_triple("NDVI")[1],
-        "ndvi_max": _avg_triple("NDVI")[2],
-        "evi_avg": _avg_triple("EVI")[0],
-        "evi_min": _avg_triple("EVI")[1],
-        "evi_max": _avg_triple("EVI")[2],
-        "ndmi_avg": _avg_triple("NDMI")[0],
-        "ndmi_min": _avg_triple("NDMI")[1],
-        "ndmi_max": _avg_triple("NDMI")[2],
-        "ndre_avg": _avg_triple("NDRE")[0],
-        "ndre_min": _avg_triple("NDRE")[1],
-        "ndre_max": _avg_triple("NDRE")[2],
-        "cire_avg": _avg_triple("CIre")[0],
-        "cire_min": _avg_triple("CIre")[1],
-        "cire_max": _avg_triple("CIre")[2],
-        "mndwi_avg": _avg_triple("MNDWI")[0],
-        "mndwi_min": _avg_triple("MNDWI")[1],
-        "mndwi_max": _avg_triple("MNDWI")[2],
+        "ndvi_avg": ndvi_avg,
+        "ndvi_min": index_stats["NDVI"][1],
+        "ndvi_max": index_stats["NDVI"][2],
+        "evi_avg": index_stats["EVI"][0],
+        "evi_min": index_stats["EVI"][1],
+        "evi_max": index_stats["EVI"][2],
+        "ndmi_avg": index_stats["NDMI"][0],
+        "ndmi_min": index_stats["NDMI"][1],
+        "ndmi_max": index_stats["NDMI"][2],
+        "ndre_avg": index_stats["NDRE"][0],
+        "ndre_min": index_stats["NDRE"][1],
+        "ndre_max": index_stats["NDRE"][2],
+        "cire_avg": index_stats["CIre"][0],
+        "cire_min": index_stats["CIre"][1],
+        "cire_max": index_stats["CIre"][2],
+        "mndwi_avg": index_stats["MNDWI"][0],
+        "mndwi_min": index_stats["MNDWI"][1],
+        "mndwi_max": index_stats["MNDWI"][2],
         "pixel_data": json.dumps(pixel_data, separators=(",", ":")),
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
@@ -747,9 +794,11 @@ def _cache_s2_scene(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
+    field_mask: np.ndarray,
     force_read: bool = False,
 ) -> np.ndarray | None:
-    """Return a cached (13,H,W) stack, windowing from HREFs if needed."""
+    """读取与网格指纹匹配的13波段缓存；缺缓存时按HREF补读有限窗口。"""
     sc_date = scene["date"]
     if isinstance(sc_date, str):
         sc_date = date.fromisoformat(sc_date[:10])
@@ -763,8 +812,13 @@ def _cache_s2_scene(
         stac_id=scene.get("id") or scene.get("stac_id"),
         band_hrefs=hrefs or None,
     )
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
     if not force_read:
-        cached = read_window_array(str(land_id), iso, "S2")
+        cached = read_window_array(
+            str(land_id), iso, "S2", expected_grid_key=grid_key
+        )
         if cached and cached.get("stack") is not None:
             return cached["stack"]
     if not hrefs:
@@ -774,6 +828,7 @@ def _cache_s2_scene(
         bounds,
         target_shape,
         target_transform,
+        target_crs=target_crs,
         log_context={
             "scene_id": scene.get("id") or scene.get("stac_id"),
             "date": iso,
@@ -782,7 +837,14 @@ def _cache_s2_scene(
         },
     )
     stack = stack_s2_13(bands)
-    write_window_array(str(land_id), iso, "S2", stack=stack)
+    write_window_array(
+        str(land_id),
+        iso,
+        "S2",
+        grid_key=grid_key,
+        stack=stack,
+        field_mask=field_mask,
+    )
     return stack
 
 
@@ -795,12 +857,17 @@ def _buffer_s2_windows(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
+    land_mask: np.ndarray,
 ) -> list[dict[str, Any]]:
     """STAC-search the pad range once and window any missing parcel stacks."""
     scenes = _search_s2_l2a_windows(
         land_geom_geojson, date_from, date_to, max_cloud=100.0
     )
     buffered: list[dict[str, Any]] = []
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, land_mask)
     for sc in scenes:
         stack = _cache_s2_scene(
             land_id,
@@ -808,6 +875,8 @@ def _buffer_s2_windows(
             bounds=bounds,
             target_shape=target_shape,
             target_transform=target_transform,
+            target_crs=target_crs,
+            field_mask=land_mask,
         )
         if stack is None:
             continue
@@ -819,7 +888,9 @@ def _buffer_s2_windows(
     for cached in list_cached_s2(str(land_id), date_from, date_to):
         if cached["date"] in seen:
             continue
-        arr = read_window_array(str(land_id), cached["date"], "S2")
+        arr = read_window_array(
+            str(land_id), cached["date"], "S2", expected_grid_key=grid_key
+        )
         if arr and arr.get("stack") is not None:
             buffered.append(
                 {
@@ -850,14 +921,21 @@ def _buffer_s1_for_dates(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
+    land_mask: np.ndarray,
 ) -> dict[date, np.ndarray]:
     """Window nearest S1 VV/VH per S2 date and cache on scratch."""
     out: dict[date, np.ndarray] = {}
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, land_mask)
     if not dates:
         return out
     need: list[date] = []
     for d in dates:
-        cached = read_window_array(str(land_id), d, "S1")
+        cached = read_window_array(
+            str(land_id), d, "S1", expected_grid_key=grid_key
+        )
         if cached and cached.get("stack") is not None:
             out[d] = cached["stack"]
         else:
@@ -865,11 +943,13 @@ def _buffer_s1_for_dates(
     if not need:
         return out
     loaded = _read_s1_for_dates(
-        land_geom_geojson, need, bounds, target_shape, target_transform
+        land_geom_geojson, need, bounds, target_shape, target_transform, target_crs
     )
     for d, arr in zip(need, loaded):
         out[d] = arr
-        write_window_array(str(land_id), d, "S1", stack=arr)
+        write_window_array(
+            str(land_id), d, "S1", grid_key=grid_key, stack=arr
+        )
         put_window_meta(land_id=str(land_id), date_str=d, sensor="S1", has_array=True)
     logger.info(
         "decloud_s1_buffered",
@@ -880,7 +960,9 @@ def _buffer_s1_for_dates(
     return out
 
 
-def _neighbor_ndvi_from_cache(land_id: str, target: date) -> float | None:
+def _neighbor_ndvi_from_cache(
+    land_id: str, target: date, *, expected_grid_key: str
+) -> float | None:
     """Mean NDVI from cached clear-ish S2 windows when PG is not yet written."""
     window_from, window_to = neighbor_window(target)
     vals: list[float] = []
@@ -894,15 +976,20 @@ def _neighbor_ndvi_from_cache(land_id: str, target: date) -> float | None:
             cloud_f = None
         if cloud_f is not None and cloud_f > decloud_cloud_min_pct():
             continue
-        arr = read_window_array(str(land_id), sc["date"], "S2")
+        arr = read_window_array(
+            str(land_id), sc["date"], "S2", expected_grid_key=expected_grid_key
+        )
         stack = None if arr is None else arr.get("stack")
         if stack is None:
+            continue
+        land_mask = None if arr is None else arr.get("field_mask")
+        if land_mask is None or tuple(land_mask.shape) != tuple(stack.shape[-2:]):
             continue
         # B08=7, B04=3 in the 13-band DN stack (0-10000).
         nir = stack[7].astype("float64")
         red = stack[3].astype("float64")
         denom = nir + red
-        ok = denom != 0
+        ok = (denom != 0) & np.asarray(land_mask, dtype=bool)
         if not ok.any():
             continue
         ndvi = (nir[ok] - red[ok]) / denom[ok]
@@ -920,6 +1007,7 @@ def _decloud_one_from_buffer(
     land_meta: dict[str, Any],
     land_geom_geojson: dict,
     target_transform,
+    target_crs: str,
     land_mask: np.ndarray,
     target: date,
     buffered_s2: list[dict[str, Any]],
@@ -931,6 +1019,11 @@ def _decloud_one_from_buffer(
 ) -> dict[str, Any]:
     """Run UnCRtainTS on one cloudy date using already-buffered windows."""
     land_id = str(land_meta["land_id"])
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(
+        target_crs, land_mask.shape, target_transform, land_mask
+    )
     input_t = decloud_input_t()
     if not batch_neighbors_ready(len(buffered_s2), input_t):
         logger.info(
@@ -955,7 +1048,9 @@ def _decloud_one_from_buffer(
     for sc in picked:
         stack = sc.get("stack")
         if stack is None:
-            cached = read_window_array(land_id, sc["date"], "S2")
+            cached = read_window_array(
+                land_id, sc["date"], "S2", expected_grid_key=grid_key
+            )
             stack = None if cached is None else cached.get("stack")
         if stack is None:
             return {"status": "skipped", "reason": "window_missing", "date": str(sc["date"])}
@@ -1000,21 +1095,29 @@ def _decloud_one_from_buffer(
         rec_01, s2_stack[-1], land_mask
     )
     ndvi_for_quality = index_arrays.get("NDVI")
-    if ndvi_for_quality is not None:
-        ndvi_q = np.array(ndvi_for_quality, copy=True)
-        ndvi_q[~land_mask] = np.nan
-    else:
-        ndvi_q = rec_01[7]
-    ndvi_stats = compute_zonal_stats(ndvi_q)
+    ndvi_q = ndvi_for_quality if ndvi_for_quality is not None else rec_01[7]
+    if tuple(ndvi_q.shape) != tuple(land_mask.shape):
+        raise ValueError("decloud NDVI and land mask dimensions differ")
+    # 质量门只需地块内NDVI均值；避免复制整幅栅格或为未使用的分位数做排序计算。
+    valid_ndvi = np.isfinite(ndvi_q)
+    valid_ndvi &= np.asarray(land_mask, dtype=bool)
+    valid_count = int(np.count_nonzero(valid_ndvi))
+    ndvi_mean = (
+        float(np.sum(ndvi_q, where=valid_ndvi, dtype=np.float64) / valid_count)
+        if valid_count
+        else None
+    )
     neighbor = _neighbor_ndvi(session, land_id, target)
     if neighbor is None:
-        neighbor = _neighbor_ndvi_from_cache(land_id, target)
+        neighbor = _neighbor_ndvi_from_cache(
+            land_id, target, expected_grid_key=grid_key
+        )
     quality_inputs = DecloudQualityInputs(
         rgb_mean=rgb_mean,
         rgb_mean_raw=rgb_raw,
         rgb_std=rgb_std,
         rgb_std_raw=rgb_std_raw,
-        ndvi_mean=float(ndvi_stats.get("mean") or 0.0),
+        ndvi_mean=ndvi_mean,
         neighbor_ndvi_mean=neighbor,
     )
     quality = score_decloud(quality_inputs)
@@ -1023,7 +1126,9 @@ def _decloud_one_from_buffer(
         date_str=target.isoformat(),
         land_id_str=land_id,
         index_arrays=index_arrays,
+        field_mask=land_mask,
         transform=target_transform,
+        target_crs=target_crs,
         geom4326=land_geom_geojson,
         quality=quality,
         raw_scene_id=raw_scene_id,
@@ -1087,13 +1192,17 @@ def _land_context(session, land_id: str):
     if land_geom is None:
         return None
     land_geom_geojson = mapping(land_geom)
+    from app.tasks.pipeline import analysis_crs_for_bounds
+
+    target_crs = analysis_crs_for_bounds(land_geom.bounds)
     target_transform, target_shape, land_mask, bounds = compute_target_grid(
-        land_geom.bounds, land_geom
+        land_geom.bounds, land_geom, target_crs=target_crs
     )
     return {
         "land_meta": land_meta,
         "land_geom_geojson": land_geom_geojson,
         "target_transform": target_transform,
+        "target_crs": target_crs,
         "target_shape": target_shape,
         "land_mask": land_mask,
         "bounds": bounds,
@@ -1146,6 +1255,8 @@ def process_parcel_decloud(
             bounds=ctx["bounds"],
             target_shape=ctx["target_shape"],
             target_transform=ctx["target_transform"],
+            target_crs=ctx["target_crs"],
+            land_mask=ctx["land_mask"],
         )
         s1_by_date: dict[date, np.ndarray] = {}
         if decloud_use_sar():
@@ -1156,12 +1267,15 @@ def process_parcel_decloud(
                 bounds=ctx["bounds"],
                 target_shape=ctx["target_shape"],
                 target_transform=ctx["target_transform"],
+                target_crs=ctx["target_crs"],
+                land_mask=ctx["land_mask"],
             )
         return _decloud_one_from_buffer(
             session=session,
             land_meta=ctx["land_meta"],
             land_geom_geojson=ctx["land_geom_geojson"],
             target_transform=ctx["target_transform"],
+            target_crs=ctx["target_crs"],
             land_mask=ctx["land_mask"],
             target=target,
             buffered_s2=buffered,
@@ -1246,6 +1360,8 @@ def decloud_parcel_batch(
             bounds=ctx["bounds"],
             target_shape=ctx["target_shape"],
             target_transform=ctx["target_transform"],
+            target_crs=ctx["target_crs"],
+            land_mask=ctx["land_mask"],
         )
         s1_by_date: dict[date, np.ndarray] = {}
         if decloud_use_sar():
@@ -1256,6 +1372,8 @@ def decloud_parcel_batch(
                 bounds=ctx["bounds"],
                 target_shape=ctx["target_shape"],
                 target_transform=ctx["target_transform"],
+                target_crs=ctx["target_crs"],
+                land_mask=ctx["land_mask"],
             )
 
         wanted = list(targets or [])
@@ -1300,6 +1418,7 @@ def decloud_parcel_batch(
                 land_meta=ctx["land_meta"],
                 land_geom_geojson=ctx["land_geom_geojson"],
                 target_transform=ctx["target_transform"],
+                target_crs=ctx["target_crs"],
                 land_mask=ctx["land_mask"],
                 target=target,
                 buffered_s2=buffered,

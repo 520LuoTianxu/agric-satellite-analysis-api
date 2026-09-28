@@ -79,9 +79,32 @@ class SceneProductOut(BaseModel):
     source: str | None = Field(
         default=None,
         description=(
-            "pixel_data.source: stac_direct for raw S2, uncrtaints_decloud "
-            "for the additive cloud-removal product."
+            "pixel_data.source: stac_direct / stac_s1_direct for raw observations, "
+            "uncrtaints_decloud for the additive cloud-removal product."
         ),
+    )
+    stac_item_id: str | None = Field(
+        default=None,
+        description="Original STAC item identifier; scene_id may remain a legacy stable key.",
+    )
+    algorithm_version: str | None = Field(
+        default=None,
+        description="Processing implementation version recorded when the product was created.",
+    )
+    analysis_grid: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Output-grid CRS/dimensions and geodesic cell-spacing estimate; "
+            "spacing is not the sensor's native spatial resolution."
+        ),
+    )
+    radiometric_calibration: dict[str, Any] | None = Field(
+        default=None,
+        description="Sentinel-1辐射定标方法及处理限制；历史产品可能没有此元数据。",
+    )
+    quality_metrics: dict[str, Any] | None = Field(
+        default=None,
+        description="按VV/VH等波段记录有效像元比例与算法口径；历史产品可能没有此元数据。",
     )
     decloud_quality: str | None = Field(
         default=None,

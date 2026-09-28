@@ -49,6 +49,7 @@ class FieldStatOut(BaseModel):
     p90: float | None = None
     stddev: float | None = None
     quality_score: float | None = None
+    quality_score_method: str | None = None
     created_at: datetime
     cloud_cover: float | None = None
     decloud_quality: str | None = None
@@ -211,6 +212,7 @@ class ShareStatPoint(BaseModel):
     p90: float | None = None
     stddev: float | None = None
     quality_score: float | None = None
+    quality_score_method: str | None = None
     id: uuid.UUID | None = None
     land_id: str | None = None
     created_at: datetime | None = None

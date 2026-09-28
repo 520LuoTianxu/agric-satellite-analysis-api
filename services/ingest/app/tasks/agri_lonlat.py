@@ -53,8 +53,10 @@ from app.core.processing_window import (
 from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
+    analysis_crs_for_bounds,
     complete_step,
     compute_target_grid,
+    describe_target_grid,
     existing_agri_scene_dates,
     filter_scenes_skip_existing,
     get_db_session,
@@ -78,6 +80,7 @@ INDEX_KEY_TO_PIXEL = {
     "cire": "CIre",
     "mndwi": "MNDWI",
 }
+AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v3"
 
 # Element84 / ESA SCL asset names. Optional; missing SCL falls back to STAC.
 SCL_STAC_ASSETS = ("scl", "SCL")
@@ -87,10 +90,9 @@ def parcel_cloud_from_scl_window(
     scl: np.ndarray | None,
     field_mask: np.ndarray | None,
 ) -> float | None:
-    """In-polygon SCL cloud/shadow fraction. Ignores nodata and window padding.
+    """计算地块内部SCL云/阴影比例，忽略无数据像元和窗口填充区。
 
-    Returns None (not 0) when SCL is missing, the polygon covers no cells,
-    or every sample is nodata / not a Sen2Cor class 1-11.
+    缺少SCL、地块内没有栅格中心或样本全部无效时返回None；不能用0误报为晴空。
     """
     if scl is None or field_mask is None:
         return None
@@ -372,6 +374,7 @@ def emit_optical_lonlat(
     scene: dict,
     index_arrays: dict[str, np.ndarray],
     transform,
+    target_crs: str,
     parcel_cloud: float | None,
     parcel_cloud_source: str | None = None,
     scl: np.ndarray | None = None,
@@ -383,7 +386,7 @@ def emit_optical_lonlat(
     processing_window_bounds: tuple[float, float, float, float] | None = None,
     result_delivery: str = "mq",
 ) -> dict[str, Any] | None:
-    """Sample lonlat_v1, upload OSS JSON, then deliver by MQ or HTTP/Redis."""
+    """采样并发布S2像元；同时保留STAC来源、算法版本和实际输出网格间距估算。"""
     from app.tasks.bridge_stac_cogs_to_agri_lonlat import (
         _round6,
         _sample_lonlat,
@@ -394,7 +397,7 @@ def emit_optical_lonlat(
         return None
     t_sample = time.perf_counter()
     pixels = _sample_lonlat(
-        geom4326, index_arrays, transform, "EPSG:4326", scl=scl
+        geom4326, index_arrays, transform, target_crs, scl=scl
     )
     sample_ms = int((time.perf_counter() - t_sample) * 1000)
     if not pixels:
@@ -451,9 +454,17 @@ def emit_optical_lonlat(
         _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
     )
 
+    # 场景主键继续使用按日期的兼容 ID；真实STAC item另存，避免丢失可追溯来源。
+    stac_item_id = str(scene.get("id") or "").strip() or None
+    analysis_grid = describe_target_grid(
+        transform, index_arrays["NDVI"].shape, target_crs
+    )
     pixel_data = {
         "format": "lonlat_v1",
         "source": "stac_direct",
+        "stac_item_id": stac_item_id,
+        "algorithm_version": AGRI_OPTICAL_ALGORITHM_VERSION,
+        "analysis_grid": analysis_grid,
         "pixels": pixels,
     }
     if processing_window_km is not None:
@@ -541,6 +552,7 @@ def _process_one_optical_scene(
     total_scenes: int,
     index_defs,
     target_transform,
+    target_crs: str,
     target_shape: tuple,
     field_mask: np.ndarray,
     bounds: tuple,
@@ -553,7 +565,7 @@ def _process_one_optical_scene(
     scene_workers: int = 1,
     mq_task_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Process one S2 scene. Progress is Redis-only (no per-step Postgres)."""
+    """处理一景S2并一次生成全部农业指数；进度写Redis，不逐步骤写Postgres。"""
     scene_id = scene.get("id")
     try:
         mark_scene_progress(
@@ -566,8 +578,7 @@ def _process_one_optical_scene(
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
         hrefs = dict(scene.get("band_hrefs") or {})
-        # Keep visual href for true-color preview only — never feed it into
-        # spectral index formulas (NDVI/EVI/…).
+        # 真彩色visual波段只供预览，不能混入NDVI/EVI等光谱指数公式。
         visual_href = hrefs.pop("visual", None)
         scene_date = scene.get("date")
         log_context = {
@@ -584,6 +595,7 @@ def _process_one_optical_scene(
             bounds,
             target_shape,
             target_transform,
+            target_crs=target_crs,
             scene_workers=scene_workers,
             resampling_by_band={"SCL": Resampling.nearest},
             log_context=log_context,
@@ -688,6 +700,10 @@ def _process_one_optical_scene(
                     band_hrefs=scene.get("band_hrefs"),
                     cloud_cover=scene.get("cloud_cover"),
                     stac_id=scene.get("id"),
+                    target_shape=target_shape,
+                    target_transform=target_transform,
+                    target_crs=target_crs,
+                    field_mask=field_mask,
                 )
             except Exception as exc:
                 # Decloud scratch cache is best-effort; lonlat OSS/MQ still publish.
@@ -733,7 +749,7 @@ def _process_one_optical_scene(
                 write_cog(
                     index_arrays[pix_key],
                     target_transform,
-                    "EPSG:4326",
+                    target_crs,
                     org_id_str,
                     land_id_str,
                     scene["date"],
@@ -776,6 +792,7 @@ def _process_one_optical_scene(
             scene=scene,
             index_arrays=index_arrays,
             transform=target_transform,
+            target_crs=target_crs,
             parcel_cloud=parcel_from_scl,
             parcel_cloud_source=parcel_source,
             scl=scl,
@@ -826,7 +843,7 @@ def _process_agri_optical_http_only(
     season_months: list | None,
     processing_window_km: float | None,
 ) -> dict:
-    """Optical chunk worker without SyncSession (OSS + MQ path)."""
+    """下载机无SyncSession的光学分块流程，通过Internal HTTP读取并提交结果。"""
     from shapely.geometry import shape as shapely_shape
 
     from app.core.http_mode import (
@@ -999,8 +1016,12 @@ def _process_agri_optical_http_only(
             "http_only": True,
         }
 
+    target_crs = analysis_crs_for_bounds(processing_geom.bounds)
     target_transform, target_shape, field_mask, bounds = compute_target_grid(
-        processing_geom.bounds, land_geom, padding_degrees=0.0
+        processing_geom.bounds,
+        land_geom,
+        padding_degrees=0.0,
+        target_crs=target_crs,
     )
     workers = min(scene_max_workers(), len(scenes))
     set_total(synthetic_job_id, len(scenes), workers=workers)
@@ -1018,6 +1039,7 @@ def _process_agri_optical_http_only(
                 total_scenes=len(scenes),
                 index_defs=index_defs,
                 target_transform=target_transform,
+                target_crs=target_crs,
                 target_shape=target_shape,
                 field_mask=field_mask,
                 bounds=bounds,
@@ -1109,6 +1131,8 @@ def process_agri_optical_lonlat(
     """Search S2, compute agri optical indices in memory, upsert lonlat_v1.
 
     HTTP-only hosts may pass ``land_id`` + date kwargs (no local Job row).
+
+    下载机以地块编号和日期参数执行时不创建本地Job/数据库会话；场景结果仍交由API入库。
     """
     from app.core.http_mode import ingest_http_only
 
@@ -1292,8 +1316,12 @@ def process_agri_optical_lonlat(
                 "skipped_existing": skipped_existing,
             }
 
+        target_crs = analysis_crs_for_bounds(processing_geom.bounds)
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
-            processing_geom.bounds, land_geom, padding_degrees=0.0
+            processing_geom.bounds,
+            land_geom,
+            padding_degrees=0.0,
+            target_crs=target_crs,
         )
         workers = min(scene_max_workers(), len(scenes))
         logger.info(
@@ -1332,7 +1360,8 @@ def process_agri_optical_lonlat(
                     idx=idx,
                     total_scenes=len(scenes),
                     index_defs=index_defs,
-                    target_transform=target_transform,
+                target_transform=target_transform,
+                target_crs=target_crs,
                     target_shape=target_shape,
                     field_mask=field_mask,
                     bounds=bounds,

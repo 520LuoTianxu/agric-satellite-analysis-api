@@ -10,20 +10,25 @@ from datetime import date
 import numpy as np
 import structlog
 from rasterio.features import geometry_mask
-from rasterio.warp import Resampling, reproject
+from rasterio.warp import Resampling, reproject, transform_geom
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 
 from agric_satellite_analysis_common.internal_api import (
-    agri_scene_dates,
+    agri_satellite_batch_inputs,
     get_job,
+    internal_client,
     patch_job,
-    resolve_land,
 )
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
 from app.core.band_parallel import band_max_workers, run_parallel_band_jobs
+from app.core.band_window_cache import (
+    read_scene_window,
+    window_cache_enabled,
+    write_scene_window,
+)
 from app.core.config import scene_max_workers, scene_straggler_timeout_sec
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
@@ -47,13 +52,16 @@ from app.tasks.agri_lonlat import (
 )
 from app.tasks.pipeline import (
     S2_PC_STAC_API_URL,
+    analysis_crs_for_bounds,
     compute_target_grid,
     compute_zonal_stats,
+    describe_target_grid,
     read_bands_windowed_parallel,
     search_scenes_for_defs,
 )
 from app.tasks.sentinel1 import (
     _read_band_windowed_db_profiled,
+    _s1_radiometric_calibration,
     _sample_s1_lonlat,
     _upsert_agri_s1,
     search_s1_scenes,
@@ -65,6 +73,7 @@ logger = structlog.get_logger()
 
 SATELLITE_BATCH_MAX_COMPENSATIONS = 2
 SATELLITE_COMPENSATION_DELAY_SECONDS = 30
+SATELLITE_BATCH_INPUTS_LAND_LIMIT = 50
 
 
 def _positive_limit_env(name: str, default: int) -> int:
@@ -256,7 +265,14 @@ def _schedule_satellite_compensation(
 
 
 def crop_shared_array(
-    source, source_transform, target_shape, target_transform, *, categorical=False
+    source,
+    source_transform,
+    target_shape,
+    target_transform,
+    *,
+    source_crs="EPSG:4326",
+    target_crs="EPSG:4326",
+    categorical=False,
 ):
     """从共享数组重采样到原有地块网格；新数组防止地块掩膜污染邻居的数据。"""
     destination = np.full(target_shape, np.nan, dtype=np.float32)
@@ -264,9 +280,9 @@ def crop_shared_array(
         source=source,
         destination=destination,
         src_transform=source_transform,
-        src_crs="EPSG:4326",
+        src_crs=source_crs,
         dst_transform=target_transform,
-        dst_crs="EPSG:4326",
+        dst_crs=target_crs,
         src_nodata=np.nan,
         dst_nodata=np.nan,
         resampling=Resampling.nearest if categorical else Resampling.bilinear,
@@ -275,57 +291,84 @@ def crop_shared_array(
 
 
 def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=None):
-    """严格通过Internal HTTP读取地块与已有景日期，禁止回退直连API数据库。"""
+    """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
+    land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
+    if not land_ids or any(not land_id for land_id in land_ids):
+        raise RuntimeError("遥感批次地块清单为空或包含空编号")
+
     lands = []
-    for land_id in land_ids:
-        remote = resolve_land(land_id=land_id)
-        # 任务可能在过滤规则发布前已经入队，因此下载机执行前再兜底过滤，
-        # 防止被排除基地或超大地块继续访问 STAC、OSS 和卫星数据。
-        if not is_scheduled_land_allowed(
-            remote.get("base_id"), remote.get("land_area_mu")
-        ):
-            logger.info(
-                "satellite_batch_land_filtered",
-                land_id=land_id,
-                base_id=remote.get("base_id"),
-                land_area_mu=remote.get("land_area_mu"),
+    # 每批最多50个边界并复用一个HTTP连接；强制重算时不额外查询已处理日期。
+    with internal_client(timeout=60.0) as client:
+        for start in range(0, len(land_ids), SATELLITE_BATCH_INPUTS_LAND_LIMIT):
+            batch_ids = land_ids[start : start + SATELLITE_BATCH_INPUTS_LAND_LIMIT]
+            remote_items = agri_satellite_batch_inputs(
+                land_ids=batch_ids,
+                sensor=sensor,
+                include_existing_dates=not force,
+                client=client,
             )
-            continue
-        if str(remote.get("land_id")) != land_id or not remote.get("boundary_geojson"):
-            raise RuntimeError(f"地块{land_id}的内部HTTP元数据不完整")
-        geom = shape(remote["boundary_geojson"])
-        if (
-            geom.is_empty
-            or not geom.is_valid
-            or geom.geom_type not in {"Polygon", "MultiPolygon"}
-        ):
-            raise RuntimeError(f"地块{land_id}的边界无效")
-        existing = set()
-        if not force:
-            existing = {
-                date.fromisoformat(str(value)[:10])
-                for value in agri_scene_dates(land_id, sensor=sensor)
+            remote_by_id = {
+                str(item.get("land_id")): item
+                for item in remote_items
+                if item.get("land_id") is not None
             }
-        lands.append(
-            {
-                "meta": {
-                    "land_id": land_id,
-                    "tile_id": remote["tile_id"],
-                    "land_name": remote.get("land_name") or land_id,
-                },
-                "geom": geom,
-                "grid": compute_target_grid(geom.bounds, geom),
-                "existing": existing,
-                # 显式回填的轮作月份优先于作物默认季节，避免区域下载误过滤用户选定窗口。
-                "season_months": normalize_season_months(
-                    season_months=season_months,
-                    growing_seasons=growing_seasons,
-                    crop_type=remote.get("crop_type"),
-                ),
-                "crop_type": remote.get("crop_type"),
-                "raw_results": [],
-            }
-        )
+            if set(remote_by_id) != set(batch_ids):
+                raise RuntimeError("遥感批量内部HTTP返回的地块清单不完整")
+
+            for land_id in batch_ids:
+                remote = remote_by_id[land_id]
+                # 入队后规则可能变化；执行前再过滤，避免已排除地块访问卫星数据。
+                if not is_scheduled_land_allowed(
+                    remote.get("base_id"), remote.get("land_area_mu")
+                ):
+                    logger.info(
+                        "satellite_batch_land_filtered",
+                        land_id=land_id,
+                        base_id=remote.get("base_id"),
+                        land_area_mu=remote.get("land_area_mu"),
+                    )
+                    continue
+                if not remote.get("boundary_geojson") or not remote.get("tile_id"):
+                    raise RuntimeError(f"地块{land_id}的内部HTTP元数据不完整")
+                geom = shape(remote["boundary_geojson"])
+                if (
+                    geom.is_empty
+                    or not geom.is_valid
+                    or geom.geom_type not in {"Polygon", "MultiPolygon"}
+                ):
+                    raise RuntimeError(f"地块{land_id}的边界无效")
+                existing = (
+                    {
+                        date.fromisoformat(str(value)[:10])
+                        for value in remote.get("existing_dates", [])
+                    }
+                    if not force
+                    else set()
+                )
+                land_crs = analysis_crs_for_bounds(geom.bounds)
+                lands.append(
+                    {
+                        "meta": {
+                            "land_id": land_id,
+                            "tile_id": remote["tile_id"],
+                            "land_name": remote.get("land_name") or land_id,
+                        },
+                        "geom": geom,
+                        "grid": compute_target_grid(
+                            geom.bounds, geom, target_crs=land_crs
+                        ),
+                        "grid_crs": land_crs,
+                        "existing": existing,
+                        # 显式回填轮作月份优先于作物默认季节，避免区域下载误过滤用户指定窗口。
+                        "season_months": normalize_season_months(
+                            season_months=season_months,
+                            growing_seasons=growing_seasons,
+                            crop_type=remote.get("crop_type"),
+                        ),
+                        "crop_type": remote.get("crop_type"),
+                        "raw_results": [],
+                    }
+                )
     return lands
 
 
@@ -489,6 +532,7 @@ def _download_scene(
     避免 SCENE×BAND 无界放大。
     """
     shared_transform, shared_shape, _, bounds = grid
+    shared_crs = analysis_crs_for_bounds(bounds)
     scene_date = scene.get("date")
     log_context = {
         "job_id": job_id,
@@ -499,23 +543,72 @@ def _download_scene(
         "sensor": sensor,
     }
     if sensor == "S1":
+        # VV/VH 必须使用同一套定标口径；有官方 LUT 时在读取阶段直接转为 Sigma0。
+        _s1_radiometric_calibration(scene)
         hrefs = {"vv": scene["vv_href"], "vh": scene["vh_href"]}
+        calibration_hrefs = {
+            band: scene.get(f"{band}_calibration_href")
+            for band in hrefs
+            if scene.get(f"{band}_calibration_href")
+        }
         resampling_by_band = {}
     else:
         hrefs = dict(scene["band_hrefs"])
         # RGB预览复用光谱波段，不把 visual 三通道资产混入指数波段缓存。
         hrefs.pop("visual", None)
+        calibration_hrefs = None
         resampling_by_band = {"SCL": Resampling.nearest}
+
+    cached = read_scene_window(
+        scene_id=str(scene.get("id") or ""),
+        sensor=sensor,
+        target_shape=shared_shape,
+        target_transform=shared_transform,
+        target_crs=shared_crs,
+        band_hrefs=hrefs,
+        calibration_hrefs=calibration_hrefs,
+        resampling_by_band=resampling_by_band,
+    )
+    if cached is not None:
+        logger.info("satellite_window_cache_hit", **log_context, bands=len(cached))
+        scl = None if sensor == "S1" else cached.pop("SCL", None)
+        return cached, scl
+    if window_cache_enabled():
+        logger.info("satellite_window_cache_miss", **log_context)
 
     if sensor == "S1":
         bands = run_parallel_band_jobs(
             hrefs,
-            lambda _, href: _read_band_windowed_db_profiled(
-                href, bounds, shared_shape, shared_transform
+            lambda band, href: _read_band_windowed_db_profiled(
+                href,
+                bounds,
+                shared_shape,
+                shared_transform,
+                shared_crs,
+                calibration_href=scene.get(f"{band}_calibration_href"),
             ),
             scene_workers=scene_workers,
             log_context=log_context,
         )
+        try:
+            write_scene_window(
+                scene_id=str(scene.get("id") or ""),
+                sensor=sensor,
+                target_shape=shared_shape,
+                target_transform=shared_transform,
+                target_crs=shared_crs,
+                band_hrefs=hrefs,
+                calibration_hrefs=calibration_hrefs,
+                arrays=bands,
+                resampling_by_band=resampling_by_band,
+            )
+        except Exception as exc:
+            # 磁盘缓存只是加速手段，写入失败不能丢弃已成功读取的卫星波段。
+            logger.warning(
+                "satellite_window_cache_write_failed",
+                **log_context,
+                error=str(exc),
+            )
         return bands, None
     # SCL 与光谱波段一起进入线程池，避免所有光谱完成后再串行发起一次远程读取。
     downloaded = read_bands_windowed_parallel(
@@ -523,14 +616,35 @@ def _download_scene(
         bounds,
         shared_shape,
         shared_transform,
+        target_crs=shared_crs,
         scene_workers=scene_workers,
-        resampling_by_band={"SCL": Resampling.nearest},
+        resampling_by_band=resampling_by_band,
         log_context=log_context,
     )
     scl = downloaded.pop("SCL", None)
     # Sentinel-2零值为景外/无数据，先转NaN，避免EVI等公式把填充值算成有效像元。
     for band in downloaded.values():
         band[band == 0] = np.nan
+    cache_arrays = dict(downloaded)
+    if scl is not None:
+        cache_arrays["SCL"] = scl
+    try:
+        write_scene_window(
+            scene_id=str(scene.get("id") or ""),
+            sensor=sensor,
+            target_shape=shared_shape,
+            target_transform=shared_transform,
+            target_crs=shared_crs,
+            band_hrefs=hrefs,
+            arrays=cache_arrays,
+            resampling_by_band=resampling_by_band,
+        )
+    except Exception as exc:
+        logger.warning(
+            "satellite_window_cache_write_failed",
+            **log_context,
+            error=str(exc),
+        )
     return downloaded, scl
 
 
@@ -545,8 +659,17 @@ def _publish_land(
     processing_window_km: float | None = None,
 ):
     target_transform, target_shape, field_mask, _ = land["grid"]
+    target_crs = land["grid_crs"]
+    shared_crs = analysis_crs_for_bounds(shared_grid[3])
     bands = {
-        key: crop_shared_array(value, shared_grid[0], target_shape, target_transform)
+        key: crop_shared_array(
+            value,
+            shared_grid[0],
+            target_shape,
+            target_transform,
+            source_crs=shared_crs,
+            target_crs=target_crs,
+        )
         for key, value in shared_bands.items()
     }
     meta = land["meta"]
@@ -557,7 +680,7 @@ def _publish_land(
         for band in bands.values():
             band[~field_mask] = np.nan
         pixels = _sample_s1_lonlat(
-            geom_json, bands["vv"], bands["vh"], target_transform
+            geom_json, bands["vv"], bands["vh"], target_transform, target_crs
         )
         if not pixels:
             return False
@@ -568,12 +691,15 @@ def _publish_land(
             f"{scene['id']}_stac",
             meta["land_id"],
             pixels,
-            compute_zonal_stats(bands["vv"]),
-            compute_zonal_stats(bands["vh"]),
+            compute_zonal_stats(bands["vv"], expected_mask=field_mask),
+            compute_zonal_stats(bands["vh"], expected_mask=field_mask),
             mq_task_id=land_task_id,
             relative_orbit=scene.get("relative_orbit"),
+            stac_item_id=str(scene.get("id") or "") or None,
+            analysis_grid=describe_target_grid(target_transform, target_shape, target_crs),
             processing_window_km=processing_window_km,
             processing_window_bounds=shared_grid[3],
+            radiometric_calibration=_s1_radiometric_calibration(scene),
             # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
             result_delivery="http",
         )
@@ -581,7 +707,13 @@ def _publish_land(
 
     scl = (
         crop_shared_array(
-            shared_scl, shared_grid[0], target_shape, target_transform, categorical=True
+            shared_scl,
+            shared_grid[0],
+            target_shape,
+            target_transform,
+            source_crs=shared_crs,
+            target_crs=target_crs,
+            categorical=True,
         )
         if shared_scl is not None
         else None
@@ -602,6 +734,10 @@ def _publish_land(
                 band_hrefs=scene["band_hrefs"],
                 cloud_cover=scene.get("cloud_cover"),
                 stac_id=scene["id"],
+                target_shape=target_shape,
+                target_transform=target_transform,
+                target_crs=target_crs,
+                field_mask=field_mask,
             )
         except Exception as exc:
             # 去云缓存与旧光学流程一样尽力保存，缓存失败不能阻断原始地块结果。
@@ -610,8 +746,9 @@ def _publish_land(
                 land_id=meta["land_id"],
                 error=str(exc),
             )
+    shared_geom = transform_geom("EPSG:4326", shared_crs, geom_json)
     shared_mask = geometry_mask(
-        [land["geom"]], out_shape=shared_grid[1], transform=shared_grid[0], invert=True
+        [shared_geom], out_shape=shared_grid[1], transform=shared_grid[0], invert=True
     )
     rgb = upload_field_rgb_preview(
         land_id=meta["land_id"],
@@ -629,6 +766,7 @@ def _publish_land(
         scene=scene,
         index_arrays=indices,
         transform=target_transform,
+        target_crs=target_crs,
         parcel_cloud=parcel_cloud,
         parcel_cloud_source=PARCEL_CLOUD_SOURCE_SCL
         if parcel_cloud is not None
@@ -1011,8 +1149,12 @@ def process_satellite_batch(
                 )
         # 任务排队期间边界可能更新；按HTTP最新边界重新求范围，保证窗口与地块完整覆盖。
         union = unary_union([land["geom"] for land in selected_lands])
+        shared_crs = analysis_crs_for_bounds(processing_geom.bounds)
         grid = compute_target_grid(
-            processing_geom.bounds, union, padding_degrees=0.0
+            processing_geom.bounds,
+            union,
+            padding_degrees=0.0,
+            target_crs=shared_crs,
         )
         try:
             if sensor == "S1":

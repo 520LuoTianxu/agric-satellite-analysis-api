@@ -90,7 +90,7 @@ async def resolve_land(
     db: Annotated[AsyncSession, Depends(get_db)],
     land_id: str = Query(..., min_length=1),
 ):
-    """Read one canonical parcel by land_id; no lookup or translation occurs."""
+    """按唯一 land_id 读取规范地块，不在下载机侧做身份映射或数据库回退。"""
     land = await db.get(LandParcel, land_id.strip())
     if not land or land.deleted_at is not None:
         raise HTTPException(status_code=404, detail="land parcel not found")

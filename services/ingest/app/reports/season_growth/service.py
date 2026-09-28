@@ -12,6 +12,9 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from agric_satellite_analysis_common.season_growth_window import (
+    normalize_season_growth_window,
+)
 from app.reports.season_growth.bailian import generate_season_narrative
 from app.reports.season_growth.charts import render_season_charts
 from app.reports.season_growth.facts import build_season_facts, facts_for_llm
@@ -53,15 +56,20 @@ def generate_season_growth_pdf(
     out_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Generate 生育期长势 PDF. Returns out_path + summary for job progress."""
+    start_day, end_day, _ = normalize_season_growth_window(start_date, end_date)
     facts = build_season_facts(
         session,
         str(land_id),
-        start_date=start_date,
-        end_date=end_date,
+        start_date=start_day.isoformat(),
+        end_date=end_day.isoformat(),
         crops=crops,
         label=label,
     )
-    material_text, materials_meta = download_material_keys(material_keys)
+    # 用作业所属地块构造可信目录，worker再次校验OSS键，避免旧消息或伪造参数越权读对象。
+    material_text, materials_meta = download_material_keys(
+        material_keys,
+        allowed_prefix=f"reports/season_growth/{land_id}/",
+    )
     llm_facts = facts_for_llm(facts)
     ai = generate_season_narrative(llm_facts, material_text, timeout=120.0)
 

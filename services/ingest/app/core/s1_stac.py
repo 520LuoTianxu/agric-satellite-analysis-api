@@ -19,6 +19,7 @@ S1_STAC_COLLECTION = "sentinel-1-grd"
 
 
 def s1_stac_api_url() -> str:
+    """读取S1目录地址，允许测试或替代部署通过环境变量覆盖默认目录。"""
     return (
         (os.environ.get("S1_STAC_API_URL") or "").strip()
         or S1_STAC_API_URL_DEFAULT
@@ -26,12 +27,13 @@ def s1_stac_api_url() -> str:
 
 
 def s1_uses_planetary_computer() -> bool:
+    """判断当前目录是否需要Planetary Computer的资产签名流程。"""
     url = s1_stac_api_url().lower()
     return "planetarycomputer.microsoft.com" in url
 
 
 def sign_s1_href(href: str) -> str:
-    """Attach a Planetary Computer SAS token when using MPC; else return href."""
+    """MPC资产默认禁止匿名读，按需签发短期SAS地址，其余目录保持原链接。"""
     if not href:
         return href
     if not s1_uses_planetary_computer():
@@ -42,7 +44,7 @@ def sign_s1_href(href: str) -> str:
 
 
 def open_s1_stac_client():
-    """Open the S1 STAC client; MPC results are signed in-place."""
+    """创建S1 STAC客户端，并在MPC响应中统一签名资产地址。"""
     from pystac_client import Client as STACClient
 
     url = s1_stac_api_url()
@@ -54,10 +56,9 @@ def open_s1_stac_client():
 
 
 def s1_gdal_env() -> dict[str, str]:
-    """Thread-local GDAL options for signed HTTPS (Azure) S1 GRD assets.
+    """为签名后的Azure COG配置GDAL读取参数，避免修改进程级环境变量。
 
-    Do not mutate process-wide os.environ (would race OSS uploads on the same
-    worker). AWS requester-pays knobs are intentionally omitted for the MPC path.
+    参数只在单次rasterio.Env中生效，防止共享worker里的OSS/GDAL任务互相串扰。
     """
     return {
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -67,7 +68,7 @@ def s1_gdal_env() -> dict[str, str]:
 
 
 def s1_open_path(href: str) -> str:
-    """Sign (if MPC) then map s3:// to /vsis3/; leave https:// for GDAL curl."""
+    """给MPC链接签名；S3 URI转为GDAL虚拟路径，HTTPS交由curl驱动读取。"""
     signed = sign_s1_href(href)
     if signed.startswith("s3://"):
         return signed.replace("s3://", "/vsis3/", 1)
@@ -75,7 +76,7 @@ def s1_open_path(href: str) -> str:
 
 
 def stac_asset_href(asset: Any) -> str | None:
-    """Prefer an https alternate when STAC provides one; else asset.href."""
+    """优先选STAC提供的HTTPS替代地址，避免worker额外配置云厂商SDK凭证。"""
     if asset is None:
         return None
     extra = getattr(asset, "extra_fields", None)
@@ -99,6 +100,7 @@ def stac_asset_href(asset: Any) -> str | None:
 
 
 def s1_access_hint() -> str:
+    """生成S1数据源连通性提示，区分MPC签名要求与自定义目录要求。"""
     if s1_uses_planetary_computer():
         return (
             "S1 uses Microsoft Planetary Computer "
@@ -115,9 +117,10 @@ def s1_access_hint() -> str:
 
 # Back-compat aliases used by older call sites / logs
 def s1_has_aws_credentials() -> bool:
-    """Deprecated: MPC path needs no AWS keys. Always True for readiness logs."""
+    """兼容旧健康检查字段；MPC通过SAS访问，不再依赖AWS requester-pays密钥。"""
     return True
 
 
 def s1_missing_credentials_hint() -> str:
+    """兼容旧调用方，统一返回当前S1目录的访问配置说明。"""
     return s1_access_hint()

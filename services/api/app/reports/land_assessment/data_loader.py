@@ -8,11 +8,19 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from agric_satellite_analysis_common.settings import settings
 from app.core.agri_classify import CLOUD_MAX_PCT, cloud_pct, official_s2_sql
+from agric_satellite_analysis_common.quality_metrics import (
+    CLOUD_COMPLEMENT_HEURISTIC_V1,
+    PARCEL_VALID_FRACTION_V1,
+    extract_quality_score_method,
+)
 from app.models.tables import (
     LandParcel,
     FieldStat,
@@ -44,7 +52,30 @@ def _location_from_land(land: LandParcel) -> str:
     return " · ".join(parts) if parts else (land.land_name or land.land_id or "—")
 
 
+def _report_rgb_oss_prefix() -> str:
+    """按预览生成规则推导允许签名的RGB对象目录。"""
+    json_prefix = (settings.oss_prefix or "s1s2_parcel/json/").rstrip("/")
+    if json_prefix.endswith("/json"):
+        return json_prefix[: -len("/json")] + "/img/"
+    return "s1s2_parcel/img/"
+
+
+def _is_allowed_report_rgb_key(key: str) -> bool:
+    """只为专用预览目录内的安全对象键签名，不让报告签发任意OSS对象。"""
+    if not isinstance(key, str) or not key.startswith(_report_rgb_oss_prefix()):
+        return False
+    if "\\" in key or any(ord(char) < 32 or ord(char) == 127 for char in key):
+        return False
+    try:
+        if len(key.encode("utf-8")) > 1023:
+            return False
+    except UnicodeEncodeError:
+        return False
+    return all(part and part not in {".", ".."} for part in key.split("/"))
+
+
 def load_indices_from_field_stats(session: Session, land_id: str) -> list[dict]:
+    """读取地块统计，并只接受带有明确算法版本的覆盖率质量分。"""
     rows = session.execute(
         select(
             FieldStat.date,
@@ -57,6 +88,7 @@ def load_indices_from_field_stats(session: Session, land_id: str) -> list[dict]:
             FieldStat.max,
             FieldStat.stddev,
             FieldStat.quality_score,
+            RasterLayer.provenance_json,
         )
         .join(RasterLayer, RasterLayer.id == FieldStat.layer_id)
         .where(FieldStat.land_id == land_id)
@@ -64,23 +96,37 @@ def load_indices_from_field_stats(session: Session, land_id: str) -> list[dict]:
     ).all()
     out = []
     for r in rows:
+        quality_method = extract_quality_score_method(r.provenance_json)
+        # 旧版本用外接矩形作分母，不能当作地块内覆盖率参与质量门或物候推断。
+        quality_score = (
+            float(r.quality_score)
+            if r.quality_score is not None
+            and quality_method == PARCEL_VALID_FRACTION_V1
+            else None
+        )
+        row = {
+            "date": r.date.isoformat()
+            if hasattr(r.date, "isoformat")
+            else str(r.date),
+            "layer_type": r.layer_type,
+            "mean": float(r.mean) if r.mean is not None else None,
+            "median": float(r.median) if r.median is not None else None,
+            "p10": float(r.p10) if r.p10 is not None else None,
+            "p90": float(r.p90) if r.p90 is not None else None,
+            "min": float(r.min) if r.min is not None else None,
+            "max": float(r.max) if r.max is not None else None,
+            "stddev": float(r.stddev) if r.stddev is not None else None,
+            "quality_score": quality_score,
+            "quality_score_method": quality_method or "unknown",
+        }
+        if (
+            str(r.layer_type).upper() == "NDVI"
+            and quality_method != PARCEL_VALID_FRACTION_V1
+        ):
+            # 显式降级，避免下游把历史矩形覆盖率误认为官方质量分。
+            row["official"] = False
         out.append(
-            {
-                "date": r.date.isoformat()
-                if hasattr(r.date, "isoformat")
-                else str(r.date),
-                "layer_type": r.layer_type,
-                "mean": float(r.mean) if r.mean is not None else None,
-                "median": float(r.median) if r.median is not None else None,
-                "p10": float(r.p10) if r.p10 is not None else None,
-                "p90": float(r.p90) if r.p90 is not None else None,
-                "min": float(r.min) if r.min is not None else None,
-                "max": float(r.max) if r.max is not None else None,
-                "stddev": float(r.stddev) if r.stddev is not None else None,
-                "quality_score": float(r.quality_score)
-                if r.quality_score is not None
-                else 0.5,
-            }
+            row
         )
     return out
 
@@ -111,8 +157,8 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
     for r in rows:
         d = r["date"].isoformat() if hasattr(r["date"], "isoformat") else str(r["date"])
         cloud = cloud_pct(r["parcel_cloud_cover_pct"], r["cloud_cover"])
-        # quality heuristic: lower cloud => higher quality
-        q = 0.5
+        # 有云量时才生成云量启发分；未知不能伪造为0.5并冒充实测质量。
+        q = None
         if cloud is not None:
             q = max(0.15, min(0.95, 1.0 - float(cloud) / 100.0))
         mapping = [
@@ -134,6 +180,9 @@ def load_indices_from_agri(session: Session, land_id: str) -> list[dict]:
                     "p10": float(mean),
                     "p90": float(mean),
                     "quality_score": q,
+                    "quality_score_method": (
+                        CLOUD_COMPLEMENT_HEURISTIC_V1 if q is not None else "unknown"
+                    ),
                     "official": True,
                 }
             )
@@ -773,7 +822,48 @@ def load_land_bundle(
     land_id = land.land_id
     indices = load_indices_from_field_stats(session, land_id)
     source = "field_stats"
-    if len(indices) < 8 and land_id:
+    has_unverified_ndvi = any(
+        str(row.get("layer_type") or "").upper() == "NDVI"
+        and row.get("quality_score_method") != PARCEL_VALID_FRACTION_V1
+        for row in indices
+    )
+    if has_unverified_ndvi:
+        # 旧NDVI的覆盖率口径不可比较；从官方地块产品补充，并优先保留新口径FieldStat。
+        trusted_indices = [
+            row
+            for row in indices
+            if not (
+                str(row.get("layer_type") or "").upper() == "NDVI"
+                and row.get("quality_score_method") != PARCEL_VALID_FRACTION_V1
+            )
+        ]
+        trusted_keys = {
+            (str(row.get("date")), str(row.get("layer_type") or "").upper())
+            for row in trusted_indices
+        }
+        agri_idx = load_indices_from_agri(session, land_id)
+        supplemental_agri = [
+            row
+            for row in agri_idx
+            if (str(row.get("date")), str(row.get("layer_type") or "").upper())
+            not in trusted_keys
+        ]
+        indices = sorted(
+            [*trusted_indices, *supplemental_agri],
+            key=lambda row: (
+                str(row.get("date") or ""),
+                str(row.get("layer_type") or ""),
+            ),
+        )
+        if supplemental_agri and trusted_indices:
+            source = "field_stats+agric_satellite.parcel_scene_products"
+        elif supplemental_agri:
+            source = "agric_satellite.parcel_scene_products"
+        elif trusted_indices:
+            source = "field_stats_without_unverified_ndvi"
+        else:
+            source = "field_stats_unverified_ndvi_excluded"
+    elif len(indices) < 8 and land_id:
         agri_idx = load_indices_from_agri(session, land_id)
         if len(agri_idx) > len(indices):
             indices = agri_idx
@@ -909,8 +999,11 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
     }
 
 
-# Cap flood-evidence satellite previews shown in PDF / payload.
+# 报告中的洪涝证据影像与旧JSON读取均有明确数量和字节上限。
 FLOOD_EVIDENCE_MAX_SCENES = 6
+FLOOD_EVIDENCE_MEDIA_OBJECT_MAX_BYTES = 8 * 1024 * 1024
+FLOOD_EVIDENCE_MEDIA_PAGE_MAX_BYTES = 16 * 1024 * 1024
+REPORT_MEDIA_MAX_BYTES = 12 * 1024 * 1024
 
 
 def load_oss_media_for_dates(
@@ -918,14 +1011,14 @@ def load_oss_media_for_dates(
     land_id: str,
     dates: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Load OSS preview media URLs for land_id + dates via json_oss_key.
+    """按地块和日期读取报告预览；优先用稳定媒体列，旧产品JSON仅作有界回退。
 
-    Returns date -> {rgb_url, large_rgb_url, heatmap_url, s2_heatmap_url, json_oss_key}.
-    Prefers rgb_url, then large_rgb_url; heatmap optional.
+    返回日期到RGB/热图地址和兼容JSON键的映射；新对象使用短时签名地址。
     """
     if not land_id or not dates:
         return {}
-    uniq = sorted({str(d)[:10] for d in dates if d})
+    # 报告最多展示有限场景；限制日期列表也避免构造无界IN参数和OSS读取循环。
+    uniq = sorted({str(d)[:10] for d in dates if d})[:FLOOD_EVIDENCE_MAX_SCENES]
     if not uniq:
         return {}
     params: dict[str, Any] = {"land_id": land_id}
@@ -935,11 +1028,16 @@ def load_oss_media_for_dates(
         params[key] = d
         placeholders.append(f"CAST(:{key} AS date)")
     sql = f"""
-        SELECT date, json_oss_key
+        SELECT date, json_oss_key, rgb_oss_key, rgb_url, large_rgb_url
         FROM agric_satellite.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
           AND date IN ({", ".join(placeholders)})
-          AND json_oss_key IS NOT NULL AND json_oss_key <> ''
+          AND (
+              COALESCE(json_oss_key, '') <> ''
+              OR COALESCE(rgb_oss_key, '') <> ''
+              OR COALESCE(rgb_url, '') <> ''
+              OR COALESCE(large_rgb_url, '') <> ''
+          )
         ORDER BY date
     """
     try:
@@ -949,6 +1047,7 @@ def load_oss_media_for_dates(
 
     out: dict[str, dict[str, Any]] = {}
     storage = None
+    remaining_bytes = FLOOD_EVIDENCE_MEDIA_PAGE_MAX_BYTES
     for r in rows:
         d = (
             r["date"].isoformat()
@@ -957,26 +1056,72 @@ def load_oss_media_for_dates(
         )
         oss_key = (r.get("json_oss_key") or "").strip()
         if not oss_key:
-            continue
+            oss_key = None
+        rgb_oss_key = (r.get("rgb_oss_key") or "").strip()
         entry: dict[str, Any] = {
             "json_oss_key": oss_key,
-            "rgb_url": None,
-            "large_rgb_url": None,
+            "rgb_url": (
+                r.get("rgb_url").strip()
+                if isinstance(r.get("rgb_url"), str)
+                and r.get("rgb_url").strip()
+                and _is_allowed_report_media_url(r.get("rgb_url").strip())
+                else None
+            ),
+            "large_rgb_url": (
+                r.get("large_rgb_url").strip()
+                if isinstance(r.get("large_rgb_url"), str)
+                and r.get("large_rgb_url").strip()
+                and _is_allowed_report_media_url(r.get("large_rgb_url").strip())
+                else None
+            ),
             "heatmap_url": None,
             "s2_heatmap_url": None,
         }
+        if rgb_oss_key and _is_allowed_report_rgb_key(rgb_oss_key):
+            try:
+                if storage is None:
+                    from app.core.storage import get_parcel_product_storage
+
+                    storage = get_parcel_product_storage()
+                # 新产品优先由可信对象键签短时地址，避免继续信任产品JSON中的任意URL。
+                signed_rgb_url = storage.presigned_get(
+                    rgb_oss_key, expires=timedelta(hours=24)
+                )
+                if signed_rgb_url:
+                    entry["rgb_url"] = signed_rgb_url
+            except Exception:
+                pass
         try:
+            if not oss_key or remaining_bytes <= 0:
+                out[d] = entry
+                continue
             if storage is None:
                 from app.core.storage import get_parcel_product_storage
 
                 storage = get_parcel_product_storage()
-            raw = storage.get_bytes(oss_key)
+            # 旧JSON内含全部像元数组；单对象和整份报告均限流，避免历史大对象撑爆报告进程。
+            read_limit = min(
+                FLOOD_EVIDENCE_MEDIA_OBJECT_MAX_BYTES, remaining_bytes
+            )
+            try:
+                raw = storage.get_bytes(oss_key, max_bytes=read_limit)
+            except Exception:
+                # 对超限或中断的读取按本次预算扣减，避免多条坏对象反复尝试绕过页面上限。
+                remaining_bytes = max(0, remaining_bytes - read_limit)
+                out[d] = entry
+                continue
+            remaining_bytes = max(0, remaining_bytes - len(raw))
             obj = json.loads(raw)
             if isinstance(obj, dict):
                 for k in ("rgb_url", "large_rgb_url", "heatmap_url", "s2_heatmap_url"):
                     v = obj.get(k)
-                    if isinstance(v, str) and v.strip():
-                        entry[k] = v.strip()
+                    if (
+                        isinstance(v, str)
+                        and v.strip()
+                        and _is_allowed_report_media_url(v.strip())
+                    ):
+                        if not entry[k]:
+                            entry[k] = v.strip()
                 if not entry["heatmap_url"] and entry["s2_heatmap_url"]:
                     entry["heatmap_url"] = entry["s2_heatmap_url"]
         except Exception:
@@ -1212,20 +1357,74 @@ def build_flood_evidence(
     }
 
 
-def download_url_bytes(url: str, *, timeout: float = 25.0) -> bytes | None:
-    """Download public HTTP(S) image/bytes; return None on failure."""
+def _is_allowed_report_media_url(url: str) -> bool:
+    """只允许报告访问配置的对象存储域名，阻断媒体URL对内网地址的探测。"""
+    try:
+        parsed = urlsplit(url)
+        endpoint = urlsplit(settings.oss_endpoint)
+        hostname = (parsed.hostname or "").lower()
+        endpoint_host = (endpoint.hostname or "").lower()
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        endpoint_port = endpoint.port
+        if endpoint_port is None:
+            endpoint_port = 443 if endpoint.scheme == "https" else 80
+    except ValueError:
+        return False
+    if (
+        not hostname
+        or parsed.scheme.lower() not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.scheme.lower() != endpoint.scheme.lower()
+        or port != endpoint_port
+        or not endpoint_host
+    ):
+        return False
+    allowed_hosts = {endpoint_host}
+    if settings.oss_bucket:
+        allowed_hosts.add(f"{settings.oss_bucket.lower()}.{endpoint_host}")
+    return hostname in allowed_hosts
+
+
+class _OssOnlyRedirectHandler(HTTPRedirectHandler):
+    """重定向也必须留在配置对象存储域名，避免白名单URL跳转到内网。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_allowed_report_media_url(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_url_bytes(
+    url: str,
+    *,
+    timeout: float = 25.0,
+    max_bytes: int = REPORT_MEDIA_MAX_BYTES,
+) -> bytes | None:
+    """从配置对象存储有界下载报告图片；不接受任意主机或跨域跳转。"""
     if not url or not isinstance(url, str):
         return None
+    if max_bytes <= 0 or not _is_allowed_report_media_url(url):
+        return None
     try:
-        import urllib.request
-
-        req = urllib.request.Request(
+        req = Request(
             url,
             headers={"User-Agent": "agric-satellite-analysis-land-assessment/1.0"},
             method="GET",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.read()
+        opener = build_opener(_OssOnlyRedirectHandler())
+        with opener.open(req, timeout=timeout) as resp:
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > max_bytes:
+                        return None
+                except ValueError:
+                    return None
+            data = resp.read(max_bytes + 1)
+            return data if len(data) <= max_bytes else None
     except Exception:
         return None
 

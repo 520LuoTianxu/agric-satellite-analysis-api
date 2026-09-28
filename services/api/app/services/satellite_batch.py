@@ -86,15 +86,34 @@ def build_satellite_batch_jobs(
     )
     date_windows = {str(key): value for key, value in (land_date_windows or {}).items()}
 
+    # 先按每个空间组的实际日期窗口估算任务数，超限时在构造 Job 前快速拒绝。
+    planned_groups: list[tuple[SatelliteBatchGroup, date, date, str]] = []
+    estimated_job_count = 0
     for group in groups:
-        group_windows = [date_windows[land_id] for land_id in group.land_ids if land_id in date_windows]
+        group_windows = [
+            date_windows[land_id]
+            for land_id in group.land_ids
+            if land_id in date_windows
+        ]
         group_date_from = min((window[0] for window in group_windows), default=date_from)
         group_date_to = max((window[1] for window in group_windows), default=date_to)
         if group_date_from > group_date_to:
             raise ValueError(f"分组{group.anchor_land_id}的日期范围无效")
-
-        cursor = group_date_from
         member_key = ",".join(sorted(group.land_ids))
+        planned_groups.append((group, group_date_from, group_date_to, member_key))
+        day_count = (group_date_to - group_date_from).days + 1
+        chunk_count = (day_count + chunk - 1) // chunk
+        estimated_job_count += chunk_count * len(unique_sensors)
+
+    max_jobs = max(int(settings.satellite_batch_max_jobs), 1)
+    if estimated_job_count > max_jobs:
+        raise ValueError(
+            f"本批次预计创建{estimated_job_count}个遥感任务，超过单批上限{max_jobs}；"
+            "请缩短日期范围、减少地块/传感器，或拆成多个批次提交"
+        )
+
+    for group, group_date_from, group_date_to, member_key in planned_groups:
+        cursor = group_date_from
         while cursor <= group_date_to:
             end = min(cursor + timedelta(days=chunk - 1), group_date_to)
             for sensor in unique_sensors:

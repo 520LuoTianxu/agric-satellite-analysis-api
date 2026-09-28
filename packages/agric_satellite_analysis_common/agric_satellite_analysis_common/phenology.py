@@ -157,8 +157,12 @@ def infer_index_rows(indices: list[dict]) -> dict:
         if str(row.get("layer_type") or row.get("layer") or "").upper() != "NDVI":
             continue
         quality = number(row.get("quality_score", row.get("quality")))
-        official = row.get("official") is True or (
-            quality is not None and quality >= 0.7
+        explicit_official = row.get("official")
+        # 显式的 False 表示调用方已确认该行不可信，不能再由历史质量分阈值反向升级。
+        official = (
+            explicit_official
+            if isinstance(explicit_official, bool)
+            else quality is not None and quality >= 0.7
         )
         try:
             day = date.fromisoformat(str(row.get("date"))[:10])

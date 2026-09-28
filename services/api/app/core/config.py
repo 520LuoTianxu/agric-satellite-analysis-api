@@ -1,6 +1,7 @@
 """agric-satellite-analysis API - Core configuration."""
 
 from dotenv import load_dotenv
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agric_satellite_analysis_common.weather_window import DEFAULT_WEATHER_BACKFILL_DAYS
@@ -71,6 +72,8 @@ class Settings(BaseSettings):
     index_backfill_months: int = 60
     index_backfill_chunk_days: int = 90
     index_weekly_batch_size: int = 50
+    # 批量遥感共享同一组/窗口构造与逐条MQ发布，限制单次请求的总Job数量。
+    satellite_batch_max_jobs: int = Field(default=5_000, ge=1)
 
     # Soil Data
     soilgrids_wcs_base_url: str = "https://maps.isric.org/mapserv"

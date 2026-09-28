@@ -8,6 +8,7 @@ COG write, zonal-stats, and alert-evaluation logic.
 from __future__ import annotations
 
 import os
+import math
 import time
 import tempfile
 import threading
@@ -18,9 +19,10 @@ from typing import Any
 
 import numpy as np
 import rasterio
+from pyproj import Geod
 from rasterio.features import geometry_mask
 from rasterio.transform import from_bounds
-from rasterio.warp import Resampling, reproject, transform_bounds
+from rasterio.warp import Resampling, reproject, transform_bounds, transform_geom
 from pystac_client import Client as STACClient
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -37,7 +39,13 @@ from app.core.band_parallel import (
 from app.core.config import scene_max_workers
 from app.tasks.indices import IndexDef
 
+from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
+
 logger = structlog.get_logger()
+_WGS84_GEOD = Geod(ellps="WGS84")
+_TARGET_GRID_CELL_SIZE_M = 10.0
+_MAX_ANALYSIS_GRID_CELLS = 4_000_000
+INDEX_PIPELINE_VERSION = "2.2.0"
 
 # ── Configuration (same as ndvi.py) ──────────────────────────────────
 
@@ -235,7 +243,7 @@ def filter_scenes_skip_existing(
     land_id: str | None = None,
     index: str | None = None,
 ) -> list[dict]:
-    """Drop scenes whose date is already present unless force=True."""
+    """按地块已有原始观测日期跳过重复场景；force用于明确要求重算。"""
     if force or not existing or not scenes:
         return scenes
     kept: list[dict] = []
@@ -321,6 +329,9 @@ def search_scenes_for_defs(
       - ``week`` (default): one lowest-cloud scene per ISO week (legacy NDVI).
       - ``day``: one lowest-cloud scene per calendar day.
       - ``none``: keep every matching STAC item (agri + decloud need full series).
+
+    云量去重策略会改变时序采样密度；农业完整序列和去云处理必须显式选择none，
+    否则默认周优选会漏掉同周内的有效观测。
     """
     if not index_defs:
         return []
@@ -424,6 +435,7 @@ def _read_band_windowed_profiled(
     target_shape: tuple,
     target_transform,
     *,
+    target_crs: str = "EPSG:4326",
     resampling: Resampling = Resampling.bilinear,
 ) -> BandReadResult[np.ndarray]:
     """读取远程 COG 窗口，并分别记录远端 I/O 与本地重投影耗时。"""
@@ -433,20 +445,24 @@ def _read_band_windowed_profiled(
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
             window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
-            data = src.read(1, window=window, boundless=True, fill_value=0)
+            # 用Rasterio掩膜同时保留源NoData与boundless窗口外区域，避免0参与双线性插值。
+            data = src.read(1, window=window, boundless=True, masked=True)
+            data = np.asarray(data.astype(np.float32).filled(np.nan))
             source_transform = rasterio.windows.transform(window, src.transform)
             source_crs = src.crs
         io_ms = int((time.perf_counter() - t_io) * 1000)
 
         t_reproject = time.perf_counter()
-        dst = np.zeros(target_shape, dtype=np.float32)
+        dst = np.full(target_shape, np.nan, dtype=np.float32)
         reproject(
-            source=data.astype(np.float32),
+            source=data,
             destination=dst,
             src_transform=source_transform,
             src_crs=source_crs,
             dst_transform=target_transform,
-            dst_crs="EPSG:4326",
+            dst_crs=target_crs,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
             resampling=resampling,
         )
         reproject_ms = int((time.perf_counter() - t_reproject) * 1000)
@@ -459,6 +475,7 @@ def read_band_windowed(
     target_shape: tuple,
     target_transform,
     *,
+    target_crs: str = "EPSG:4326",
     resampling: Resampling = Resampling.bilinear,
 ) -> np.ndarray:
     """Read a band from a remote COG, windowed to field extent.
@@ -466,12 +483,16 @@ def read_band_windowed(
     Caller must treat this as one GDAL dataset open. Band workers each call
     this under their own ``rasterio.Env()`` (this function opens one).
     Categorical layers (SCL) must pass ``resampling=Resampling.nearest``.
+
+    读取窗口限制网络范围；连续反射率波段与分类SCL使用不同重采样方式，
+    避免把分类编码插值成不存在的类别。
     """
     return _read_band_windowed_profiled(
         href,
         bounds,
         target_shape,
         target_transform,
+        target_crs=target_crs,
         resampling=resampling,
     ).value
 
@@ -482,6 +503,7 @@ def read_bands_windowed_parallel(
     target_shape: tuple,
     target_transform,
     *,
+    target_crs: str = "EPSG:4326",
     scene_workers: int = 1,
     resampling_by_band: dict[str, Resampling] | None = None,
     log_context: dict[str, object] | None = None,
@@ -497,6 +519,7 @@ def read_bands_windowed_parallel(
             bounds,
             target_shape,
             target_transform,
+            target_crs=target_crs,
             resampling=resampling,
         )
 
@@ -514,6 +537,7 @@ def read_rgb_windowed(
     target_shape: tuple,
     target_transform,
     *,
+    target_crs: str = "EPSG:4326",
     resampling: Resampling = Resampling.bilinear,
 ) -> np.ndarray | None:
     """Read a 3-band visual/true_color COG windowed to the target grid.
@@ -528,16 +552,20 @@ def read_rgb_windowed(
                 return None
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
             window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
-            data = src.read([1, 2, 3], window=window, boundless=True, fill_value=0)
-            dst = np.zeros((3, *target_shape), dtype=np.float32)
+            # RGB预览同样屏蔽景幅外像元，避免边缘黑边被平滑扩散进地块。
+            data = src.read([1, 2, 3], window=window, boundless=True, masked=True)
+            data = data.astype(np.float32).filled(np.nan)
+            dst = np.full((3, *target_shape), np.nan, dtype=np.float32)
             for i in range(3):
                 reproject(
-                    source=data[i].astype(np.float32),
+                    source=data[i],
                     destination=dst[i],
                     src_transform=rasterio.windows.transform(window, src.transform),
                     src_crs=src.crs,
                     dst_transform=target_transform,
-                    dst_crs="EPSG:4326",
+                    dst_crs=target_crs,
+                    src_nodata=np.nan,
+                    dst_nodata=np.nan,
                     resampling=resampling,
                 )
             return np.transpose(dst, (1, 2, 0))
@@ -555,7 +583,7 @@ def write_cog(
     scene_date: date,
     index_key: str,
 ) -> str:
-    """Write an index array as COG to object storage. Returns the ``cog_uri``."""
+    """把指数数组写为云优化GeoTIFF并返回对象URI，供按窗口读取和地图服务使用。"""
     # rio-cogeo 只在真正写 COG 时需要；把重型可选依赖延迟到这里，避免
     # HTTP-only 编排和日期检查在不写本地 COG 的场景下无法加载任务模块。
     from rio_cogeo.cogeo import cog_translate
@@ -605,9 +633,23 @@ def write_cog(
 # ── Zonal statistics ─────────────────────────────────────────────────
 
 
-def compute_zonal_stats(data: np.ndarray) -> dict:
-    """Compute zonal statistics over the valid (finite) pixels."""
-    valid = data[np.isfinite(data)]
+def compute_zonal_stats(
+    data: np.ndarray, *, expected_mask: np.ndarray | None = None
+) -> dict:
+    """计算有效像元统计；有地块掩膜时质量分只以地块内格点为分母。"""
+    if expected_mask is None:
+        valid_domain = None
+        total_pixels = int(data.size)
+    else:
+        valid_domain = np.asarray(expected_mask, dtype=bool)
+        if tuple(valid_domain.shape) != tuple(data.shape):
+            raise ValueError("expected mask dimensions must match zonal data")
+        total_pixels = int(np.count_nonzero(valid_domain))
+
+    finite_mask = np.isfinite(data)
+    if valid_domain is not None:
+        finite_mask &= valid_domain
+    valid = data[finite_mask]
     if len(valid) == 0:
         return {
             "mean": None,
@@ -619,7 +661,6 @@ def compute_zonal_stats(data: np.ndarray) -> dict:
             "p90": None,
             "quality_score": 0.0,
         }
-    total_pixels = data.size
     return {
         "mean": float(np.nanmean(valid)),
         "median": float(np.nanmedian(valid)),
@@ -757,34 +798,129 @@ def run_alerts(
 # ── Grid / mask helpers ──────────────────────────────────────────────
 
 
-def compute_target_grid(field_bounds: tuple, land_geom, *, padding_degrees: float = 0.001):
-    """Return (target_transform, target_shape, field_mask, expanded_bounds).
+def analysis_crs_for_bounds(field_bounds: tuple) -> str:
+    """根据WGS84范围中心选择UTM或极区UPS坐标系，供米制遥感分析使用。"""
+    minx, miny, maxx, maxy = (float(value) for value in field_bounds)
+    if minx >= maxx or miny >= maxy:
+        raise ValueError("parcel bounds must have positive width and height")
+    center_lon = (minx + maxx) / 2
+    center_lat = (miny + maxy) / 2
+    if not all(math.isfinite(value) for value in (center_lon, center_lat)):
+        raise ValueError("parcel bounds must contain finite WGS84 coordinates")
+    if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+        raise ValueError("parcel bounds are outside the WGS84 coordinate range")
+    # 农业地块通常是区域级范围，按中心点选UTM可让目标像元直接以米计量。
+    # 极区超出UTM适用纬度时改用UPS，避免错误投影或静默退回经纬度网格。
+    if center_lat >= 84:
+        return "EPSG:32661"
+    if center_lat <= -80:
+        return "EPSG:32761"
+    zone = min(60, max(1, int((center_lon + 180) // 6) + 1))
+    return f"EPSG:{(32600 if center_lat >= 0 else 32700) + zone}"
 
-    ``padding_degrees=0`` is used by the fixed metric processing window so
-    the raster read covers the requested AOI instead of adding another degree
-    based margin. Existing callers retain the historical padding by default.
+
+def compute_target_grid(
+    field_bounds: tuple,
+    land_geom,
+    *,
+    padding_degrees: float = 0.001,
+    target_crs: str | None = None,
+):
+    """构建局部米制目标网格，并返回变换、尺寸、地块掩膜和扩展后的WGS84范围。
+
+    固定公里级处理窗口传入 ``padding_degrees=0``，避免在请求范围外再加经纬度缓冲；
+    其他旧调用方默认沿用历史缓冲。网格单边最多5000格、总格点最多400万，超限自动降采样。
     """
-    minx, miny, maxx, maxy = field_bounds
+    if len(field_bounds) != 4:
+        raise ValueError("field bounds must contain minx, miny, maxx, maxy")
+    minx, miny, maxx, maxy = (float(value) for value in field_bounds)
+    if (
+        not all(math.isfinite(value) for value in (minx, miny, maxx, maxy))
+        or minx >= maxx
+        or miny >= maxy
+        or minx < -180
+        or maxx > 180
+        or miny < -90
+        or maxy > 90
+    ):
+        raise ValueError("field bounds must be an ordered WGS84 rectangle")
     buf = float(padding_degrees)
+    if not math.isfinite(buf) or buf < 0:
+        raise ValueError("padding_degrees must be finite and non-negative")
     minx -= buf
     miny -= buf
     maxx += buf
     maxy += buf
-    pixel_size = 0.0001
-    width = max(int((maxx - minx) / pixel_size), 1)
-    height = max(int((maxy - miny) / pixel_size), 1)
+    output_crs = target_crs or analysis_crs_for_bounds((minx, miny, maxx, maxy))
+    # STAC窗口仍以WGS84检索；只有目标栅格边界和地块掩膜转换为米制投影。
+    projected_bounds = transform_bounds(
+        "EPSG:4326", output_crs, minx, miny, maxx, maxy, densify_pts=21
+    )
+    left, bottom, right, top = projected_bounds
+    if not all(math.isfinite(value) for value in projected_bounds):
+        raise ValueError("parcel bounds could not be projected to the analysis CRS")
+    width = max(math.ceil((right - left) / _TARGET_GRID_CELL_SIZE_M), 1)
+    height = max(math.ceil((top - bottom) / _TARGET_GRID_CELL_SIZE_M), 1)
     max_dim = 5000
-    if width > max_dim or height > max_dim:
-        scale = max_dim / max(width, height)
+    # 只限制单边会允许5000×5000的2500万格点；多个波段并行读取时容易放大内存峰值。
+    scale = min(
+        1.0,
+        max_dim / max(width, height),
+        math.sqrt(_MAX_ANALYSIS_GRID_CELLS / (width * height)),
+    )
+    if scale < 1.0:
         width = max(int(width * scale), 1)
         height = max(int(height * scale), 1)
 
-    target_transform = from_bounds(minx, miny, maxx, maxy, width, height)
+    target_transform = from_bounds(left, bottom, right, top, width, height)
     target_shape = (height, width)
+    # 掩膜几何与像元 transform 必须在同一投影坐标系，才能保证像元确实位于地块内。
+    projected_geom = transform_geom("EPSG:4326", output_crs, land_geom.__geo_interface__)
     field_mask = geometry_mask(
-        [land_geom], out_shape=target_shape, transform=target_transform, invert=True
+        [projected_geom],
+        out_shape=target_shape,
+        transform=target_transform,
+        invert=True,
     )
     return target_transform, target_shape, field_mask, (minx, miny, maxx, maxy)
+
+
+def describe_target_grid(
+    target_transform, target_shape: tuple, target_crs: str
+) -> dict[str, Any]:
+    """记录分析网格的坐标系和实际像元间距，不把输出网格误称为传感器原生分辨率。"""
+    height, width = (int(value) for value in target_shape)
+    if height < 1 or width < 1:
+        raise ValueError("analysis grid dimensions must be positive")
+
+    if str(target_crs).upper() in {"EPSG:4326", "OGC:CRS84"}:
+        # 兼容旧栅格的元数据读取；新分析网格均使用米制投影。
+        col, row = width / 2, height / 2
+        x0, y0 = target_transform * (col, row)
+        x1, y1 = target_transform * (col + 1, row)
+        x2, y2 = target_transform * (col, row + 1)
+        spacing_x = abs(float(_WGS84_GEOD.inv(x0, y0, x1, y1)[2]))
+        spacing_y = abs(float(_WGS84_GEOD.inv(x0, y0, x2, y2)[2]))
+        measurement = "wgs84_geodesic_estimate"
+    else:
+        spacing_x = abs(float(target_transform.a))
+        spacing_y = abs(float(target_transform.e))
+        measurement = "projected_axis_spacing"
+    if not math.isfinite(spacing_x) or not math.isfinite(spacing_y):
+        raise ValueError("analysis grid spacing could not be measured")
+    return {
+        "crs": str(target_crs),
+        "width": width,
+        "height": height,
+        "cell_size_m": {"x": round(spacing_x, 2), "y": round(spacing_y, 2)},
+        "target_cell_size_m": _TARGET_GRID_CELL_SIZE_M,
+        "measurement": measurement,
+    }
+
+
+def describe_target_grid_wgs84(target_transform, target_shape: tuple) -> dict[str, Any]:
+    """兼容旧调用方，描述仍以WGS84存储的历史分析网格。"""
+    return describe_target_grid(target_transform, target_shape, "EPSG:4326")
 
 
 # ── Full per-scene processing ────────────────────────────────────────
@@ -801,6 +937,7 @@ def process_scene(
     target_shape: tuple,
     field_mask: np.ndarray,
     bounds: tuple,
+    target_crs: str,
     org_id_str: str,
     land_id_str: str,
     date_from: date,
@@ -819,6 +956,9 @@ def process_scene(
     can be nested-capped (see ``app.core.band_parallel``).
 
     Returns the stats dict on success, ``None`` on failure.
+
+    主农业时序由agri_lonlat一次遍历生成全部指数；此路径保留单指数栅格和告警兼容，
+    避免把旧图层消费者误当作主像元数据来源。
     """
     from app.models.tables import RasterLayer, FieldStat
     from app.core.index_cogs import write_index_cogs_enabled
@@ -842,6 +982,7 @@ def process_scene(
         bounds,
         target_shape,
         target_transform,
+        target_crs=target_crs,
         scene_workers=scene_workers,
         log_context={
             "job_id": str(getattr(job, "id", "")) or None,
@@ -867,7 +1008,7 @@ def process_scene(
         cog_uri = write_cog(
             index_data,
             target_transform,
-            "EPSG:4326",
+            target_crs,
             org_id_str,
             land_id_str,
             scene_date,
@@ -883,7 +1024,7 @@ def process_scene(
 
     # -- compute stats --
     update_job_progress(session, job, "compute_stats")
-    stats = compute_zonal_stats(index_data)
+    stats = compute_zonal_stats(index_data, expected_mask=field_mask)
     valid = index_data[np.isfinite(index_data)]
     data_min = float(np.nanmin(valid)) if len(valid) > 0 else None
     data_max = float(np.nanmax(valid)) if len(valid) > 0 else None
@@ -908,7 +1049,8 @@ def process_scene(
                 "scene_id": scene_id,
                 "bands": band_hrefs,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
-                "pipeline_version": "2.0.0",
+                "pipeline_version": INDEX_PIPELINE_VERSION,
+                "quality_score_method": PARCEL_VALID_FRACTION_V1,
             },
         )
         stmt = (
@@ -993,6 +1135,7 @@ def process_scenes_parallel(
     target_shape: tuple,
     field_mask: np.ndarray,
     bounds: tuple,
+    target_crs: str,
     org_id_str: str,
     land_id_str: str,
     date_from: date,
@@ -1006,6 +1149,8 @@ def process_scenes_parallel(
     Per-scene failures are logged and skipped, matching the serial loop.
     ``historical_means`` is copied per scene so workers do not share a list;
     backfill jobs already skip alerts, and weekly jobs typically have one scene.
+
+    每景独立Session并使用历史均值快照，失败景单独记录后继续处理，避免线程共享会话或修改同一列表。
     """
     from app.models.tables import Job
 
@@ -1043,6 +1188,7 @@ def process_scenes_parallel(
                 target_shape=target_shape,
                 field_mask=field_mask,
                 bounds=bounds,
+                target_crs=target_crs,
                 org_id_str=org_id_str,
                 land_id_str=land_id_str,
                 date_from=date_from,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from datetime import timedelta
 from functools import lru_cache
 from urllib.parse import urlparse
@@ -10,6 +11,10 @@ from urllib.parse import urlparse
 import oss2
 
 from agric_satellite_analysis_common.settings import settings
+
+
+class ObjectTooLargeError(ValueError):
+    """对象流超过调用方上限时抛出，避免把整份大对象读入内存。"""
 
 
 def signed_get_expire_sec(*, years: float = 20.0) -> int:
@@ -52,8 +57,12 @@ class ObjectStorage(ABC):
         """Upload raw bytes. Returns the object key."""
 
     @abstractmethod
-    def get_bytes(self, key: str) -> bytes:
-        """Download object contents as bytes."""
+    def get_bytes(self, key: str, *, max_bytes: int | None = None) -> bytes:
+        """下载对象内容；提供上限时在流读取阶段限制传输和内存占用。"""
+
+    def iter_bytes(self, key: str, *, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        """按块读取对象；后端必须原生实现以避免整对象驻留内存。"""
+        raise NotImplementedError("storage backend must implement streaming reads")
 
     @abstractmethod
     def exists(self, key: str) -> bool:
@@ -142,9 +151,33 @@ class OssStorage(ObjectStorage):
         self._bucket.put_object(key, data, headers=headers)
         return key
 
-    def get_bytes(self, key: str) -> bytes:
+    def get_bytes(self, key: str, *, max_bytes: int | None = None) -> bytes:
         result = self._bucket.get_object(key)
-        return result.read()
+        try:
+            if max_bytes is None:
+                return result.read()
+            if max_bytes < 0:
+                raise ValueError("max_bytes must be non-negative")
+            # 多读1字节仅用于识别超限对象；OSS流随即关闭，不会把剩余大对象拉入内存。
+            raw = result.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise ObjectTooLargeError(
+                    f"object {key!r} exceeds the {max_bytes}-byte read limit"
+                )
+            return raw
+        finally:
+            result.close()
+
+    def iter_bytes(self, key: str, *, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        """从OSS响应流逐块返回对象，并在客户端断开时关闭底层连接。"""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        result = self._bucket.get_object(key)
+        try:
+            while chunk := result.read(chunk_size):
+                yield chunk
+        finally:
+            result.close()
 
     def exists(self, key: str) -> bool:
         return bool(self._bucket.object_exists(key))
@@ -302,6 +335,7 @@ def clear_storage_cache() -> None:
 
 __all__ = [
     "ObjectStorage",
+    "ObjectTooLargeError",
     "OssStorage",
     "get_storage",
     "get_parcel_product_storage",

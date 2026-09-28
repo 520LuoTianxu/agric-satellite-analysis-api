@@ -94,7 +94,7 @@ def load_agri_s2_rows(
     rows = (
         session.execute(
             text(
-                f"""
+                """
             SELECT date, scene_id, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
                    parcel_cloud_cover_pct, cloud_cover,
                    pixel_data->>'source' AS source,
@@ -178,7 +178,9 @@ def load_agri_s1_rows(
             text(
                 """
             SELECT date, scene_id, vv_avg, vh_avg,
-                   NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
+                   NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit,
+                   pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
+                   NULLIF(pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
             FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S1'
               AND date >= :start_date AND date <= :end_date
@@ -207,6 +209,8 @@ def load_agri_s1_rows(
                 "vv_avg": _num(r["vv_avg"]),
                 "vh_avg": _num(r["vh_avg"]),
                 "relative_orbit": rel,
+                "calibration_method": r.get("calibration_method"),
+                "calibration_scale": _num(r.get("calibration_scale")),
             }
         )
     return out
@@ -286,6 +290,8 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "vh": r.get("vh_avg"),
                 "scene_id": r.get("scene_id"),
                 "relative_orbit": r.get("relative_orbit"),
+                "calibration_method": r.get("calibration_method"),
+                "calibration_scale": _num(r.get("calibration_scale")),
             }
         )
     classified = classify_flood_series(observations)
@@ -629,7 +635,6 @@ def _build_timeline(
         str(d.get("date")): str(d.get("class"))
         for d in (drought.get("days") or [])
     }
-    class_by_date = {str(sc.get("date")): str(sc.get("class") or "") for sc in usable_classes}
     flood_scenes = list(flood.get("scenes") or [])
     ndvi_ts = list(ndvi_ts or [])
 

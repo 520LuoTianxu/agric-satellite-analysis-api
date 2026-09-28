@@ -2,11 +2,13 @@
 
 import unittest
 import uuid
+from contextlib import nullcontext
 from datetime import date
 from unittest.mock import patch
 
 import numpy as np
 from rasterio.transform import xy
+from rasterio.warp import transform as warp_xy
 from shapely.geometry import Point, box, mapping
 from shapely.ops import unary_union
 
@@ -26,13 +28,48 @@ def remote_land(land_id):
 def make_lands(sensor="S2"):
     with (
         patch.object(
-            batch,
-            "resolve_land",
-            side_effect=lambda **kwargs: remote_land(kwargs["land_id"]),
+            batch, "internal_client", return_value=nullcontext(object())
         ),
-        patch.object(batch, "agri_scene_dates", return_value=[]),
+        patch.object(
+            batch,
+            "agri_satellite_batch_inputs",
+            side_effect=lambda **kwargs: [
+                {**remote_land(land_id), "existing_dates": []}
+                for land_id in kwargs["land_ids"]
+            ],
+        ),
     ):
         return batch._load_lands(["A", "B"], sensor, False)
+
+
+class LandInputBatchTests(unittest.TestCase):
+    def test_load_lands_chunks_at_limit_and_reuses_one_http_client(self):
+        land_ids = [f"L{index}" for index in range(51)]
+        client = object()
+        with (
+            patch.object(
+                batch, "internal_client", return_value=nullcontext(client)
+            ) as open_client,
+            patch.object(
+                batch,
+                "agri_satellite_batch_inputs",
+                side_effect=lambda **kwargs: [
+                    {**remote_land(land_id), "existing_dates": []}
+                    for land_id in kwargs["land_ids"]
+                ],
+            ) as batch_inputs,
+        ):
+            lands = batch._load_lands(land_ids, "S2", False)
+
+        self.assertEqual(open_client.call_count, 1)
+        self.assertEqual(
+            [len(call.kwargs["land_ids"]) for call in batch_inputs.call_args_list],
+            [50, 1],
+        )
+        self.assertTrue(
+            all(call.kwargs["client"] is client for call in batch_inputs.call_args_list)
+        )
+        self.assertEqual([land["meta"]["land_id"] for land in lands], land_ids)
 
 
 class SharedWindowTests(unittest.TestCase):
@@ -219,11 +256,16 @@ class SharedWindowTests(unittest.TestCase):
             patch.object(batch, "get_job", return_value=job),
             patch.object(batch, "patch_job") as progress,
             patch.object(
-                batch,
-                "resolve_land",
-                side_effect=lambda **kwargs: remote_land(kwargs["land_id"]),
+                batch, "internal_client", return_value=nullcontext(object())
             ),
-            patch.object(batch, "agri_scene_dates", return_value=[]),
+            patch.object(
+                batch,
+                "agri_satellite_batch_inputs",
+                return_value=[
+                    {**remote_land(land_id), "existing_dates": []}
+                    for land_id in ["A", "B"]
+                ],
+            ),
             patch.object(batch, "search_scenes_for_defs", return_value=[scene, scene]),
             patch.object(
                 batch, "read_bands_windowed_parallel", side_effect=read_bands
@@ -264,16 +306,32 @@ class SharedWindowTests(unittest.TestCase):
 
     def test_http_scene_dates_are_a_list_and_force_skips_lookup(self):
         with (
-            patch.object(batch, "resolve_land", return_value=remote_land("A")),
             patch.object(
-                batch, "agri_scene_dates", return_value=["2026-08-01"]
-            ) as dates,
+                batch, "internal_client", return_value=nullcontext(object())
+            ),
+            patch.object(
+                batch,
+                "agri_satellite_batch_inputs",
+                side_effect=lambda **kwargs: [
+                    {
+                        **remote_land(land_id),
+                        "existing_dates": (
+                            ["2026-08-01"]
+                            if kwargs["include_existing_dates"]
+                            else []
+                        ),
+                    }
+                    for land_id in kwargs["land_ids"]
+                ],
+            ) as batch_inputs,
         ):
             lands = batch._load_lands(["A"], "S2", False)
             self.assertEqual(lands[0]["existing"], {date(2026, 8, 1)})
             forced = batch._load_lands(["A"], "S2", True)
         self.assertEqual(forced[0]["existing"], set())
-        dates.assert_called_once()
+        self.assertEqual(batch_inputs.call_count, 2)
+        self.assertTrue(batch_inputs.call_args_list[0].kwargs["include_existing_dates"])
+        self.assertFalse(batch_inputs.call_args_list[1].kwargs["include_existing_dates"])
 
     def test_failed_scene_is_reported_as_failed(self):
         job = {
@@ -331,7 +389,13 @@ class ParcelProductTests(unittest.TestCase):
         union = unary_union([land["geom"] for land in self.lands])
         self.grid = compute_target_grid(union.bounds, union)
         rows, cols = np.indices(self.grid[1])
-        longitudes, _ = xy(self.grid[0], rows, cols)
+        eastings, northings = xy(self.grid[0], rows, cols)
+        longitudes, _ = warp_xy(
+            batch.analysis_crs_for_bounds(union.bounds),
+            "EPSG:4326",
+            np.asarray(eastings).reshape(-1).tolist(),
+            np.asarray(northings).reshape(-1).tolist(),
+        )
         self.left = np.asarray(longitudes).reshape(self.grid[1]) < 110.006
 
     def test_optical_pixels_and_statistics_are_isolated(self):

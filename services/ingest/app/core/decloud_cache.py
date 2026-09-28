@@ -8,6 +8,7 @@ fresh STAC scrape. Missing arrays are fine: hrefs are enough to re-window.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from datetime import date, datetime
 from pathlib import Path
@@ -20,17 +21,50 @@ from app.core.decloud import (
 )
 
 _SENSORS = frozenset({"S2", "S1"})
+_GRID_KEY = "__grid_key__"
+
+
+def window_grid_key(
+    crs: str,
+    shape: tuple[int, int],
+    transform: object,
+    field_mask: Any | None = None,
+) -> str:
+    """为去云数组生成坐标系、尺寸、变换及地块掩膜的稳定指纹。"""
+    try:
+        affine = [round(float(value), 14) for value in transform]  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise ValueError("window transform is not iterable") from exc
+    identity = {
+        "crs": str(crs),
+        "shape": [int(shape[0]), int(shape[1])],
+        "transform": affine,
+    }
+    if field_mask is not None:
+        import numpy as np
+
+        mask = np.asarray(field_mask, dtype=np.uint8)
+        if tuple(mask.shape) != tuple(identity["shape"]):
+            raise ValueError("field mask shape does not match the cached grid")
+        identity["field_mask_sha256"] = hashlib.sha256(
+            mask.tobytes(order="C")
+        ).hexdigest()
+    encoded = json.dumps(
+        identity, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def cache_root() -> Path:
+    # S1定标的像元中心索引口径改变；换目录避免旧辅助特征数组覆盖新算法结果。
     explicit = (os.environ.get("DECLOUD_CACHE_DIR") or "").strip()
     if explicit:
-        root = Path(explicit)
+        root = Path(explicit) / "v4_sigma0_lut"
     else:
         scratch = (
             os.environ.get("OPENFARM_SCRATCH_DIR") or "/data/scratch"
         ).strip() or "/data/scratch"
-        root = Path(scratch) / "decloud_windows"
+        root = Path(scratch) / "decloud_windows" / "v4_sigma0_lut"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -216,6 +250,7 @@ def write_window_array(
     land_id: str,
     date_str: date | str,
     sensor: str,
+    grid_key: str | None = None,
     **arrays: Any,
 ) -> Path | None:
     """Best-effort npz write. Returns None when numpy is unavailable."""
@@ -226,6 +261,8 @@ def write_window_array(
     path = array_path(land_id, date_str, sensor)
     path.parent.mkdir(parents=True, exist_ok=True)
     packed = {k: np.asarray(v) for k, v in arrays.items() if v is not None}
+    if grid_key:
+        packed[_GRID_KEY] = np.asarray(str(grid_key))
     if not packed:
         return None
     # savez_compressed appends .npz unless the name already ends with it.
@@ -251,7 +288,11 @@ def write_window_array(
 
 
 def read_window_array(
-    land_id: str, date_str: date | str, sensor: str
+    land_id: str,
+    date_str: date | str,
+    sensor: str,
+    *,
+    expected_grid_key: str | None = None,
 ) -> dict[str, Any] | None:
     path = array_path(land_id, date_str, sensor)
     if not path.is_file():
@@ -262,7 +303,12 @@ def read_window_array(
         return None
     try:
         with np.load(path) as data:
-            return {k: data[k] for k in data.files}
+            stored_grid_key = (
+                str(data[_GRID_KEY].item()) if _GRID_KEY in data.files else None
+            )
+            if expected_grid_key is not None and stored_grid_key != expected_grid_key:
+                return None
+            return {k: data[k] for k in data.files if k != _GRID_KEY}
     except OSError:
         return None
 
@@ -278,6 +324,7 @@ __all__ = [
     "put_window_meta",
     "read_window_array",
     "usable_s2_count",
+    "window_grid_key",
     "window_array_tmp_path",
     "write_window_array",
 ]

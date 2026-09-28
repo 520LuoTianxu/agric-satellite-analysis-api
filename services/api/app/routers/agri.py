@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+import math
+from datetime import date, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.agri_classify import parse_s1_relative_orbit
 from app.core.database import get_db
-from app.core.storage import get_parcel_product_storage
+from app.core.storage import ObjectTooLargeError, get_parcel_product_storage
 from app.middleware.auth import OrgContext, require_roles
 from app.schemas.agri import (
     AgriStatsOut,
@@ -38,6 +41,12 @@ router = APIRouter(prefix="/agri", tags=["agri"])
 logger = logging.getLogger(__name__)
 
 _reader = require_roles("owner", "admin", "member", "viewer")
+_SCENE_PIXEL_PAGE_LIMIT = 50
+_SCENE_PIXEL_RESPONSE_LIMIT = 50_000
+_SCENE_PIXEL_RESPONSE_LIMIT_BYTES = 16 * 1024 * 1024
+_SCENE_PIXEL_STORAGE_LIMIT_BYTES = 12 * 1024 * 1024
+_SCENE_OSS_JSON_LIMIT_BYTES = 8 * 1024 * 1024
+_SCENE_OSS_PAGE_LIMIT_BYTES = 16 * 1024 * 1024
 
 # Averages + meta; pixel_data excluded unless include_pixels=1
 _SCENE_COLS = """
@@ -55,6 +64,11 @@ _SCENE_COLS = """
     vh_avg, vh_min, vh_max,
     generated_at_shanghai, ingested_at,
     pixel_data->>'source' AS source,
+    pixel_data->>'stac_item_id' AS stac_item_id,
+    pixel_data->>'algorithm_version' AS algorithm_version,
+    pixel_data->'analysis_grid' AS analysis_grid,
+    pixel_data->'radiometric_calibration' AS radiometric_calibration,
+    pixel_data->'quality_metrics' AS quality_metrics,
     pixel_data->>'decloud_quality' AS decloud_quality,
     NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score,
     pixel_data->'decloud_reasons' AS decloud_reasons,
@@ -63,30 +77,69 @@ _SCENE_COLS = """
 """
 
 
+class _ScenePixelLimitExceeded(ValueError):
+    """单次像元响应预算超限，供异步路由转换为明确的 413 响应。"""
+
+
+class _SceneOssReadBudget:
+    """限制一页历史预览/像元回退最多读取的OSS JSON总字节数。"""
+
+    def __init__(self) -> None:
+        self.remaining_bytes = _SCENE_OSS_PAGE_LIMIT_BYTES
+
+    def get_bytes(self, storage: Any, key: str) -> bytes:
+        # 每个旧对象仍有单独上限；整页共享剩余预算，避免50条历史行各读满8 MiB。
+        read_limit = min(_SCENE_OSS_JSON_LIMIT_BYTES, self.remaining_bytes)
+        if read_limit <= 0:
+            raise _ScenePixelLimitExceeded("OSS scene page byte budget exhausted")
+        try:
+            raw = storage.get_bytes(key, max_bytes=read_limit)
+        except ObjectTooLargeError as exc:
+            # 存储层只会多读1字节确认超限；保守按本次上限扣减，严格保持整页有界。
+            self.remaining_bytes = max(0, self.remaining_bytes - read_limit)
+            if read_limit < _SCENE_OSS_JSON_LIMIT_BYTES:
+                raise _ScenePixelLimitExceeded(
+                    "OSS scene page byte budget exceeded"
+                ) from exc
+            raise
+        self.remaining_bytes = max(0, self.remaining_bytes - len(raw))
+        return raw
+
+
 def _row_to_dict(row: Any) -> dict[str, Any]:
+    """把数据库行和JSONB字符串规范为有限数值与可安全序列化的响应字段。"""
     from decimal import Decimal
 
     d = dict(row._mapping)
     for k, v in list(d.items()):
         if isinstance(v, Decimal):
-            d[k] = float(v)
+            v = float(v)
+        if isinstance(v, float) and not math.isfinite(v):
+            # PostgreSQL浮点特殊值不是合法JSON数值；对外统一按缺测返回NULL。
+            d[k] = None
         elif k in (
             "boundary_geojson",
             "source_properties",
             "pixel_data",
+            "analysis_grid",
+            "radiometric_calibration",
+            "quality_metrics",
             "grid_json",
             "decloud_reasons",
         ) and isinstance(v, str):
             try:
-                d[k] = json.loads(v)
+                # Python默认会接受非标准NaN/Infinity常量；映射成JSON null，避免响应序列化失败。
+                d[k] = json.loads(v, parse_constant=lambda _value: None)
             except json.JSONDecodeError:
                 pass
+        else:
+            d[k] = v
     _enrich_scene_product(d)
     return d
 
 
 def _enrich_scene_product(d: dict[str, Any]) -> None:
-    """Normalize decloud_reasons and fill relative_orbit from scene_id."""
+    """规范化去云原因，并从S1场景编号补轨道字段以兼容历史记录。"""
     reasons = d.get("decloud_reasons")
     if isinstance(reasons, str):
         try:
@@ -108,7 +161,7 @@ def _enrich_scene_product(d: dict[str, Any]) -> None:
 
 
 def _normalize_lonlat_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
-    """Keep only dict lon/lat pixel objects (DB lonlat_v1 or OSS JSON)."""
+    """筛掉缺坐标或坐标不可转数值的像元，避免坏数据进入地图栅格化。"""
     if not isinstance(raw_pixels, list):
         return []
     out: list[dict[str, Any]] = []
@@ -117,24 +170,50 @@ def _normalize_lonlat_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
             continue
         lon = p.get("lon")
         lat = p.get("lat")
-        if lon is None or lat is None:
+        if lon is None or lat is None or isinstance(lon, bool) or isinstance(lat, bool):
             continue
         try:
-            float(lon)
-            float(lat)
-        except (TypeError, ValueError):
+            lon_value = float(lon)
+            lat_value = float(lat)
+        except (TypeError, ValueError, OverflowError):
             continue
-        out.append(p)
+        # JSONB/历史OSS可能混有字符串、NaN或越界坐标；统一成有限WGS84数值，
+        # 否则无效点会污染地图范围，甚至产生前端无法解析的JSON响应。
+        if (
+            not math.isfinite(lon_value)
+            or not math.isfinite(lat_value)
+            or not -180 <= lon_value <= 180
+            or not -90 <= lat_value <= 90
+        ):
+            continue
+        # 像元契约只暴露数值指标；剔除NaN、嵌套对象和无关大字符串，保证JSON有效且响应紧凑。
+        normalized = {"lon": lon_value, "lat": lat_value}
+        for key, value in p.items():
+            if key in {"lon", "lat"}:
+                continue
+            if isinstance(value, bool):
+                if key == "clear":
+                    normalized[key] = int(value)
+                continue
+            if not isinstance(value, (int, float, str)):
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(numeric_value):
+                normalized[key] = numeric_value
+        out.append(normalized)
     return out
 
 
 def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
-    """Keep only dict lon/lat pixel objects from OSS JSON."""
+    """复用统一坐标与数值校验，防止旧OSS像元格式绕过响应边界。"""
     return _normalize_lonlat_pixels(raw_pixels)
 
 
 def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
-    """Extract lonlat_v1 pixels from agric_satellite.parcel_scene_products.pixel_data."""
+    """只接受带 lonlat_v1 标记的数据库像元，避免误把旧行列网格当经纬度。"""
     if not isinstance(pixel_data, dict):
         return None
     if pixel_data.get("format") != "lonlat_v1":
@@ -144,7 +223,7 @@ def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
 
 
 def _oss_str_url(value: Any) -> str | None:
-    """Accept non-empty string URLs from OSS JSON; reject other types."""
+    """只接受旧OSS JSON中的非空字符串媒体地址，拒绝意外类型。"""
     if isinstance(value, str):
         s = value.strip()
         if s:
@@ -153,7 +232,7 @@ def _oss_str_url(value: Any) -> str | None:
 
 
 def _extract_oss_media_urls(obj: dict[str, Any]) -> dict[str, str | None]:
-    """Pull preview image URLs from an OSS parcel product JSON object."""
+    """抽取历史产品预览地址，并保留旧单热图字段到S2热图的回退语义。"""
     rgb_url = _oss_str_url(obj.get("rgb_url"))
     large_rgb_url = _oss_str_url(obj.get("large_rgb_url"))
     heatmap_url = _oss_str_url(obj.get("heatmap_url"))
@@ -161,14 +240,18 @@ def _extract_oss_media_urls(obj: dict[str, Any]) -> dict[str, str | None]:
     return {
         "rgb_url": rgb_url,
         "large_rgb_url": large_rgb_url,
-        # Backward-compatible single heatmap field (prefer dedicated heatmap, else S2).
+        # 为旧版客户端保留单热图字段；优先专用热图，缺失时回退到S2图层。
         "heatmap_url": heatmap_url or s2_heatmap_url,
         "s2_heatmap_url": s2_heatmap_url,
     }
 
 
-def _load_oss_scene_json(json_oss_key: str | None) -> dict[str, Any] | None:
-    """Fetch and parse original OSS parcel JSON; return dict or None on failure."""
+def _load_oss_scene_json(
+    json_oss_key: str | None,
+    *,
+    read_budget: _SceneOssReadBudget | None = None,
+) -> dict[str, Any] | None:
+    """有界读取历史 OSS 产品 JSON；缺失、损坏或超限时回退数据库可用数据。"""
     if not json_oss_key or not isinstance(json_oss_key, str):
         return None
     key = json_oss_key.strip()
@@ -176,8 +259,18 @@ def _load_oss_scene_json(json_oss_key: str | None) -> dict[str, Any] | None:
         return None
     try:
         storage = get_parcel_product_storage()
-        raw = storage.get_bytes(key)
+        # 旧格式把像元与预览元数据合在同一对象；在OSS流层设上限，超大对象不会先完整下载再丢弃。
+        raw = (
+            read_budget.get_bytes(storage, key)
+            if read_budget is not None
+            else storage.get_bytes(key, max_bytes=_SCENE_OSS_JSON_LIMIT_BYTES)
+        )
         obj = json.loads(raw)
+    except _ScenePixelLimitExceeded:
+        raise
+    except ObjectTooLargeError as exc:
+        logger.warning("OSS scene JSON exceeds per-object read limit for %s: %s", key, exc)
+        return None
     except Exception as exc:  # noqa: BLE001 — fallback to DB grid is intentional
         logger.warning("OSS scene JSON fetch failed for %s: %s", key, exc)
         return None
@@ -186,23 +279,52 @@ def _load_oss_scene_json(json_oss_key: str | None) -> dict[str, Any] | None:
     return obj
 
 
-def _load_oss_scene_media(json_oss_key: str | None) -> dict[str, str | None] | None:
-    """Load rgb/heatmap preview URLs from OSS JSON without requiring pixels.
+def _load_oss_scene_media(
+    json_oss_key: str | None,
+    *,
+    read_budget: _SceneOssReadBudget | None = None,
+) -> dict[str, str | None] | None:
+    """从旧版 OSS 产品 JSON 提取预览 URL。
 
-    Used when pixels come from DB lonlat_v1 but json_oss_key still has preview images.
+    历史格式把预览元数据和像元放在同一 JSON 中，因此读取时仍会下载整个对象；
+    该同步 I/O 只能在线程池调用，后续可用独立元数据列/小对象消除这次重复下载。
     """
-    obj = _load_oss_scene_json(json_oss_key)
+    try:
+        obj = _load_oss_scene_json(json_oss_key, read_budget=read_budget)
+    except _ScenePixelLimitExceeded as exc:
+        # 预览媒体可选；预算不足时保留可用像元结果，不再为旧图片字段扩读OSS。
+        logger.warning("OSS scene media skipped by page byte budget for %s: %s", json_oss_key, exc)
+        return None
     if obj is None:
         return None
     return _extract_oss_media_urls(obj)
 
 
-def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
-    """Fetch original OSS parcel JSON; return pixels + media URLs, or media-only if no pixels."""
-    obj = _load_oss_scene_json(json_oss_key)
+def _load_oss_scene_pixels(
+    json_oss_key: str | None,
+    *,
+    max_pixels: int | None = None,
+    read_budget: _SceneOssReadBudget | None = None,
+) -> dict[str, Any] | None:
+    """读取旧版 OSS 像元并保留预览 URL；像元缺失时只返回媒体信息供兼容回退。"""
+    obj = _load_oss_scene_json(json_oss_key, read_budget=read_budget)
     if obj is None:
         return None
-    pixels = _normalize_oss_pixels(obj.get("pixels"))
+    raw_pixels = obj.get("pixels")
+    declared_count = obj.get("pixel_count")
+    try:
+        declared_count = int(declared_count or 0)
+    except (TypeError, ValueError):
+        declared_count = 0
+    # OSS 回退先检查声明数量和数组长度，避免规范化明显超限的数据副本。
+    if max_pixels is not None and (
+        declared_count > max_pixels
+        or (isinstance(raw_pixels, list) and len(raw_pixels) > max_pixels)
+    ):
+        raise _ScenePixelLimitExceeded("OSS scene pixel count exceeds the request budget")
+    pixels = _normalize_oss_pixels(raw_pixels)
+    if max_pixels is not None and len(pixels) > max_pixels:
+        raise _ScenePixelLimitExceeded("OSS scene pixel count exceeds the request budget")
     media = _extract_oss_media_urls(obj)
     if not pixels:
         logger.warning(
@@ -217,6 +339,7 @@ def _load_oss_scene_pixels(json_oss_key: str | None) -> dict[str, Any] | None:
 
 
 def _clear_scene_media_urls(d: dict[str, Any]) -> None:
+    """清除无法从稳定OSS键重签的旧媒体字段，避免回传过期预览链接。"""
     d["rgb_url"] = None
     d["large_rgb_url"] = None
     d["heatmap_url"] = None
@@ -224,20 +347,24 @@ def _clear_scene_media_urls(d: dict[str, Any]) -> None:
 
 
 def _sign_preview_url(key: str | None, fallback: str | None = None) -> str | None:
-    """Private-bucket browser URL: prefer 20y signed GET from ``rgb_oss_key``."""
+    """为私有桶预览生成24小时可读 URL；稳定 OSS key 优先，旧链接只作兼容回退。"""
     if isinstance(key, str) and key.strip():
         try:
-            return get_parcel_product_storage().presigned_get(key.strip())
+            # 图片 URL 会下发到浏览器，短期签名可减少链接泄露后的长期访问窗口；
+            # 页面重新请求场景时会用稳定 key 重新签名，不依赖客户端永久缓存 URL。
+            return get_parcel_product_storage().presigned_get(
+                key.strip(), expires=timedelta(hours=24)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("rgb_presign_failed key=%s err=%s", key[:120], exc)
     if isinstance(fallback, str) and fallback.strip():
-        # Already-signed URLs (contain Signature= / X-Amz-Signature) pass through.
+        # 历史对象内已签名的链接没有稳定 key 可重签，只能按旧格式原样回传。
         return fallback.strip()
     return None
 
 
 def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) -> None:
-    """Fill preview URLs. DB columns (already on ``d``) win over OSS JSON media."""
+    """补全预览地址：数据库稳定列优先，旧 OSS JSON 只补历史缺失字段。"""
     db_rgb = d.get("rgb_url")
     db_large = d.get("large_rgb_url")
     db_key = d.get("rgb_oss_key")
@@ -251,19 +378,108 @@ def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) ->
         d["heatmap_url"] = media.get("heatmap_url")
         d["s2_heatmap_url"] = media.get("s2_heatmap_url")
     else:
-        # Keep DB rgb_* ; clear only heatmap fields that live solely on OSS JSON.
+        # 保留数据库中的RGB字段；只清理必须从旧OSS JSON补齐的热图字段。
         if not db_rgb and not db_large:
             _clear_scene_media_urls(d)
         else:
             d["heatmap_url"] = None
             d["s2_heatmap_url"] = None
-    # Always re-sign from stable key so private ACL buckets work in <img>.
+    # 私有桶优先用稳定 key 重签，避免数据库存放的短期URL过期或直接访问失败。
     signed = _sign_preview_url(
         d.get("rgb_oss_key") if isinstance(d.get("rgb_oss_key"), str) else db_key,
         d.get("rgb_url"),
     )
     if signed:
         d["rgb_url"] = signed
+
+
+def _build_scene_product_items(rows: list[Any], *, include_pixels: bool) -> list[SceneProductOut]:
+    """构造场景响应；像元模式会访问 OSS，必须由异步路由放入线程池执行。"""
+    items: list[SceneProductOut] = []
+    total_pixels = 0
+    oss_read_budget = _SceneOssReadBudget() if include_pixels else None
+    for row in rows:
+        data = _row_to_dict(row)
+        if not include_pixels:
+            for field in (
+                "pixel_data",
+                "pixels_lonlat",
+                "rgb_url",
+                "large_rgb_url",
+                "heatmap_url",
+                "s2_heatmap_url",
+                "pixels_source",
+            ):
+                data.pop(field, None)
+            items.append(SceneProductOut.model_validate(data))
+            continue
+
+        db_lonlat = _pixels_from_db_lonlat(data.get("pixel_data"))
+        if db_lonlat:
+            if total_pixels + len(db_lonlat) > _SCENE_PIXEL_RESPONSE_LIMIT:
+                raise _ScenePixelLimitExceeded(
+                    "database scene pixels exceed the request budget"
+                )
+            total_pixels += len(db_lonlat)
+            data["pixels_lonlat"] = db_lonlat
+            data["pixels_source"] = "db_lonlat"
+            # DB 经纬度像元是权威数据；清掉网格副本，同时保留 OSS 预览图。
+            data["pixel_data"] = None
+            if not data.get("pixel_count"):
+                data["pixel_count"] = len(db_lonlat)
+            # 新产品的稳定预览对象键已单独入库，直接重签即可，避免为取RGB再次下载含像元的整份OSS JSON。
+            media = (
+                None
+                if data.get("rgb_oss_key")
+                else _load_oss_scene_media(
+                    data.get("json_oss_key"), read_budget=oss_read_budget
+                )
+            )
+            _attach_scene_media_urls(
+                data, media
+            )
+        else:
+            oss_payload = _load_oss_scene_pixels(
+                data.get("json_oss_key"),
+                max_pixels=_SCENE_PIXEL_RESPONSE_LIMIT - total_pixels,
+                read_budget=oss_read_budget,
+            )
+            if oss_payload and oss_payload.get("pixels_lonlat"):
+                total_pixels += len(oss_payload["pixels_lonlat"])
+                data["pixels_lonlat"] = oss_payload["pixels_lonlat"]
+                data["pixels_source"] = "oss"
+                # OSS 经纬度像元优先于旧网格，避免前端把低精度回退数据当主结果。
+                data["pixel_data"] = None
+                if oss_payload.get("pixel_count") and not data.get("pixel_count"):
+                    data["pixel_count"] = oss_payload["pixel_count"]
+                _attach_scene_media_urls(data, oss_payload)
+            else:
+                data["pixels_lonlat"] = None
+                _attach_scene_media_urls(data, oss_payload)
+                if data.get("pixel_data"):
+                    data["pixels_source"] = "db_grid"
+                else:
+                    data["pixels_source"] = None
+        items.append(SceneProductOut.model_validate(data))
+    return items
+
+
+def _serialize_scene_page(
+    items: list[SceneProductOut], *, total: int, limit: int, offset: int
+) -> bytes:
+    """在线程池中完成大像元响应的 Pydantic 包装与 JSON 序列化。"""
+    payload = PaginatedResponse(
+        items=items, total=int(total), limit=limit, offset=offset
+    )
+    serialized = json.dumps(
+        payload.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(serialized) > _SCENE_PIXEL_RESPONSE_LIMIT_BYTES:
+        raise _ScenePixelLimitExceeded("serialized scene pixel page exceeds byte budget")
+    return serialized
 
 
 async def _agri_ready(db: AsyncSession) -> None:
@@ -342,7 +558,8 @@ async def list_land_scenes(
         le=1,
         description=(
             "If 1, prefer DB lonlat_v1 pixels (pixels_source=db_lonlat); "
-            "else try OSS via json_oss_key; else legacy grid pixel_data (db_grid)."
+            "else try OSS via json_oss_key; else legacy grid pixel_data (db_grid). "
+            "Pixel pages are capped at 50 scenes and a bounded pixel/JSON budget."
         ),
     ),
     order: Literal["asc", "desc"] = Query(
@@ -356,7 +573,7 @@ async def list_land_scenes(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    """S1/S2 time series for a 地块. Returns index averages for growth curves.
+    """返回地块 S1/S2 时序；默认轻量统计，按需返回有界像元详情。
 
     Timeseries UI should load the newest window first: ``order=desc&limit=500``
     then reverse items ascending for charts, or
@@ -400,6 +617,48 @@ async def list_land_scenes(
         )
     ).scalar() or 0
 
+    page_limit = min(limit, _SCENE_PIXEL_PAGE_LIMIT) if include_pixels else limit
+    params["limit"] = page_limit
+    if include_pixels:
+        # 先只让数据库汇总当前页的像元数和JSONB体积；超过预算时不把像元正文
+        # 传到API进程，避免一个大地块或过宽日期窗口占满内存并拖慢响应。
+        payload_budget = await db.execute(
+            text(
+                f"""
+                SELECT
+                    COALESCE(SUM(GREATEST(
+                        COALESCE(pixel_count, 0),
+                        CASE
+                            WHEN pixel_data->>'format' = 'lonlat_v1'
+                             AND jsonb_typeof(pixel_data->'pixels') = 'array'
+                            THEN jsonb_array_length(pixel_data->'pixels')
+                            ELSE 0
+                        END
+                    )), 0)::bigint AS pixel_count,
+                    COALESCE(SUM(pg_column_size(pixel_data)), 0)::bigint AS payload_bytes
+                FROM (
+                    SELECT pixel_count, pixel_data
+                    FROM agric_satellite.parcel_scene_products
+                    WHERE {wh}
+                    ORDER BY date {order_sql}, sensor {order_sql}, scene_id {order_sql}
+                    LIMIT :limit OFFSET :offset
+                ) AS page
+                """
+            ),
+            params,
+        )
+        budget = payload_budget.mappings().one()
+        if (
+            int(budget["pixel_count"] or 0) > _SCENE_PIXEL_RESPONSE_LIMIT
+            or int(budget["payload_bytes"] or 0) > _SCENE_PIXEL_STORAGE_LIMIT_BYTES
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "像元详情超过单次响应上限，请缩小日期范围或分批请求"
+                ),
+            )
+
     cols = _SCENE_COLS + (", pixel_data" if include_pixels else "")
     rows = (
         await db.execute(
@@ -415,74 +674,48 @@ async def list_land_scenes(
             params,
         )
     ).fetchall()
-    items: list[SceneProductOut] = []
-    for r in rows:
-        d = _row_to_dict(r)
-        if not include_pixels:
-            d.pop("pixel_data", None)
-            d.pop("pixels_lonlat", None)
-            d.pop("rgb_url", None)
-            d.pop("large_rgb_url", None)
-            d.pop("heatmap_url", None)
-            d.pop("s2_heatmap_url", None)
-            d.pop("pixels_source", None)
-        else:
-            db_lonlat = _pixels_from_db_lonlat(d.get("pixel_data"))
-            if db_lonlat:
-                d["pixels_lonlat"] = db_lonlat
-                d["pixels_source"] = "db_lonlat"
-                # Prefer DB lon/lat; drop grid payload so clients use pixels_lonlat.
-                d["pixel_data"] = None
-                if not d.get("pixel_count"):
-                    d["pixel_count"] = len(db_lonlat)
-                # Keep OSS preview images even when pixels come from DB lonlat_v1.
-                _attach_scene_media_urls(
-                    d, _load_oss_scene_media(d.get("json_oss_key"))
-                )
-            else:
-                oss_payload = _load_oss_scene_pixels(d.get("json_oss_key"))
-                if oss_payload and oss_payload.get("pixels_lonlat"):
-                    d["pixels_lonlat"] = oss_payload["pixels_lonlat"]
-                    d["pixels_source"] = "oss"
-                    # Prefer OSS lon/lat; drop lossy grid to avoid frontend using it.
-                    d["pixel_data"] = None
-                    if oss_payload.get("pixel_count") and not d.get("pixel_count"):
-                        d["pixel_count"] = oss_payload["pixel_count"]
-                    _attach_scene_media_urls(d, oss_payload)
-                else:
-                    d["pixels_lonlat"] = None
-                    # Attach media from same OSS fetch (or None if JSON missing).
-                    _attach_scene_media_urls(d, oss_payload)
-                    if d.get("pixel_data"):
-                        d["pixels_source"] = "db_grid"
-                    else:
-                        d["pixels_source"] = None
-        items.append(SceneProductOut.model_validate(d))
-    payload = PaginatedResponse(
-        items=items, total=int(total), limit=limit, offset=offset
-    )
-    if not include_pixels:
-        return {
-            "items": [
-                i.model_dump(
-                    exclude_none=False,
-                    exclude={
-                        "pixel_data",
-                        "pixels_lonlat",
-                        "rgb_url",
-                        "large_rgb_url",
-                        "heatmap_url",
-                        "s2_heatmap_url",
-                        "pixels_source",
-                    },
-                )
-                for i in items
-            ],
-            "total": int(total),
-            "limit": limit,
-            "offset": offset,
-        }
-    return payload
+    # OSS SDK、JSON 解码和大响应序列化都是同步工作；像元模式统一放入线程池，
+    # 避免请求高峰时阻塞 FastAPI 事件循环。普通时序仍走轻量同步组装。
+    if include_pixels:
+        try:
+            items = await run_in_threadpool(
+                _build_scene_product_items, rows, include_pixels=True
+            )
+            serialized = await run_in_threadpool(
+                _serialize_scene_page,
+                items,
+                total=int(total),
+                limit=page_limit,
+                offset=offset,
+            )
+        except _ScenePixelLimitExceeded as exc:
+            raise HTTPException(
+                status_code=413,
+                detail="像元详情超过单次响应上限，请缩小日期范围或分批请求",
+            ) from exc
+        return Response(content=serialized, media_type="application/json")
+    else:
+        items = _build_scene_product_items(rows, include_pixels=False)
+    return {
+        "items": [
+            i.model_dump(
+                exclude_none=False,
+                exclude={
+                    "pixel_data",
+                    "pixels_lonlat",
+                    "rgb_url",
+                    "large_rgb_url",
+                    "heatmap_url",
+                    "s2_heatmap_url",
+                    "pixels_source",
+                },
+            )
+            for i in items
+        ],
+        "total": int(total),
+        "limit": page_limit,
+        "offset": offset,
+    }
 
 
 @router.get("/lands/{land_id}/scenes/summary", response_model=LandScenesSummaryOut)

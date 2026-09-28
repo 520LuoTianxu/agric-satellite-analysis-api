@@ -41,6 +41,12 @@ def fake_db(lands):
     return db
 
 
+async def call_backfill_without_rate_limit(body, db):
+    # 这些单测只覆盖路由业务逻辑；HTTP限流由注册路由集成测试单独处理。
+    endpoint = getattr(backfill_satellite_batch, "__wrapped__", backfill_satellite_batch)
+    return await endpoint(None, body, None, db)
+
+
 def added_jobs(db):
     """合并 SQLAlchemy add/add_all mock 中暂存的 Job，便于检查派发载荷。"""
     jobs = [call.args[0] for call in db.add.call_args_list]
@@ -250,7 +256,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.routers.satellite_batch.publish_api_task", side_effect=publish
         ) as send:
-            response = await backfill_satellite_batch(body, None, db)
+            response = await call_backfill_without_rate_limit(body, db)
         self.assertEqual(
             (response.land_count, response.group_count, response.job_count), (2, 1, 2)
         )
@@ -314,7 +320,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
             patch("app.routers.satellite_batch.settings.index_backfill_chunk_days", 3),
             patch("app.routers.satellite_batch.publish_api_task"),
         ):
-            response = await backfill_satellite_batch(body, None, db)
+            response = await call_backfill_without_rate_limit(body, db)
         self.assertEqual(response.job_count, 2)
         jobs = added_jobs(db)
         self.assertEqual(jobs[1].params_json["date_from"], "2026-08-04")
@@ -324,7 +330,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
         db = fake_db([local_land("A")])
         body = SatelliteBatchRequest.model_validate({"landIdList": ["A", "missing"]})
         with patch("app.routers.satellite_batch.publish_api_task") as send:
-            response = await backfill_satellite_batch(body, None, db)
+            response = await call_backfill_without_rate_limit(body, db)
         self.assertEqual(response.land_count, 1)
         self.assertEqual(response.skipped_land_count, 1)
         self.assertEqual(response.selected_land_ids, ["A"])
@@ -378,7 +384,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
             ) as sync,
             patch("app.routers.satellite_batch.publish_api_task"),
         ):
-            response = await backfill_satellite_batch(body, None, db)
+            response = await call_backfill_without_rate_limit(body, db)
 
         self.assertEqual(response.land_count, 2)
         sync.assert_awaited_once_with(
@@ -397,7 +403,7 @@ class BatchRouteTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaises(HTTPException) as error,
         ):
-            await backfill_satellite_batch(body, None, db)
+            await call_backfill_without_rate_limit(body, db)
         self.assertEqual(len(error.exception.detail["queued_job_ids"]), 1)
         self.assertEqual(len(error.exception.detail["failed_job_ids"]), 1)
         self.assertEqual(

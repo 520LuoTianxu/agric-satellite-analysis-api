@@ -3,12 +3,13 @@
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, require_roles
 from app.mq_publish import publish_api_task
 from app.schemas.satellite_batch import (
@@ -53,7 +54,9 @@ async def history_backfill(
     response_model=SatelliteBatchResponse,
     status_code=202,
 )
+@limiter.limit("2/minute")
 async def backfill_satellite_batch(
+    request: Request,
     body: SatelliteBatchRequest,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],

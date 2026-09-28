@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from app.routers import internal_jobs as jobs_mod
+from app.routers import internal_agri as agri_mod
 from app.routers import internal_lands as lands_mod
 
 
@@ -64,6 +65,44 @@ def test_patch_land_tags_updates_metadata_on_same_row() -> None:
     db.commit.assert_awaited_once()
 
 
+def test_satellite_batch_inputs_returns_requested_order_and_dates() -> None:
+    land_rows = [
+        {
+            "land_id": land_id,
+            "base_id": None,
+            "land_area_mu": 12.5,
+            "tile_id": f"tile-{land_id}",
+            "land_name": f"地块{land_id}",
+            "boundary_geojson": {
+                "type": "Polygon",
+                "coordinates": [[[110, 35], [110.1, 35], [110.1, 35.1], [110, 35]]],
+            },
+            "crop_type": "wheat",
+            "season": "2026",
+        }
+        for land_id in ("L1", "L2")
+    ]
+    land_result = MagicMock()
+    land_result.mappings.return_value.all.return_value = land_rows
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            land_result,
+            [("L1", date(2026, 8, 1)), ("L2", date(2026, 8, 3))],
+        ]
+    )
+    body = agri_mod.SatelliteBatchInputsRequest(
+        land_ids=["L2", "L1", "L2"], sensor="S1"
+    )
+
+    out = asyncio.run(agri_mod.satellite_batch_inputs(body, None, db))
+
+    assert [item.land_id for item in out.items] == ["L2", "L1"]
+    assert out.items[0].existing_dates == [date(2026, 8, 3)]
+    assert out.items[1].existing_dates == [date(2026, 8, 1)]
+    assert db.execute.await_count == 2
+
+
 def test_job_patch_merges_progress_steps() -> None:
     job = MagicMock()
     job.id = uuid.uuid4()
@@ -79,6 +118,7 @@ def test_job_patch_merges_progress_steps() -> None:
     job.created_at = datetime.now(timezone.utc)
     job.started_at = None
     job.finished_at = None
+    job.parent_job_id = None
 
     db = AsyncMock()
     db.get = AsyncMock(return_value=job)
