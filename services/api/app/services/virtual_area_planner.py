@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+import heapq
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any
@@ -306,6 +307,9 @@ def _scarcity_scores(
     *,
     side_m: float,
     target_land_ids: set[str] | None = None,
+    active_parcels: Mapping[str, PlannerParcel] | None = None,
+    tree: STRtree | None = None,
+    identity_index: dict[int, int] | None = None,
 ) -> dict[str, float]:
     """按可共同覆盖地块数量估算稀缺度。
 
@@ -315,14 +319,25 @@ def _scarcity_scores(
     """
     if not parcels:
         return {}
-    geometries = [parcel.geometry for parcel in parcels]
-    tree = STRtree(geometries)
-    identity_index = {id(geometry): index for index, geometry in enumerate(geometries)}
-    parcel_by_id = {parcel.land_id: parcel for parcel in parcels}
-    targets = set(parcel_by_id) if target_land_ids is None else target_land_ids
+    if tree is None:
+        geometries = [parcel.geometry for parcel in parcels]
+        tree = STRtree(geometries)
+        identity_index = {
+            id(geometry): index for index, geometry in enumerate(geometries)
+        }
+    elif identity_index is None:
+        raise ValueError("复用空间索引时必须同时传入几何位置映射")
+
+    parcel_by_id = (
+        active_parcels
+        if active_parcels is not None
+        else {parcel.land_id: parcel for parcel in parcels}
+    )
+    targets = parcel_by_id.keys() if target_land_ids is None else target_land_ids
     scores: dict[str, float] = {}
-    for parcel in parcels:
-        if parcel.land_id not in targets:
+    for land_id in targets:
+        parcel = parcel_by_id.get(land_id)
+        if parcel is None:
             continue
         origin = parcel.geometry.centroid
         local_bounds = _approximate_metric_bounds(
@@ -337,11 +352,11 @@ def _scarcity_scores(
         nearby_positions = _tree_positions(
             tree,
             _rough_query_box(parcel.geometry, side_m),
-            identity_index=identity_index,
+            identity_index=identity_index if identity_index is not None else {},
         )
         for other_index in nearby_positions:
             other = parcels[other_index]
-            if other.land_id == parcel.land_id:
+            if other.land_id == parcel.land_id or other.land_id not in parcel_by_id:
                 continue
             other_bounds = _approximate_metric_bounds(
                 other.geometry, origin_x=origin.x, origin_y=origin.y
@@ -360,14 +375,12 @@ def _scarcity_scores(
 
 def _candidate_for_anchor(
     anchor: PlannerParcel,
-    remaining: Sequence[PlannerParcel],
+    remaining: Mapping[str, PlannerParcel],
+    nearby_land_ids: Sequence[str],
     difficulty: dict[str, float],
     existing_areas: Sequence[ExistingArea],
     *,
     side_m: float,
-    anchor_tree: STRtree,
-    geometry_index: dict[int, str],
-    geometry_identity_index: dict[int, int],
     existing_tree: STRtree | None,
     existing_identity_index: dict[int, int] | None,
     existing_geometries: Sequence[BaseGeometry],
@@ -378,25 +391,15 @@ def _candidate_for_anchor(
     center = anchor.geometry.representative_point()
     planning_crs = f"AEQD:{center.y:.6f},{center.x:.6f}"
     half_side_m = side_m / 2
-    # 先用 WGS84 bbox 粗筛，再转投影；这一步避免每轮把远处全国地块投影。
     query_box = _rough_query_box(anchor.geometry, side_m)
-    remaining_ids = {parcel.land_id for parcel in remaining}
-    nearby_ids = {
-        geometry_index[index]
-        for index in _tree_positions(
-            anchor_tree, query_box, identity_index=geometry_identity_index
-        )
-        if geometry_index.get(index) in remaining_ids
-    }
-    parcels_by_id = {parcel.land_id: parcel for parcel in remaining}
     local_by_id = {
         land_id: _LocalParcel(
-            land_id, transform(to_local.transform, parcels_by_id[land_id].geometry)
+            land_id, transform(to_local.transform, remaining[land_id].geometry)
         )
-        for land_id in nearby_ids
+        for land_id in nearby_land_ids
     }
     local_anchor = local_by_id[anchor.land_id]
-    nearby = [local_by_id[land_id] for land_id in sorted(nearby_ids)]
+    nearby = [local_by_id[land_id] for land_id in nearby_land_ids]
     if existing_tree is not None and existing_identity_index is not None:
         existing_positions = _tree_positions(
             existing_tree, query_box, identity_index=existing_identity_index
@@ -469,6 +472,52 @@ def _candidate_for_anchor(
     return candidates
 
 
+def _nearby_land_ids(
+    anchor: PlannerParcel,
+    remaining: Mapping[str, PlannerParcel],
+    *,
+    side_m: float,
+    tree: STRtree,
+    geometry_index: Mapping[int, str],
+    identity_index: dict[int, int],
+) -> tuple[str, ...]:
+    """用静态全国索引找当前候选窗口附近仍有效的地块，并固定稳定顺序。"""
+    nearby_ids = {
+        land_id
+        for index in _tree_positions(
+            tree,
+            _rough_query_box(anchor.geometry, side_m),
+            identity_index=identity_index,
+        )
+        if (land_id := geometry_index.get(index)) is not None and land_id in remaining
+    }
+    return tuple(sorted(nearby_ids))
+
+
+def _select_anchor_ids(
+    remaining: Mapping[str, PlannerParcel],
+    anchor_heap: list[tuple[float, str, int]],
+    anchor_versions: Mapping[str, int],
+    *,
+    anchor_limit: int,
+) -> list[str]:
+    """从惰性更新堆中取稀缺度最高的有限候选，平分时按 land_id 稳定排序。"""
+    wanted = max(1, min(anchor_limit, len(remaining)))
+    selected: list[tuple[float, str, int]] = []
+    while anchor_heap and len(selected) < wanted:
+        entry = heapq.heappop(anchor_heap)
+        _, land_id, version = entry
+        if land_id not in remaining or anchor_versions.get(land_id) != version:
+            # 地块已出组或稀缺度已刷新；丢弃旧堆项，避免每轮重排全国地块。
+            continue
+        selected.append(entry)
+
+    # 候选窗口仍需在本轮同时比较，取出后立即放回，供后续轮次复用。
+    for entry in selected:
+        heapq.heappush(anchor_heap, entry)
+    return [entry[1] for entry in selected]
+
+
 def _candidate_sort_key(candidate: _Candidate) -> tuple[Any, ...]:
     """实现“数量优先、稀缺保护、紧凑、重叠最小”的稳定排序。"""
     return (
@@ -531,38 +580,75 @@ def plan_virtual_areas(
         if existing_geometries
         else None
     )
-    difficulty = _scarcity_scores(parcels, side_m=window_side_m)
+    difficulty = _scarcity_scores(
+        parcels,
+        side_m=window_side_m,
+        active_parcels=remaining,
+        tree=tree,
+        identity_index=geometry_identity_index,
+    )
+    # 初次计算后以最大堆维护全局候选；局部稀缺度变化时只追加新版本，旧版本惰性丢弃。
+    anchor_versions = {land_id: 0 for land_id in remaining}
+    anchor_heap = [(-score, land_id, 0) for land_id, score in difficulty.items()]
+    heapq.heapify(anchor_heap)
+    candidate_cache: dict[
+        str, tuple[tuple[tuple[str, float], ...], tuple[_Candidate, ...]]
+    ] = {}
     plans: list[VirtualAreaPlan] = []
 
     while remaining:
-        current = list(remaining.values())
-        current_ids = {parcel.land_id for parcel in current}
-        # 每轮只在剩余地块中挑选困难地块作为全局候选 anchor。
-        anchor_ids = sorted(
-            current_ids,
-            key=lambda land_id: (-difficulty.get(land_id, 0.0), land_id),
-        )[: max(1, min(anchor_limit, len(current)))]
+        # 堆保持与原全量排序相同的(-稀缺度, land_id)顺序，避免每个窗口扫描/排序剩余全集。
+        anchor_ids = _select_anchor_ids(
+            remaining,
+            anchor_heap,
+            anchor_versions,
+            anchor_limit=anchor_limit,
+        )
+        active_anchor_ids = set(anchor_ids)
+        # 只保留本轮仍参与全局比较的少量候选，避免缓存随全量地块数增长。
+        candidate_cache = {
+            land_id: entry
+            for land_id, entry in candidate_cache.items()
+            if land_id in active_anchor_ids
+        }
         candidates: list[_Candidate] = []
         for anchor_id in anchor_ids:
-            candidates.extend(
-                _candidate_for_anchor(
-                    remaining[anchor_id],
-                    current,
-                    difficulty,
-                    existing_areas,
-                    side_m=window_side_m,
-                    anchor_tree=tree,
-                    geometry_index=index_by_position,
-                    geometry_identity_index=geometry_identity_index,
-                    existing_tree=existing_tree,
-                    existing_identity_index=existing_identity_index,
-                    existing_geometries=existing_geometries,
-                    center_limit=center_limit,
-                )
+            anchor = remaining[anchor_id]
+            nearby_land_ids = _nearby_land_ids(
+                anchor,
+                remaining,
+                side_m=window_side_m,
+                tree=tree,
+                geometry_index=index_by_position,
+                identity_index=geometry_identity_index,
             )
+            # 候选评分只依赖本地成员集合及其稀缺度；快照不变时可复用上轮精确几何结果。
+            snapshot = tuple(
+                (land_id, difficulty.get(land_id, 0.0)) for land_id in nearby_land_ids
+            )
+            cached = candidate_cache.get(anchor_id)
+            if cached is not None and cached[0] == snapshot:
+                anchor_candidates = cached[1]
+            else:
+                anchor_candidates = tuple(
+                    _candidate_for_anchor(
+                        remaining[anchor_id],
+                        remaining,
+                        nearby_land_ids,
+                        difficulty,
+                        existing_areas,
+                        side_m=window_side_m,
+                        existing_tree=existing_tree,
+                        existing_identity_index=existing_identity_index,
+                        existing_geometries=existing_geometries,
+                        center_limit=center_limit,
+                    )
+                )
+                candidate_cache[anchor_id] = (snapshot, anchor_candidates)
+            candidates.extend(anchor_candidates)
         if not candidates:
             # 理论上只有无效/超大几何会走到这里；保留单地块计划，避免死循环。
-            anchor = min(current, key=lambda parcel: parcel.land_id)
+            anchor = min(remaining.values(), key=lambda parcel: parcel.land_id)
             boundary = anchor.geometry.envelope
             plans.append(
                 VirtualAreaPlan(
@@ -600,30 +686,37 @@ def plan_virtual_areas(
                 for land_id in plan.land_ids
             ]
             affected_ids: set[str] = set()
-            current_after = list(remaining.values())
-            current_after_geometries = [parcel.geometry for parcel in current_after]
-            current_after_tree = STRtree(current_after_geometries)
-            current_after_identity = {
-                id(geometry): index
-                for index, geometry in enumerate(current_after_geometries)
-            }
             for removed_geometry in removed_geometries:
                 for index in _tree_positions(
-                    current_after_tree,
+                    tree,
                     _rough_query_box(removed_geometry, window_side_m),
-                    identity_index=current_after_identity,
+                    identity_index=geometry_identity_index,
                 ):
-                    affected_ids.add(current_after[index].land_id)
-            difficulty.update(
-                _scarcity_scores(
-                    current_after,
-                    side_m=window_side_m,
-                    target_land_ids=affected_ids,
-                )
+                    land_id = index_by_position[index]
+                    if land_id in remaining:
+                        affected_ids.add(land_id)
+            refreshed = _scarcity_scores(
+                parcels,
+                side_m=window_side_m,
+                target_land_ids=affected_ids,
+                active_parcels=remaining,
+                tree=tree,
+                identity_index=geometry_identity_index,
             )
-            difficulty = {
-                land_id: difficulty.get(land_id, 0.0) for land_id in remaining
-            }
+            for land_id, score in refreshed.items():
+                if difficulty.get(land_id) == score:
+                    continue
+                difficulty[land_id] = score
+                version = anchor_versions[land_id] + 1
+                anchor_versions[land_id] = version
+                heapq.heappush(anchor_heap, (-score, land_id, version))
+            if len(anchor_heap) > max(2 * len(remaining), 2 * anchor_limit):
+                # 惰性失效项只在累计超过活动地块两倍时清理，限制长任务堆内存并摊销重建成本。
+                anchor_heap = [
+                    (-difficulty[land_id], land_id, anchor_versions[land_id])
+                    for land_id in remaining
+                ]
+                heapq.heapify(anchor_heap)
 
     return plans
 

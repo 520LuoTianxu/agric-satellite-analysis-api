@@ -1056,6 +1056,9 @@ def load_oss_media_for_dates(
         if not oss_key:
             oss_key = None
         rgb_oss_key = (r.get("rgb_oss_key") or "").strip()
+        has_stable_rgb_key = bool(
+            rgb_oss_key and _is_allowed_report_rgb_key(rgb_oss_key)
+        )
         entry: dict[str, Any] = {
             "json_oss_key": oss_key,
             "rgb_url": (
@@ -1075,7 +1078,8 @@ def load_oss_media_for_dates(
             "heatmap_url": None,
             "s2_heatmap_url": None,
         }
-        if rgb_oss_key and _is_allowed_report_rgb_key(rgb_oss_key):
+        stable_rgb_url_refreshed = False
+        if has_stable_rgb_key:
             try:
                 if storage is None:
                     from app.core.storage import get_parcel_product_storage
@@ -1087,8 +1091,13 @@ def load_oss_media_for_dates(
                 )
                 if signed_rgb_url:
                     entry["rgb_url"] = signed_rgb_url
+                    stable_rgb_url_refreshed = True
             except Exception:
                 pass
+        if has_stable_rgb_key and stable_rgb_url_refreshed:
+            # 新版当前只写入RGB元数据；稳定预览已重签时不为旧热图字段回读整份像元对象。
+            out[d] = entry
+            continue
         try:
             if not oss_key or remaining_bytes <= 0:
                 out[d] = entry

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
@@ -67,6 +68,8 @@ from app.core.s1_stac import (
     s1_gdal_env,
     s1_open_path,
     s1_stac_api_url,
+    s1_uses_planetary_computer,
+    sign_s1_href,
     stac_asset_href,
 )
 from app.core.storage import get_storage
@@ -99,6 +102,38 @@ AGRI_S1_ALGORITHM_VERSION = "stac-s1-lonlat-v6"
 _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
 _S1_CALIBRATION_MAX_BYTES = 2 * 1024 * 1024
+_S1_AZURE_BLOB_SUFFIX = ".blob.core.windows.net"
+_S1_AZURE_SAS_QUERY_PARAMS = frozenset(
+    {
+        "st",
+        "se",
+        "sp",
+        "sv",
+        "sr",
+        "sig",
+        "spr",
+        "sip",
+        "si",
+        "ss",
+        "srt",
+        "skoid",
+        "sktid",
+        "skt",
+        "ske",
+        "sks",
+        "skv",
+        "saoid",
+        "suoid",
+        "scid",
+        "sdd",
+        "ses",
+        "rscc",
+        "rscd",
+        "rsce",
+        "rscl",
+        "rsct",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,14 +205,55 @@ def _parse_s1_sigma0_lut(xml_bytes: bytes) -> S1CalibrationLUT:
     )
 
 
-@lru_cache(maxsize=64)
+def _s1_sigma0_lut_cache_key(calibration_href: str) -> str:
+    """为MPC的Azure定标资产去掉SAS凭证，保留稳定的对象地址作为缓存键。"""
+    parsed = urlsplit(calibration_href)
+    hostname = parsed.hostname or ""
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    # 只规范化MPC Azure Blob上带签名的地址；其他目录的查询参数可能参与资源定位，必须原样保留。
+    if (
+        not s1_uses_planetary_computer()
+        or parsed.scheme.lower() not in {"http", "https"}
+        or not hostname.lower().endswith(_S1_AZURE_BLOB_SUFFIX)
+        or not any(key.casefold() == "sig" for key, _ in query_pairs)
+        or any(
+            key.casefold() not in _S1_AZURE_SAS_QUERY_PARAMS
+            for key, _ in query_pairs
+        )
+    ):
+        return calibration_href
+
+    # 只有查询串完全由SAS字段构成时才剥离；带版本号等对象定位参数的链接继续原样缓存。
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            "",
+            parsed.fragment,
+        )
+    )
+
+
 def _load_s1_sigma0_lut(calibration_href: str) -> S1CalibrationLUT:
+    """按稳定资产地址复用解析后的Sigma0 LUT，避免签名轮换后重新下载。"""
+    return _load_s1_sigma0_lut_cached(_s1_sigma0_lut_cache_key(calibration_href))
+
+
+@lru_cache(maxsize=64)
+def _load_s1_sigma0_lut_cached(calibration_href: str) -> S1CalibrationLUT:
     """有界下载并缓存每个VV/VH定标XML，减小同一下载机重复读取开销。"""
+    # 缓存命中时不会走到这里；未命中时再签发可用凭证，避免把短期SAS放进缓存键。
+    request_href = (
+        sign_s1_href(calibration_href)
+        if s1_uses_planetary_computer()
+        else calibration_href
+    )
     chunks: list[bytes] = []
     received = 0
     with httpx.stream(
         "GET",
-        calibration_href,
+        request_href,
         timeout=httpx.Timeout(30.0, connect=10.0),
         follow_redirects=True,
     ) as response:

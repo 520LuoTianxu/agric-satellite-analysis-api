@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -9,13 +10,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select, text
 
 from app.core.agri_classify import (
-    CLOUD_MAX_PCT,
+    NEARBY_CLEAR_DAYS,
     PHENOLOGY_MONTHS,
     WEAK_NDVI_LT,
     classify_drought_series,
     classify_flood_series,
     is_drought_day_class,
-    is_official_optical_product,
+    pick_official_optical,
 )
 from app.core.crops import get_crop_season
 from app.core.database_sync import SyncSession
@@ -174,32 +175,46 @@ def _load_optical_rows(session, land_id: str, as_of: date) -> list[dict[str, Any
         .all()
     )
 
-    # 同一天原始景和去云景只保留一份官方观测，避免把同日产品误作长势变化。
-    by_date: dict[date, dict[str, Any]] = {}
+    by_date: dict[date, list[dict[str, Any]]] = {}
+    neighbors: list[dict[str, Any]] = []
     for raw in rows:
         scene_date = _date(raw.get("date"))
         if scene_date is None:
             continue
         row = dict(raw)
-        if not is_official_optical_product(
-            source=row.get("product_source"),
-            scene_id=row.get("scene_id"),
-            decloud_quality=row.get("decloud_quality"),
-            parcel_cloud_cover_pct=_number(row.get("parcel_cloud_cover_pct")),
-            parcel_cloud_source=row.get("parcel_cloud_source"),
-            cloud_cover=_number(row.get("cloud_cover")),
-            cloud_cover_over_30=row.get("cloud_cover_over_30"),
-            cloud_max_pct=CLOUD_MAX_PCT,
-        ):
-            continue
         row["date"] = scene_date
-        current = by_date.get(scene_date)
-        if current is None or (
-            current.get("scene_id", "").endswith("_decloud")
-            and not str(row.get("scene_id") or "").endswith("_decloud")
-        ):
-            by_date[scene_date] = row
-    return [by_date[key] for key in sorted(by_date)]
+        row["source"] = row.get("product_source")
+        neighbors.append(row)
+        by_date.setdefault(scene_date, []).append(row)
+
+    selected: list[dict[str, Any]] = []
+    scene_dates = sorted(by_date)
+    dates_by_month: dict[int, list[date]] = {}
+    for scene_date in scene_dates:
+        dates_by_month.setdefault(scene_date.month, []).append(scene_date)
+
+    for scene_date in scene_dates:
+        first_nearby = bisect_left(
+            scene_dates, scene_date - timedelta(days=NEARBY_CLEAR_DAYS)
+        )
+        after_nearby = bisect_right(
+            scene_dates, scene_date + timedelta(days=NEARBY_CLEAR_DAYS)
+        )
+        # 择景基线只会读取±窗口日期，若窗口内没有合格晴空原始景才回退同月日期；
+        # 先按日期缩小候选，避免每个边界云量日都重复遍历三年内的全部场景行。
+        neighbor_dates = set(scene_dates[first_nearby:after_nearby])
+        neighbor_dates.update(dates_by_month[scene_date.month])
+        neighbor_dates.discard(scene_date)
+        neighbors = [
+            row
+            for neighbor_date in sorted(neighbor_dates)
+            for row in by_date[neighbor_date]
+        ]
+        # API预警与前端时序使用同一择景规则，避免同日原始景和优质去云景导致等级不一致。
+        scene = pick_official_optical(by_date[scene_date], neighbors=neighbors)
+        if scene is not None:
+            selected.append(scene)
+    return selected
 
 
 def _load_sar_rows(session, land_id: str, as_of: date) -> list[dict[str, Any]]:
@@ -479,11 +494,20 @@ def _create_flood_alert(
     return int(created), [{"index": "flood", "date": alert_date.isoformat(), "class": flood_class}]
 
 
-def evaluate_agri_alerts_for_land(land_id: str, *, replace_open: bool = True) -> dict[str, Any]:
+def evaluate_agri_alerts_for_land(
+    land_id: str,
+    *,
+    replace_open: bool = True,
+    sensor_scope: str | None = None,
+) -> dict[str, Any]:
     """从 API 主库重算一个地块的最新长势、旱情和涝情预警。"""
     land_id = str(land_id).strip()
     if not land_id:
         return {"land_id": land_id, "status": "skipped", "reason": "empty_land_id"}
+    if sensor_scope is not None:
+        sensor_scope = str(sensor_scope).strip().upper()
+        if sensor_scope not in {"S1", "S2"}:
+            raise ValueError("sensor_scope must be S1 or S2")
 
     session = SyncSession()
     try:
@@ -492,9 +516,23 @@ def evaluate_agri_alerts_for_land(land_id: str, *, replace_open: bool = True) ->
             return {"land_id": land_id, "status": "skipped", "reason": "land_not_found"}
 
         as_of = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-        optical = _load_optical_rows(session, land_id, as_of)
-        sar = _load_sar_rows(session, land_id, as_of)
-        rules = OPTICAL_RULES | FLOOD_RULES
+        # 单传感器结果只读取并重算其负责的历史序列，避免每个场景入库都扫描另一传感器的三年数据。
+        optical = (
+            _load_optical_rows(session, land_id, as_of)
+            if sensor_scope in {None, "S2"}
+            else []
+        )
+        sar = (
+            _load_sar_rows(session, land_id, as_of)
+            if sensor_scope in {None, "S1"}
+            else []
+        )
+        if sensor_scope == "S1":
+            rules = FLOOD_RULES
+        elif sensor_scope == "S2":
+            rules = OPTICAL_RULES
+        else:
+            rules = OPTICAL_RULES | FLOOD_RULES
         rows = (
             session.execute(
                 select(Alert).where(Alert.land_id == land_id, Alert.rule_name.in_(rules))
@@ -506,14 +544,20 @@ def evaluate_agri_alerts_for_land(land_id: str, *, replace_open: bool = True) ->
         active: set[tuple[date, str]] = set()
         created = 0
         evaluated: list[dict[str, Any]] = []
-        latest_weather = _latest_weather_row(session, land_id, as_of)
-        created += _create_weather_drought_alert(
-            session,
-            land_id=land_id,
-            weather_row=latest_weather,
-            existing=existing,
-            active=active,
+        # S1只生成洪涝信号，与天气/光学干旱规则无关；S2和完整重算仍合并天气证据。
+        latest_weather = (
+            _latest_weather_row(session, land_id, as_of)
+            if sensor_scope != "S1"
+            else None
         )
+        if sensor_scope != "S1":
+            created += _create_weather_drought_alert(
+                session,
+                land_id=land_id,
+                weather_row=latest_weather,
+                existing=existing,
+                active=active,
+            )
 
         if optical:
             optical_created, optical_results = _create_optical_alerts(
@@ -572,6 +616,7 @@ def evaluate_alerts_for_scene_result(envelope: dict[str, Any], stats: dict[str, 
         stats = stats["apply"]
     scene_upserts = int(stats.get("scene_upserts") or 0)
     oss_stats = stats.get("oss")
+    oss_scene_upserts = int(oss_stats.get("scene_upserts") or 0) if isinstance(oss_stats, dict) else 0
     domain_stats = stats.get("domain") if isinstance(stats.get("domain"), dict) else {}
     weather_upserts = max(
         int(stats.get("weather_upserts") or 0),
@@ -580,7 +625,7 @@ def evaluate_alerts_for_scene_result(envelope: dict[str, Any], stats: dict[str, 
     if isinstance(oss_stats, dict):
         weather_upserts = max(weather_upserts, int(oss_stats.get("weather_upserts") or 0))
     scene_applied = scene_upserts > 0 or (
-        isinstance(oss_stats, dict) and int(oss_stats.get("scene_upserts") or 0) > 0
+        oss_scene_upserts > 0
     )
     if not scene_applied and weather_upserts <= 0:
         return None
@@ -602,4 +647,19 @@ def evaluate_alerts_for_scene_result(envelope: dict[str, Any], stats: dict[str, 
         return None
     if scene_applied and sensor and sensor not in {"S1", "S2"} and weather_upserts <= 0:
         return None
-    return evaluate_agri_alerts_for_land(str(land_id), replace_open=True)
+    # 只有恰好一个纯遥感场景成功入库时，才能从结果元数据确认本次受影响的传感器。
+    # 批量、多传感器或同时写天气的结果继续完整重算，避免漏掉交叉依赖的预警。
+    applied_scene_count = max(scene_upserts, oss_scene_upserts)
+    sensor_scope = (
+        sensor
+        if scene_applied
+        and weather_upserts <= 0
+        and applied_scene_count == 1
+        and sensor in {"S1", "S2"}
+        else None
+    )
+    return evaluate_agri_alerts_for_land(
+        str(land_id),
+        replace_open=True,
+        sensor_scope=sensor_scope,
+    )
