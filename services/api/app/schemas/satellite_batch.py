@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
+from agric_satellite_analysis_common.weather_window import MAX_WEATHER_HISTORY_DAYS
+
 
 class SatelliteBatchRequest(BaseModel):
     land_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
@@ -54,8 +56,10 @@ class SatelliteBatchRequest(BaseModel):
             self.date_from = date(year, month, day)
         if self.date_from > self.date_to:
             raise ValueError("date_from必须不晚于date_to")
-        if (self.date_to - self.date_from).days > 3660:
-            raise ValueError("回填时间范围最多10年")
+        if (self.date_to - self.date_from).days + 1 > MAX_WEATHER_HISTORY_DAYS:
+            raise ValueError(
+                f"回填时间范围最多{MAX_WEATHER_HISTORY_DAYS}天（含首尾）"
+            )
         return self
 
 

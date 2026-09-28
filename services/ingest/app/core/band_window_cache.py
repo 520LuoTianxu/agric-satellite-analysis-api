@@ -2,7 +2,7 @@
 
 This cache is independent from the UnCRtainTS parcel catalog. It stores the
 shared scene window used by ``process_satellite_batch`` so retries and reruns do
-not re-open remote COGs. Keys include source paths, target grid and resampling
+not re-open remote COGs. Keys include source paths, target CRS/grid and resampling
 mode; signed query strings are deliberately excluded because SAS tokens rotate.
 """
 
@@ -24,7 +24,7 @@ import numpy as np
 
 logger = logging.getLogger("openfarm.ingest.band_window_cache")
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 5
 _META_KEY = "__window_cache_meta__"
 _prune_lock = threading.Lock()
 _last_prune_monotonic = 0.0
@@ -48,7 +48,7 @@ def window_cache_root() -> Path:
         scratch = str(
             os.environ.get("OPENFARM_SCRATCH_DIR", "/data/scratch")
         ).strip() or "/data/scratch"
-        root = Path(scratch) / "band_windows" / "v2"
+        root = Path(scratch) / "band_windows" / "v5"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -82,7 +82,9 @@ def _cache_meta(
     sensor: str,
     target_shape: tuple[int, int],
     target_transform: object,
+    target_crs: str = "EPSG:4326",
     band_hrefs: Mapping[str, str],
+    calibration_hrefs: Mapping[str, str] | None = None,
     resampling_by_band: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     sources = {
@@ -94,14 +96,20 @@ def _cache_meta(
         key: _resampling_name((resampling_by_band or {}).get(key, "bilinear"))
         for key in sources
     }
+    calibration_sources = {
+        str(key): _source_identity(value)
+        for key, value in sorted((calibration_hrefs or {}).items())
+        if value
+    }
     identity = {
         "schema": CACHE_SCHEMA_VERSION,
         "scene_id": str(scene_id),
         "sensor": str(sensor).upper(),
-        "crs": "EPSG:4326",
+        "crs": str(target_crs),
         "shape": [int(target_shape[0]), int(target_shape[1])],
         "transform": _grid_values(target_transform),
         "sources": sources,
+        "calibration_sources": calibration_sources,
         "resampling": resampling,
     }
     encoded = json.dumps(
@@ -124,10 +132,12 @@ def read_scene_window(
     sensor: str,
     target_shape: tuple[int, int],
     target_transform: object,
+    target_crs: str = "EPSG:4326",
     band_hrefs: Mapping[str, str],
+    calibration_hrefs: Mapping[str, str] | None = None,
     resampling_by_band: Mapping[str, object] | None = None,
 ) -> dict[str, np.ndarray] | None:
-    """读取完全匹配源与目标网格的 v2 窗口；损坏缓存自动失效。"""
+    """读取完全匹配源、定标资产与目标网格的 v5 窗口；损坏缓存自动失效。"""
     if not window_cache_enabled() or not band_hrefs:
         return None
     meta = _cache_meta(
@@ -135,7 +145,9 @@ def read_scene_window(
         sensor=sensor,
         target_shape=target_shape,
         target_transform=target_transform,
+        target_crs=target_crs,
         band_hrefs=band_hrefs,
+        calibration_hrefs=calibration_hrefs,
         resampling_by_band=resampling_by_band,
     )
     path = _cache_path(meta)
@@ -179,8 +191,10 @@ def write_scene_window(
     sensor: str,
     target_shape: tuple[int, int],
     target_transform: object,
+    target_crs: str = "EPSG:4326",
     band_hrefs: Mapping[str, str],
     arrays: Mapping[str, np.ndarray],
+    calibration_hrefs: Mapping[str, str] | None = None,
     resampling_by_band: Mapping[str, object] | None = None,
 ) -> Path | None:
     """原子写入一个共享景窗口；缓存失败不应影响主卫星产品流程。"""
@@ -191,7 +205,9 @@ def write_scene_window(
         sensor=sensor,
         target_shape=target_shape,
         target_transform=target_transform,
+        target_crs=target_crs,
         band_hrefs=band_hrefs,
+        calibration_hrefs=calibration_hrefs,
         resampling_by_band=resampling_by_band,
     )
     expected = set(meta["sources"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from math import isfinite
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -15,6 +16,11 @@ from jose import jwt
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.quality_metrics import (
+    CLOUD_COMPLEMENT_HEURISTIC_V1,
+    PARCEL_VALID_FRACTION_V1,
+    extract_quality_score_method,
+)
 from app.core.agri_classify import (
     optical_tooltip_fields,
     pick_optical_for_ndvi,
@@ -106,13 +112,17 @@ _AGRI_INDEX_COLS: list[tuple[str, str, str]] = [
 ]
 
 
-def _quality_from_cloud(cloud: Any) -> float:
+def _quality_from_cloud(cloud: Any) -> float | None:
+    """云量缺失或越界时保持未知，不用中性占位分伪装成观测质量。"""
     if cloud is None:
-        return 0.5
+        return None
     try:
-        return max(0.15, min(0.95, 1.0 - float(cloud) / 100.0))
+        value = float(cloud)
     except (TypeError, ValueError):
-        return 0.5
+        return None
+    if not isfinite(value) or not 0.0 <= value <= 100.0:
+        return None
+    return max(0.15, min(0.95, 1.0 - value / 100.0))
 
 
 def _stat_point(
@@ -120,9 +130,10 @@ def _stat_point(
     land_id: str,
     d: Any,
     mean: float,
-    quality: float,
+    quality: float | None,
     idx: str,
     cloud_cover: float | None = None,
+    quality_score_method: str | None = None,
     decloud_quality: str | None = None,
     decloud_reasons: list[str] | None = None,
     product_source: str | None = None,
@@ -151,6 +162,7 @@ def _stat_point(
         p90=mean,
         stddev=None,
         quality_score=quality,
+        quality_score_method=quality_score_method or "unknown",
         created_at=datetime.now(timezone.utc),
         cloud_cover=cloud_cover,
         decloud_quality=decloud_quality,
@@ -180,6 +192,7 @@ async def _load_agri_share_series(
                            cloud_cover_over_30,
                            scene_id,
                            pixel_data->>'source' AS source,
+                           pixel_data->'quality_metrics' AS quality_metrics,
                            pixel_data->>'decloud_quality' AS decloud_quality,
                            pixel_data->'decloud_reasons' AS decloud_reasons,
                            pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
@@ -227,7 +240,10 @@ async def _load_agri_share_series(
         mapping = dict(row) if not isinstance(row, dict) else row
         tip = optical_tooltip_fields(mapping) if sensor == "S2" else {}
         cloud = tip.get("cloud_cover") if sensor == "S2" else mapping.get("cloud_cover")
-        q = _quality_from_cloud(cloud)
+        scene_quality = _quality_from_cloud(cloud) if sensor == "S2" else None
+        scene_quality_method = (
+            CLOUD_COMPLEMENT_HEURISTIC_V1 if scene_quality is not None else None
+        )
         reasons = tip.get("decloud_reasons") if sensor == "S2" else None
         for idx, col, want_sensor in _AGRI_INDEX_COLS:
             if sensor != want_sensor:
@@ -239,12 +255,40 @@ async def _load_agri_share_series(
                 mean = float(raw)
             except (TypeError, ValueError):
                 continue
+            if sensor == "S1":
+                # S1没有云量字段，质量只读取写入时保存的VV/VH掩膜内有效比例。
+                quality_by_index = mapping.get("quality_metrics")
+                metric = (
+                    quality_by_index.get(idx.upper())
+                    if isinstance(quality_by_index, dict)
+                    else None
+                )
+                q = None
+                method = None
+                if isinstance(metric, dict):
+                    try:
+                        candidate = float(metric.get("valid_fraction"))
+                    except (TypeError, ValueError):
+                        candidate = None
+                    candidate_method = metric.get("method")
+                    if (
+                        isinstance(candidate_method, str)
+                        and candidate_method == PARCEL_VALID_FRACTION_V1
+                        and candidate is not None
+                        and 0.0 <= candidate <= 1.0
+                    ):
+                        q = candidate
+                        method = candidate_method
+            else:
+                q = scene_quality
+                method = scene_quality_method
             pt = _stat_point(
                 land_id=land_id,
                 d=mapping["date"],
                 mean=mean,
                 quality=q,
                 idx=idx,
+                quality_score_method=method or "unknown",
                 cloud_cover=tip.get("cloud_cover") if sensor == "S2" else None,
                 decloud_quality=tip.get("decloud_quality") if sensor == "S2" else None,
                 decloud_reasons=reasons if sensor == "S2" else None,
@@ -443,13 +487,29 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     stats_by_type: dict[str, list[Any]] = {}
     for idx_type in available_index_types:
         stats_result = await db.execute(
-            select(FieldStat)
+            select(FieldStat, RasterLayer.provenance_json)
             .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
             .where(FieldStat.land_id == field.land_id, RasterLayer.layer_type == idx_type)
             .order_by(FieldStat.date.desc())
             .limit(12)
         )
-        idx_stats = list(stats_result.scalars().all())
+        idx_stats = []
+        for stat, provenance in stats_result.all():
+            method = extract_quality_score_method(provenance)
+            score = (
+                float(stat.quality_score)
+                if stat.quality_score is not None
+                and method == PARCEL_VALID_FRACTION_V1
+                else None
+            )
+            # 分享报告保留趋势统计，但未知旧口径只返回空质量分并显式标记。
+            point = ShareStatPoint.model_validate(stat).model_copy(
+                update={
+                    "quality_score": score,
+                    "quality_score_method": method or "unknown",
+                }
+            )
+            idx_stats.append(point)
         stats_by_type[idx_type] = idx_stats
         all_stats.extend(idx_stats)
     # Sort descending by date

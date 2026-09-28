@@ -166,6 +166,8 @@ class SarObs(TypedDict, total=False):
     vh: float | None
     scene_id: str | None
     relative_orbit: int | None
+    calibration_method: str | None
+    calibration_scale: float | None
 
 
 def compute_nddi(ndvi: float, ndmi: float) -> float | None:
@@ -1271,15 +1273,33 @@ def classify_flood_scene(
     return "dry"
 
 
+def _flood_calibration_group_key(obs: SarObs) -> str:
+    """让不同辐射尺度的S1观测分别建立基线，避免重处理前后互相污染。"""
+    method = str(obs.get("calibration_method") or "").strip()
+    if not method:
+        return "legacy_unknown"
+    if method == "fixed_amplitude_scale_approximation":
+        scale = _num(obs.get("calibration_scale"))
+        return f"{method}:{scale:g}" if scale is not None else f"{method}:unknown"
+    return method
+
+
+def _flood_baseline_group_key(obs: SarObs) -> str:
+    return f"{orbit_group_key(obs)}|{_flood_calibration_group_key(obs)}"
+
+
 def classify_flood_series(
     observations: list[SarObs],
 ) -> list[tuple[str, FloodClass | None]]:
-    """Per-orbit median VV baseline + p40 of VV-VH; classify each scene."""
+    """按相对轨道和定标口径建立VV基线，防止尺度变更把洪涝降幅算错。"""
     groups: dict[str, list[SarObs]] = defaultdict(list)
+    calibration_groups: dict[str, list[SarObs]] = defaultdict(list)
     for obs in observations:
         if _num(obs.get("vv")) is None:
             continue
-        groups[orbit_group_key(obs)].append(obs)
+        calibration_key = _flood_calibration_group_key(obs)
+        groups[_flood_baseline_group_key(obs)].append(obs)
+        calibration_groups[calibration_key].append(obs)
 
     baselines: dict[str, tuple[float | None, float | None]] = {}
     for key, rows in groups.items():
@@ -1294,11 +1314,13 @@ def classify_flood_series(
         if len(vvs_f) >= MIN_ORBIT_SAMPLES:
             baselines[key] = (_median(vvs_f), _percentile(diffs, VV_VH_DIFF_PCTL))
         else:
-            # Too few in this orbit: fall back to all-scene median, still not VV-VH-only.
-            all_vv = [_num(r.get("vv")) for r in observations]
+            # 轨道样本不足时可借同定标口径的其他轨道，但不能混用不同数值尺度。
+            calibration_key = key.rsplit("|", 1)[-1]
+            compatible_rows = calibration_groups.get(calibration_key, [])
+            all_vv = [_num(r.get("vv")) for r in compatible_rows]
             all_f = [v for v in all_vv if v is not None]
             all_diff: list[float] = []
-            for r in observations:
+            for r in compatible_rows:
                 vv = _num(r.get("vv"))
                 vh = _num(r.get("vh"))
                 if vv is not None and vh is not None:
@@ -1315,7 +1337,7 @@ def classify_flood_series(
         date_str = str(obs.get("date") or "")
         vv = _num(obs.get("vv"))
         vh = _num(obs.get("vh"))
-        base, p40 = baselines.get(orbit_group_key(obs), (None, None))
+        base, p40 = baselines.get(_flood_baseline_group_key(obs), (None, None))
         out.append((date_str, classify_flood_scene(vv, vh, base, p40)))
     return out
 

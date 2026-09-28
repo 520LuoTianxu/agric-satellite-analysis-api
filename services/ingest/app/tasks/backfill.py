@@ -20,6 +20,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
 )
+from agric_satellite_analysis_common.date_chunks import split_inclusive_date_range
 from app.core.config import settings
 from app.worker import celery_app
 
@@ -34,14 +35,9 @@ def get_db_session():
 
 
 def _date_chunks(start: date, end: date, chunk_days: int) -> list[tuple[date, date]]:
-    """Split [start, end] into non-overlapping segments of chunk_days."""
-    chunks: list[tuple[date, date]] = []
-    cursor = start
-    while cursor < end:
-        chunk_end = min(cursor + timedelta(days=chunk_days - 1), end)
-        chunks.append((cursor, chunk_end))
-        cursor = chunk_end + timedelta(days=1)
-    return chunks
+    """Split a bounded inclusive date range into non-overlapping chunks."""
+    # 光学与S1共用闭区间和跨度上限，避免两条回填路径产生不同日期边界。
+    return split_inclusive_date_range(start, end, chunk_days)
 
 
 @celery_app.task(

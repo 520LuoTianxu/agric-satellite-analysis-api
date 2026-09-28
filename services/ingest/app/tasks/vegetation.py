@@ -28,6 +28,7 @@ from app.tasks.pipeline import (
     update_job_progress,
     complete_step,
     search_scenes,
+    analysis_crs_for_bounds,
     compute_target_grid,
     process_scenes_parallel,
     collect_existing_scene_dates,
@@ -133,6 +134,7 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             return {"job_id": job_id, "status": "completed", "scenes": 0}
 
         # Compute target grid
+        target_crs = analysis_crs_for_bounds(land_geom.bounds)
         target_transform, target_shape, field_mask, bounds = compute_target_grid(
             land_geom.bounds, land_geom
         )
@@ -164,6 +166,7 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             target_shape=target_shape,
             field_mask=field_mask,
             bounds=bounds,
+            target_crs=target_crs,
             org_id_str=org_id_str,
             land_id_str=land_id_str,
             date_from=date_from,

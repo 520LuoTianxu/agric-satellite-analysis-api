@@ -172,13 +172,13 @@ def _load_land(conn, land_id: str) -> dict[str, Any]:
 
 
 def _land_stats_map(conn, land_id: str) -> dict[tuple[str, str], dict[str, float]]:
-    """(date_iso, LAYER_TYPE) → {mean,min,max,quality_score}."""
+    """(date_iso, LAYER_TYPE) → {mean,min,max}；不读取口径未知的历史质量分。"""
     out: dict[tuple[str, str], dict[str, float]] = {}
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
             SELECT rl.date::text AS d, rl.layer_type,
-                   fs.mean, fs.min, fs.max, fs.quality_score
+                   fs.mean, fs.min, fs.max
             FROM field_stats fs
             JOIN raster_layers rl ON rl.id = fs.layer_id
             WHERE fs.land_id = %s
@@ -190,7 +190,6 @@ def _land_stats_map(conn, land_id: str) -> dict[tuple[str, str], dict[str, float
                 "mean": r["mean"],
                 "min": r["min"],
                 "max": r["max"],
-                "quality_score": r["quality_score"],
             }
     return out
 

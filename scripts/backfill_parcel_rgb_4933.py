@@ -15,16 +15,22 @@ from datetime import date
 import numpy as np
 from PIL import Image
 from pystac_client import Client
-from rasterio.enums import Resampling
-from rasterio.features import geometry_mask
 from sqlalchemy import create_engine, text
 
 # Prefer installed app helpers when running inside ingest container.
 sys.path.insert(0, "/app")
 try:
-    from app.tasks.pipeline import compute_target_grid, read_band_windowed
+    from app.tasks.pipeline import (
+        analysis_crs_for_bounds,
+        compute_target_grid,
+        read_band_windowed,
+    )
 except Exception:
-    from app.tasks.pipeline import compute_target_grid, read_band_windowed  # type: ignore
+    from app.tasks.pipeline import (  # type: ignore
+        analysis_crs_for_bounds,
+        compute_target_grid,
+        read_band_windowed,
+    )
 
 from agric_satellite_analysis_common.settings import settings
 from agric_satellite_analysis_common.storage import get_storage
@@ -160,17 +166,18 @@ def main() -> int:
             geom_shp = shape(geom)
             bounds = geom_shp.bounds
             # 复用统一的地块栅格计算逻辑，几何直接来自主地块表。
+            target_crs = analysis_crs_for_bounds(bounds)
             target_transform, target_shape, field_mask, _bounds = compute_target_grid(
-                bounds, geom
+                bounds, geom, target_crs=target_crs
             )
             b02 = read_band_windowed(
-                href_b02, bounds, target_shape, target_transform
+                href_b02, bounds, target_shape, target_transform, target_crs=target_crs
             )
             b03 = read_band_windowed(
-                href_b03, bounds, target_shape, target_transform
+                href_b03, bounds, target_shape, target_transform, target_crs=target_crs
             )
             b04 = read_band_windowed(
-                href_b04, bounds, target_shape, target_transform
+                href_b04, bounds, target_shape, target_transform, target_crs=target_crs
             )
             if b02 is None or b03 is None or b04 is None:
                 print(f"SKIP {d} band read failed")

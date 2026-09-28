@@ -589,7 +589,9 @@ async def _compute_live_stats(
                 text(
                     f"""
                     SELECT s.land_id, s.date, s.vv_avg, s.vh_avg, s.scene_id,
-                           s.pixel_data->>'relative_orbit' AS relative_orbit
+                           s.pixel_data->>'relative_orbit' AS relative_orbit,
+                           s.pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
+                           NULLIF(s.pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
                     FROM agric_satellite.parcel_scene_products s
                     JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                     WHERE {batch_region}
@@ -611,6 +613,8 @@ async def _compute_live_stats(
                     "vh": row.vh_avg,
                     "scene_id": getattr(row, "scene_id", None),
                     "relative_orbit": getattr(row, "relative_orbit", None),
+                    "calibration_method": getattr(row, "calibration_method", None),
+                    "calibration_scale": getattr(row, "calibration_scale", None),
                 }
             )
         for land_id, observations in s1_by_land.items():

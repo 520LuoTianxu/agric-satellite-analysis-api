@@ -531,13 +531,13 @@ def should_trigger_decloud(
 
 @dataclass(frozen=True)
 class DecloudQualityInputs:
-    """Scalar summaries (0-1 reflectance) used by the quality gate."""
+    """去云质量门使用的地块内RGB统计及可缺失NDVI均值。"""
 
     rgb_mean: float
     rgb_mean_raw: float
     rgb_std: float
     rgb_std_raw: float
-    ndvi_mean: float
+    ndvi_mean: float | None
     neighbor_ndvi_mean: float | None = None
 
 
@@ -557,7 +557,7 @@ def _finite(v: float) -> bool:
 
 
 def score_decloud(inp: DecloudQualityInputs) -> DecloudQualityResult:
-    """Score a reconstructed parcel window as good / fair / bad.
+    """按地块内重建影像的亮度、变化、纹理和NDVI邻期差异分为good/fair/bad。
 
     Pilot heuristics that mapped to fair/bad:
     - RGB mean still too bright after decloud
@@ -573,10 +573,11 @@ def score_decloud(inp: DecloudQualityInputs) -> DecloudQualityResult:
     rgb_raw = float(inp.rgb_mean_raw)
     std = float(inp.rgb_std)
     std_raw = float(inp.rgb_std_raw)
-    ndvi = float(inp.ndvi_mean)
+    # 缺少有效地块NDVI时必须走低质量分支，不能把缺测降成数值0参与判级。
+    ndvi = float(inp.ndvi_mean) if inp.ndvi_mean is not None else float("nan")
 
     if not _finite(rgb) or not _finite(ndvi):
-        return DecloudQualityResult("bad", 0.0, ["non_finite_reconstruction"])
+        return DecloudQualityResult("bad", 0.0, ["no_valid_parcel_pixels"])
 
     if rgb >= RGB_BRIGHT_BAD:
         reasons.append("rgb_still_bright")
@@ -678,21 +679,29 @@ def _round_metric(v: float | None, ndigits: int = 6) -> float | None:
 def decloud_quality_metrics(
     inp: DecloudQualityInputs,
 ) -> dict[str, float | None]:
-    """Audit scalars used by ``score_decloud`` (always safe to persist)."""
+    """整理质量门使用的统计量；缺测和非有限值以NULL保存，便于审计。"""
     neighbor = inp.neighbor_ndvi_mean
-    ndvi = float(inp.ndvi_mean) if _finite(float(inp.ndvi_mean)) else None
+    ndvi_value = (
+        float(inp.ndvi_mean)
+        if inp.ndvi_mean is not None and _finite(float(inp.ndvi_mean))
+        else None
+    )
     neigh = (
         float(neighbor)
         if neighbor is not None and _finite(float(neighbor))
         else None
     )
-    gap = (neigh - ndvi) if (neigh is not None and ndvi is not None) else None
+    gap = (
+        (neigh - ndvi_value)
+        if (neigh is not None and ndvi_value is not None)
+        else None
+    )
     return {
         "rgb_mean": _round_metric(inp.rgb_mean),
         "rgb_mean_raw": _round_metric(inp.rgb_mean_raw),
         "rgb_std": _round_metric(inp.rgb_std),
         "rgb_std_raw": _round_metric(inp.rgb_std_raw),
-        "ndvi_mean": _round_metric(ndvi),
+        "ndvi_mean": _round_metric(ndvi_value),
         "neighbor_ndvi_mean": _round_metric(neigh),
         "ndvi_gap": _round_metric(gap),
     }

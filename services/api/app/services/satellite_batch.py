@@ -3,13 +3,14 @@
 import uuid
 import math
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date
 
 from pyproj import CRS, Transformer
 from shapely.geometry import box
 from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
+from agric_satellite_analysis_common.date_chunks import split_inclusive_date_range
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
 from app.models.tables import Job, LandParcel
@@ -110,18 +111,26 @@ def build_satellite_batch_jobs(
     if date_from > date_to:
         raise ValueError("date_from must be no later than date_to")
 
-    groups = group_satellite_lands(lands)
-    jobs: list[Job] = []
-    unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
     chunk_days = max(
         int(settings.index_backfill_chunk_days if chunk_days is None else chunk_days), 1
     )
+    # API批次与worker回填复用同一闭区间和跨度上限，先校验日期再做空间分组。
+    date_chunks = split_inclusive_date_range(date_from, date_to, chunk_days)
+    groups = group_satellite_lands(lands)
+    unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
+    job_count = len(groups) * len(date_chunks) * len(unique_sensors)
+    max_jobs = settings.satellite_batch_max_jobs
+    if job_count > max_jobs:
+        raise ValueError(
+            f"本批次预计创建{job_count}个遥感任务，超过单批上限{max_jobs}；"
+            "请缩短日期范围、减少地块/传感器，或拆成多个批次提交"
+        )
+
+    jobs: list[Job] = []
     processing_window_km = 5.0
 
     for group in groups:
-        cursor = date_from
-        while cursor <= date_to:
-            end = min(cursor + timedelta(days=chunk_days - 1), date_to)
+        for chunk_start, chunk_end in date_chunks:
             for sensor in unique_sensors:
                 if id_namespace is None:
                     job_id = uuid.uuid4()
@@ -129,7 +138,7 @@ def build_satellite_batch_jobs(
                     job_id = uuid.uuid5(
                         id_namespace,
                         f"satellite_batch:{group.anchor_land_id}:{sensor}:"
-                        f"{cursor.isoformat()}:{end.isoformat()}",
+                        f"{chunk_start.isoformat()}:{chunk_end.isoformat()}",
                     )
                 job = Job(
                     id=job_id,
@@ -145,12 +154,11 @@ def build_satellite_batch_jobs(
                         "download_bbox": list(group.download_bbox),
                         "aggregation_bbox": list(group.aggregation_bbox),
                         "sensor": sensor,
-                        "date_from": cursor.isoformat(),
-                        "date_to": end.isoformat(),
+                        "date_from": chunk_start.isoformat(),
+                        "date_to": chunk_end.isoformat(),
                         "force": force,
                     },
                 )
                 group.job_ids.append(str(job.id))
                 jobs.append(job)
-            cursor = end + timedelta(days=1)
     return groups, jobs

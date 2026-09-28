@@ -350,7 +350,9 @@ async def _export_overview_batch(
             text(
                 f"""
                 SELECT s.land_id, s.date, s.vv_avg, s.vh_avg, s.scene_id,
-                       s.pixel_data->>'relative_orbit' AS relative_orbit
+                       s.pixel_data->>'relative_orbit' AS relative_orbit,
+                       s.pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
+                       NULLIF(s.pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
                 FROM agric_satellite.parcel_scene_products s
                 JOIN agric_satellite.land_parcels p ON p.land_id = s.land_id
                 WHERE s.land_id IN ({land_sql})
@@ -372,6 +374,8 @@ async def _export_overview_batch(
                     "vh": row.vh_avg,
                     "scene_id": str(row.scene_id) if row.scene_id else None,
                     "relative_orbit": row.relative_orbit,
+                    "calibration_method": row.calibration_method,
+                    "calibration_scale": row.calibration_scale,
                 }
             )
 

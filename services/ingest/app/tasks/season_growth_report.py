@@ -4,10 +4,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from agric_satellite_analysis_common.season_growth_window import (
+    normalize_season_growth_window,
+)
 from app.core.database_sync import SyncSession
+from app.core.logging import logger
+from app.models.tables import Job
+from app.reports.season_growth.service import generate_season_growth_pdf
+from app.tasks.assessment_report import bootstrap_pulls_ready
+from app.tasks.storage_tasks import upload_file_via_storage
+from app.worker import celery_app
 
 
 def _maybe_sync_session():
@@ -16,18 +25,12 @@ def _maybe_sync_session():
             ingest_pg_reads_allowed,
             internal_api_enabled,
         )
+
         if internal_api_enabled() and not ingest_pg_reads_allowed():
             return None
     except ImportError:
         pass
     return SyncSession()
-
-from app.core.logging import logger
-from app.models.tables import Job
-from app.reports.season_growth.service import generate_season_growth_pdf
-from app.tasks.assessment_report import bootstrap_pulls_ready
-from app.tasks.storage_tasks import upload_file_via_storage
-from app.worker import celery_app
 
 
 def _update_job(
@@ -196,19 +199,23 @@ def generate_season_growth_report(
             )
             return {"error": err}
 
+        # 先校验窗口再等待天气/遥感子任务，避免旧消息或直接投递触发超长回填等待。
+        start_day, end_day, span_days = normalize_season_growth_window(
+            str(start_date), str(end_date)
+        )
+        start_date, end_date = start_day.isoformat(), end_day.isoformat()
+
         if pull_data:
             wave_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
             if job and job.created_at:
                 wave_cutoff = job.created_at - timedelta(minutes=2)
-            weather_min_rows = 7
-            try:
-                span = (
-                    datetime.fromisoformat(str(end_date)[:10]).date()
-                    - datetime.fromisoformat(str(start_date)[:10]).date()
-                ).days + 1
-                weather_min_rows = max(1, min(7, span))
-            except ValueError:
-                pass
+            # 天气历史接口只覆盖到昨天；今天结束的窗口不能等待尚未发布的当日天气。
+            historical_weather_days = max(
+                0,
+                (min(end_day, date.today() - timedelta(days=1)) - start_day).days
+                + 1,
+            )
+            weather_min_rows = min(7, historical_weather_days)
             from app.tasks.assessment_report import _resolve_wait_started_at
 
             started_at = _resolve_wait_started_at(job, job_id_str)

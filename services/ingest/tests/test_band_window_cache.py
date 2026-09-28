@@ -1,4 +1,4 @@
-"""共享卫星窗口缓存 v2 的键校验、原子读写与 LRU 测试。"""
+"""共享卫星窗口缓存 v5 的键校验、原子读写与 LRU 测试。"""
 
 from __future__ import annotations
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.quality_metrics import (
+    PARCEL_VALID_FRACTION_V1,
+    extract_quality_score_method,
+)
 from app.core.config import settings
 from app.core.database import get_db
 from app.middleware.auth import OrgContext, get_org_context, org_scope
@@ -116,7 +119,7 @@ async def list_stats(
     offset: int = Query(0, ge=0),
 ):
     base = (
-        select(FieldStat)
+        select(FieldStat, RasterLayer.provenance_json)
         .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
         .where(
             FieldStat.land_id == land_id,
@@ -130,9 +133,24 @@ async def list_stats(
     result = await db.execute(
         base.order_by(FieldStat.date.asc()).limit(limit).offset(offset)
     )
-    return PaginatedResponse(
-        items=result.scalars().all(), total=total, limit=limit, offset=offset
-    )
+    items = []
+    for stat, provenance in result.all():
+        method = extract_quality_score_method(provenance)
+        # 历史质量分没有算法口径时不返回数值，避免前端把旧矩形比例显示成地块覆盖率。
+        trusted_score = (
+            float(stat.quality_score)
+            if stat.quality_score is not None
+            and method == PARCEL_VALID_FRACTION_V1
+            else None
+        )
+        item = FieldStatOut.model_validate(stat).model_copy(
+            update={
+                "quality_score": trusted_score,
+                "quality_score_method": method or "unknown",
+            }
+        )
+        items.append(item)
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/lands/{land_id}/layers/types", response_model=list[str])

@@ -11,26 +11,35 @@ from urllib.parse import quote
 from fastapi import (
     APIRouter,
     Depends,
-    File,
     Header,
     HTTPException,
     Request,
-    UploadFile,
     status,
 )
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field as PydanticField, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.concurrency import run_in_threadpool
 
 from agric_satellite_analysis_common.task_priority import INTERACTIVE_REPORT_PRIORITY
+from agric_satellite_analysis_common.season_growth_window import (
+    normalize_season_growth_window,
+)
 from app.core.database import get_db
 from app.core.logging import logger
 from app.core.rate_limit import limiter
+from app.core.request_body import (
+    read_limited_body,
+    request_with_body,
+    safe_upload_filename,
+)
 from app.core.storage import get_storage
 from app.middleware.auth import OrgContext, get_org_context, require_roles, org_scope
 from app.models.tables import LandParcel, Job
 from app.schemas.monitoring import JobOut
+from app.services.report_urls import report_progress_for_response, signed_report_url
 from app.services.cdfinance_report_prefetch import (
     normalize_optional_group_id,
     normalize_optional_hr_base_id,
@@ -38,13 +47,19 @@ from app.services.cdfinance_report_prefetch import (
     resolve_request_token,
 )
 
+_MAX_SEASON_MATERIAL_BYTES = 20 * 1024 * 1024
+_MAX_SEASON_MATERIAL_COUNT = 20
+_MAX_SEASON_MATERIAL_KEY_BYTES = 1023
+
 
 class SeasonGrowthGenerateRequest(BaseModel):
     start_date: str = PydanticField(..., description="YYYY-MM-DD")
     end_date: str = PydanticField(..., description="YYYY-MM-DD")
     crops: list[str] = PydanticField(default_factory=list)
     label: str | None = None
-    material_keys: list[str] = PydanticField(default_factory=list)
+    material_keys: list[str] = PydanticField(
+        default_factory=list, max_length=_MAX_SEASON_MATERIAL_COUNT
+    )
     pull_data: bool = PydanticField(
         default=True,
         description="Queue weather + agri RS indices + soil bootstrap before PDF",
@@ -75,6 +90,28 @@ class SeasonGrowthGenerateRequest(BaseModel):
             raise ValueError("date must be YYYY-MM-DD") from e
         return str(v)[:10]
 
+    @field_validator("material_keys")
+    @classmethod
+    def _normalize_material_keys(cls, keys: list[str]) -> list[str]:
+        """限制材料键长度并去重，避免相同OSS对象被重复下载和解析。"""
+        normalized: list[str] = []
+        for key in keys:
+            # 先限制原始输入，避免对超长字符串执行strip或UTF-8编码。
+            if len(key) > _MAX_SEASON_MATERIAL_KEY_BYTES:
+                raise ValueError("material key exceeds the storage key limit")
+            key = key.strip()
+            if not key:
+                continue
+            try:
+                key_bytes = len(key.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise ValueError("material key contains invalid Unicode") from exc
+            if key_bytes > _MAX_SEASON_MATERIAL_KEY_BYTES:
+                raise ValueError("material key exceeds the storage key limit")
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
+
 
 class MaterialUploadOut(BaseModel):
     key: str
@@ -86,12 +123,30 @@ class MaterialUploadOut(BaseModel):
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
 
-
 async def _get_field(land_id: str, org_id: uuid.UUID, db: AsyncSession) -> LandParcel:
     field = await db.get(LandParcel, land_id)
     if not field or field.deleted_at is not None:
         raise HTTPException(status_code=404, detail="LandParcel not found")
     return field
+
+
+def _is_safe_material_key(key: str, allowed_prefix: str) -> bool:
+    """确认材料键只访问当前地块目录，且不含路径穿越或URL控制字符。"""
+    if len(key) > _MAX_SEASON_MATERIAL_KEY_BYTES:
+        return False
+    if not key.startswith(allowed_prefix) or "\\" in key:
+        return False
+    if any(
+        ord(char) < 32 or ord(char) == 127 or char in {"?", "#", "%"}
+        for char in key
+    ):
+        return False
+    try:
+        if len(key.encode("utf-8")) > _MAX_SEASON_MATERIAL_KEY_BYTES:
+            return False
+    except UnicodeEncodeError:
+        return False
+    return all(part and part not in {".", ".."} for part in key.split("/"))
 
 
 def _window_key(
@@ -151,13 +206,25 @@ async def create_season_growth_report(
     """
     field = await _get_field(land_id, ctx.org_id, db)
 
-    start = date.fromisoformat(body.start_date)
-    end = date.fromisoformat(body.end_date)
-    if end < start:
-        raise HTTPException(status_code=422, detail="end_date must be >= start_date")
+    # 材料键由客户端提交，必须限定在当前地块的专属目录，避免借报告任务读取其他OSS对象。
+    material_prefix = f"reports/season_growth/{field.land_id}/"
+    if any(
+        not _is_safe_material_key(key, material_prefix)
+        for key in body.material_keys
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="material_keys must reference uploaded materials for this land parcel",
+        )
+
+    try:
+        start, end, weather_days = normalize_season_growth_window(
+            body.start_date, body.end_date
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     pull_data = bool(body.pull_data)
-    weather_days = max(1, (end - start).days)
 
     cdfinance_token = resolve_request_token(
         cdfinance_token=body.cdfinance_token,
@@ -331,6 +398,20 @@ async def create_season_growth_report(
 @router.post(
     "/lands/{land_id}/season-growth-report/materials",
     response_model=MaterialUploadOut,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
 )
 @limiter.limit("20/minute")
 async def upload_season_growth_material(
@@ -338,22 +419,38 @@ async def upload_season_growth_material(
     land_id: str,
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    file: UploadFile = File(...),
 ):
     """Upload an optional material file; returns storage key for generate body."""
     await _get_field(land_id, ctx.org_id, db)
-    raw = await file.read()
+    # 先对完整multipart流限长，再交给Starlette解析，避免大文件被无限制暂存到磁盘。
+    request_body = await read_limited_body(
+        request, _MAX_SEASON_MATERIAL_BYTES + 1024 * 1024
+    )
+    form = await request_with_body(request, request_body).form(
+        max_files=1,
+        max_fields=0,
+        max_part_size=_MAX_SEASON_MATERIAL_BYTES,
+    )
+    try:
+        file = form.get("file")
+        if not isinstance(file, StarletteUploadFile):
+            raise HTTPException(status_code=400, detail="material file is required")
+        raw = await file.read(_MAX_SEASON_MATERIAL_BYTES + 1)
+        filename = safe_upload_filename(file.filename, "material.bin")
+        content_type = file.content_type or "application/octet-stream"
+    finally:
+        await form.close()
     if not raw:
         raise HTTPException(status_code=400, detail="empty file")
-    if len(raw) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="file too large (max 20MB)")
+    if len(raw) > _MAX_SEASON_MATERIAL_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 20MB)")
 
-    safe_name = (file.filename or "material.bin").replace("/", "_").replace("\\", "_")
+    safe_name = filename
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     object_key = f"reports/season_growth/{land_id}/{ts}-{safe_name}"
     storage = get_storage()
-    content_type = file.content_type or "application/octet-stream"
-    storage.put_bytes(object_key, raw, content_type=content_type)
+    # OSS SDK是同步客户端，上传放到线程池，避免阻塞其它API请求。
+    await run_in_threadpool(storage.put_bytes, object_key, raw, content_type)
 
     url = None
     try:
@@ -396,13 +493,16 @@ async def get_latest_season_growth_report(
         raise HTTPException(status_code=404, detail="Report file missing")
 
     storage = get_storage()
-    if not storage.exists(object_key):
+    if not await run_in_threadpool(storage.exists, object_key):
         raise HTTPException(
             status_code=404, detail="Report object not found in storage"
         )
 
-    data = storage.get_bytes(object_key)
-    filename = progress.get("filename") or "生育期长势分析报告.pdf"
+    stored_filename = progress.get("filename")
+    filename = safe_upload_filename(
+        stored_filename if isinstance(stored_filename, str) else None,
+        "生育期长势分析报告.pdf",
+    )
     disp = (
         f'attachment; filename="season-growth.pdf"; '
         f"filename*=UTF-8''{quote(filename)}"
@@ -411,10 +511,13 @@ async def get_latest_season_growth_report(
         "Content-Disposition": disp,
         "X-Season-Growth-Job-Id": str(job.id),
     }
-    public_url = progress.get("public_url")
+    public_url = signed_report_url(object_key)
     if public_url:
-        headers["X-Season-Growth-Public-Url"] = str(public_url)
-    return Response(content=data, media_type="application/pdf", headers=headers)
+        headers["X-Season-Growth-Public-Url"] = public_url
+    # 生育期报告以分块方式从私有OSS回传，避免同步整对象读取阻塞事件循环。
+    return StreamingResponse(
+        storage.iter_bytes(object_key), media_type="application/pdf", headers=headers
+    )
 
 
 async def _latest_report_job_for_meta(
@@ -489,4 +592,6 @@ async def get_latest_season_growth_meta(
     )
     if not job:
         raise HTTPException(status_code=404, detail="No season growth report yet")
-    return job
+    result = JobOut.model_validate(job)
+    result.progress_json = report_progress_for_response(result.progress_json)
+    return result

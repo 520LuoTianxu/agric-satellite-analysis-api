@@ -28,6 +28,7 @@ __all__ = [
     "apply_results",
     "cache_results",
     "assessment_bundle",
+    "agri_satellite_batch_inputs",
     "complete_work",
     "data_readiness",
     "daily_satellite_prepare",
@@ -263,7 +264,7 @@ def resolve_land(
     land_id: str | None = None,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """GET /v1/internal/lands/resolve → canonical land metadata."""
+    """读取单个规范地块元数据；下载机只能通过此 Internal HTTP 边界取数。"""
     params: dict[str, str] = {}
     if land_id:
         params["land_id"] = str(land_id)
@@ -352,7 +353,7 @@ def agri_scene_dates(
     sensor: str,
     client: httpx.Client | None = None,
 ) -> list[str]:
-    """GET /v1/internal/agri/lands/{id}/scenes/dates — ISO dates for skip-existing."""
+    """读取单个地块的已入库日期，沿用原始影像过滤口径以安全跳过重复处理。"""
 
     def _do(c: httpx.Client) -> list[str]:
         r = c.get(
@@ -372,6 +373,36 @@ def agri_scene_dates(
     if client is not None:
         return _do(client)
     with internal_client() as c:
+        return _do(c)
+
+
+def agri_satellite_batch_inputs(
+    *,
+    land_ids: list[str],
+    sensor: str,
+    include_existing_dates: bool = True,
+    client: httpx.Client | None = None,
+    timeout: float = 60.0,
+) -> list[dict[str, Any]]:
+    """批量读取遥感批任务所需地块元数据及已存在日期。"""
+    body = {
+        "land_ids": [str(land_id) for land_id in land_ids],
+        "sensor": str(sensor),
+        "include_existing_dates": bool(include_existing_dates),
+    }
+
+    def _do(c: httpx.Client) -> list[dict[str, Any]]:
+        r = c.post("/v1/internal/agri/satellite-batch/inputs", json=body)
+        _raise_for_status(r, context="agri/satellite-batch/inputs")
+        data = r.json()
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise InternalApiError("agri/satellite-batch/inputs returned invalid data")
+        return items
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
         return _do(c)
 
 

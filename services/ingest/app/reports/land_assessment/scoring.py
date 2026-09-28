@@ -23,6 +23,8 @@ from app.reports.land_assessment.soil_labels import (
     soil_texture_zh,
 )
 
+from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
+
 SEASON_MONTHS = {6, 7, 8, 9}
 PEAK_MONTHS = {7, 8}
 UNCROPPED_NDVI = 0.25
@@ -420,20 +422,28 @@ def compute_assessment(
     crop_label = crop_name_zh(crop_key)
 
     by: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    qualities: list[float] = []
+    # 一个观测日内多个同源指数共享影像覆盖情况，先按日期聚合，避免指数多的日期被重复加权。
+    quality_by_date: dict[str, list[float]] = defaultdict(list)
     for r in indices:
         layer = r.get("layer_type") or r.get("layer")
         date = str(r.get("date"))
         if not layer or not date:
             continue
+        quality_method = r.get("quality_score_method")
+        # 即使该日因低覆盖率被排除出指数分析，也要保留它的覆盖证据用于降低报告置信度。
+        if quality_method == PARCEL_VALID_FRACTION_V1 and r.get("quality_score") is not None:
+            quality_by_date[date].append(float(r["quality_score"]))
         mean = r.get("mean")
         if mean is None:
             continue
+        quality_value = r.get("quality_score")
+        if quality_value is None:
+            quality_value = r.get("quality")
         # NDVI 的低质量统计不能参与物候图表和阶段判断。
         if (
             str(layer).upper() == "NDVI"
             and r.get("official") is not True
-            and float(r.get("quality_score") or r.get("quality") or 0) < 0.7
+            and float(quality_value if quality_value is not None else 0) < 0.7
         ):
             continue
         row = {
@@ -443,13 +453,14 @@ def compute_assessment(
             else float(mean),
             "p10": float(r["p10"]) if r.get("p10") is not None else float(mean),
             "p90": float(r["p90"]) if r.get("p90") is not None else float(mean),
-            "quality": float(r.get("quality_score") or r.get("quality") or 0.5),
+            # 0.0 是真实的零覆盖率，不能被 `or` 当成缺省值替换成0.5。
+            "quality": float(quality_value) if quality_value is not None else 0.5,
         }
         by[date][str(layer).upper()] = row
-        qualities.append(row["quality"])
 
     dates = sorted(by)
-    qmean = float(np.mean(qualities)) if qualities else 0.5
+    per_date_quality = [float(np.mean(scores)) for scores in quality_by_date.values()]
+    qmean = float(np.mean(per_date_quality)) if per_date_quality else 0.5
 
     # Prefer NDWI; fall back to MNDWI from agri products.
     def _wet_layer(d: str) -> dict[str, Any] | None:
@@ -885,7 +896,7 @@ def compute_assessment(
     conf = 78
     if not observed_windows:
         conf -= 20
-    if qmean < 0.4:
+    if per_date_quality and qmean < 0.4:
         conf -= 8
     if not dates:
         conf -= 20
@@ -935,7 +946,9 @@ def compute_assessment(
         "confidence": {
             "score": conf,
             "plain": (
-                f"生育期口径；影像质量均分约{qmean:.2f}；峰值景{len(peak_dates)}"
+                f"生育期口径；地块内有效像元率均值约{qmean:.2f}（{len(per_date_quality)}个观测日）；峰值景{len(peak_dates)}"
+                if per_date_quality
+                else f"生育期口径；暂无可核验的地块内有效像元率；峰值景{len(peak_dates)}"
             ),
         },
         "howto": (
@@ -1007,6 +1020,7 @@ def compute_assessment(
         },
         "meta": {
             "qmean": round(qmean, 4),
+            "quality_observation_days": len(per_date_quality),
             "n_dates": len(dates),
             "season_dates": season_dates,
             "peak_dates": peak_dates,

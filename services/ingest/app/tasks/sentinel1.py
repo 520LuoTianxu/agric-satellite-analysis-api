@@ -1,8 +1,9 @@
 """Sentinel-1 GRD → agric_satellite.parcel_scene_products lonlat_v1 (VV_db/VH_db).
 
 Searches Microsoft Planetary Computer ``sentinel-1-grd`` (VV/VH on Azure Blob,
-SAS-signed via ``planetary_computer``), converts amplitude DN to approximate
-σ⁰ dB, samples the parcel polygon, and upserts ``sensor='S1'`` lonlat_v1 rows.
+SAS-signed via ``planetary_computer``), converts amplitude DN using each product's
+Sigma0 LUT when available, samples the parcel polygon, and upserts
+``sensor='S1'`` lonlat_v1 rows.
 
 Override catalog with ``S1_STAC_API_URL`` if needed. Optical S2 still uses
 ``STAC_API_URL`` (Element84 by default).
@@ -13,21 +14,28 @@ unless ``WRITE_INDEX_COGS=1``.
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
+import httpx
 import numpy as np
 import rasterio
 import structlog
+from pyproj import Transformer
 from rasterio.features import geometry_mask
-from rasterio.transform import from_bounds, xy
-from rasterio.warp import Resampling, reproject
+from rasterio.control import GroundControlPoint
+from rasterio.transform import GCPTransformer, xy
+from rasterio.warp import Resampling, reproject, transform as warp_xy, transform_geom
 from rio_cogeo.cogeo import cog_translate
 from rio_cogeo.profiles import cog_profiles
 from shapely.geometry import mapping
@@ -67,6 +75,9 @@ from app.tasks.pipeline import (
     RETRY_DELAYS,
     complete_step,
     compute_zonal_stats,
+    analysis_crs_for_bounds,
+    compute_target_grid,
+    describe_target_grid,
     existing_agri_scene_dates,
     filter_scenes_skip_existing,
     get_db_session,
@@ -77,13 +88,292 @@ from app.worker import celery_app
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
+from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
+from agric_satellite_analysis_common.date_chunks import split_inclusive_date_range
 logger = structlog.get_logger()
 
 STAC_S1_COLLECTION = S1_STAC_COLLECTION
+AGRI_S1_ALGORITHM_VERSION = "stac-s1-lonlat-v5"
 # Nominal IW GRDH amplitude calibration scale so DN→dB lands near typical σ⁰.
-# Full LUT calibration is not applied; values are approximate but flood-usable.
+# 仅供缺少定标资产的非标准目录回退；Planetary Computer GRD默认使用逐景Sigma0 LUT。
 _S1_DN_CAL = 1000.0
 _S1_EPS = 1e-10
+_S1_CALIBRATION_MAX_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class S1CalibrationLUT:
+    """Sentinel-1产品提供的Aσ幅度定标因子，按方位行和距离像元索引。"""
+
+    lines: np.ndarray
+    pixels: tuple[np.ndarray, ...]
+    sigma_nought: tuple[np.ndarray, ...]
+
+
+def _xml_child_text(node: ElementTree.Element, name: str) -> str | None:
+    """读取不依赖XML命名空间前缀的直接子节点文本。"""
+    for child in node:
+        if child.tag.rsplit("}", 1)[-1] == name:
+            return child.text
+    return None
+
+
+def _parse_lut_vector(text: str) -> np.ndarray:
+    """逐项解析定标向量，避免fromstring遇到坏尾项时静默截断。"""
+    return np.asarray([float(value) for value in text.split()], dtype=np.float64)
+
+
+def _parse_s1_sigma0_lut(xml_bytes: bytes) -> S1CalibrationLUT:
+    """解析ESA Sigma0 LUT；坏或不完整资产必须失败，不能悄悄套近似常数。"""
+    root = ElementTree.fromstring(xml_bytes)
+    rows: list[float] = []
+    pixel_vectors: list[np.ndarray] = []
+    sigma_vectors: list[np.ndarray] = []
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] != "calibrationVector":
+            continue
+        line_text = _xml_child_text(node, "line")
+        pixel_text = _xml_child_text(node, "pixel")
+        sigma_text = _xml_child_text(node, "sigmaNought")
+        if not line_text or not pixel_text or not sigma_text:
+            continue
+        try:
+            line = float(line_text)
+            pixels = _parse_lut_vector(pixel_text)
+            sigma = _parse_lut_vector(sigma_text)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            not math.isfinite(line)
+            or pixels.size < 2
+            or pixels.size != sigma.size
+            or not np.all(np.isfinite(pixels))
+            or not np.all(np.isfinite(sigma))
+            or np.any(np.diff(pixels) <= 0)
+            or np.any(sigma <= 0)
+        ):
+            continue
+        rows.append(line)
+        pixel_vectors.append(pixels)
+        sigma_vectors.append(sigma)
+    if len(rows) < 2:
+        raise ValueError("Sentinel-1 calibration asset has fewer than two valid Sigma0 vectors")
+
+    order = np.argsort(np.asarray(rows, dtype=np.float64))
+    lines = np.asarray(rows, dtype=np.float64)[order]
+    if np.any(np.diff(lines) <= 0):
+        raise ValueError("Sentinel-1 calibration lines are not strictly increasing")
+    return S1CalibrationLUT(
+        lines=lines,
+        pixels=tuple(pixel_vectors[int(index)] for index in order),
+        sigma_nought=tuple(sigma_vectors[int(index)] for index in order),
+    )
+
+
+@lru_cache(maxsize=64)
+def _load_s1_sigma0_lut(calibration_href: str) -> S1CalibrationLUT:
+    """有界下载并缓存每个VV/VH定标XML，减小同一下载机重复读取开销。"""
+    chunks: list[bytes] = []
+    received = 0
+    with httpx.stream(
+        "GET",
+        calibration_href,
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        follow_redirects=True,
+    ) as response:
+        response.raise_for_status()
+        declared_size = response.headers.get("content-length")
+        if declared_size and int(declared_size) > _S1_CALIBRATION_MAX_BYTES:
+            raise ValueError("Sentinel-1 calibration asset exceeds the 2 MiB limit")
+        for chunk in response.iter_bytes():
+            received += len(chunk)
+            if received > _S1_CALIBRATION_MAX_BYTES:
+                raise ValueError("Sentinel-1 calibration asset exceeds the 2 MiB limit")
+            chunks.append(chunk)
+    return _parse_s1_sigma0_lut(b"".join(chunks))
+
+
+def _sigma0_calibration_factor_at_pixels(
+    lut: S1CalibrationLUT, source_rows: np.ndarray, source_cols: np.ndarray
+) -> np.ndarray:
+    """在原始源像元坐标插值ESA给出的Sigma0幅度定标因子Aσ。"""
+    rows, cols = np.broadcast_arrays(
+        np.asarray(source_rows, dtype=np.float64),
+        np.asarray(source_cols, dtype=np.float64),
+    )
+    flat_rows = rows.ravel()
+    flat_cols = cols.ravel()
+    upper = np.searchsorted(lut.lines, flat_rows, side="right")
+    lower = np.clip(upper - 1, 0, len(lut.lines) - 1)
+    upper = np.clip(upper, 0, len(lut.lines) - 1)
+    row_span = lut.lines[upper] - lut.lines[lower]
+    row_weight = np.zeros(flat_rows.shape, dtype=np.float64)
+    different = row_span > 0
+    row_weight[different] = (
+        (flat_rows[different] - lut.lines[lower[different]])
+        / row_span[different]
+    )
+    row_weight = np.clip(row_weight, 0.0, 1.0)
+
+    result = np.full(flat_rows.shape, np.nan, dtype=np.float64)
+    in_line_range = (flat_rows >= lut.lines[0]) & (flat_rows <= lut.lines[-1])
+    pair_ids = lower * len(lut.lines) + upper
+    for pair_id in np.unique(pair_ids):
+        selected = np.flatnonzero(pair_ids == pair_id)
+        lo = int(pair_id) // len(lut.lines)
+        hi = int(pair_id) % len(lut.lines)
+        lo_values = np.interp(
+            flat_cols[selected],
+            lut.pixels[lo],
+            lut.sigma_nought[lo],
+            left=np.nan,
+            right=np.nan,
+        )
+        if lo == hi:
+            result[selected] = lo_values
+            continue
+        hi_values = np.interp(
+            flat_cols[selected],
+            lut.pixels[hi],
+            lut.sigma_nought[hi],
+            left=np.nan,
+            right=np.nan,
+        )
+        result[selected] = lo_values + (
+            hi_values - lo_values
+        ) * row_weight[selected]
+    result[~in_line_range | ~np.isfinite(flat_rows) | ~np.isfinite(flat_cols)] = np.nan
+    return result.reshape(rows.shape)
+
+
+def _source_window_for_target_grid(
+    src,
+    target_shape: tuple[int, int],
+    target_transform,
+    target_crs: str,
+    source_gcps: list,
+    gcp_crs,
+):
+    """反算目标网格范围对应的原始COG窗口，避免整景读取。"""
+    height, width = target_shape
+    edge = np.linspace(0.0, 1.0, num=33, dtype=np.float64)
+    edge_cols = np.concatenate(
+        (
+            edge * width,
+            edge * width,
+            np.zeros_like(edge) * width,
+            np.ones_like(edge) * width,
+        )
+    )
+    edge_rows = np.concatenate(
+        (
+            np.zeros_like(edge) * height,
+            np.ones_like(edge) * height,
+            edge * height,
+            edge * height,
+        )
+    )
+    target_x = (
+        target_transform.c
+        + edge_cols * target_transform.a
+        + edge_rows * target_transform.b
+    )
+    target_y = (
+        target_transform.f
+        + edge_cols * target_transform.d
+        + edge_rows * target_transform.e
+    )
+
+    use_gcps = bool(source_gcps and gcp_crs is not None)
+    source_crs = gcp_crs if use_gcps else src.crs
+    if source_crs is None:
+        raise ValueError("Sentinel-1 source raster has no usable georeferencing")
+    target_to_source = Transformer.from_crs(
+        target_crs, source_crs, always_xy=True
+    )
+    source_x, source_y = target_to_source.transform(target_x, target_y)
+    if use_gcps:
+        inverse_gcps = GCPTransformer(source_gcps)
+        try:
+            rows, cols = inverse_gcps.rowcol(
+                np.asarray(source_x),
+                np.asarray(source_y),
+                op=lambda value: value,
+            )
+        finally:
+            inverse_gcps.close()
+    else:
+        cols, rows = (~src.transform) * (np.asarray(source_x), np.asarray(source_y))
+
+    rows = np.asarray(rows, dtype=np.float64)
+    cols = np.asarray(cols, dtype=np.float64)
+    finite = np.isfinite(rows) & np.isfinite(cols)
+    if not np.any(finite):
+        return None
+
+    # 边界采样加8个源像元余量，覆盖GCP曲率和双线性重采样所需邻域。
+    padding = 8
+    row_start = max(0, math.floor(float(np.min(rows[finite]))) - padding)
+    row_stop = min(src.height, math.ceil(float(np.max(rows[finite]))) + padding + 1)
+    col_start = max(0, math.floor(float(np.min(cols[finite]))) - padding)
+    col_stop = min(src.width, math.ceil(float(np.max(cols[finite]))) + padding + 1)
+    if row_stop <= row_start or col_stop <= col_start:
+        return None
+    return rasterio.windows.Window(
+        col_start, row_start, col_stop - col_start, row_stop - row_start
+    )
+
+
+def _shift_gcps_for_window(source_gcps: list, window) -> list[GroundControlPoint]:
+    """把全景GCP坐标平移到裁剪窗口的局部像素原点。"""
+    row_offset = int(window.row_off)
+    col_offset = int(window.col_off)
+    return [
+        GroundControlPoint(
+            row=float(gcp.row) - row_offset,
+            col=float(gcp.col) - col_offset,
+            x=gcp.x,
+            y=gcp.y,
+            z=gcp.z,
+            id=gcp.id,
+            info=gcp.info,
+        )
+        for gcp in source_gcps
+    ]
+
+
+def _calibrate_source_window_sigma0(
+    amplitude: np.ndarray,
+    lut: S1CalibrationLUT,
+    row_offset: int,
+    col_offset: int,
+) -> np.ndarray:
+    """先在COG原生像元上应用Aσ LUT，输出可安全重采样的线性功率。"""
+    height, width = amplitude.shape
+    source_cols = np.arange(width, dtype=np.float64)[None, :] + col_offset + 0.5
+    source_power = np.full(amplitude.shape, np.nan, dtype=np.float32)
+    # LUT插值和浮点运算按128行分块，避免大窗口同时复制多份全尺寸float64数组。
+    for start in range(0, height, 128):
+        stop = min(start + 128, height)
+        source_rows = (
+            np.arange(start, stop, dtype=np.float64)[:, None] + row_offset + 0.5
+        )
+        sigma0_factor = _sigma0_calibration_factor_at_pixels(
+            lut, source_rows, source_cols
+        )
+        amplitude_block = amplitude[start:stop].astype(np.float64, copy=False)
+        valid = (
+            np.isfinite(amplitude_block)
+            & (amplitude_block > 0)
+            & np.isfinite(sigma0_factor)
+            & (sigma0_factor > 0)
+        )
+        power_block = source_power[start:stop]
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            power_block[valid] = np.square(
+                amplitude_block[valid] / sigma0_factor[valid]
+            ).astype(np.float32)
+    return source_power
 
 UPSERT_S1_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
@@ -126,7 +416,7 @@ def _round6(v: float) -> float:
 
 
 def _dn_to_db(dn: np.ndarray) -> np.ndarray:
-    """Convert GRD amplitude DN to approximate σ⁰ dB."""
+    """按项目现有幅度DN标定近似换算σ⁰分贝，非完整地形校正流程。"""
     amp = dn.astype(np.float32)
     amp[amp <= 0] = np.nan
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -150,6 +440,7 @@ def search_s1_scenes(
     )
     items = list(search.items())
     skipped_no_vvvh = 0
+    skipped_incomplete_calibration = 0
     logger.info(
         "s1_stac_search_results",
         count=len(items),
@@ -178,6 +469,24 @@ def search_s1_scenes(
                 asset_keys=sorted(assets.keys()),
             )
             continue
+        vv_calibration_href = stac_asset_href(
+            assets.get("schema-calibration-vv")
+        )
+        vh_calibration_href = stac_asset_href(
+            assets.get("schema-calibration-vh")
+        )
+        # VV/VH必须使用同一辐射口径；只提供单通道LUT的目录项不能入选，
+        # 先跳过候选以便同周仍可选其他完整场景，避免处理阶段整景失败。
+        if bool(vv_calibration_href) != bool(vh_calibration_href):
+            skipped_incomplete_calibration += 1
+            logger.info(
+                "s1_scene_skipped",
+                reason="incomplete_sigma_nought_lut_pair",
+                scene_id=item.id,
+                has_vv_calibration=bool(vv_calibration_href),
+                has_vh_calibration=bool(vh_calibration_href),
+            )
+            continue
         item_date = item.datetime.date() if item.datetime else date_from
         week_key = item_date.isocalendar()[:2]
         week_str = f"{week_key[0]}-W{week_key[1]:02d}" if dedupe_week else item.id
@@ -191,6 +500,9 @@ def search_s1_scenes(
         polarizations = props.get("sar:polarizations") or []
         if "VV" in polarizations and "VH" in polarizations:
             score += 3
+        # 同周候选中优先选有VV/VH定标资产的产品，避免不必要地回退到固定幅度比例。
+        if vv_calibration_href and vh_calibration_href:
+            score += 1
         entry = weekly.get(week_str)
         if entry is None or score > entry["score"]:
             rel_orbit = props.get("sat:relative_orbit") or props.get("relative_orbit")
@@ -200,12 +512,20 @@ def search_s1_scenes(
                 "score": score,
                 "vv_href": vv_href,
                 "vh_href": vh_href,
+                "vv_calibration_href": vv_calibration_href,
+                "vh_calibration_href": vh_calibration_href,
                 "relative_orbit": rel_orbit,
             }
     if skipped_no_vvvh:
         logger.info(
             "s1_stac_skipped_no_vvvh",
             skipped=skipped_no_vvvh,
+            kept_weeks=len(weekly),
+        )
+    if skipped_incomplete_calibration:
+        logger.info(
+            "s1_stac_skipped_incomplete_calibration",
+            skipped=skipped_incomplete_calibration,
             kept_weeks=len(weekly),
         )
 
@@ -218,6 +538,8 @@ def search_s1_scenes(
                 "date": e["date"],
                 "vv_href": e["vv_href"],
                 "vh_href": e["vh_href"],
+                "vv_calibration_href": e.get("vv_calibration_href"),
+                "vh_calibration_href": e.get("vh_calibration_href"),
                 "relative_orbit": e.get("relative_orbit"),
                 "geometry": e["item"].geometry,
             }
@@ -226,53 +548,95 @@ def search_s1_scenes(
 
 
 def _read_band_windowed_db_profiled(
-    href: str, bounds: tuple, target_shape: tuple, target_transform
+    href: str,
+    bounds: tuple,
+    target_shape: tuple,
+    target_transform,
+    target_crs: str = "EPSG:4326",
+    calibration_href: str | None = None,
 ) -> BandReadResult[np.ndarray]:
     """读取 GRD COG 窗口，并拆分远端 I/O 与目标网格重投影耗时。
 
-    Sentinel-1 GRD COGs are often CRS-less with GCPs; WarpedVRT → EPSG:4326.
+    S1 GRD常以GCP而非常规仿射CRS定位；先反算原生像元窗口，避免整景下载和先重采样DN。
     """
-    from rasterio.vrt import WarpedVRT
-
+    t_io = time.perf_counter()
+    calibration_lut = (
+        _load_s1_sigma0_lut(calibration_href) if calibration_href else None
+    )
     s3_path = s1_open_path(href)
-    dst = np.zeros(target_shape, dtype=np.float32)
+    dst = np.full(target_shape, np.nan, dtype=np.float32)
     with gdal_read_slot(), rasterio.Env(**s1_gdal_env()):
-        t_io = time.perf_counter()
         with rasterio.open(s3_path) as src:
-            # Always warp via VRT so GCP-only products work
-            with WarpedVRT(
-                src, crs="EPSG:4326", resampling=Resampling.bilinear
-            ) as vrt:
-                # WarpedVRT forbids boundless reads — clip window to VRT extent
-                window = rasterio.windows.from_bounds(
-                    *bounds, transform=vrt.transform
-                ).intersection(rasterio.windows.Window(0, 0, vrt.width, vrt.height))
-                if window.width <= 0 or window.height <= 0:
-                    logger.info(
-                        "s1_scene_skipped",
-                        reason="empty_vrt_window",
-                        href=href[:160],
-                        bounds=list(bounds),
-                    )
-                    io_ms = int((time.perf_counter() - t_io) * 1000)
-                    return BandReadResult(
-                        _dn_to_db(dst), io_ms=io_ms, reproject_ms=0
-                    )
-                window = window.round_offsets().round_lengths()
-                data = vrt.read(1, window=window, boundless=False)
-                src_transform = rasterio.windows.transform(window, vrt.transform)
+            source_gcps, gcp_crs = src.gcps
+            window = _source_window_for_target_grid(
+                src,
+                target_shape,
+                target_transform,
+                target_crs,
+                source_gcps,
+                gcp_crs,
+            )
+            if window is None:
+                logger.info(
+                    "s1_scene_skipped",
+                    reason="empty_source_window",
+                    href=href[:160],
+                    bounds=list(bounds),
+                )
+                io_ms = int((time.perf_counter() - t_io) * 1000)
+                return BandReadResult(_dn_to_db(dst), io_ms=io_ms, reproject_ms=0)
+
+            # 直接从云优化GeoTIFF读取地块覆盖的原始像元，并保留源NoData掩膜。
+            data = src.read(1, window=window, masked=True)
+            data = np.asarray(data.astype(np.float32).filled(np.nan))
+            if source_gcps and gcp_crs is not None:
+                source_gcps = _shift_gcps_for_window(source_gcps, window)
+                source_crs = gcp_crs
+                source_georef = {"gcps": source_gcps}
+            else:
+                source_crs = src.crs
+                source_transform = rasterio.windows.transform(window, src.transform)
+                source_georef = {"src_transform": source_transform}
         io_ms = int((time.perf_counter() - t_io) * 1000)
         t_reproject = time.perf_counter()
-        reproject(
-            source=data.astype(np.float32),
-            destination=dst,
-            src_transform=src_transform,
-            src_crs="EPSG:4326",
-            dst_transform=target_transform,
-            dst_crs="EPSG:4326",
-            resampling=Resampling.bilinear,
-        )
-        value = _dn_to_db(dst)
+        if calibration_lut is not None:
+            # ESA要求逐源像元先由DN²/Aσ²得到Sigma0，再重采样功率，最后转dB。
+            # 这样不会先平均原始幅度再平方，避免双重插值改变地块回散射统计。
+            source_values = _calibrate_source_window_sigma0(
+                data,
+                calibration_lut,
+                int(window.row_off),
+                int(window.col_off),
+            )
+            destination_power = np.full(target_shape, np.nan, dtype=np.float32)
+            reproject(
+                source=source_values,
+                destination=destination_power,
+                src_crs=source_crs,
+                **source_georef,
+                dst_transform=target_transform,
+                dst_crs=target_crs,
+                src_nodata=np.nan,
+                dst_nodata=np.nan,
+                resampling=Resampling.bilinear,
+            )
+            value = np.full(target_shape, np.nan, dtype=np.float32)
+            valid = np.isfinite(destination_power) & (destination_power > 0)
+            value[valid] = 10.0 * np.log10(destination_power[valid])
+        else:
+            # 兼容不提供校准XML的目录；产品元数据会明确标出该近似回退口径。
+            reproject(
+                source=data,
+                destination=dst,
+                src_crs=source_crs,
+                **source_georef,
+                dst_transform=target_transform,
+                dst_crs=target_crs,
+                src_nodata=np.nan,
+                dst_nodata=np.nan,
+                resampling=Resampling.bilinear,
+            )
+            value = _dn_to_db(dst)
         reproject_ms = int((time.perf_counter() - t_reproject) * 1000)
     return BandReadResult(value, io_ms=io_ms, reproject_ms=reproject_ms)
 
@@ -286,8 +650,37 @@ def _read_band_windowed_db(
     ).value
 
 
+def _s1_radiometric_calibration(scene: dict[str, Any]) -> dict[str, Any]:
+    """生成随产品返回的S1定标口径，并拒绝只校准一个极化通道的混合产品。"""
+    vv_lut = scene.get("vv_calibration_href")
+    vh_lut = scene.get("vh_calibration_href")
+    if bool(vv_lut) != bool(vh_lut):
+        raise ValueError("Sentinel-1 VV/VH calibration assets must be provided together")
+    if vv_lut and vh_lut:
+        method = "esa_sigma_nought_lut"
+        scale = None
+    else:
+        method = "fixed_amplitude_scale_approximation"
+        scale = _S1_DN_CAL
+    return {
+        "method": method,
+        "coefficient": "sigma0",
+        "units": "dB",
+        "polarizations": {"VV": method, "VH": method},
+        "fallback_scale": scale,
+        # 记录本代码路径做过的操作；不推断STAC数据提供方是否已做上游噪声处理。
+        "thermal_noise_correction": "not_performed_by_this_pipeline",
+    }
+
+
 def _write_index_cog(
-    data: np.ndarray, transform, org_id: str, land_id: str, scene_date: date, stem: str
+    data: np.ndarray,
+    transform,
+    target_crs: str,
+    org_id: str,
+    land_id: str,
+    scene_date: date,
+    stem: str,
 ) -> str:
     """Write float32 COG to active storage; return storage URI."""
     object_key = f"cogs/{org_id}/{land_id}/{scene_date.isoformat()}/{stem}.tif"
@@ -302,7 +695,7 @@ def _write_index_cog(
             "width": data.shape[1],
             "height": data.shape[0],
             "count": 1,
-            "crs": "EPSG:4326",
+            "crs": target_crs,
             "transform": transform,
             "nodata": np.nan,
         }
@@ -321,11 +714,22 @@ def _write_index_cog(
 
 
 def _sample_s1_lonlat(
-    geom4326: dict, vv: np.ndarray, vh: np.ndarray, transform
+    geom4326: dict,
+    vv: np.ndarray,
+    vh: np.ndarray,
+    transform,
+    target_crs: str = "EPSG:4326",
 ) -> list[dict[str, Any]]:
+    """按地块掩膜采样VV/VH并记录像元中心经纬度；VH缺测不丢弃有效VV。"""
     h, w = vv.shape
+    # 多边形先投影到分析网格坐标系，像元中心再反投影为lonlat_v1坐标。
+    geom_target = (
+        geom4326
+        if target_crs.upper() in {"EPSG:4326", "OGC:CRS84"}
+        else transform_geom("EPSG:4326", target_crs, geom4326)
+    )
     inside = ~geometry_mask(
-        [geom4326],
+        [geom_target],
         out_shape=(h, w),
         transform=transform,
         all_touched=False,
@@ -341,6 +745,10 @@ def _sample_s1_lonlat(
     xs, ys = xy(transform, rows, cols, offset="center")
     xs = np.asarray(xs, dtype=np.float64)
     ys = np.asarray(ys, dtype=np.float64)
+    if target_crs.upper() not in {"EPSG:4326", "OGC:CRS84"}:
+        lons, lats = warp_xy(target_crs, "EPSG:4326", xs.tolist(), ys.tolist())
+        xs = np.asarray(lons, dtype=np.float64)
+        ys = np.asarray(lats, dtype=np.float64)
 
     pixels: list[dict[str, Any]] = []
     for i in range(rows.size):
@@ -400,15 +808,21 @@ def _upsert_agri_s1(
     vh_stats: dict,
     mq_task_id: str | None = None,
     relative_orbit: int | None = None,
+    stac_item_id: str | None = None,
+    analysis_grid: dict[str, Any] | None = None,
     processing_window_km: float | None = None,
     processing_window_bounds: tuple[float, float, float, float] | None = None,
     result_delivery: str = "mq",
+    radiometric_calibration: dict[str, Any] | None = None,
 ) -> str | None:
-    """Upload S1 lonlat JSON and deliver it through the selected result channel.
+    """上传S1经纬度像元并经选定通道发布，同时保留来源与网格元数据。
 
     ``result_delivery='http'`` is used by the daily satellite batch: only a
     small OSS callback is sent to the API, which queues it in Redis before the
     API-side PostgreSQL upsert. Legacy callers keep the MQ path by default.
+
+    ``scene_id`` 为兼容旧流程保留；原始 STAC item ID 单独存入产品元数据，
+    ``analysis_grid`` 记录输出网格而非声称传感器原生分辨率。
 
     Returns public JSON URL when upload+delivery succeed.
     """
@@ -422,7 +836,30 @@ def _upsert_agri_s1(
             result_delivery = "http"
     date_str = scene_date.isoformat()
     rel = parse_s1_relative_orbit(scene_id, relative_orbit)
-    pixel_data = {"format": "lonlat_v1", "pixels": pixels}
+    pixel_data = {
+        "format": "lonlat_v1",
+        "source": "stac_s1_direct",
+        "algorithm_version": AGRI_S1_ALGORITHM_VERSION,
+        "pixels": pixels,
+    }
+    # S1质量分同样是地块掩膜内有效像元比例，随产品写入口径标识便于后续解释。
+    pixel_data["quality_metrics"] = {
+        "VV": {
+            "valid_fraction": vv_stats.get("quality_score"),
+            "method": PARCEL_VALID_FRACTION_V1,
+        },
+        "VH": {
+            "valid_fraction": vh_stats.get("quality_score"),
+            "method": PARCEL_VALID_FRACTION_V1,
+        },
+    }
+    if radiometric_calibration is not None:
+        pixel_data["radiometric_calibration"] = radiometric_calibration
+    if stac_item_id:
+        # scene_id 保留兼容后缀；原始 STAC item ID 独立持久化，便于追踪轨道与资产。
+        pixel_data["stac_item_id"] = str(stac_item_id)
+    if analysis_grid is not None:
+        pixel_data["analysis_grid"] = analysis_grid
     if processing_window_km is not None:
         # 与光学产品保持一致，记录 S1 实际检索/读取的周边矩形范围。
         pixel_data["processing_window"] = {
@@ -587,6 +1024,7 @@ def _process_one_s1_scene(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
     field_mask: np.ndarray,
     org_id_str: str,
     land_id_str: str,
@@ -604,6 +1042,8 @@ def _process_one_s1_scene(
     Returns True only when a product was published (OSS+MQ) or classic COGs
     were written. Empty samples / missing agri meta / Job-only races do not
     count as processed.
+
+    入库统计和像元采样都使用先应用地块掩膜后的线性数组，避免邻近地块像元污染结果。
     """
     from app.models.tables import RasterLayer
     from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -624,11 +1064,17 @@ def _process_one_s1_scene(
         )
         t_scene = time.perf_counter()
         t0 = time.perf_counter()
+        radiometric_calibration = _s1_radiometric_calibration(scene)
         try:
             pol = run_parallel_band_jobs(
                 {"vv": scene["vv_href"], "vh": scene["vh_href"]},
-                lambda _key, href: _read_band_windowed_db_profiled(
-                    href, bounds, target_shape, target_transform
+                lambda key, href: _read_band_windowed_db_profiled(
+                    href,
+                    bounds,
+                    target_shape,
+                    target_transform,
+                    target_crs,
+                    calibration_href=scene.get(f"{key}_calibration_href"),
                 ),
                 scene_workers=scene_workers,
                 log_context={
@@ -668,8 +1114,8 @@ def _process_one_s1_scene(
 
         write_cogs = write_index_cogs_enabled()
         t0 = time.perf_counter()
-        vv_stats = compute_zonal_stats(vv)
-        vh_stats = compute_zonal_stats(vh)
+        vv_stats = compute_zonal_stats(vv, expected_mask=field_mask)
+        vh_stats = compute_zonal_stats(vh, expected_mask=field_mask)
         stats_ms = int((time.perf_counter() - t0) * 1000)
 
         write_cog_ms = 0
@@ -683,10 +1129,10 @@ def _process_one_s1_scene(
             )
             t0 = time.perf_counter()
             vv_uri = _write_index_cog(
-                vv, target_transform, org_id_str, land_id_str, scene["date"], "vv"
+                vv, target_transform, target_crs, org_id_str, land_id_str, scene["date"], "vv"
             )
             vh_uri = _write_index_cog(
-                vh, target_transform, org_id_str, land_id_str, scene["date"], "vh"
+                vh, target_transform, target_crs, org_id_str, land_id_str, scene["date"], "vh"
             )
             write_cog_ms = int((time.perf_counter() - t0) * 1000)
             logger.info(
@@ -715,7 +1161,10 @@ def _process_one_s1_scene(
                     provenance_json={
                         "scene_id": scene["id"],
                         "processed_at": datetime.now(timezone.utc).isoformat(),
-                        "pipeline_version": "s1-1.0.0",
+                        "pipeline_version": "s1-4.0.0",
+                        "algorithm_version": AGRI_S1_ALGORITHM_VERSION,
+                        "quality_score_method": PARCEL_VALID_FRACTION_V1,
+                        "radiometric_calibration": radiometric_calibration,
                     },
                 )
                 stmt = (
@@ -763,7 +1212,9 @@ def _process_one_s1_scene(
                 )
         else:
             t0 = time.perf_counter()
-            pixels = _sample_s1_lonlat(land_geom_geojson, vv, vh, target_transform)
+            pixels = _sample_s1_lonlat(
+                land_geom_geojson, vv, vh, target_transform, target_crs
+            )
             if not pixels:
                 logger.info(
                     "s1_scene_skipped",
@@ -786,8 +1237,13 @@ def _process_one_s1_scene(
                     vh_stats,
                     mq_task_id=mq_task_id,
                     relative_orbit=scene.get("relative_orbit"),
+                    stac_item_id=str(scene_id) if scene_id else None,
+                    analysis_grid=describe_target_grid(
+                        target_transform, target_shape, target_crs
+                    ),
                     processing_window_km=processing_window_km,
                     processing_window_bounds=bounds,
+                    radiometric_calibration=radiometric_calibration,
                 )
                 published = True
                 logger.info(
@@ -840,6 +1296,7 @@ def _process_s1_scenes_parallel(
     bounds: tuple,
     target_shape: tuple,
     target_transform,
+    target_crs: str,
     field_mask: np.ndarray,
     org_id_str: str,
     land_id_str: str,
@@ -856,6 +1313,8 @@ def _process_s1_scenes_parallel(
 
     ``on_chunk(completed_n, processed)`` is invoked every ``workers`` completions
     so the parent can flush Redis progress into Postgres.
+
+    每个线程独立打开数据库会话；波段读取与场景级并发受worker上限控制，避免共享Session跨线程使用。
     """
     total = len(scenes)
     if total == 0:
@@ -885,6 +1344,7 @@ def _process_s1_scenes_parallel(
                 bounds=bounds,
                 target_shape=target_shape,
                 target_transform=target_transform,
+                target_crs=target_crs,
                 field_mask=field_mask,
                 org_id_str=org_id_str,
                 land_id_str=land_id_str,
@@ -938,7 +1398,7 @@ def _process_s1_http_only(
     mq_task_id: str | None,
     processing_window_km: float | None,
 ) -> dict:
-    """S1 chunk worker without SyncSession (OSS + MQ path)."""
+    """下载机无SyncSession的S1分块流程，经Internal HTTP取地块/任务并提交结果。"""
     from shapely.geometry import shape as shapely_shape
 
     from app.core.http_mode import (
@@ -1067,21 +1527,9 @@ def _process_s1_http_only(
         }
 
     bounds = processing_geom.bounds
-    pixel_size = 0.0001
-    width = max(int((bounds[2] - bounds[0]) / pixel_size), 1)
-    height = max(int((bounds[3] - bounds[1]) / pixel_size), 1)
-    max_dim = 2000
-    if width > max_dim or height > max_dim:
-        scale = max_dim / max(width, height)
-        width = max(int(width * scale), 1)
-        height = max(int(height * scale), 1)
-    target_transform = from_bounds(*bounds, width, height)
-    target_shape = (height, width)
-    field_mask = geometry_mask(
-        [mapping(land_geom)],
-        out_shape=target_shape,
-        transform=target_transform,
-        invert=True,
+    target_crs = analysis_crs_for_bounds(bounds)
+    target_transform, target_shape, field_mask, bounds = compute_target_grid(
+        bounds, land_geom, padding_degrees=0.0, target_crs=target_crs
     )
 
     workers = min(scene_max_workers(), len(scenes))
@@ -1092,6 +1540,7 @@ def _process_s1_http_only(
         bounds=bounds,
         target_shape=target_shape,
         target_transform=target_transform,
+        target_crs=target_crs,
         field_mask=field_mask,
         org_id_str=org_id_str,
         land_id_str=land_id_str,
@@ -1137,6 +1586,8 @@ def process_s1_backfill(
 
     HTTP-only download hosts may pass ``land_id`` + date kwargs instead of a
     local Job id (orchestration fans out without SyncSession Job rows).
+
+    强制HTTP模式时直接复用地块和日期参数，不访问下载机本地Job表。
     """
     from app.core.http_mode import ingest_http_only
 
@@ -1259,21 +1710,9 @@ def process_s1_backfill(
             }
 
         bounds = processing_geom.bounds
-        pixel_size = 0.0001  # ~10 m
-        width = max(int((bounds[2] - bounds[0]) / pixel_size), 1)
-        height = max(int((bounds[3] - bounds[1]) / pixel_size), 1)
-        max_dim = 2000
-        if width > max_dim or height > max_dim:
-            scale = max_dim / max(width, height)
-            width = max(int(width * scale), 1)
-            height = max(int(height * scale), 1)
-        target_transform = from_bounds(*bounds, width, height)
-        target_shape = (height, width)
-        field_mask = geometry_mask(
-            [mapping(land_geom)],
-            out_shape=target_shape,
-            transform=target_transform,
-            invert=True,
+        target_crs = analysis_crs_for_bounds(bounds)
+        target_transform, target_shape, field_mask, bounds = compute_target_grid(
+            bounds, land_geom, padding_degrees=0.0, target_crs=target_crs
         )
 
         workers = min(scene_max_workers(), len(scenes))
@@ -1301,6 +1740,7 @@ def process_s1_backfill(
             bounds=bounds,
             target_shape=target_shape,
             target_transform=target_transform,
+            target_crs=target_crs,
             field_mask=field_mask,
             org_id_str=org_id_str,
             land_id_str=land_id_str,
@@ -1399,7 +1839,7 @@ def backfill_s1_for_land(
     date_to: str | None = None,
     processing_window_km: float | None = None,
 ) -> dict:
-    """Orchestrate chunked S1 jobs for a field (same months as index backfill)."""
+    """按配置回溯窗口拆分S1日期段并派发子任务，限制单个任务的时间范围。"""
     from app.core.http_mode import ingest_http_only
 
     months = months or settings.index_backfill_months
@@ -1413,12 +1853,8 @@ def backfill_s1_for_land(
     if start_date > end_date:
         start_date, end_date = end_date, start_date
 
-    chunks: list[tuple[date, date]] = []
-    cursor = start_date
-    while cursor < end_date:
-        chunk_end = min(cursor + timedelta(days=chunk_days - 1), end_date)
-        chunks.append((cursor, chunk_end))
-        cursor = chunk_end + timedelta(days=1)
+    # S1直接回填也复用有界闭区间分片，保护绕过光学编排器的调用路径。
+    chunks = split_inclusive_date_range(start_date, end_date, chunk_days)
 
     if ingest_http_only():
         # Fan-out Celery kwargs — no SyncSession / Job rows on download host.
