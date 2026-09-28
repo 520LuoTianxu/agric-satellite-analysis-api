@@ -107,6 +107,7 @@ class _SceneOssReadBudget:
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
+    """把数据库行和JSONB字符串规范为有限数值与可安全序列化的响应字段。"""
     from decimal import Decimal
 
     d = dict(row._mapping)
@@ -138,7 +139,7 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 
 def _enrich_scene_product(d: dict[str, Any]) -> None:
-    """Normalize decloud_reasons and fill relative_orbit from scene_id."""
+    """规范化去云原因，并从S1场景编号补轨道字段以兼容历史记录。"""
     reasons = d.get("decloud_reasons")
     if isinstance(reasons, str):
         try:
@@ -207,7 +208,7 @@ def _normalize_lonlat_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
-    """Keep only dict lon/lat pixel objects from OSS JSON."""
+    """复用统一坐标与数值校验，防止旧OSS像元格式绕过响应边界。"""
     return _normalize_lonlat_pixels(raw_pixels)
 
 
@@ -222,7 +223,7 @@ def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
 
 
 def _oss_str_url(value: Any) -> str | None:
-    """Accept non-empty string URLs from OSS JSON; reject other types."""
+    """只接受旧OSS JSON中的非空字符串媒体地址，拒绝意外类型。"""
     if isinstance(value, str):
         s = value.strip()
         if s:
@@ -231,7 +232,7 @@ def _oss_str_url(value: Any) -> str | None:
 
 
 def _extract_oss_media_urls(obj: dict[str, Any]) -> dict[str, str | None]:
-    """Pull preview image URLs from an OSS parcel product JSON object."""
+    """抽取历史产品预览地址，并保留旧单热图字段到S2热图的回退语义。"""
     rgb_url = _oss_str_url(obj.get("rgb_url"))
     large_rgb_url = _oss_str_url(obj.get("large_rgb_url"))
     heatmap_url = _oss_str_url(obj.get("heatmap_url"))
@@ -338,6 +339,7 @@ def _load_oss_scene_pixels(
 
 
 def _clear_scene_media_urls(d: dict[str, Any]) -> None:
+    """清除无法从稳定OSS键重签的旧媒体字段，避免回传过期预览链接。"""
     d["rgb_url"] = None
     d["large_rgb_url"] = None
     d["heatmap_url"] = None

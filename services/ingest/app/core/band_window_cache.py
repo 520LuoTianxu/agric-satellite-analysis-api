@@ -24,7 +24,7 @@ import numpy as np
 
 logger = logging.getLogger("openfarm.ingest.band_window_cache")
 
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 _META_KEY = "__window_cache_meta__"
 _prune_lock = threading.Lock()
 _last_prune_monotonic = 0.0
@@ -48,7 +48,7 @@ def window_cache_root() -> Path:
         scratch = str(
             os.environ.get("OPENFARM_SCRATCH_DIR", "/data/scratch")
         ).strip() or "/data/scratch"
-        root = Path(scratch) / "band_windows" / "v5"
+        root = Path(scratch) / "band_windows" / "v6"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -137,7 +137,7 @@ def read_scene_window(
     calibration_hrefs: Mapping[str, str] | None = None,
     resampling_by_band: Mapping[str, object] | None = None,
 ) -> dict[str, np.ndarray] | None:
-    """读取完全匹配源、定标资产与目标网格的 v5 窗口；损坏缓存自动失效。"""
+    """读取完全匹配源、定标资产与目标网格的 v6 窗口；损坏缓存自动失效。"""
     if not window_cache_enabled() or not band_hrefs:
         return None
     meta = _cache_meta(

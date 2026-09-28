@@ -93,7 +93,7 @@ from agric_satellite_analysis_common.date_chunks import split_inclusive_date_ran
 logger = structlog.get_logger()
 
 STAC_S1_COLLECTION = S1_STAC_COLLECTION
-AGRI_S1_ALGORITHM_VERSION = "stac-s1-lonlat-v5"
+AGRI_S1_ALGORITHM_VERSION = "stac-s1-lonlat-v6"
 # Nominal IW GRDH amplitude calibration scale so DN→dB lands near typical σ⁰.
 # 仅供缺少定标资产的非标准目录回退；Planetary Computer GRD默认使用逐景Sigma0 LUT。
 _S1_DN_CAL = 1000.0
@@ -350,13 +350,14 @@ def _calibrate_source_window_sigma0(
 ) -> np.ndarray:
     """先在COG原生像元上应用Aσ LUT，输出可安全重采样的线性功率。"""
     height, width = amplitude.shape
-    source_cols = np.arange(width, dtype=np.float64)[None, :] + col_offset + 0.5
+    # ESA校准向量用从0开始的像元中心编号，与NumPy数组行列号一致，不能再加半像元。
+    source_cols = np.arange(width, dtype=np.float64)[None, :] + col_offset
     source_power = np.full(amplitude.shape, np.nan, dtype=np.float32)
     # LUT插值和浮点运算按128行分块，避免大窗口同时复制多份全尺寸float64数组。
     for start in range(0, height, 128):
         stop = min(start + 128, height)
         source_rows = (
-            np.arange(start, stop, dtype=np.float64)[:, None] + row_offset + 0.5
+            np.arange(start, stop, dtype=np.float64)[:, None] + row_offset
         )
         sigma0_factor = _sigma0_calibration_factor_at_pixels(
             lut, source_rows, source_cols
@@ -682,7 +683,7 @@ def _write_index_cog(
     scene_date: date,
     stem: str,
 ) -> str:
-    """Write float32 COG to active storage; return storage URI."""
+    """将float32遥感指数写为COG并上传当前存储后端，返回稳定对象地址。"""
     object_key = f"cogs/{org_id}/{land_id}/{scene_date.isoformat()}/{stem}.tif"
     src_fd, tmp_src = tempfile.mkstemp(suffix="_src.tif")
     dst_fd, tmp_dst = tempfile.mkstemp(suffix="_cog.tif")
@@ -773,7 +774,7 @@ def _resolve_land_meta(
     land_id: str,
     remote: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Read metadata from the canonical parcel row without identity translation."""
+    """只读取规范地块元数据并校验内部API返回的ID，避免结果写入错地块。"""
     if remote is not None:
         if str(remote.get("land_id") or "") != str(land_id):
             raise RuntimeError("internal land response does not match requested land_id")
@@ -1161,7 +1162,7 @@ def _process_one_s1_scene(
                     provenance_json={
                         "scene_id": scene["id"],
                         "processed_at": datetime.now(timezone.utc).isoformat(),
-                        "pipeline_version": "s1-4.0.0",
+                        "pipeline_version": "s1-4.0.1",
                         "algorithm_version": AGRI_S1_ALGORITHM_VERSION,
                         "quality_score_method": PARCEL_VALID_FRACTION_V1,
                         "radiometric_calibration": radiometric_calibration,

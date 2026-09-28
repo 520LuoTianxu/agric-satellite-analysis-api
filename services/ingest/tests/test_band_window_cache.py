@@ -1,4 +1,4 @@
-"""共享卫星窗口缓存 v5 的键校验、原子读写与 LRU 测试。"""
+"""共享卫星窗口缓存 v6 的键校验、原子读写与 LRU 测试。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ from unittest.mock import patch
 import numpy as np
 
 from app.core.band_window_cache import (
+    CACHE_SCHEMA_VERSION,
     prune_window_cache,
     read_scene_window,
+    window_cache_root,
     write_scene_window,
 )
 
@@ -29,6 +31,14 @@ class BandWindowCacheTests(unittest.TestCase):
             "BAND_WINDOW_CACHE_MIN_FREE_GB": "0",
             "BAND_WINDOW_CACHE_PRUNE_INTERVAL_SEC": "0",
         }
+
+    def test_schema_and_default_directory_are_versioned_for_s1_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"BAND_WINDOW_CACHE_DIR": "", "OPENFARM_SCRATCH_DIR": tmp},
+        ):
+            self.assertEqual(CACHE_SCHEMA_VERSION, 6)
+            self.assertEqual(window_cache_root(), Path(tmp) / "band_windows" / "v6")
 
     def test_round_trip_ignores_rotating_query_string(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

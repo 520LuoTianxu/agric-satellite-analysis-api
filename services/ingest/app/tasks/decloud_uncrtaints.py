@@ -83,7 +83,7 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 S1_MATCH_DAYS = 6
-DECLOUD_ALGORITHM_VERSION = "uncrtaints-decloud-v4"
+DECLOUD_ALGORITHM_VERSION = "uncrtaints-decloud-v5"
 
 
 def _database_url_configured() -> bool:

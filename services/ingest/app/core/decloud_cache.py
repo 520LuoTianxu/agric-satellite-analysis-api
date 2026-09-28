@@ -56,15 +56,15 @@ def window_grid_key(
 
 
 def cache_root() -> Path:
-    # 网格和S1定标口径都改变窗口数组含义；换目录避免旧缓存覆盖新算法结果。
+    # S1定标的像元中心索引口径改变；换目录避免旧辅助特征数组覆盖新算法结果。
     explicit = (os.environ.get("DECLOUD_CACHE_DIR") or "").strip()
     if explicit:
-        root = Path(explicit) / "v3_sigma0_lut"
+        root = Path(explicit) / "v4_sigma0_lut"
     else:
         scratch = (
             os.environ.get("OPENFARM_SCRATCH_DIR") or "/data/scratch"
         ).strip() or "/data/scratch"
-        root = Path(scratch) / "decloud_windows" / "v3_sigma0_lut"
+        root = Path(scratch) / "decloud_windows" / "v4_sigma0_lut"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
