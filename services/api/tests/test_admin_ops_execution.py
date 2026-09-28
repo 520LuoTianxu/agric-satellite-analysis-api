@@ -265,6 +265,44 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
         self.assertEqual(out.child_counts["terminal"], 2)
         self.assertEqual(out.child_counts["failed"], 1)
 
+    def test_smart_backfill_children_are_hidden_under_parent_group(self):
+        now = datetime.now(timezone.utc)
+        parent_id = uuid.uuid4()
+        parent = SimpleNamespace(
+            id=parent_id,
+            land_id=None,
+            type="smart_land_backfill",
+            status="running",
+            progress_json={"stage": "dispatched", "land_count": 1000},
+            params_json={"job_ids": [str(uuid.uuid4())]},
+            error=None,
+            created_at=now,
+            started_at=now,
+            finished_at=None,
+        )
+        child = SimpleNamespace(
+            id=uuid.uuid4(),
+            land_id="61224",
+            type="satellite_batch",
+            status="completed",
+            parent_job_id=parent_id,
+            progress_json={},
+            params_json={},
+            error=None,
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+        )
+        parent.params_json["job_ids"] = [str(child.id)]
+
+        groups = _build_execution_groups([parent, child], [])
+
+        self.assertEqual(len(groups), 1)
+        out = _to_execution_group_out(groups[0])
+        self.assertEqual(out.type, "smart_land_backfill")
+        self.assertEqual(out.status, "completed")
+        self.assertEqual(out.child_counts["jobs"], 1)
+
 
 if __name__ == "__main__":
     import unittest

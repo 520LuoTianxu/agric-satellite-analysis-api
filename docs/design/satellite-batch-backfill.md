@@ -1,4 +1,4 @@
-# 按landIdList聚合遥感回填
+# 按地块清单动态规划10km窗口的遥感回填
 
 `POST /v1/lands/backfill-indices/batch`，返回HTTP 202。
 
@@ -15,28 +15,27 @@
 一次最多1000个编号，空清单、空编号、无效日期返回422；不存在或已删除的地块返回404且整批不派发。
 复用现有写权限依赖（owner/admin/member）；当前项目鉴权模块处于匿名绕过模式，接口行为与现有地块接口一致。
 
-## 聚合与下载
+## 动态聚合与下载
 
-- **只处理请求中的地块**，不纳入数据库中其他邻居。
-- 按land_id排序选取未分组地块为锚点，以地块中心建立当地米制等距投影，生成边长5000米的矩形，向四周各延伸2500米。
-- 完整边界落入矩形的请求地块并入同组，每个地块只属于一个组；矩形四角也可纳入，不使用圆形半径判断。
-- 跨矩形边界的地块另外分组；自身大于矩形的地块独立拉取完整范围，响应`oversized=true`。
-- 下载机实际以锚点的5×5公里矩形作为STAC检索和栅格窗口，不再把组内地块外接矩形当作共享范围；这样每个共享任务都覆盖完整的周边上下文。地块边界只用于逐地块掩膜和统计。
-- 每个组、传感器、日期分片创建一个Job。日期范围两端都包含，分片沿用`INDEX_BACKFILL_CHUNK_DAYS`（默认90天）。
-- 每景光谱波段只下载一次，逐地块在内存中重采样到既有网格并掩膜。像元、统计、云量与RGB预览分别按land_id发布；大图预览复用组窗口。
+- 本轮输入地块经 Smart 补齐/数据库查询后，统一进入 10×10km 动态窗口规划器；不查询持久化分组，也不匹配历史窗口。
+- 每轮从剩余地块中选全局候选 anchor，按稀缺地块保护、成员数量、紧凑度等评分选窗口；窗口中心由规划器优化，不以 anchor 地块中心固定居中。
+- 普通组保证所有成员地块完整落在精确 `processing_boundary_geojson` 内；超过10km的地块独立处理，使用覆盖其完整范围的窗口。
+- 每个本轮空间组、传感器、日期分片创建一个 Job，参数仅带地块ID、临时窗口边界和查询日期，不持久化项目区ID/归属。日期两端都包含，分片沿用 `INDEX_BACKFILL_CHUNK_DAYS`。
+- worker 每次重新搜索 STAC 并读取 COG，不从 OSS 或本地磁盘复用10km窗口像素，不上传10km级影像/JSON/PNG。只在内存中共享读取一次，再按各地块边界裁剪/重采样并保存单地块 JSON 产品。
+- S2 默认走 AWS/Element84 公共 Sentinel-2 COG；STAC搜索无结果/失败或主源 COG 读取失败时，才降级到 Planetary Computer 并使用 SAS 签名。S1 继续使用现有 Planetary Computer/STAC 流程。
 - 跳过已有日期及未完整覆盖地块的景；S2沿用作物季节云量过滤和去云缓存/调度。`force=true`重新处理已有日期，同一任务每地块每天只发布首个成功景。
 - 所有地块元数据、已有日期和任务状态通过Internal HTTP读取/更新，下载机无Postgres/远程Redis会话。结果继续通过OSS场景JSON和结果MQ写入`parcel_scene_products`。
-- 下载机执行时会再次用最新地块边界校验`covers`：只有完整落在5×5公里窗口内的地块才进入共享任务；与窗口相交但跨出窗口的地块被排除，不会被截断后并入处理。每日更新任务与手工聚合回填使用同一规则。
+- 日增量、周度过期补拉、Smart同步、手动单地块/批量回填、报告拉取和管理员历史回填都使用同一无状态规划与任务构造器。旧`satellite_analysis`消息仍保留兼容消费者，但新增业务入口不再生产逐地块任务。
 
 ## 响应及状态
 
 返回`land_count`、`group_count`、`job_count`、日期范围和`groups`。
-每组包含`anchor_land_id`、`land_ids`、`aggregation_bbox`、`download_bbox`、`oversized`、`job_ids`。
-两种bbox均为WGS84 `[min_lon, min_lat, max_lon, max_lat]`；`aggregation_bbox`是米制矩形投影回经纬度后的外接范围。普通组下载机使用`aggregation_bbox`作为共享窗口；`download_bbox`主要用于超大地块的完整独立处理和兼容旧任务。
+每组包含`anchor_land_id`、`land_ids`、`aggregation_bbox`、`download_bbox`、`processing_boundary_geojson`、`oversized`、`job_ids`。
+两种bbox均为WGS84 `[min_lon, min_lat, max_lon, max_lat]`；10×10公里真实窗口以Job中的`processing_boundary_geojson`为准，bbox用于检索和响应展示。
 
 用`GET /v1/jobs/{job_id}`查询分片状态：`pending`、`running`、`completed`、`failed`。
 `progress_json`记录`scenes_total`、`scenes_done`、`products_published`、`failed`。
-`products_published`表示场景已上传OSS并发布结果消息，数据入库由现有结果写入服务异步完成。
+`products_published`表示单地块结果已发布，数据入库由现有结果写入服务异步完成。
 没有新景时任务完成且产出为零；任何下载或地块景处理失败时任务标记失败，已成功结果保留。
 API派发部分失败时，错误响应包含`queued_job_ids`和`failed_job_ids`供调用方核对。
 

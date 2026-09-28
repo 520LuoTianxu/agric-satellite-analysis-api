@@ -1,24 +1,26 @@
-"""只聚合请求中的地块，使用当地米制投影计算5×5公里区域。"""
+"""按动态 10×10 km 窗口规划并构造一次性遥感下载任务。"""
 
-import uuid
+from __future__ import annotations
+
 import math
-from collections.abc import Sequence
-from datetime import date
+import uuid
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
+from typing import Any
 
-from pyproj import CRS, Transformer
-from shapely.geometry import box
-from shapely.ops import transform, unary_union
-from shapely.strtree import STRtree
-
-from agric_satellite_analysis_common.date_chunks import split_inclusive_date_range
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
 from app.models.tables import Job, LandParcel
 from app.schemas.satellite_batch import SatelliteBatchGroup
+from app.services.virtual_area_planner import (
+    DEFAULT_WINDOW_SIDE_M,
+    VPA10_ALGORITHM_VERSION,
+    plan_virtual_areas,
+)
 
 
 def satellite_land_geometry(land: LandParcel):
-    """统一校验下载所需边界，定时任务可单独隔离无效地块而不中断全国批次。"""
+    """校验一次性遥感任务使用的地块边界，坏数据不进入几何规划。"""
     geom = geojson_to_shape(land.boundary_geojson)
     if (
         land.boundary_srid != 4326
@@ -38,57 +40,24 @@ def satellite_land_geometry(land: LandParcel):
 
 
 def group_satellite_lands(lands: Sequence[LandParcel]) -> list[SatelliteBatchGroup]:
-    """按稳定地块顺序选锚点；完整包含才共享窗口，超大地块独立处理。"""
-    geometries = {land.land_id: satellite_land_geometry(land) for land in lands}
+    """每次按本次输入地块重新规划 10km 窗口，不读写项目区主数据。"""
+    valid_lands = list(lands)
+    for land in valid_lands:
+        satellite_land_geometry(land)
 
-    remaining = dict(sorted(geometries.items()))
-    land_keys = list(remaining)
-    # 全国清单先用空间索引筛邻居，避免每个锚点遍历所有远处地块。
-    tree = STRtree(list(remaining.values()))
-    groups = []
-    while remaining:
-        anchor_id = next(iter(remaining))
-        anchor = remaining[anchor_id]
-        center = anchor.centroid
-        # 经纬度单位不是公里；以锚点建立局部等距投影，避免高纬地区尺寸失真。
-        local_crs = CRS.from_proj4(
-            f"+proj=aeqd +lat_0={center.y} +lon_0={center.x} +datum=WGS84 +units=m"
+    plans = plan_virtual_areas(valid_lands, window_side_m=DEFAULT_WINDOW_SIDE_M)
+    return [
+        SatelliteBatchGroup(
+            anchor_land_id=plan.anchor_land_id,
+            land_ids=list(plan.land_ids),
+            aggregation_bbox=plan.aggregation_bbox,
+            # 窗口边界来自规划器选出的动态中心，不再用地块中心重新居中。
+            download_bbox=plan.aggregation_bbox,
+            processing_boundary_geojson=plan.boundary_geojson,
+            oversized=plan.oversized,
         )
-        to_local = Transformer.from_crs(4326, local_crs, always_xy=True)
-        to_wgs = Transformer.from_crs(local_crs, 4326, always_xy=True)
-        square = box(-2500, -2500, 2500, 2500)
-        aggregation_bbox = transform(to_wgs.transform, square.segmentize(100)).bounds
-        oversized = not square.covers(transform(to_local.transform, anchor))
-        members = [anchor_id]
-        if not oversized:
-            candidates = sorted(
-                land_keys[int(i)] for i in tree.query(box(*aggregation_bbox))
-            )
-            members.extend(
-                land_id
-                for land_id in candidates
-                # 先用经纬度外接范围排除远处地块，避免离散清单做大量投影转换。
-                if land_id != anchor_id
-                and land_id in remaining
-                and (geom := remaining[land_id]) is not None
-                and geom.bounds[0] >= aggregation_bbox[0]
-                and geom.bounds[1] >= aggregation_bbox[1]
-                and geom.bounds[2] <= aggregation_bbox[2]
-                and geom.bounds[3] <= aggregation_bbox[3]
-                and square.covers(transform(to_local.transform, geom))
-            )
-        # 保留组内地块外接范围供超大/旧任务兼容；普通下载任务使用 aggregation_bbox。
-        download_bbox = unary_union([remaining.pop(key) for key in members]).bounds
-        groups.append(
-            SatelliteBatchGroup(
-                anchor_land_id=anchor_id,
-                land_ids=members,
-                aggregation_bbox=aggregation_bbox,
-                download_bbox=download_bbox,
-                oversized=oversized,
-            )
-        )
-    return groups
+        for plan in plans
+    ]
 
 
 def build_satellite_batch_jobs(
@@ -101,64 +70,108 @@ def build_satellite_batch_jobs(
     parent_job_id: uuid.UUID | None = None,
     id_namespace: uuid.UUID | None = None,
     chunk_days: int | None = None,
+    land_date_windows: Mapping[str, tuple[date, date]] | None = None,
+    job_land_id: str | None = None,
+    extra_params: Mapping[str, Any] | None = None,
 ) -> tuple[list[SatelliteBatchGroup], list[Job]]:
-    """为一批地块构造共享遥感 Job，不在这里提交数据库或派发消息。
-
-    批量选地报告和独立遥感回填都需要完全一致的 5×5 km 分组、日期分片
-    和任务参数；集中构造可以避免两个入口逐渐产生不同的聚合规则。
-    ``id_namespace`` 用于批量报告重试时生成稳定 Job ID，防止重复下载。
-    """
+    """构造临时空间组任务；相同组/日期/传感器只读一次共享 COG 窗口。"""
     if date_from > date_to:
         raise ValueError("date_from must be no later than date_to")
 
-    chunk_days = max(
+    groups = group_satellite_lands(lands)
+    jobs: list[Job] = []
+    unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
+    chunk = max(
         int(settings.index_backfill_chunk_days if chunk_days is None else chunk_days), 1
     )
-    # API批次与worker回填复用同一闭区间和跨度上限，先校验日期再做空间分组。
-    date_chunks = split_inclusive_date_range(date_from, date_to, chunk_days)
-    groups = group_satellite_lands(lands)
-    unique_sensors = list(dict.fromkeys(str(sensor) for sensor in sensors))
-    job_count = len(groups) * len(date_chunks) * len(unique_sensors)
-    max_jobs = settings.satellite_batch_max_jobs
-    if job_count > max_jobs:
+    date_windows = {str(key): value for key, value in (land_date_windows or {}).items()}
+
+    # 先按每个空间组的实际日期窗口估算任务数，超限时在构造 Job 前快速拒绝。
+    planned_groups: list[tuple[SatelliteBatchGroup, date, date, str]] = []
+    estimated_job_count = 0
+    for group in groups:
+        group_windows = [
+            date_windows[land_id]
+            for land_id in group.land_ids
+            if land_id in date_windows
+        ]
+        group_date_from = min((window[0] for window in group_windows), default=date_from)
+        group_date_to = max((window[1] for window in group_windows), default=date_to)
+        if group_date_from > group_date_to:
+            raise ValueError(f"分组{group.anchor_land_id}的日期范围无效")
+        member_key = ",".join(sorted(group.land_ids))
+        planned_groups.append((group, group_date_from, group_date_to, member_key))
+        day_count = (group_date_to - group_date_from).days + 1
+        chunk_count = (day_count + chunk - 1) // chunk
+        estimated_job_count += chunk_count * len(unique_sensors)
+
+    max_jobs = max(int(settings.satellite_batch_max_jobs), 1)
+    if estimated_job_count > max_jobs:
         raise ValueError(
-            f"本批次预计创建{job_count}个遥感任务，超过单批上限{max_jobs}；"
+            f"本批次预计创建{estimated_job_count}个遥感任务，超过单批上限{max_jobs}；"
             "请缩短日期范围、减少地块/传感器，或拆成多个批次提交"
         )
 
-    jobs: list[Job] = []
-    processing_window_km = 5.0
-
-    for group in groups:
-        for chunk_start, chunk_end in date_chunks:
+    for group, group_date_from, group_date_to, member_key in planned_groups:
+        cursor = group_date_from
+        while cursor <= group_date_to:
+            end = min(cursor + timedelta(days=chunk - 1), group_date_to)
             for sensor in unique_sensors:
                 if id_namespace is None:
                     job_id = uuid.uuid4()
                 else:
                     job_id = uuid.uuid5(
                         id_namespace,
-                        f"satellite_batch:{group.anchor_land_id}:{sensor}:"
-                        f"{chunk_start.isoformat()}:{chunk_end.isoformat()}",
+                        f"satellite-batch-10km:{group.anchor_land_id}:{member_key}:"
+                        f"{sensor}:{cursor.isoformat()}:{end.isoformat()}",
                     )
+                params = {
+                    **dict(extra_params or {}),
+                    "land_ids": list(group.land_ids),
+                    "anchor_land_id": group.anchor_land_id,
+                    "processing_window_km": DEFAULT_WINDOW_SIDE_M / 1000,
+                    "processing_window_side_m": DEFAULT_WINDOW_SIDE_M,
+                    "processing_boundary_geojson": group.processing_boundary_geojson,
+                    "aggregation_bbox": list(group.aggregation_bbox),
+                    "download_bbox": list(group.download_bbox),
+                    "oversized": group.oversized,
+                    "sensor": sensor,
+                    "date_from": cursor.isoformat(),
+                    "date_to": end.isoformat(),
+                    "force": force,
+                    "grouping_algorithm": VPA10_ALGORITHM_VERSION,
+                }
                 job = Job(
                     id=job_id,
-                    land_id=group.anchor_land_id,
+                    land_id=job_land_id or group.anchor_land_id,
                     type="satellite_batch",
                     status="pending",
                     parent_job_id=parent_job_id,
-                    params_json={
-                        "land_ids": group.land_ids,
-                        "anchor_land_id": group.anchor_land_id,
-                        "processing_window_km": processing_window_km,
-                        "oversized": group.oversized,
-                        "download_bbox": list(group.download_bbox),
-                        "aggregation_bbox": list(group.aggregation_bbox),
-                        "sensor": sensor,
-                        "date_from": chunk_start.isoformat(),
-                        "date_to": chunk_end.isoformat(),
-                        "force": force,
-                    },
+                    params_json=params,
                 )
                 group.job_ids.append(str(job.id))
                 jobs.append(job)
+            cursor = end + timedelta(days=1)
     return groups, jobs
+
+
+async def create_satellite_batch_jobs(
+    db,
+    lands: Sequence[LandParcel],
+    **kwargs: Any,
+) -> tuple[list[SatelliteBatchGroup], list[Job], dict[str, Any]]:
+    """统一的 API 编排入口；只把下载 Job 写入队列，不持久化空间分组。"""
+    groups, jobs = build_satellite_batch_jobs(lands, **kwargs)
+    db.add_all(jobs)
+    return groups, jobs, {
+        "algorithm_version": VPA10_ALGORITHM_VERSION,
+        "window_side_m": DEFAULT_WINDOW_SIDE_M,
+    }
+
+
+__all__ = [
+    "build_satellite_batch_jobs",
+    "create_satellite_batch_jobs",
+    "group_satellite_lands",
+    "satellite_land_geometry",
+]

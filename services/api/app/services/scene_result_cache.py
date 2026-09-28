@@ -157,6 +157,21 @@ async def consume_cached_scene_results() -> None:
                 stats = await asyncio.to_thread(apply_result_envelope, envelope)
                 if not isinstance(stats, dict) or not _scene_upsert_succeeded(stats):
                     raise RuntimeError(f"scene result was not applied: {stats}")
+                # 预警重算必须在场景事务完成后执行，否则最新观测可能还未进入主库。
+                from app.services.agri_alerts import evaluate_alerts_for_scene_result
+
+                try:
+                    await asyncio.to_thread(
+                        evaluate_alerts_for_scene_result,
+                        envelope,
+                        stats,
+                    )
+                except Exception as alert_exc:
+                    logger.exception(
+                        "satellite_scene_alert_evaluation_failed",
+                        result_id=result_id,
+                        error=str(alert_exc),
+                    )
                 await redis_client.lrem(SCENE_RESULT_PROCESSING, 1, result_id)
                 await redis_client.delete(_item_key(result_id))
                 logger.info(

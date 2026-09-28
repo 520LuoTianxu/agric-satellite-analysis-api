@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     index_backfill_chunk_days: int = 90
     index_weekly_batch_size: int = 50
     # 每个下载机地块任务的检索/读取窗口边长；地块指标仍按原始边界掩膜。
-    processing_window_km: float = 5.0
+    processing_window_km: float = 10.0
 
     # Soil Data
     soilgrids_wcs_base_url: str = "https://maps.isric.org/mapserv"
@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # Celery --concurrency is separate (typically 4); this speeds the per-job
     # serial scene loop. Each thread opens its own DB session.
     ingest_scene_max_workers: int = 16
+    # Rolling grace (seconds) after the last parallel scene completion before
+    # abandoning still in-flight scenes so a stuck COG/HTTP call cannot block
+    # batch finalize forever. Also applied from parallel start if zero scenes finish.
+    ingest_scene_straggler_timeout_sec: float = 30.0
     # Process-wide cap on concurrent windowed band reads (GDAL/rasterio).
     # Nested under the scene pool; see app.core.band_parallel.
     ingest_band_max_workers: int = 8
@@ -99,3 +103,12 @@ def scene_max_workers() -> int:
     except (TypeError, ValueError):
         n = 16
     return max(1, n)
+
+
+def scene_straggler_timeout_sec() -> float:
+    """Rolling seconds to wait after last scene completion before abandoning stragglers."""
+    try:
+        n = float(settings.ingest_scene_straggler_timeout_sec)
+    except (TypeError, ValueError):
+        n = 30.0
+    return max(1.0, n)

@@ -1,4 +1,4 @@
-"""Pydantic schemas for agric_satellite data (项目区 / 地块 / S1·S2 产品)."""
+"""Pydantic schemas for agric_satellite 地块与 S1/S2 产品数据。"""
 
 from __future__ import annotations
 
@@ -9,55 +9,6 @@ from pydantic import BaseModel, Field
 
 
 Sensor = Literal["S1", "S2"]
-
-
-class ProjectAreaOut(BaseModel):
-    """virtual_project_areas row (项目区 / ~5km tile)."""
-
-    tile_id: str
-    project_key: str | None = None
-    anchor_land_id: str | None = None
-    assignment_type: str | None = None
-    parcel_count: int | None = None
-    tile_width_m: float | None = None
-    tile_height_m: float | None = None
-    group_id: str | None = None
-    group_name: str | None = None
-    base_id: str | None = None
-    org_code: str | None = None
-    org_name: str | None = None
-    province_name: str | None = None
-    city_name: str | None = None
-    county_name: str | None = None
-    boundary_geojson: dict[str, Any] | None = None
-    boundary_srid: int | None = None
-    min_lon: float | None = None
-    min_lat: float | None = None
-    max_lon: float | None = None
-    max_lat: float | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    land_count: int | None = None
-
-
-class ProjectAreaLandOut(BaseModel):
-    """virtual_project_area_lands join row (+ optional parcel fields)."""
-
-    tile_id: str
-    land_id: str
-    assignment_type: str | None = None
-    is_anchor: bool | None = None
-    intersection_area_m2: float | None = None
-    coverage_ratio: float | None = None
-    land_name: str | None = None
-    land_area_mu: float | None = None
-    province_name: str | None = None
-    city_name: str | None = None
-    county_name: str | None = None
-    min_lon: float | None = None
-    min_lat: float | None = None
-    max_lon: float | None = None
-    max_lat: float | None = None
 
 
 class LandParcelOut(BaseModel):

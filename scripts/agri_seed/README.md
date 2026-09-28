@@ -6,8 +6,6 @@ Imports the Aliyun agricultural data into the single `agric_satellite` applicati
 
 | Object | Role | Seed rows (sample dump) |
 | --- | --- | --- |
-| `agric_satellite.virtual_project_areas` | 项目区 / ~5km tiles | 6158 |
-| `agric_satellite.virtual_project_area_lands` | tile ↔ land | 14050 |
 | `agric_satellite.land_parcels` | 地块 + `boundary_geojson` | 14050 |
 | `agric_satellite.parcel_scene_products` | S1/S2 products (indexes + optional `pixel_data`) | **1000 sample** |
 | `agric_satellite.ingest_*` | OSS ingest ledger / runs | full |
@@ -16,6 +14,10 @@ Imports the Aliyun agricultural data into the single `agric_satellite` applicati
 - Optical growth curves: S2 `ndvi/evi/ndmi/ndre/mndwi/cire` averages.
 - SAR: S1 `vv` / `vh` averages.
 - Pixel JSON on OSS under prefix `s1s2_parcel/json/` (`pixel_data_url` / `json_oss_key`).
+- Spatial grouping is transient: each request runs the 10×10 km dynamic-window
+  planner and keeps its boundary only in the satellite Job parameters.
+- The current schema intentionally has no project-area membership or shared
+  pixel-cache tables. Only parcel-level products are persisted.
 
 The **213MB** joined SQL dump is **not** committed. Place it locally (gitignored).
 
@@ -96,48 +98,39 @@ After import (and API restart if needed), authenticated org members can call:
 
 - `GET /v1/agri/stats` — row counts
 - `GET /v1/agri/admin/import-status` — same counts (read-only admin status)
-- `GET /v1/agri/project-areas` — list 项目区 tiles
-- `GET /v1/agri/project-areas/{tile_id}`
-- `GET /v1/agri/project-areas/{tile_id}/lands`
 - `GET /v1/agri/lands/{land_id}`
 - `GET /v1/agri/lands/{land_id}/scenes` — time series (`?sensor=S1|S2`, `from`, `to`; `?include_pixels=1` optional)
 - `GET /v1/agri/lands/{land_id}/scenes/summary`
 
 Auth: same `Authorization` + `X-Org-Id` as other routers (viewer+ for GET; member+ for imports).
 
+## 10km historical backfill
+
+- `POST /v1/admin/satellite-batch/history-backfill` — 按本次地块集合动态规划 10×10 km S1/S2 历史下载，默认五年。
+- 设置 `SCHEDULE_SATELLITE_HISTORY_ENABLED=true` 后，下载机 Beat 每周二北京时间 02:30 请求 API 机下发历史任务；默认关闭。
+- 每轮均重新搜索 STAC 并读取 COG，不读取或上传 10×10 km 像素缓存；只写入单地块 JSON 产品。
+
 ## Product model (primary)
 
 | Agri | Role |
 | --- | --- |
-| `virtual_project_areas` | 项目区 (~5km tiles) — list/map entry point |
 | `land_parcels` | 地块 with `boundary_geojson` |
 | `parcel_scene_products` | S2 optical indices + S1 VV/VH time series |
 
 `/v1/lands` is the canonical parcel API. Every parcel-related API, task, and
 report uses `land_parcels.land_id`; there is no second `fields` table or
 parcel-ID mapping layer. The `/v1/agri/*` routes are read-oriented scene and
-project-area endpoints over the same canonical rows.
+parcel endpoints over the same canonical rows.
 
 ## Files in this folder
 
 - `001_agri_schema.sql` — DDL only (CREATE SCHEMA/TABLE/VIEW/INDEX/FK)
+- `004_vpa10_virtual_area.sql` — historical migration retained for upgrade ordering
+- `005_remove_virtual_project_areas.sql` — drop legacy project-area tables/view after import
 - `import_agri_seed.sh` — join + import helper
 - `join_export.sh` — concatenate `agri_export.sql.part-*.sql`
 - `manifest.json` — part checksums + expected joined sha256
 
-
-## Assign project areas to farm containers
-
-Create/update one `farms` container per project tile and fill the optional
-`land_parcels.farm_id` ownership column. The utility never creates a parcel
-mirror, UUID identity, or tag-based mapping.
-
-```bash
-python3 scripts/agri_seed/sync_project_areas_to_farms.py
-```
-
-Uses `PGHOST`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` or `DATABASE_URL_SYNC`.
-Does not delete existing sample farms.
 
 ## Agri data plane
 

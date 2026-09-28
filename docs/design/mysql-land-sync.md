@@ -14,19 +14,12 @@ advisory lock `agric-satellite:mysql-land-sync`, streams the MySQL snapshot in
 batches, validates the pipe-delimited WGS84 polygon, and commits each target
 batch before dispatching remote-sensing work.
 
-New or boundary-changed parcels receive a deterministic backfill job covering
-the previous 24 calendar months. The task is dispatched as
-`satellite_analysis`, so both S2 optical indices and S1 VV/VH products use the
-existing download and result-ingest pipeline. Metadata-only changes do not
-re-download two years of imagery.
-
-Each download-host parcel task uses a 5 km × 5 km square centered on the
-parcel centroid for STAC search and raster reads. Products and statistics are
-still masked by the original parcel polygon. For grouped daily jobs, only
-parcels whose complete boundary is covered by the anchor parcel's square are
-included; a parcel crossing the square boundary is excluded from that group.
-An oversized anchor parcel is processed independently using its complete
-bounding rectangle.
+New or boundary-changed parcels are included in one transient 10×10 km grouping
+plan for that sync run. The API dispatches shared `satellite_batch` jobs covering
+the previous 24 calendar months for S1 and S2. Each job fetches fresh STAC/COG
+data, crops it in memory, and persists only parcel-level results. No project-area
+membership or full-window pixel assets are read or written. Metadata-only changes
+do not trigger a historical pull.
 
 ## Source-specific decisions
 
@@ -47,4 +40,5 @@ bounding rectangle.
 Keep `MYSQL_SOURCE_URL` only in the API-machine private `.env`. Grant the
 MySQL account `SELECT` on the two source tables, restrict MySQL network access
 to the API machine, and inspect `AuditEvent(event_type='mysql_land_sync')` plus
-the generated `backfill` jobs when a run is partial.
+the generated `smart_land_sync_satellite` parent jobs and `satellite_batch`
+children when a run is partial.

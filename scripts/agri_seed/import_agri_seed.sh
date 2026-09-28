@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 SEED_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 SCHEMA_ONLY_SQL="$SEED_DIR/001_agri_schema.sql"
+REMOVE_PROJECT_AREAS_SQL="$SEED_DIR/005_remove_virtual_project_areas.sql"
 DEFAULT_SQL="${AGRI_SQL:-$ROOT/data/agri_export.sql}"
 
 RESET=0
@@ -157,6 +158,10 @@ fi
 
 echo "Applying…"
 run_psql_file "$SQL_PATH"
+if [[ -f "$REMOVE_PROJECT_AREAS_SQL" ]]; then
+  echo "Applying current-schema cleanup…"
+  run_psql_file "$REMOVE_PROJECT_AREAS_SQL"
+fi
 
 echo "Row counts:"
 run_sql "SELECT relname AS table, n_live_tup AS approx_rows

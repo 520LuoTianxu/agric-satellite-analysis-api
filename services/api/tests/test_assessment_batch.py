@@ -155,6 +155,9 @@ class _BatchDb:
     def add(self, item):
         self.added.append(item)
 
+    def add_all(self, items):
+        self.added.extend(items)
+
     async def commit(self):
         self.commit_count += 1
 
@@ -170,6 +173,7 @@ class AssessmentBatchRouteTests(unittest.IsolatedAsyncioTestCase):
                 "landIdList": ["A", "B"],
                 "crop_type": "rice",
                 "date_from": "2026-08-01",
+                "date_to": "2026-08-01",
                 "sensors": ["S2"],
             }
         )
@@ -241,6 +245,12 @@ class SmartSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CAST(al.land_id AS CHAR) IN (:selected_land_0, :selected_land_1)", query.text)
         self.assertNotIn("'A'", query.text)
         self.assertEqual(params, {"selected_land_0": "A", "selected_land_1": "B"})
+
+    def test_manual_query_can_include_schedule_filtered_lands(self):
+        query, _ = _selected_source_query(
+            ["A"], include_excluded_schedule_lands=True
+        )
+        self.assertNotIn("lg.base_id <> 46", query.text)
 
     async def test_disabled_smart_source_does_not_open_database_connections(self):
         with patch("app.services.mysql_land_sync.settings.mysql_source_enabled", False):

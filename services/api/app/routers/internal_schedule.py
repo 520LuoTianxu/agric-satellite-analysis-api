@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
@@ -24,14 +24,14 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
-from app.models.tables import Job
+from app.models.tables import Job, LandParcel
 from app.services.beat_schedule import (
     STAGGER_SECONDS,
-    WEEKLY_INDEX_KEYS,
-    index_task_name,
     weekly_date_window,
 )
 from app.services.overview_daily import business_today, finalize_daily, prepare_daily
+from app.services.satellite_batch import satellite_land_geometry
+from app.services.satellite_batch import create_satellite_batch_jobs
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
 
@@ -40,12 +40,15 @@ OVERVIEW_UPSERT_BATCH_SIZE = 200
 
 class WeeklyIndexJobOut(BaseModel):
     land_id: str
+    land_ids: list[str] = Field(default_factory=list)
     job_id: str
     task_name: str
     countdown: int = 0
     date_from: str
     date_to: str
     index: str
+    sensor: str | None = None
+    weather_windows: list[dict[str, str]] = Field(default_factory=list)
 
 
 class WeeklyIndexPrepareOut(BaseModel):
@@ -86,7 +89,7 @@ async def prepare_daily_satellite(
     db: Annotated[AsyncSession, Depends(get_db)],
     as_of: date | None = Query(None),
 ) -> dict[str, Any]:
-    """每日发现全部有效地块，按5×5公里窗口派发增量S1/S2下载。"""
+    """每日发现全部有效地块，本轮动态聚合10×10公里窗口并派发增量S1/S2下载。"""
     from fastapi import HTTPException
 
     day = as_of or business_today()
@@ -110,7 +113,7 @@ async def prepare_weekly_index(
     _: InternalAuth,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """列出过期的统一地块，在 API 建 Job，返回给下载机执行。"""
+    """为过期地块本轮动态规划 10km 共享窗口并创建 S1/S2 增量 Job。"""
     today = date.today()
     # 规范光学结果存于 parcel_scene_products；不再以历史 raster_layers
     # 作为另一套地块/遥感主链路。
@@ -132,45 +135,104 @@ async def prepare_weekly_index(
         )
     ).all()
 
-    items: list[WeeklyIndexJobOut] = []
-    lands_dispatched = 0
+    stale_windows: dict[str, tuple[date, date]] = {}
     for land_id, latest in rows:
         window = weekly_date_window(latest, today=today)
         if window is None:
             continue
-        date_from, date_to = window
-        countdown = lands_dispatched * STAGGER_SECONDS
-        for idx_key in WEEKLY_INDEX_KEYS:
-            job = Job(
-                land_id=land_id,
-                type=idx_key,
-                status="pending",
-                params_json={
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                },
-            )
-            db.add(job)
-            await db.flush()
-            items.append(
-                WeeklyIndexJobOut(
-                    land_id=land_id,
-                    job_id=str(job.id),
-                    task_name=index_task_name(idx_key),
-                    countdown=countdown,
-                    date_from=date_from.isoformat(),
-                    date_to=date_to.isoformat(),
-                    index=idx_key,
+        stale_windows[str(land_id)] = window
+
+    lands = (
+        (
+            await db.execute(
+                select(LandParcel).where(
+                    LandParcel.land_id.in_(list(stale_windows)),
+                    LandParcel.deleted_at.is_(None),
                 )
             )
-        lands_dispatched += 1
+        )
+        .scalars()
+        .all()
+        if stale_windows
+        else []
+    )
+    valid_lands = []
+    valid_windows: dict[str, tuple[date, date]] = {}
+    for land in lands:
+        try:
+            satellite_land_geometry(land)
+        except ValueError:
+            continue
+        land_id = str(land.land_id)
+        valid_lands.append(land)
+        valid_windows[land_id] = stale_windows[land_id]
+
+    items: list[WeeklyIndexJobOut] = []
+    if valid_lands:
+        # 每个组按最早缺口开始读共享影像；worker 仍依据地块已有景日期避免重复写入。
+        groups, jobs, _ = await create_satellite_batch_jobs(
+            db,
+            valid_lands,
+            date_from=min(window[0] for window in valid_windows.values()),
+            date_to=today,
+            sensors=("S1", "S2"),
+            force=False,
+            parent_job_id=None,
+            chunk_days=settings.index_backfill_chunk_days,
+            land_date_windows=valid_windows,
+            extra_params={"schedule": "weekly-index"},
+        )
+        jobs_by_id = {str(job.id): job for job in jobs}
+        countdown = 0
+        for group in groups:
+            weather_windows = [
+                {
+                    "land_id": land_id,
+                    "date_from": valid_windows[land_id][0].isoformat(),
+                    "date_to": valid_windows[land_id][1].isoformat(),
+                }
+                for land_id in group.land_ids
+                if land_id in valid_windows
+            ]
+            for job_id in group.job_ids:
+                job = jobs_by_id[job_id]
+                params = job.params_json or {}
+                items.append(
+                    WeeklyIndexJobOut(
+                        land_id=str(job.land_id),
+                        land_ids=list(params.get("land_ids", [])),
+                        job_id=str(job.id),
+                        task_name="app.tasks.satellite_batch.process_satellite_batch",
+                        countdown=countdown,
+                        date_from=params["date_from"],
+                        date_to=params["date_to"],
+                        index="agri_optical",
+                        sensor=params.get("sensor"),
+                        weather_windows=weather_windows,
+                    )
+                )
+                countdown += STAGGER_SECONDS
 
     await db.commit()
     return WeeklyIndexPrepareOut(
         items=items,
         lands_checked=len(rows),
-        lands_dispatched=lands_dispatched,
+        lands_dispatched=len(valid_lands),
         jobs_created=len(items),
+    )
+
+
+@router.post("/satellite-history")
+async def prepare_satellite_history(
+    _: InternalAuth,
+    as_of: date | None = Query(default=None),
+) -> dict[str, Any]:
+    """Beat 通过 API 机触发五年历史遥感回填，按本次地块动态分组下载。"""
+    from app.services.satellite_history import backfill_satellite_history
+
+    return await backfill_satellite_history(
+        date_to=as_of,
+        parent_job_id=uuid.uuid4(),
     )
 
 
@@ -493,8 +555,6 @@ async def finalize_overview(
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise HTTPException(400, "总览 OSS 结果格式无效")
 
-    from app.routers.agri_overview import ensure_overview_cache_table
-
     window_from = payload.get("window_from")
     window_to = payload.get("window_to")
     crop_key = str(payload.get("crop") or "")
@@ -506,7 +566,6 @@ async def finalize_overview(
     except ValueError as exc:
         raise HTTPException(400, "总览 OSS 结果窗口日期无效") from exc
 
-    await ensure_overview_cache_table(db)
     as_of = date.today()
     upsert_rows: list[dict[str, Any]] = []
     from app.schemas.agri import OverviewStatsOut
@@ -592,14 +651,11 @@ async def _refresh_overview_preagg(
     from app.routers.agri_overview import (
         _compute_live_stats,
         _resolve_region_label,
-        ensure_overview_cache_table,
     )
 
     to_d = date.today()
     from_d = to_d - timedelta(days=int(window_days))
     crop_key = normalize_crop_key(crop) if crop else None
-    await ensure_overview_cache_table(db)
-
     results: list[dict[str, Any]] = []
 
     async def _one(

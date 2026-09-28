@@ -135,6 +135,8 @@ class BatchQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("p.group_id = :group_id", scene_sql)
         self.assertIn("p.deleted_at IS NULL", scene_sql)
         self.assertIn("DISTINCT ON (s.date)", scene_sql)
+        self.assertIn("s.product_source", scene_sql)
+        self.assertNotIn("pixel_data->>", scene_sql)
         compiled = alert_call.args[0].compile()
         self.assertIn("project-42", compiled.params.values())
         self.assertIn("land_parcels.deleted_at IS NULL", str(compiled))

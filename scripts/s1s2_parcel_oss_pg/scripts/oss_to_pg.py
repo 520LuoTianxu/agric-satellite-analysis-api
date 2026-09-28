@@ -58,6 +58,7 @@ UPSERT_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
   land_id, tile_id, date, sensor, scene_id, land_name,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
+  product_source, decloud_quality, parcel_cloud_source,
   json_oss_key, pixel_count, generated_at_shanghai,
   pixel_data_url, rgb_url, large_rgb_url, rgb_oss_key,
   ndvi_avg, ndvi_min, ndvi_max,
@@ -72,6 +73,7 @@ INSERT INTO agric_satellite.parcel_scene_products (
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
+  %(product_source)s, %(decloud_quality)s, %(parcel_cloud_source)s,
   %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
   %(pixel_data_url)s, %(rgb_url)s, %(large_rgb_url)s, %(rgb_oss_key)s,
   %(ndvi_avg)s, %(ndvi_min)s, %(ndvi_max)s,
@@ -90,6 +92,9 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
+  product_source = EXCLUDED.product_source,
+  decloud_quality = EXCLUDED.decloud_quality,
+  parcel_cloud_source = EXCLUDED.parcel_cloud_source,
   json_oss_key = EXCLUDED.json_oss_key,
   pixel_data_url = EXCLUDED.pixel_data_url,
   rgb_url = EXCLUDED.rgb_url,
@@ -284,6 +289,15 @@ def row_from_product(obj: dict, key: str, bucket_name: str) -> dict:
         "cloud_cover": obj.get("cloud_cover"),
         "cloud_cover_over_30": obj.get("cloud_cover_over_30"),
         "parcel_cloud_cover_pct": obj.get("parcel_cloud_cover_pct"),
+        # 监测筛选字段同步落列，避免 API 查询逐行读取大 pixel_data。
+        "product_source": pixel_data.get("source") or obj.get("source"),
+        "decloud_quality": (
+            pixel_data.get("decloud_quality") or obj.get("decloud_quality")
+        ),
+        "parcel_cloud_source": (
+            pixel_data.get("parcel_cloud_source")
+            or obj.get("parcel_cloud_source")
+        ),
         "json_oss_key": json_key,
         "pixel_data_url": pixel_data_url,
         "rgb_url": obj.get("rgb_url"),

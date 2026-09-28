@@ -542,7 +542,7 @@ async def _apply_batch(
     )
 
     if not create_rs_jobs:
-        # 批量选地报告会在上层统一创建共享 5×5 km satellite_batch Job；
+        # 显式选地只同步 Smart 主数据；上层按本次地块集合动态规划 10km 窗口，
         # 这里仅同步 Smart 地块主数据，禁止再为每块地派发重复的单地块回填。
         await db.commit()
         return
@@ -591,44 +591,125 @@ async def _apply_batch(
             continue
         dispatch.append((record, job_id, job))
 
+    if not dispatch:
+        await db.commit()
+        return
+
+    from app.services.satellite_batch import create_satellite_batch_jobs
+
+    selected_ids = [record.land_id for record, _, _ in dispatch]
+    selected_lands = (
+        await db.execute(
+            select(LandParcel)
+            .where(LandParcel.land_id.in_(selected_ids))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    batch_id = uuid.uuid5(
+        run_id,
+        "satellite-10km-smart-sync:" + ",".join(sorted(selected_ids)),
+    )
+    parent = Job(
+        id=batch_id,
+        type="smart_land_sync_satellite",
+        status="running",
+        params_json={
+            "land_ids": sorted(selected_ids),
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "source": SOURCE_SYSTEM,
+        },
+        progress_json={"stage": "planning", "land_count": len(selected_ids)},
+    )
+    db.add(parent)
+    groups, area_jobs, _ = await create_satellite_batch_jobs(
+        db,
+        selected_lands,
+        date_from=date_from,
+        date_to=date_to,
+        sensors=("S1", "S2"),
+        force=False,
+        parent_job_id=batch_id,
+        chunk_days=settings.index_backfill_chunk_days,
+        extra_params={
+            "is_backfill": True,
+            "source": SOURCE_SYSTEM,
+            "sync_run_id": str(run_id),
+        },
+    )
+    jobs_by_land = {land_id: [] for land_id in selected_ids}
+    for area_job in area_jobs:
+        for land_id in (area_job.params_json or {}).get("land_ids", []):
+            jobs_by_land.setdefault(str(land_id), []).append(str(area_job.id))
+    for record, job_id, sentinel in dispatch:
+        sentinel.params_json = {
+            **(sentinel.params_json or {}),
+            "dispatch_status": "planning",
+            "satellite_batch_parent_job_id": str(batch_id),
+            "satellite_batch_job_ids": jobs_by_land.get(record.land_id, []),
+        }
+    parent.params_json = {
+        **(parent.params_json or {}),
+        "job_ids": [str(job.id) for job in area_jobs],
+        "area_count": len(groups),
+    }
+    parent.progress_json = {
+        "stage": "dispatching",
+        "land_count": len(selected_ids),
+        "area_count": len(groups),
+        "job_count": len(area_jobs),
+        "dispatched_job_ids": [],
+    }
     await db.commit()
 
-    for record, job_id, job in dispatch:
+    dispatched_job_ids: list[str] = []
+    failed_job_ids: list[str] = []
+    for job in area_jobs:
         try:
             from app.mq_publish import publish_api_task
 
-            # 任务 ID 与源几何 hash 稳定绑定，claim/MQ 重试不会无限创建新任务。
             await asyncio.to_thread(
                 publish_api_task,
-                type="satellite_analysis",
-                land_id=record.land_id,
-                task_id=str(job_id),
-                extras={
-                    "months": settings.mysql_sync_rs_months,
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                    "force": False,
-                    "with_bridge": False,
-                    "source": SOURCE_SYSTEM,
-                    "sync_run_id": str(run_id),
-                    "sentinel_job_id": str(job_id),
-                    "processing_window_km": settings.mysql_sync_processing_window_km,
-                },
+                type="satellite_batch",
+                land_id=job.land_id,
+                task_id=str(job.id),
+                extras={"job_id": str(job.id)},
             )
         except Exception as exc:
             summary["dispatch_failed"] += 1
             logger.exception(
-                "mysql_land_sync_rs_dispatch_failed",
-                land_id=record.land_id,
-                job_id=str(job_id),
+                "mysql_land_sync_satellite_batch_dispatch_failed",
+                land_id=job.land_id,
+                job_id=str(job.id),
                 error=str(exc),
             )
+            job.status = "failed"
+            job.error = f"10km 遥感分组任务派发失败：{str(exc)[:3900]}"
+            failed_job_ids.append(str(job.id))
             continue
         job.params_json = {**(job.params_json or {}), "dispatch_status": "queued"}
+        dispatched_job_ids.append(str(job.id))
         summary["rs_dispatched"] += 1
 
-    if dispatch:
-        await db.commit()
+    for record, _, sentinel in dispatch:
+        land_job_ids = jobs_by_land.get(record.land_id, [])
+        failed_for_land = any(job_id in failed_job_ids for job_id in land_job_ids)
+        sentinel.status = "failed" if failed_for_land else "completed"
+        sentinel.finished_at = now
+        sentinel.params_json = {
+            **(sentinel.params_json or {}),
+            "dispatch_status": "partial" if failed_for_land else "queued",
+        }
+
+    parent.progress_json = {
+        **(parent.progress_json or {}),
+        "stage": "dispatched",
+        "dispatched_job_ids": dispatched_job_ids,
+        "failed_count": len(area_jobs) - len(dispatched_job_ids),
+    }
+    parent.status = "partial" if failed_job_ids else "completed"
+    parent.finished_at = now
+    await db.commit()
 
 
 async def _soft_delete_missing_source_lands(
@@ -667,8 +748,10 @@ async def _record_audit(summary: dict[str, Any]) -> None:
         await db.commit()
 
 
-def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]]:
-    """构造 Smart 精确地块查询，参数名固定生成以避免拼接用户输入。"""
+def _selected_source_query(
+    land_ids: Sequence[str], *, include_excluded_schedule_lands: bool = False
+) -> tuple[Any, dict[str, str]]:
+    """构造 Smart 精确查询；参数名固定生成以避免拼接用户输入。"""
     normalized = list(dict.fromkeys(str(value).strip() for value in land_ids))
     if not normalized or any(not value for value in normalized):
         raise ValueError("land_ids must contain at least one non-empty ID")
@@ -676,7 +759,11 @@ def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]
     names = [f"selected_land_{index}" for index in range(len(normalized))]
     placeholders = ", ".join(f":{name}" for name in names)
     order_clause = "    ORDER BY lg.group_id, al.land_id"
-    source_text = SOURCE_SQL.text.replace(
+    source_text = SOURCE_SQL.text
+    if include_excluded_schedule_lands:
+        # 显式地块回填允许管理员指定自动调度过滤之外的地块；全量每日同步仍保留过滤。
+        source_text = source_text.replace("      AND lg.base_id <> 46\n", "", 1)
+    source_text = source_text.replace(
         order_clause,
         f"      AND CAST(al.land_id AS CHAR) IN ({placeholders})\n{order_clause}",
         1,
@@ -687,13 +774,19 @@ def _selected_source_query(land_ids: Sequence[str]) -> tuple[Any, dict[str, str]
 
 
 async def sync_selected_lands(
-    land_ids: Sequence[str], *, today: date | None = None
+    land_ids: Sequence[str],
+    *,
+    today: date | None = None,
+    include_excluded_schedule_lands: bool = False,
+    allow_partial: bool = False,
 ) -> dict[str, Any]:
     """从 Smart/MySQL 同步指定地块到 PostgreSQL，不派发单地块遥感任务。
 
-    批量选地报告需要先拿到请求地块的最新边界，再统一计算 5×5 km 共享窗口。
+    批量选地报告需要先拿到请求地块的最新边界，再按本次请求动态规划 10×10 km 窗口。
     因此这里复用正式同步的标准化和 upsert 逻辑，但关闭其原本的单地块
     ``satellite_analysis`` 派发，避免之后与批量窗口任务重复下载。
+    ``allow_partial`` 用于显式地块清单：能标准化的记录先落库，缺失或无效记录
+    通过摘要返回；默认仍保持全量同步的原子语义，避免影响报告和其他调用方。
     """
     requested = list(dict.fromkeys(str(value).strip() for value in land_ids))
     if not requested or any(not value for value in requested):
@@ -709,6 +802,7 @@ async def sync_selected_lands(
         "missing_land_ids": [],
         "filtered_land_ids": [],
         "invalid_land_ids": [],
+        "invalid_land_errors": [],
     }
     if not settings.mysql_source_enabled:
         summary["status"] = "disabled"
@@ -730,7 +824,10 @@ async def sync_selected_lands(
                 return summary
 
             try:
-                source_query, source_params = _selected_source_query(requested)
+                source_query, source_params = _selected_source_query(
+                    requested,
+                    include_excluded_schedule_lands=include_excluded_schedule_lands,
+                )
                 async with source_engine.connect() as source_conn:
                     result = await source_conn.execute(source_query, source_params)
                     rows = [dict(row) for row in result.mappings().all()]
@@ -745,43 +842,54 @@ async def sync_selected_lands(
                 summary["missing_land_ids"] = missing
 
                 records: list[SourceParcel] = []
-                if not missing:
-                    for row in rows:
-                        raw_land_id = _string_or_none(row.get("land_id"))
-                        if (
-                            is_excluded_schedule_base_id(row.get("group_base_id"))
-                            or not is_scheduled_land_allowed(
-                                row.get("base_id"), row.get("land_area")
-                            )
-                        ):
-                            if raw_land_id:
-                                summary["filtered_land_ids"].append(raw_land_id)
-                            continue
-                        try:
-                            records.append(normalize_source_row(row))
-                        except (TypeError, ValueError):
-                            if raw_land_id:
-                                summary["invalid_land_ids"].append(raw_land_id)
-
-                if summary["missing_land_ids"]:
-                    summary["status"] = "not_found"
-                elif summary["filtered_land_ids"]:
-                    summary["status"] = "filtered"
-                elif summary["invalid_land_ids"]:
-                    summary["status"] = "invalid"
-                else:
-                    async with async_session() as target_db:
-                        await _apply_batch(
-                            target_db,
-                            records,
-                            run_id=run_id,
-                            date_from=business_day,
-                            date_to=business_day,
-                            summary=summary,
-                            create_rs_jobs=False,
+                for row in rows:
+                    raw_land_id = _string_or_none(row.get("land_id"))
+                    if not include_excluded_schedule_lands and (
+                        is_excluded_schedule_base_id(row.get("group_base_id"))
+                        or not is_scheduled_land_allowed(
+                            row.get("base_id"), row.get("land_area")
                         )
+                    ):
+                        if raw_land_id:
+                            summary["filtered_land_ids"].append(raw_land_id)
+                        continue
+                    try:
+                        records.append(normalize_source_row(row))
+                    except (TypeError, ValueError) as exc:
+                        if raw_land_id:
+                            summary["invalid_land_ids"].append(raw_land_id)
+                            if len(summary["invalid_land_errors"]) < 100:
+                                summary["invalid_land_errors"].append(
+                                    {"land_id": raw_land_id, "reason": str(exc)}
+                                )
+
+                has_selection_errors = bool(
+                    summary["missing_land_ids"]
+                    or summary["filtered_land_ids"]
+                    or summary["invalid_land_ids"]
+                )
+                if has_selection_errors and not allow_partial:
+                    if summary["missing_land_ids"]:
+                        summary["status"] = "not_found"
+                    elif summary["filtered_land_ids"]:
+                        summary["status"] = "filtered"
+                    else:
+                        summary["status"] = "invalid"
+                else:
+                    # 显式地块清单允许部分成功，避免无数据或无效编号阻断有效地块同步。
+                    if records:
+                        async with async_session() as target_db:
+                            await _apply_batch(
+                                target_db,
+                                records,
+                                run_id=run_id,
+                                date_from=business_day,
+                                date_to=business_day,
+                                summary=summary,
+                                create_rs_jobs=False,
+                            )
                     summary["synced_land_ids"] = [record.land_id for record in records]
-                    summary["status"] = "completed"
+                    summary["status"] = "partial" if has_selection_errors else "completed"
             finally:
                 await lock_conn.execute(
                     text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),

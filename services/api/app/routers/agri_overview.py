@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
@@ -83,28 +82,7 @@ _LEVEL_NAME_COL = {
 }
 
 _CACHE_FRESH_HOURS = 36
-_overview_cache_ready = False
-_overview_cache_init_lock = asyncio.Lock()
-
-_ENSURE_CACHE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS agric_satellite.overview_stats_daily (
-    as_of_date date NOT NULL,
-    level text NOT NULL,
-    region_code text NOT NULL DEFAULT '',
-    region_name text,
-    parent_code text,
-    metric_json jsonb NOT NULL,
-    window_from date NOT NULL,
-    window_to date NOT NULL,
-    crop text NOT NULL DEFAULT '',
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (as_of_date, level, region_code, window_from, window_to, crop)
-)
-"""
-_ENSURE_CACHE_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS overview_stats_daily_lookup_idx
-    ON agric_satellite.overview_stats_daily (level, region_code, window_from, window_to, crop, updated_at DESC)
-"""
+# 总览缓存表及索引由 DMS/发布迁移统一维护，API 请求期间只读写已存在的业务表，不执行 DDL。
 
 
 def _default_window() -> tuple[date, date]:
@@ -170,23 +148,6 @@ async def _agri_ready(db: AsyncSession) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="agric_satellite schema not installed",
         )
-
-
-async def ensure_overview_cache_table(db: AsyncSession) -> None:
-    """兼容旧部署初始化总览缓存表；同一API进程只执行一次DDL。"""
-    global _overview_cache_ready
-    if _overview_cache_ready:
-        return
-    async with _overview_cache_init_lock:
-        if _overview_cache_ready:
-            return
-        # 使用独立事务提交DDL，避免调用方后续业务回滚时把初始化结果一起回滚。
-        from app.core.database import engine
-
-        async with engine.begin() as connection:
-            await connection.execute(text(_ENSURE_CACHE_TABLE_SQL))
-            await connection.execute(text(_ENSURE_CACHE_INDEX_SQL))
-        _overview_cache_ready = True
 
 
 def _region_where(
@@ -333,7 +294,6 @@ async def _read_cache(
     crop_key: str | None,
 ) -> OverviewStatsOut | None:
     """Return cached stats if a fresh row exists (updated_at within 36h)."""
-    await ensure_overview_cache_table(db)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_CACHE_FRESH_HOURS)
     row = (
         await db.execute(

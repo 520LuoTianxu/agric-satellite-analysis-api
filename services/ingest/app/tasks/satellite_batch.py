@@ -1,7 +1,10 @@
 """按聚合窗口下载一次影像，在内存中裁到请求地块后回调 API 结果缓存。"""
 
 import os
+import time
+import threading
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 
 import numpy as np
@@ -20,13 +23,14 @@ from agric_satellite_analysis_common.internal_api import (
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
-from app.core.band_parallel import run_parallel_band_jobs
-from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
+from app.core.band_parallel import band_max_workers, run_parallel_band_jobs
 from app.core.band_window_cache import (
     read_scene_window,
     window_cache_enabled,
     write_scene_window,
 )
+from app.core.config import scene_max_workers, scene_straggler_timeout_sec
+from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
     decloud_enabled,
     decloud_s2_extra_assets,
@@ -47,6 +51,7 @@ from app.tasks.agri_lonlat import (
     parcel_cloud_from_scl_window,
 )
 from app.tasks.pipeline import (
+    S2_PC_STAC_API_URL,
     analysis_crs_for_bounds,
     compute_target_grid,
     compute_zonal_stats,
@@ -62,13 +67,13 @@ from app.tasks.sentinel1 import (
     search_s1_scenes,
 )
 from app.worker import celery_app
+from celery.exceptions import MaxRetriesExceededError, SoftTimeLimitExceeded
 
 logger = structlog.get_logger()
 
 SATELLITE_BATCH_MAX_COMPENSATIONS = 2
 SATELLITE_COMPENSATION_DELAY_SECONDS = 30
 SATELLITE_BATCH_INPUTS_LAND_LIMIT = 50
-SATELLITE_BATCH_PROGRESS_INTERVAL = 5
 
 
 def _positive_limit_env(name: str, default: int) -> int:
@@ -78,14 +83,43 @@ def _positive_limit_env(name: str, default: int) -> int:
         return default
 
 
-# 默认保持现网 25/30 分钟；若业务要求绝对十分钟内退出，可配置为 540/600。
-# soft limit 可能无法打断 GDAL C 调用，最终由 hard limit 回收整个 prefork 子进程。
-SATELLITE_BATCH_TIME_LIMIT_SEC = _positive_limit_env(
-    "SATELLITE_BATCH_TIME_LIMIT_SEC", 1800
+def _nonneg_int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 任务级软超时默认 12 分钟；硬超时略高以便 soft 路径可 retry。
+# soft 可能打断不了 GDAL C 调用，最终由 hard limit 回收 prefork 子进程；
+# hard 杀进程时依赖 task_acks_late + task_reject_on_worker_lost 重新入队。
+# 环境变量名沿用既有 SATELLITE_BATCH_*（非 INGEST_ 前缀）；也接受 INGEST_ 别名。
+def _batch_limit_env(primary: str, ingest_alias: str, default: int) -> int:
+    if os.environ.get(primary) is not None:
+        return _positive_limit_env(primary, default)
+    if os.environ.get(ingest_alias) is not None:
+        return _positive_limit_env(ingest_alias, default)
+    return _positive_limit_env(primary, default)
+
+
+SATELLITE_BATCH_TIME_LIMIT_SEC = _batch_limit_env(
+    "SATELLITE_BATCH_TIME_LIMIT_SEC",
+    "INGEST_SATELLITE_BATCH_TIME_LIMIT_SEC",
+    780,
 )
 SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC = min(
     SATELLITE_BATCH_TIME_LIMIT_SEC - 1,
-    _positive_limit_env("SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC", 1500),
+    _batch_limit_env(
+        "SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC",
+        "INGEST_SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC",
+        720,
+    ),
+)
+SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES = _nonneg_int_env(
+    "SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES", 6
+)
+SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC = _nonneg_int_env(
+    "SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC", 30
 )
 
 
@@ -240,7 +274,7 @@ def crop_shared_array(
     target_crs="EPSG:4326",
     categorical=False,
 ):
-    """投影共享场景到地块本地网格；新数组防止掩膜外像元污染相邻地块。"""
+    """从共享数组重采样到原有地块网格；新数组防止地块掩膜污染邻居的数据。"""
     destination = np.full(target_shape, np.nan, dtype=np.float32)
     reproject(
         source=source,
@@ -256,14 +290,14 @@ def crop_shared_array(
     return destination
 
 
-def _load_lands(land_ids, sensor, force):
-    """通过有界批量 Internal HTTP 读取地块与已有景日期，禁止下载机直连数据库。"""
+def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=None):
+    """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
     land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
     if not land_ids or any(not land_id for land_id in land_ids):
         raise RuntimeError("遥感批次地块清单为空或包含空编号")
+
     lands = []
-    # 每批最多50个边界，限制复杂地块几何带来的响应体大小；复用连接并批量查询
-    # 将请求数降为ceil(N/50)；强制重算时不额外查询已有日期。
+    # 每批最多50个边界并复用一个HTTP连接；强制重算时不额外查询已处理日期。
     with internal_client(timeout=60.0) as client:
         for start in range(0, len(land_ids), SATELLITE_BATCH_INPUTS_LAND_LIMIT):
             batch_ids = land_ids[start : start + SATELLITE_BATCH_INPUTS_LAND_LIMIT]
@@ -283,8 +317,7 @@ def _load_lands(land_ids, sensor, force):
 
             for land_id in batch_ids:
                 remote = remote_by_id[land_id]
-                # 任务可能在过滤规则发布前已经入队，因此执行前再兜底过滤，
-                # 避免被排除基地或超大地块继续访问 STAC、OSS 和卫星数据。
+                # 入队后规则可能变化；执行前再过滤，避免已排除地块访问卫星数据。
                 if not is_scheduled_land_allowed(
                     remote.get("base_id"), remote.get("land_area_mu")
                 ):
@@ -304,10 +337,14 @@ def _load_lands(land_ids, sensor, force):
                     or geom.geom_type not in {"Polygon", "MultiPolygon"}
                 ):
                     raise RuntimeError(f"地块{land_id}的边界无效")
-                existing = {
-                    date.fromisoformat(str(value)[:10])
-                    for value in remote.get("existing_dates", [])
-                }
+                existing = (
+                    {
+                        date.fromisoformat(str(value)[:10])
+                        for value in remote.get("existing_dates", [])
+                    }
+                    if not force
+                    else set()
+                )
                 land_crs = analysis_crs_for_bounds(geom.bounds)
                 lands.append(
                     {
@@ -322,8 +359,11 @@ def _load_lands(land_ids, sensor, force):
                         ),
                         "grid_crs": land_crs,
                         "existing": existing,
+                        # 显式回填轮作月份优先于作物默认季节，避免区域下载误过滤用户指定窗口。
                         "season_months": normalize_season_months(
-                            crop_type=remote.get("crop_type")
+                            season_months=season_months,
+                            growing_seasons=growing_seasons,
+                            crop_type=remote.get("crop_type"),
                         ),
                         "crop_type": remote.get("crop_type"),
                         "raw_results": [],
@@ -339,8 +379,9 @@ def select_complete_processing_lands(
     *,
     oversized: bool = False,
     download_bbox=None,
+    processing_boundary=None,
 ):
-    """选择共享处理窗口内的完整地块，窗口外地块留待独立任务避免裁断边界。"""
+    """Return the shared processing geometry and only fully covered parcels."""
     if not lands:
         raise ValueError("satellite batch has no land parcels")
     anchor = next(
@@ -348,11 +389,24 @@ def select_complete_processing_lands(
         lands[0],
     )
     if oversized:
-        # 超过5 km的锚点地块不能被5 km窗口截断，独立使用完整外接矩形。
+        # 超过窗口的地块不能被窗口截断，独立使用完整外接矩形。
         window_bounds = tuple(download_bbox or anchor["geom"].bounds)
         return [anchor], box(*window_bounds)
 
-    # 只合并完整落在锚点5 km窗口内的地块；跨出窗口的地块不参与本批次。
+    if processing_boundary is not None:
+        # API 将本轮动态规划的窗口边界放进 Job；下载机必须复用它以维持相同分组。
+        processing_geom = (
+            shape(processing_boundary)
+            if isinstance(processing_boundary, dict)
+            else processing_boundary
+        )
+        if processing_geom.is_empty or not processing_geom.is_valid:
+            raise ValueError("任务中的动态处理窗口边界无效")
+        if not processing_geom.covers(anchor["geom"]):
+            raise ValueError("动态处理窗口未完整包含锚点地块")
+        return [land for land in lands if processing_geom.covers(land["geom"])], processing_geom
+
+    # 旧任务缺少动态边界时，使用任务携带的窗口宽度临时构造兼容处理范围。
     processing_geom, anchor_oversized = build_complete_processing_window(
         anchor["geom"], processing_window_km
     )
@@ -384,8 +438,99 @@ def _scene_lands(scene, lands, sensor):
     return selected
 
 
-def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
-    """下载一个共享景窗口；全部波段走同一并发池和统一重试/日志链路。"""
+def _search_s2_options() -> dict:
+    extra_assets = {"SCL": SCL_STAC_ASSETS}
+    cloud_max = None
+    if decloud_enabled():
+        extra_assets.update(decloud_s2_extra_assets())
+        cloud_max = decloud_stac_cloud_max_pct()
+    return {
+        "index_defs": agri_optical_index_defs(),
+        "index_label": "satellite_batch",
+        "max_cloud_cover": cloud_max,
+        "extra_assets": extra_assets,
+        "cloud_dedupe": "none",
+        "max_items": 2000,
+    }
+
+
+def _search_s2_scenes(processing_geom, date_from: date, date_to: date) -> list[dict]:
+    """S2 先搜 Element84/AWS；搜索失败或无结果时才用 PC 签名 STAC 降级。"""
+    options = _search_s2_options()
+    primary_error: Exception | None = None
+    try:
+        scenes = search_scenes_for_defs(
+            mapping(processing_geom), date_from, date_to, **options
+        )
+    except Exception as exc:
+        primary_error = exc
+        scenes = []
+        logger.warning(
+            "s2_element84_stac_search_failed",
+            date_from=str(date_from),
+            date_to=str(date_to),
+            error=str(exc),
+        )
+    if scenes:
+        return scenes
+
+    try:
+        fallback_scenes = search_scenes_for_defs(
+            mapping(processing_geom),
+            date_from,
+            date_to,
+            **options,
+            catalog_url=S2_PC_STAC_API_URL,
+            planetary_computer_signing=True,
+            source_catalog="planetary_computer",
+        )
+    except Exception as fallback_error:
+        logger.exception(
+            "s2_planetary_computer_stac_search_failed",
+            date_from=str(date_from),
+            date_to=str(date_to),
+            error=str(fallback_error),
+        )
+        if primary_error is not None:
+            raise RuntimeError(
+                f"Element84 搜索失败，PC 降级搜索也失败：{fallback_error}"
+            ) from primary_error
+        raise
+    if fallback_scenes:
+        logger.warning(
+            "s2_planetary_computer_stac_fallback_used",
+            scene_count=len(fallback_scenes),
+            date_from=str(date_from),
+            date_to=str(date_to),
+        )
+    return fallback_scenes
+
+
+def _search_s2_scene_fallback(scene, processing_geom) -> list[dict]:
+    """AWS COG 读取失败时，按同一日期和窗口找 PC 的替代 Sentinel-2 景。"""
+    scene_date = scene.get("date")
+    if not isinstance(scene_date, date):
+        scene_date = date.fromisoformat(str(scene_date)[:10])
+    options = _search_s2_options()
+    return search_scenes_for_defs(
+        mapping(processing_geom),
+        scene_date,
+        scene_date,
+        **options,
+        catalog_url=S2_PC_STAC_API_URL,
+        planetary_computer_signing=True,
+        source_catalog="planetary_computer",
+    )
+
+
+def _download_scene(
+    scene, sensor, grid, *, job_id: str | None = None, scene_workers: int = 1
+):
+    """下载一个共享景窗口；全部波段走同一并发池和统一重试/日志链路。
+
+    ``scene_workers`` 是父级景线程池大小，交给 band 层做嵌套扇出限流，
+    避免 SCENE×BAND 无界放大。
+    """
     shared_transform, shared_shape, _, bounds = grid
     shared_crs = analysis_crs_for_bounds(bounds)
     scene_date = scene.get("date")
@@ -398,7 +543,7 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
         "sensor": sensor,
     }
     if sensor == "S1":
-        # 先确认双极化使用同一类定标口径，避免下载后才因单通道缺LUT而丢弃共享景。
+        # VV/VH 必须使用同一套定标口径；有官方 LUT 时在读取阶段直接转为 Sigma0。
         _s1_radiometric_calibration(scene)
         hrefs = {"vv": scene["vv_href"], "vh": scene["vh_href"]}
         calibration_hrefs = {
@@ -409,9 +554,9 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
         resampling_by_band = {}
     else:
         hrefs = dict(scene["band_hrefs"])
-        calibration_hrefs = None
         # RGB预览复用光谱波段，不把 visual 三通道资产混入指数波段缓存。
         hrefs.pop("visual", None)
+        calibration_hrefs = None
         resampling_by_band = {"SCL": Resampling.nearest}
 
     cached = read_scene_window(
@@ -442,7 +587,7 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
                 shared_crs,
                 calibration_href=scene.get(f"{band}_calibration_href"),
             ),
-            scene_workers=1,
+            scene_workers=scene_workers,
             log_context=log_context,
         )
         try:
@@ -458,7 +603,7 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
                 resampling_by_band=resampling_by_band,
             )
         except Exception as exc:
-            # 本地缓存是性能优化，磁盘满或缓存写失败不能影响已完成的远程读取。
+            # 磁盘缓存只是加速手段，写入失败不能丢弃已成功读取的卫星波段。
             logger.warning(
                 "satellite_window_cache_write_failed",
                 **log_context,
@@ -472,8 +617,8 @@ def _download_scene(scene, sensor, grid, *, job_id: str | None = None):
         shared_shape,
         shared_transform,
         target_crs=shared_crs,
-        scene_workers=1,
-        resampling_by_band={"SCL": Resampling.nearest},
+        scene_workers=scene_workers,
+        resampling_by_band=resampling_by_band,
         log_context=log_context,
     )
     scl = downloaded.pop("SCL", None)
@@ -513,7 +658,6 @@ def _publish_land(
     parent_id,
     processing_window_km: float | None = None,
 ):
-    """从共享场景数组生成单地块产品，并通过结果通道发布。"""
     target_transform, target_shape, field_mask, _ = land["grid"]
     target_crs = land["grid_crs"]
     shared_crs = analysis_crs_for_bounds(shared_grid[3])
@@ -642,12 +786,268 @@ def _publish_land(
     return result is not None
 
 
+
+def _release_scene_date_reservation(lands, scene_date) -> None:
+    """下载/发布失败时释放乐观占位，让后续同日景或补偿可再试。"""
+    for land in lands:
+        land["existing"].discard(scene_date)
+
+
+def _process_one_batch_scene(
+    scene,
+    *,
+    sensor: str,
+    selected_lands: list,
+    grid,
+    processing_geom,
+    job_id: str,
+    mq_task_id: str | None,
+    processing_window_km: float | None,
+    scene_workers: int,
+    state_lock: threading.Lock,
+    progress: dict,
+    failed_land_ids: set[str],
+    failed_scene_ids: set[str],
+    abandon_event: threading.Event,
+    active_reservations: dict,
+) -> None:
+    """处理单个景：占位 → 下载(含PC降级) → 发布；进度在锁内合并。
+
+    ``abandon_event`` 在批次因 straggler 超时放弃剩余景时置位。线程无法强杀
+    阻塞中的 GDAL/HTTP，因此此处只做 best-effort：停止发布、释放占位、不再回写进度
+    （父任务已把该景记入 failed / scenes_done）。
+    """
+
+    def record_failures(lands_to_record, scene_id: str | None) -> None:
+        failed_land_ids.update(str(land["meta"]["land_id"]) for land in lands_to_record)
+        if scene_id:
+            failed_scene_ids.add(str(scene_id))
+
+    def reservation_key() -> str:
+        return str(scene.get("id") or id(scene))
+
+    def clear_active_reservation() -> None:
+        active_reservations.pop(reservation_key(), None)
+
+    def abandoned_cleanup(reserved_lands) -> bool:
+        """若批次已放弃本景，释放占位并跳过进度回写。返回 True 表示调用方应直接 return。"""
+        if not abandon_event.is_set():
+            return False
+        _release_scene_date_reservation(reserved_lands, scene_date)
+        clear_active_reservation()
+        return True
+
+    scene_date = scene["date"]
+
+    with state_lock:
+        if abandon_event.is_set():
+            return
+        selected = _scene_lands(scene, selected_lands, sensor)
+        # 同日多景并发时先占位，避免重复下载；成功保留，失败再释放。
+        for land in selected:
+            land["existing"].add(scene_date)
+        reserved = list(selected)
+        if reserved:
+            active_reservations[reservation_key()] = (scene_date, list(reserved))
+
+    if not reserved:
+        with state_lock:
+            if abandon_event.is_set():
+                return
+            progress["failed_land_ids"] = sorted(failed_land_ids)
+            progress["failed_scene_ids"] = sorted(failed_scene_ids)
+            progress["scenes_done"] += 1
+            patch_job(job_id, {"progress_json": dict(progress)})
+        return
+
+    scene_products: list[tuple[dict, list, dict, np.ndarray | None]] = []
+    primary_error: Exception | None = None
+    try:
+        shared_bands, scl = _download_scene(
+            scene, sensor, grid, job_id=job_id, scene_workers=scene_workers
+        )
+        scene_products.append((scene, reserved, shared_bands, scl))
+        unresolved: dict[str, dict] = {}
+    except Exception as exc:
+        primary_error = exc
+        unresolved = {str(land["meta"]["land_id"]): land for land in reserved}
+        if sensor == "S2" and scene.get("source_catalog") != "planetary_computer":
+            try:
+                fallback_scenes = _search_s2_scene_fallback(scene, processing_geom)
+            except Exception as fallback_error:
+                fallback_scenes = []
+                logger.warning(
+                    "s2_planetary_computer_cog_fallback_search_failed",
+                    job_id=job_id,
+                    scene_id=scene.get("id"),
+                    error=str(fallback_error),
+                )
+            def _fallback_cover_count(candidate: dict) -> int:
+                footprint = (
+                    shape(candidate["geometry"]) if candidate.get("geometry") else None
+                )
+                n = 0
+                for land in unresolved.values():
+                    if footprint is not None and not footprint.covers(land["geom"]):
+                        continue
+                    filtered, _ = filter_scenes_outside_season_high_cloud(
+                        [candidate], season_months=land["season_months"]
+                    )
+                    if filtered:
+                        n += 1
+                return n
+
+            fallback_scenes.sort(
+                key=lambda candidate: (
+                    -_fallback_cover_count(candidate),
+                    float(candidate.get("cloud_cover") or 100),
+                    str(candidate.get("id") or ""),
+                )
+            )
+            for fallback_scene in fallback_scenes:
+                # 占位已在 land["existing"]；fallback 覆盖判定用 unresolved 列表。
+                fallback_selected = []
+                footprint = (
+                    shape(fallback_scene["geometry"])
+                    if fallback_scene.get("geometry")
+                    else None
+                )
+                for land in list(unresolved.values()):
+                    if footprint is not None and not footprint.covers(land["geom"]):
+                        continue
+                    filtered, _ = filter_scenes_outside_season_high_cloud(
+                        [fallback_scene], season_months=land["season_months"]
+                    )
+                    if not filtered:
+                        continue
+                    fallback_selected.append(land)
+                if not fallback_selected:
+                    continue
+                try:
+                    fallback_bands, fallback_scl = _download_scene(
+                        fallback_scene,
+                        sensor,
+                        grid,
+                        job_id=job_id,
+                        scene_workers=scene_workers,
+                    )
+                except Exception as fallback_error:
+                    logger.warning(
+                        "s2_planetary_computer_cog_fallback_failed",
+                        job_id=job_id,
+                        primary_scene_id=scene.get("id"),
+                        fallback_scene_id=fallback_scene.get("id"),
+                        error=str(fallback_error),
+                    )
+                    continue
+                scene_products.append(
+                    (fallback_scene, fallback_selected, fallback_bands, fallback_scl)
+                )
+                for land in fallback_selected:
+                    unresolved.pop(str(land["meta"]["land_id"]), None)
+
+    with state_lock:
+        if abandoned_cleanup(reserved):
+            return
+        published_land_ids: set[str] = set()
+        for product_scene, product_lands, shared_bands, scl in scene_products:
+            if abandon_event.is_set():
+                leftover = [
+                    land
+                    for land in reserved
+                    if str(land["meta"]["land_id"]) not in published_land_ids
+                ]
+                _release_scene_date_reservation(leftover, scene_date)
+                clear_active_reservation()
+                return
+            for land in product_lands:
+                land_id = str(land["meta"]["land_id"])
+                try:
+                    if _publish_land(
+                        product_scene,
+                        sensor,
+                        land,
+                        shared_bands,
+                        scl,
+                        grid,
+                        mq_task_id or job_id,
+                        processing_window_km,
+                    ):
+                        progress["products_published"] += 1
+                        progress["published_products"].append(
+                            {
+                                "land_id": land["meta"]["land_id"],
+                                "date": product_scene["date"].isoformat(),
+                            }
+                        )
+                        published_land_ids.add(land_id)
+                    else:
+                        progress["failed"] += 1
+                        record_failures([land], product_scene.get("id"))
+                        land["existing"].discard(scene_date)
+                except Exception as exc:
+                    progress["failed"] += 1
+                    record_failures([land], product_scene.get("id"))
+                    land["existing"].discard(scene_date)
+                    logger.error(
+                        "satellite_batch_land_failed",
+                        job_id=job_id,
+                        land_id=land["meta"]["land_id"],
+                        error=str(exc),
+                    )
+
+        if primary_error is not None and unresolved:
+            failed_lands = list(unresolved.values())
+            progress["failed"] += len(failed_lands)
+            record_failures(failed_lands, str(scene.get("id") or ""))
+            _release_scene_date_reservation(failed_lands, scene_date)
+            logger.error(
+                "satellite_batch_download_failed",
+                job_id=job_id,
+                scene_id=scene.get("id"),
+                error=str(primary_error),
+                unresolved_land_ids=sorted(unresolved),
+            )
+        elif primary_error is None and not scene_products:
+            _release_scene_date_reservation(reserved, scene_date)
+
+        # 主下载成功但部分 reserved 地块未进入任何 product：释放占位以便后续同日景。
+        if primary_error is None and scene_products:
+            covered = {
+                str(land["meta"]["land_id"])
+                for _, lands, _, _ in scene_products
+                for land in lands
+            }
+            leftover = [
+                land
+                for land in reserved
+                if str(land["meta"]["land_id"]) not in covered
+                and str(land["meta"]["land_id"]) not in published_land_ids
+            ]
+            if leftover:
+                _release_scene_date_reservation(leftover, scene_date)
+
+        clear_active_reservation()
+        if abandon_event.is_set():
+            # 父任务已把本景记入 abandoned/failed；已发布结果保留，不再重复累计 scenes_done。
+            return
+        progress["failed_land_ids"] = sorted(failed_land_ids)
+        progress["failed_scene_ids"] = sorted(failed_scene_ids)
+        progress["scenes_done"] += 1
+        patch_job(job_id, {"progress_json": dict(progress)})
+
+
 @celery_app.task(
+    bind=True,
     name="app.tasks.satellite_batch.process_satellite_batch",
     time_limit=SATELLITE_BATCH_TIME_LIMIT_SEC,
     soft_time_limit=SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+    max_retries=SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES,
+    acks_late=True,
+    reject_on_worker_lost=True,
 )
 def process_satellite_batch(
+    self,
     job_id: str,
     mq_task_id: str | None = None,
     compensation_attempt: int = 0,
@@ -685,7 +1085,13 @@ def process_satellite_batch(
             date.fromisoformat(params["date_to"]),
         )
         patch_job(job_id, {"status": "running", "touch_started": True})
-        lands = _load_lands(params["land_ids"], sensor, params.get("force", False))
+        lands = _load_lands(
+            params["land_ids"],
+            sensor,
+            params.get("force", False),
+            season_months=params.get("season_months"),
+            growing_seasons=params.get("growing_seasons"),
+        )
         if not lands:
             patch_job(
                 job_id,
@@ -709,6 +1115,7 @@ def process_satellite_batch(
             processing_window_km,
             oversized=bool(params.get("oversized")),
             download_bbox=params.get("download_bbox"),
+            processing_boundary=params.get("processing_boundary_geojson"),
         )
         selected_ids = {
             str(land["meta"]["land_id"]) for land in selected_lands
@@ -727,7 +1134,7 @@ def process_satellite_batch(
                 processing_window_km=processing_window_km,
             )
         if not selected_lands:
-            raise RuntimeError("5 km processing window contains no complete land parcel")
+            raise RuntimeError("processing window contains no complete land parcel")
         if sensor == "S2" and params.get("overview_run_id"):
             # 每日总览的 S1/S2 任务共用同一批地块和日期窗口，只在 S2 子任务
             # 派发一次天气，避免同一遥感批次产生两份重复天气任务。
@@ -749,35 +1156,20 @@ def process_satellite_batch(
             padding_degrees=0.0,
             target_crs=shared_crs,
         )
-        if sensor == "S1":
-            scenes = search_s1_scenes(
-                mapping(processing_geom), d0, d1, dedupe_week=False
-            )
-        else:
-            extra_assets = {"SCL": SCL_STAC_ASSETS}
-            if decloud_enabled():
-                extra_assets.update(decloud_s2_extra_assets())
-            scenes = search_scenes_for_defs(
-                mapping(processing_geom),
-                d0,
-                d1,
-                agri_optical_index_defs(),
-                index_label="satellite_batch",
-                max_cloud_cover=decloud_stac_cloud_max_pct()
-                if decloud_enabled()
-                else None,
-                extra_assets=extra_assets,
-                cloud_dedupe="none",
-                max_items=2000,
-            )
+        try:
+            if sensor == "S1":
+                scenes = search_s1_scenes(
+                    mapping(processing_geom), d0, d1, dedupe_week=False
+                )
+            else:
+                scenes = _search_s2_scenes(processing_geom, d0, d1)
+        except Exception:
+            # S1 沿用原有 Planetary Computer 搜索；S2 的 primary/fallback 已在 helper 中处理。
+            raise
         # 失败明细用于批次结束后的定向补偿；保留“失败过”的候选集合，重复补偿是幂等的。
         failed_land_ids: set[str] = set()
         failed_scene_ids: set[str] = set()
-
-        def record_failures(lands_to_record, scene_id: str | None) -> None:
-            failed_land_ids.update(str(land["meta"]["land_id"]) for land in lands_to_record)
-            if scene_id:
-                failed_scene_ids.add(str(scene_id))
+        state_lock = threading.Lock()
 
         progress = {
             "scenes_total": len(scenes),
@@ -787,72 +1179,164 @@ def process_satellite_batch(
             "failed_land_ids": [],
             "failed_scene_ids": [],
             "published_products": [],
+            "scene_workers": 1,
+            "straggler_timeout_sec": scene_straggler_timeout_sec(),
+            "straggler_abandoned_scene_ids": [],
         }
         if compensation_attempt:
             progress = _compensation_progress(
                 progress, compensation_attempt, active=True
             )
-        for scene in scenes:
-            selected = _scene_lands(scene, selected_lands, sensor)
-            if selected:
-                try:
-                    shared_bands, scl = _download_scene(
-                        scene, sensor, grid, job_id=job_id
-                    )
-                except Exception as exc:
-                    progress["failed"] += len(selected)
-                    record_failures(selected, scene["id"])
-                    logger.error(
-                        "satellite_batch_download_failed",
+
+        workers = min(scene_max_workers(), max(1, len(scenes))) if scenes else 1
+        progress["scene_workers"] = workers
+        straggler_timeout = scene_straggler_timeout_sec()
+        progress["straggler_timeout_sec"] = straggler_timeout
+        abandon_event = threading.Event()
+        active_reservations: dict = {}
+        logger.info(
+            "scene_parallel_start",
+            job_id=job_id,
+            index=f"satellite_batch_{sensor}",
+            scenes=len(scenes),
+            workers=workers,
+            band_gdal_cap=band_max_workers(),
+            straggler_timeout_sec=straggler_timeout,
+        )
+        patch_job(job_id, {"progress_json": dict(progress)})
+
+        if scenes:
+            # 不用 with：默认 shutdown(wait=True) 会在 straggler 放弃后仍永久卡住。
+            # cancel_futures 只能取消尚未开跑的任务；已在跑的 GDAL/HTTP 线程只能孤儿化。
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                futures = {
+                    pool.submit(
+                        _process_one_batch_scene,
+                        scene,
+                        sensor=sensor,
+                        selected_lands=selected_lands,
+                        grid=grid,
+                        processing_geom=processing_geom,
                         job_id=job_id,
-                        scene_id=scene["id"],
-                        error=str(exc),
-                    )
-                else:
-                    for land in selected:
+                        mq_task_id=mq_task_id,
+                        processing_window_km=processing_window_km,
+                        scene_workers=workers,
+                        state_lock=state_lock,
+                        progress=progress,
+                        failed_land_ids=failed_land_ids,
+                        failed_scene_ids=failed_scene_ids,
+                        abandon_event=abandon_event,
+                        active_reservations=active_reservations,
+                    ): scene
+                    for scene in scenes
+                }
+                pending = set(futures)
+                # 滚动宽限：时钟从并行开始（零完成兜底）或最近一次景完成时刻起算。
+                last_completion = time.monotonic()
+                while pending:
+                    remaining = straggler_timeout - (time.monotonic() - last_completion)
+                    if remaining <= 0:
+                        done, not_done = set(), set(pending)
+                    else:
+                        done, not_done = wait(
+                            pending,
+                            timeout=remaining,
+                            return_when=FIRST_COMPLETED,
+                        )
+                    if not done:
+                        # 超时窗口内可能刚好有 future 结束；再扫一遍避免误杀刚完成的景。
+                        done = {fut for fut in pending if fut.done()}
+                        not_done = pending - done
+                    for fut in done:
+                        pending.discard(fut)
+                        scene = futures[fut]
                         try:
-                            if _publish_land(
-                                scene,
-                                sensor,
-                                land,
-                                shared_bands,
-                                scl,
-                                grid,
-                                mq_task_id or job_id,
-                                processing_window_km,
-                            ):
-                                progress["products_published"] += 1
-                                # 完成下载不等于MQ结果已入库；API按这些地块/日期确认后才生成每日快照。
-                                progress["published_products"].append(
-                                    {
-                                        "land_id": land["meta"]["land_id"],
-                                        "date": scene["date"].isoformat(),
-                                    }
-                                )
-                                # 同日优先景成功后跳过后续重复景，避免重下载和同一消息编号覆盖。
-                                land["existing"].add(scene["date"])
-                            else:
-                                progress["failed"] += 1
-                                record_failures([land], scene["id"])
+                            fut.result()
                         except Exception as exc:
-                            progress["failed"] += 1
-                            record_failures([land], scene["id"])
-                            logger.error(
-                                "satellite_batch_land_failed",
+                            # 单景未捕获异常仍计入失败，避免整个 batch 默默丢景。
+                            with state_lock:
+                                if not abandon_event.is_set():
+                                    progress["failed"] += 1
+                                    sid = str(scene.get("id") or "")
+                                    if sid:
+                                        failed_scene_ids.add(sid)
+                                    progress["failed_land_ids"] = sorted(
+                                        failed_land_ids
+                                    )
+                                    progress["failed_scene_ids"] = sorted(
+                                        failed_scene_ids
+                                    )
+                                    progress["scenes_done"] += 1
+                                    patch_job(
+                                        job_id, {"progress_json": dict(progress)}
+                                    )
+                            logger.exception(
+                                "satellite_batch_scene_worker_crashed",
                                 job_id=job_id,
-                                land_id=land["meta"]["land_id"],
+                                scene_id=scene.get("id"),
                                 error=str(exc),
                             )
-            progress["failed_land_ids"] = sorted(failed_land_ids)
-            progress["failed_scene_ids"] = sorted(failed_scene_ids)
-            progress["scenes_done"] += 1
-            # 回执是每日汇总核验实际入库所必需的兼容格式；按每5景检查点批量写进度，
-            # 减少重复序列化增长中的回执，同时保留任务运行期的可观测性。
-            if (
-                progress["scenes_done"] % SATELLITE_BATCH_PROGRESS_INTERVAL == 0
-                or progress["scenes_done"] == len(scenes)
-            ):
-                patch_job(job_id, {"progress_json": progress})
+                        last_completion = time.monotonic()
+                    if done and pending:
+                        continue
+                    if not_done and not done:
+                        abandon_event.set()
+                        abandoned_ids: list[str] = []
+                        with state_lock:
+                            for fut in list(not_done):
+                                scene = futures[fut]
+                                sid = str(scene.get("id") or "")
+                                key = sid or str(id(scene))
+                                info = active_reservations.pop(key, None)
+                                if info is None and sid:
+                                    info = active_reservations.pop(str(id(scene)), None)
+                                if info is not None:
+                                    _release_scene_date_reservation(
+                                        info[1], info[0]
+                                    )
+                                if sid:
+                                    failed_scene_ids.add(sid)
+                                    abandoned_ids.append(sid)
+                                else:
+                                    abandoned_ids.append(key)
+                                progress["failed"] += 1
+                                progress["scenes_done"] += 1
+                                fut.cancel()
+                            progress["failed_land_ids"] = sorted(failed_land_ids)
+                            progress["failed_scene_ids"] = sorted(failed_scene_ids)
+                            progress["straggler_abandoned_scene_ids"] = sorted(
+                                set(
+                                    progress.get("straggler_abandoned_scene_ids")
+                                    or []
+                                ).union(abandoned_ids)
+                            )
+                            patch_job(job_id, {"progress_json": dict(progress)})
+                        logger.warning(
+                            "scene_straggler_timeout",
+                            job_id=job_id,
+                            index=f"satellite_batch_{sensor}",
+                            timeout_sec=straggler_timeout,
+                            abandoned=len(not_done),
+                            abandoned_scene_ids=abandoned_ids,
+                            scenes_done=progress["scenes_done"],
+                            scenes_total=progress["scenes_total"],
+                            products_published=progress["products_published"],
+                        )
+                        pending.clear()
+                        break
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        logger.info(
+            "scene_parallel_done",
+            job_id=job_id,
+            index=f"satellite_batch_{sensor}",
+            scenes_done=progress["scenes_done"],
+            products_published=progress["products_published"],
+            failed=progress["failed"],
+            workers=workers,
+        )
         if sensor == "S2" and decloud_enabled():
             from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
 
@@ -902,6 +1386,84 @@ def process_satellite_batch(
             },
         )
         return {"job_id": job_id, "status": status, **progress}
+    except SoftTimeLimitExceeded as exc:
+        # 12 分钟软超时：不落永久 failed，保持 running 并 Celery retry 重入队列。
+        # 重入仍走 params.force（默认 false）+_load_lands 日期跳过，不重做已发布景。
+        retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+        logger.warning(
+            "satellite_batch_soft_time_limit",
+            job_id=job_id,
+            soft_time_limit_sec=SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+            time_limit_sec=SATELLITE_BATCH_TIME_LIMIT_SEC,
+            retries=retries,
+            max_retries=SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES,
+            countdown_sec=SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC,
+        )
+        try:
+            current = dict((job or {}).get("progress_json") or {})
+            current.update(
+                {
+                    "stage": "soft_timeout_requeue",
+                    "last_error": (
+                        f"soft_time_limit={SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC}s "
+                        f"retry={retries}/{SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES}"
+                    )[:2000],
+                    "soft_time_limit_sec": SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC,
+                    "soft_timeout_retries": retries,
+                }
+            )
+            patch_job(
+                job_id,
+                {
+                    "status": "running",
+                    "progress_json": current,
+                    "error": (
+                        "任务软超时，稍后重试；已发布景将按日期跳过"
+                    )[:2000],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "satellite_batch_soft_timeout_state_update_failed", job_id=job_id
+            )
+        try:
+            raise self.retry(
+                exc=exc,
+                countdown=SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC,
+            )
+        except MaxRetriesExceededError:
+            logger.error(
+                "satellite_batch_soft_time_limit_exhausted",
+                job_id=job_id,
+                retries=retries,
+            )
+        # 仅当 soft-timeout 重试次数耗尽时落到此处；self.retry 的 Retry 信号会直接抛出。
+        compensation_scheduled = False
+        try:
+            if job is None:
+                job = get_job(job_id)
+            if _is_assessment_batch_child(job):
+                compensation_scheduled = _schedule_satellite_compensation(
+                    job_id,
+                    job,
+                    compensation_attempt=compensation_attempt,
+                    error=str(exc),
+                )
+        except Exception:
+            logger.exception("satellite_batch_compensation_failed", job_id=job_id)
+        if compensation_scheduled:
+            return {
+                "job_id": job_id,
+                "status": "compensating",
+                "compensation_attempt": compensation_attempt + 1,
+            }
+        try:
+            patch_job(
+                job_id, {"status": "failed", "touch_finished": True, "error": str(exc)}
+            )
+        except Exception:
+            logger.exception("satellite_batch_failure_report_failed", job_id=job_id)
+        raise
     except Exception as exc:
         # HTTP和下载错误必须可见，不得把未产出数据的分组默认为成功。
         compensation_scheduled = False

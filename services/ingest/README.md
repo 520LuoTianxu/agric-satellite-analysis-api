@@ -29,11 +29,9 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 | `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the GDAL semaphore. |
 | `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `60` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=30` also aborts stalled Range responses. |
 | `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |
-| `BAND_WINDOW_CACHE` | `1` (Compose) | Reuse versioned shared scene windows under scratch before reopening remote COGs. The library default is off outside deployment config. |
-| `BAND_WINDOW_CACHE_MAX_GB` | `20` | LRU capacity. Files are also evicted when free disk falls below `BAND_WINDOW_CACHE_MIN_FREE_GB` (default `2`). |
 | `INDEX_BACKFILL_CHUNK_DAYS` | `90` | Historical task window. Keep 90 initially; switch to 30-45 only if measured tails still require a smaller failure domain. |
 | `SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC` / `SATELLITE_BATCH_TIME_LIMIT_SEC` | `1500` / `1800` | Optional whole-task guard. Configure `540` / `600` for a strict ten-minute ceiling; the hard limit recycles a stuck Celery prefork child. |
-| `PROCESSING_WINDOW_KM` | `5.0` | Per-land STAC/raster processing square side length. The complete parcel polygon is used as the metric mask; a parcel crossing a shared window is not merged into that group. |
+| `PROCESSING_WINDOW_KM` | `10.0` | Fallback processing square side for legacy jobs; new batch tasks carry the exact transient 10×10 km planner boundary. |
 | `WRITE_INDEX_COGS` | unset | Canonical optical path skips index TIF/COG uploads by default. `0` = never. `1` = always (storage-heavy). |
 | `UPLOAD_SCENE_JSON` | `1` | Upload compact lonlat_v1 scene JSON under `OSS_PREFIX` (not rasters). |
 | `DECLOUD_ENABLED` | `0` | Optional UnCRtainTS parcel-window cloud removal after agri optical ingest. Off by default. See `docs/decloud-uncrtaints.md`. |

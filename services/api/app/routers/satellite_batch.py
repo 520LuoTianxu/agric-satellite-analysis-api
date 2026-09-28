@@ -4,7 +4,6 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
@@ -12,13 +11,42 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import limiter
 from app.middleware.auth import OrgContext, require_roles
-from app.models.tables import LandParcel
 from app.mq_publish import publish_api_task
-from app.schemas.satellite_batch import SatelliteBatchRequest, SatelliteBatchResponse
-from app.services.satellite_batch import build_satellite_batch_jobs
+from app.schemas.satellite_batch import (
+    SatelliteBatchRequest,
+    SatelliteBatchResponse,
+    SatelliteHistoryBackfillRequest,
+)
+from app.services.smart_land_backfill import (
+    SMART_BACKFILL_MAX_LANDS,
+    LandSelectionError,
+    ensure_land_parcels,
+)
+from app.services.satellite_batch import create_satellite_batch_jobs
+from app.services.satellite_history import backfill_satellite_history
 
 router = APIRouter()
 _writer = require_roles("owner", "admin", "member")
+_admin = require_roles("owner", "admin")
+
+
+@router.post("/admin/satellite-batch/history-backfill", status_code=202)
+async def history_backfill(
+    body: SatelliteHistoryBackfillRequest,
+    _: Annotated[OrgContext, Depends(_admin)],
+):
+    """按本次地块集合临时聚合 10km 窗口并下发历史遥感下载。"""
+    try:
+        return await backfill_satellite_history(
+            land_ids=body.land_ids,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            years=body.years,
+            sensors=body.sensors,
+            force=body.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post(
@@ -33,25 +61,27 @@ async def backfill_satellite_batch(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """传入landIdList，按5×5公里分组并派发共享窗口的S1/S2回填。"""
-    lands = (
-        (
-            await db.execute(
-                select(LandParcel).where(
-                    LandParcel.land_id.in_(body.land_ids),
-                    LandParcel.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    missing = sorted(set(body.land_ids) - {land.land_id for land in lands})
-    if missing:
-        raise HTTPException(status_code=404, detail={"missing_land_ids": missing})
+    """支持清单/闭区间选地，缺失主数据时先从 Smart 补齐再派发 S1/S2。"""
+    requested_land_ids = body.resolved_land_ids()
     try:
-        groups, jobs = await asyncio.to_thread(
-            build_satellite_batch_jobs,
+        # 输入可以覆盖较大编号范围，但实际查询后最多只为1000个有效地块创建任务。
+        lands, selection = await ensure_land_parcels(
+            db,
+            requested_land_ids,
+            max_lands=SMART_BACKFILL_MAX_LANDS,
+            # 显式地块清单按可用数据尽力处理；Smart 中不存在或无效的编号只计入跳过数。
+            allow_partial=True,
+        )
+    except LandSelectionError as exc:
+        detail: object = (
+            {"missing_land_ids": exc.missing_land_ids}
+            if exc.missing_land_ids
+            else str(exc)
+        )
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    try:
+        groups, jobs, _ = await create_satellite_batch_jobs(
+            db,
             lands,
             date_from=body.date_from,
             date_to=body.date_to,
@@ -62,8 +92,6 @@ async def backfill_satellite_batch(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    for job in jobs:
-        db.add(job)
     # 先提交所有任务记录，下载机只需通过内部HTTP读job即可拿到地块列表与窗口。
     await db.commit()
     for index, job in enumerate(jobs):
@@ -94,6 +122,11 @@ async def backfill_satellite_batch(
         land_count=len(lands),
         group_count=len(groups),
         job_count=len(jobs),
+        requested_land_count=(
+            selection.get("requested_land_count") if selection else len(requested_land_ids)
+        ),
+        selected_land_ids=[str(land.land_id) for land in lands],
+        skipped_land_count=(selection.get("skipped_land_count", 0) if selection else 0),
         date_from=body.date_from,
         date_to=body.date_to,
         groups=groups,

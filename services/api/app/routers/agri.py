@@ -1,4 +1,4 @@
-"""Agri-first APIs: 项目区 (virtual_project_areas), 地块 (land_parcels), S1/S2 scenes.
+"""Agri-first APIs: 地块 (land_parcels) 与 S1/S2 scenes.
 
 Primary product surface for agric-satellite-analysis. Scene data is keyed
 directly by ``agric_satellite.land_parcels.land_id``; no parcel mapping is
@@ -31,8 +31,6 @@ from app.schemas.agri import (
     LandScenesSummaryOut,
     NdviDayGradeShareItem,
     NdviDayGradeSharesOut,
-    ProjectAreaLandOut,
-    ProjectAreaOut,
     SceneProductOut,
     SensorSceneSummary,
 )
@@ -125,6 +123,7 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
             "analysis_grid",
             "radiometric_calibration",
             "quality_metrics",
+            "grid_json",
             "decloud_reasons",
         ) and isinstance(v, str):
             try:
@@ -503,8 +502,6 @@ async def agri_stats(
     """Read-only row counts for agri tables (import health check)."""
     await _agri_ready(db)
     tables = [
-        "virtual_project_areas",
-        "virtual_project_area_lands",
         "land_parcels",
         "parcel_scene_products",
         "ingest_runs",
@@ -523,160 +520,6 @@ async def agri_stats(
             "/v1/lands is the canonical parcel API in this fork."
         ),
     )
-
-
-@router.get("/project-areas", response_model=PaginatedResponse[ProjectAreaOut])
-async def list_project_areas(
-    ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    province: str | None = Query(None, description="Filter province_name ILIKE"),
-    city: str | None = Query(None),
-    county: str | None = Query(None),
-    q: str | None = Query(None, description="Search tile_id / project_key / names"),
-    include_boundary: int = Query(0, ge=0, le=1),
-):
-    """List 项目区 tiles (virtual_project_areas)."""
-    await _agri_ready(db)
-    where = ["TRUE"]
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if province:
-        where.append("province_name ILIKE :province")
-        params["province"] = f"%{province}%"
-    if city:
-        where.append("city_name ILIKE :city")
-        params["city"] = f"%{city}%"
-    if county:
-        where.append("county_name ILIKE :county")
-        params["county"] = f"%{county}%"
-    if q:
-        where.append(
-            "("
-            "tile_id ILIKE :q OR coalesce(project_key,'') ILIKE :q OR "
-            "coalesce(group_name,'') ILIKE :q OR coalesce(org_name,'') ILIKE :q OR "
-            "coalesce(province_name,'') ILIKE :q OR coalesce(city_name,'') ILIKE :q OR "
-            "coalesce(county_name,'') ILIKE :q"
-            ")"
-        )
-        params["q"] = f"%{q}%"
-    wh = " AND ".join(where)
-
-    total = (
-        await db.execute(
-            text(
-                f"SELECT count(*) FROM agric_satellite.virtual_project_areas WHERE {wh}"
-            ),
-            params,
-        )
-    ).scalar() or 0
-
-    boundary_expr = (
-        "boundary_geojson" if include_boundary else "NULL::jsonb AS boundary_geojson"
-    )
-    rows = (
-        await db.execute(
-            text(
-                f"""
-                SELECT tile_id, project_key, anchor_land_id, assignment_type, parcel_count,
-                       tile_width_m, tile_height_m, group_id, group_name, base_id,
-                       org_code, org_name, province_name, city_name, county_name,
-                       {boundary_expr}, boundary_srid,
-                       min_lon, min_lat, max_lon, max_lat, created_at, updated_at,
-                       parcel_count AS land_count
-                FROM agric_satellite.virtual_project_areas
-                WHERE {wh}
-                ORDER BY province_name NULLS LAST, city_name NULLS LAST, county_name NULLS LAST, tile_id
-                LIMIT :limit OFFSET :offset
-                """
-            ),
-            params,
-        )
-    ).fetchall()
-
-    items = [ProjectAreaOut.model_validate(_row_to_dict(r)) for r in rows]
-    return PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
-
-
-@router.get("/project-areas/{tile_id}", response_model=ProjectAreaOut)
-async def get_project_area(
-    tile_id: str,
-    ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    await _agri_ready(db)
-    row = (
-        await db.execute(
-            text(
-                """
-                SELECT a.*,
-                       (SELECT count(*) FROM agric_satellite.virtual_project_area_lands l
-                        WHERE l.tile_id = a.tile_id) AS land_count
-                FROM agric_satellite.virtual_project_areas a
-                WHERE a.tile_id = :tile_id
-                """
-            ),
-            {"tile_id": tile_id},
-        )
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Project area (tile) not found")
-    return ProjectAreaOut.model_validate(_row_to_dict(row))
-
-
-@router.get(
-    "/project-areas/{tile_id}/lands",
-    response_model=PaginatedResponse[ProjectAreaLandOut],
-)
-async def list_project_area_lands(
-    tile_id: str,
-    ctx: Annotated[OrgContext, Depends(_reader)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
-    await _agri_ready(db)
-    exists = (
-        await db.execute(
-            text(
-                "SELECT 1 FROM agric_satellite.virtual_project_areas WHERE tile_id = :tile_id"
-            ),
-            {"tile_id": tile_id},
-        )
-    ).scalar()
-    if not exists:
-        raise HTTPException(status_code=404, detail="Project area (tile) not found")
-
-    params = {"tile_id": tile_id, "limit": limit, "offset": offset}
-    total = (
-        await db.execute(
-            text(
-                "SELECT count(*) FROM agric_satellite.virtual_project_area_lands WHERE tile_id = :tile_id"
-            ),
-            params,
-        )
-    ).scalar() or 0
-    rows = (
-        await db.execute(
-            text(
-                """
-                SELECT l.tile_id, l.land_id, l.assignment_type, l.is_anchor,
-                       l.intersection_area_m2, l.coverage_ratio,
-                       p.land_name, p.land_area_mu,
-                       p.province_name, p.city_name, p.county_name,
-                       p.min_lon, p.min_lat, p.max_lon, p.max_lat
-                FROM agric_satellite.virtual_project_area_lands l
-                JOIN agric_satellite.land_parcels p ON p.land_id = l.land_id
-                WHERE l.tile_id = :tile_id
-                ORDER BY l.is_anchor DESC, p.land_name NULLS LAST, l.land_id
-                LIMIT :limit OFFSET :offset
-                """
-            ),
-            params,
-        )
-    ).fetchall()
-    items = [ProjectAreaLandOut.model_validate(_row_to_dict(r)) for r in rows]
-    return PaginatedResponse(items=items, total=int(total), limit=limit, offset=offset)
 
 
 @router.get("/lands/{land_id}", response_model=LandParcelOut)

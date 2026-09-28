@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated
 
@@ -186,6 +187,32 @@ async def list_field_alerts(
     return await _page(
         db, _scoped_alerts(ctx).where(Alert.land_id == land_id), limit, offset
     )
+
+
+@router.post("/lands/{land_id}/alerts/evaluate")
+async def evaluate_field_alerts(land_id: str, ctx: Context, db: Database):
+    """手动打开地块时补算预警，并为旧手工地块补齐当前基地归属。"""
+    land = await db.get(LandParcel, land_id)
+    if not land or land.deleted_at is not None:
+        raise HTTPException(404, "Land not found")
+    if land.base_id is None and (land.source_properties or {}).get("source") == "api":
+        # 旧版手工创建没有传基地 ID；首次在该基地查看时补齐，之后按基地正常隔离。
+        land.base_id = ctx.base_id
+        await db.commit()
+    elif str(land.base_id or "") != ctx.base_id:
+        raise HTTPException(404, "Land not found")
+
+    from app.services.agri_alerts import evaluate_agri_alerts_for_land
+
+    try:
+        return await asyncio.to_thread(
+            evaluate_agri_alerts_for_land,
+            land_id,
+            replace_open=True,
+        )
+    except Exception as exc:
+        logger.exception("field_alert_evaluation_failed", land_id=land_id)
+        raise HTTPException(500, "Alert evaluation failed") from exc
 
 
 @router.patch("/alerts/{alert_id}", response_model=AlertOut)

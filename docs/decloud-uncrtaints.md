@@ -36,6 +36,29 @@ fallback that only fires after neighbor windows are already in the local cache.
 
 Restart the ingest worker.
 
+## Claim/download-host data plane
+
+When the download machine runs with `WORK_QUEUE_MODE=claim` and has no
+`DATABASE_URL` or `DATABASE_URL_SYNC`, the `decloud` worker must have
+`API_BASE_URL` and `INTERNAL_API_TOKEN` from the same internal API setup as
+the other download workers. It does not create a SQLAlchemy session. The
+batch/per-scene tasks use these paths instead:
+
+1. `GET /v1/internal/lands/resolve?land_id=...` supplies the canonical land
+   geometry, tile, and display metadata.
+2. `GET /v1/internal/lands/{land_id}/season-growth-inputs` supplies official
+   S2 neighbor averages used by the decloud quality score. Local S2/S1 window
+   arrays remain in the download machine scratch cache.
+3. The reconstructed JSON is uploaded to OSS and reported through
+   `POST /v1/internal/results/cache`; the API-side result consumer downloads
+   the JSON and upserts `parcel_scene_products`.
+
+The download machine's Redis remains only the local Celery broker. A deployment
+with a non-empty database URL and without HTTP-only settings keeps the existing
+SQLAlchemy path for compatibility. Regardless of the path, raw S2 rows remain
+additive and only `decloud_quality=good` is eligible for official drought and
+other official metrics.
+
 ## Sequence (new vs old)
 
 **Old (phase 1):** each raw S2 write immediately enqueued

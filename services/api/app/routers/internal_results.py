@@ -83,6 +83,13 @@ async def apply_results(
     envelope = _envelope_from_body(body)
     stats = await asyncio.to_thread(apply_result_envelope, envelope)
     ok = "error" not in stats
+    if ok:
+        from app.services.agri_alerts import evaluate_alerts_for_scene_result
+
+        try:
+            await asyncio.to_thread(evaluate_alerts_for_scene_result, envelope, stats)
+        except Exception as exc:
+            logger.exception("internal_scene_alert_evaluation_failed", error=str(exc))
     return ApplyResponse(ok=ok, stats=stats)
 
 

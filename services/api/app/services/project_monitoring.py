@@ -158,7 +158,8 @@ async def get_project_monitoring(
                        latest.date AS latest_scene_date,
                        obs.date AS observation_date, obs.ndvi_avg, obs.evi_avg,
                        obs.ndmi_avg, obs.cloud_cover, obs.parcel_cloud_cover_pct,
-                       obs.parcel_cloud_source, obs.source, obs.scene_id
+                       obs.parcel_cloud_source, obs.product_source AS source,
+                       obs.scene_id
                 FROM agric_satellite.land_parcels p
                 LEFT JOIN LATERAL (
                     SELECT s.date
@@ -171,8 +172,7 @@ async def get_project_monitoring(
                     SELECT DISTINCT ON (s.date)
                            s.date, s.ndvi_avg, s.evi_avg, s.ndmi_avg,
                            s.cloud_cover, s.parcel_cloud_cover_pct, s.scene_id,
-                           s.pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
-                           s.pixel_data->>'source' AS source
+                           s.parcel_cloud_source, s.product_source
                     FROM agric_satellite.parcel_scene_products s
                     WHERE s.land_id = p.land_id AND s.sensor = 'S2'
                       AND s.date <= :as_of AND s.ndvi_avg BETWEEN -1 AND 1
