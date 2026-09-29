@@ -26,6 +26,15 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 RESULT_JSON_MAX_BYTES = 8 * 1024 * 1024
 
+
+class PermanentResultPayloadError(ValueError):
+    """不可通过重试修复的回执地址或对象内容错误。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 __all__ = [
     "UPSERT_SCENE_SQL",
     "UPSERT_WEATHER_SQL",
@@ -179,14 +188,14 @@ def _download_json(url: str) -> Any | None:
     """有界读取本项目 OSS JSON；拒绝非配置 OSS 主机及跨主机重定向。"""
     if not isinstance(url, str) or len(url) > 8192:
         logger.warning("result_json_url_rejected reason=invalid_length")
-        return None
+        raise PermanentResultPayloadError("invalid_url_length")
 
     try:
         parsed = urlparse(url)
         endpoint = urlparse(settings.oss_endpoint)
     except ValueError:
         logger.warning("result_json_url_rejected reason=invalid_url")
-        return None
+        raise PermanentResultPayloadError("invalid_url") from None
     endpoint_authority = endpoint.netloc or endpoint.path
     expected_authority = f"{settings.oss_bucket}.{endpoint_authority}".casefold()
     expected_scheme = (endpoint.scheme or "https").casefold()
@@ -205,19 +214,19 @@ def _download_json(url: str) -> Any | None:
             "result_json_url_rejected host=%s",
             parsed.hostname,
         )
-        return None
+        raise PermanentResultPayloadError("url_outside_configured_oss")
 
     key = parsed.path.lstrip("/")
     if not key:
         logger.warning("result_json_url_rejected reason=missing_object_key")
-        return None
+        raise PermanentResultPayloadError("missing_object_key")
 
     try:
         raw = get_storage().get_bytes(key, max_bytes=RESULT_JSON_MAX_BYTES)
     except ObjectTooLargeError:
         # API 场景读取也限制为8 MiB；在公共结果入口采用同一边界，防止大对象耗尽内存。
         logger.warning("result_json_object_too_large host=%s", parsed.hostname)
-        return None
+        raise PermanentResultPayloadError("object_too_large") from None
     except Exception as exc:
         # 存储凭证/SDK暂不可用时仍可尝试读取公开对象，但不记录签名URL或对象键。
         logger.warning(
@@ -234,7 +243,7 @@ def _download_json(url: str) -> Any | None:
                 parsed.hostname,
                 type(exc).__name__,
             )
-            return None
+            raise PermanentResultPayloadError("invalid_json") from None
 
     try:
         # HTTP回退也逐块限流；禁止自动跟随重定向，避免OSS之外的二次请求。
@@ -246,7 +255,7 @@ def _download_json(url: str) -> Any | None:
                         parsed.hostname,
                         resp.status_code,
                     )
-                    return None
+                    raise PermanentResultPayloadError("oss_redirect_rejected")
                 resp.raise_for_status()
                 content_length = resp.headers.get("content-length")
                 if (
@@ -258,7 +267,7 @@ def _download_json(url: str) -> Any | None:
                         parsed.hostname,
                         content_length,
                     )
-                    return None
+                    raise PermanentResultPayloadError("object_too_large")
                 raw = bytearray()
                 for chunk in resp.iter_bytes():
                     if len(raw) + len(chunk) > RESULT_JSON_MAX_BYTES:
@@ -266,9 +275,32 @@ def _download_json(url: str) -> Any | None:
                             "result_json_object_too_large host=%s",
                             parsed.hostname,
                         )
-                        return None
+                        raise PermanentResultPayloadError("object_too_large")
                     raw.extend(chunk)
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise PermanentResultPayloadError("invalid_json") from None
+    except PermanentResultPayloadError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code in {400, 404, 410, 422}:
+            # 仅把明确的请求/对象错误隔离；鉴权、限流和服务端错误仍可在环境修复后重试。
+            logger.warning(
+                "result_json_http_rejected host=%s status=%s",
+                parsed.hostname,
+                status_code,
+            )
+            raise PermanentResultPayloadError(
+                f"oss_http_status_{status_code}"
+            ) from None
+        logger.warning(
+            "http_get_failed host=%s status=%s",
+            parsed.hostname,
+            status_code,
+        )
+        return None
     except Exception as exc:
         logger.warning(
             "http_get_failed host=%s error_type=%s",
@@ -896,13 +928,19 @@ def apply_domain_from_payload(
     return _apply_domain_from_payload(payload, status=status)
 
 
-def _download_and_apply_oss(oss_urls: dict[str, Any] | None, *, status: str) -> tuple[dict[str, Any], int]:
-    """Download OSS JSON labels and apply weather/soil/scene upserts."""
+def _download_and_apply_oss(
+    oss_urls: dict[str, Any] | None, *, status: str
+) -> tuple[dict[str, Any], int, list[str], dict[str, str]]:
+    """逐标签读取OSS JSON，并为队列消费者区分可重试故障和永久拒绝。"""
     downloaded: dict[str, Any] = {}
     scene_upserts = 0
+    retryable_failures: list[str] = []
+    permanent_rejections: dict[str, str] = {}
+    # 单个对象失败不阻断同一回执中的其他场景；最终由消费者统一决定重试或隔离。
     for label, url in (oss_urls or {}).items():
         if not url or not str(url).startswith("http"):
-            downloaded[label] = {"skipped": True, "raw": url}
+            downloaded[label] = {"permanent_rejection": "invalid_url"}
+            permanent_rejections[label] = "invalid_url"
             continue
         url_l = str(url).lower().split("?", 1)[0]
         if label in ("assessment_pdf", "season_growth_pdf") or url_l.endswith(".pdf"):
@@ -912,9 +950,15 @@ def _download_and_apply_oss(oss_urls: dict[str, Any] | None, *, status: str) -> 
                 "content_type": "application/pdf",
             }
             continue
-        data = _download_json(str(url))
+        try:
+            data = _download_json(str(url))
+        except PermanentResultPayloadError as exc:
+            downloaded[label] = {"permanent_rejection": exc.reason}
+            permanent_rejections[label] = exc.reason
+            continue
         if data is None:
             downloaded[label] = {"download_failed": True, "url": url}
+            retryable_failures.append(label)
             continue
         downloaded[label] = data
 
@@ -930,6 +974,7 @@ def _download_and_apply_oss(oss_urls: dict[str, Any] | None, *, status: str) -> 
                     "domain_apply_from_oss_failed label=%s err=%s", label, exc
                 )
                 downloaded[label] = {"apply_failed": True, "error": str(exc)[:300]}
+                retryable_failures.append(label)
             continue
 
         if _is_lonlat_scene_product(data):
@@ -946,7 +991,8 @@ def _download_and_apply_oss(oss_urls: dict[str, Any] | None, *, status: str) -> 
                     "upsert_failed": True,
                     "error": str(exc)[:300],
                 }
-    return downloaded, scene_upserts
+                retryable_failures.append(label)
+    return downloaded, scene_upserts, retryable_failures, permanent_rejections
 
 
 def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -997,7 +1043,12 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
     oss_urls = envelope.get("oss_urls")
     if isinstance(oss_urls, dict) and oss_urls:
-        downloaded, scene_n = _download_and_apply_oss(oss_urls, status=status)
+        (
+            downloaded,
+            scene_n,
+            retryable_failures,
+            permanent_rejections,
+        ) = _download_and_apply_oss(oss_urls, status=status)
         # 返回天气实际入库行数，供 API 在同一结果链路触发干旱预警重算。
         weather_n = sum(
             int(item.get("weather_rows") or 0)
@@ -1009,6 +1060,10 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
             "scene_upserts": scene_n,
             "weather_upserts": weather_n,
         }
+        if retryable_failures:
+            stats["oss"]["retryable_failures"] = retryable_failures
+        if permanent_rejections:
+            stats["oss"]["permanent_rejections"] = permanent_rejections
         if scene_n:
             stats["scene_upserts"] = stats.get("scene_upserts", 0) + scene_n
         if weather_n:

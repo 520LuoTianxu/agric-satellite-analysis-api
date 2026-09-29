@@ -191,3 +191,4 @@ docker compose --profile mq up -d --build api ingest mq_consumer mq_result_write
 6. 失败重试：consumer 用 `x-retry-count` 头，默认最多 3 次后 ack。  
 7. 改 `mq_consumer` / `mq_result_writer` / API / ingest 后需 `--build`。  
 8. 旧队列名 `openfarm_tasks` / `openfarm_results` 上若仍有残留消息，需人工迁移或消费干净后再切流量。
+9. API 的场景结果 Redis 队列对暂时性 OSS/数据库故障按 2 秒起步的指数退避重试，最长间隔 5 分钟；不属于配置 OSS 的地址、重定向、损坏 JSON、明确无效的 HTTP 请求/对象状态或超过 8 MiB 的对象转入 `openfarm:satellite:scene-result:dead-letter`，原因保存在 `openfarm:satellite:scene-result:dead-letter-reason:{result_id}`。鉴权、限流和服务端错误仍会重试。原始回执保留在 `openfarm:satellite:scene-result:item:{result_id}`，最多保留 24 小时；死信列表最多保留 1000 个 ID。人工重放前先导出原始回执，再从死信列表移除该 ID 并删除对应 `item:{result_id}` 与 `dead-letter-reason:{result_id}` 键，最后调用 `/v1/internal/results/cache`；仅重新 POST 但保留幂等缓存键不会重新入队。
