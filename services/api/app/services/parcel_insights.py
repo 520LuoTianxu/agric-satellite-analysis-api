@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from math import cos, radians, sqrt
 from statistics import mean, pstdev
 from typing import Any
 
@@ -15,6 +16,8 @@ from agric_satellite_analysis_common.phenology import infer_phenology, number
 from app.core.agri_classify import is_decloud_product, is_official_optical_product
 from app.models.tables import LandParcel, WeatherDaily
 from app.schemas.parcel_insights import InsightsRequest
+
+SPATIAL_DISPLAY_PIXEL_LIMIT = 1600
 
 
 def shifted(day: date, year: int) -> date:
@@ -269,6 +272,58 @@ async def load_points(
     return {key: official_points(grouped[key]) for key in land_ids}
 
 
+def _sample_spatial_pixels(valid: list[list[float]]) -> list[list[float]]:
+    """按地理网格选展示代表点，避免展平数组固定步长抽样产生周期性空间偏差。"""
+    if len(valid) <= SPATIAL_DISPLAY_PIXEL_LIMIT:
+        return valid
+
+    min_lon = min(pixel[0] for pixel in valid)
+    max_lon = max(pixel[0] for pixel in valid)
+    min_lat = min(pixel[1] for pixel in valid)
+    max_lat = max(pixel[1] for pixel in valid)
+    # 经度距离随纬度收缩；用近似投影后的宽高比设置网格，避免狭长地块浪费抽样格。
+    longitude_factor = max(abs(cos(radians((min_lat + max_lat) / 2))), 1e-12)
+    width = (max_lon - min_lon) * longitude_factor
+    height = max_lat - min_lat
+    if width and height:
+        aspect_ratio = width / height
+    elif width:
+        aspect_ratio = float(SPATIAL_DISPLAY_PIXEL_LIMIT)
+    elif height:
+        aspect_ratio = 1 / SPATIAL_DISPLAY_PIXEL_LIMIT
+    else:
+        aspect_ratio = 1.0
+
+    columns = max(
+        1,
+        min(
+            SPATIAL_DISPLAY_PIXEL_LIMIT,
+            round(sqrt(SPATIAL_DISPLAY_PIXEL_LIMIT * aspect_ratio)),
+        ),
+    )
+    rows = max(1, SPATIAL_DISPLAY_PIXEL_LIMIT // columns)
+    cell_width = width / columns
+    cell_height = height / rows
+    representatives: dict[tuple[int, int], tuple[float, list[float]]] = {}
+    for pixel in valid:
+        x = (pixel[0] - min_lon) * longitude_factor
+        y = pixel[1] - min_lat
+        column = min(columns - 1, int(x / width * columns)) if width else 0
+        row = min(rows - 1, int(y / height * rows)) if height else 0
+        center_x = (column + 0.5) * cell_width
+        center_y = (row + 0.5) * cell_height
+        # 每格取最靠近格心的有效像元；距离相同时按坐标和NDVI稳定择一，不依赖原数组的行扫描顺序。
+        distance = (((x - center_x) / cell_width) ** 2 if cell_width else 0) + (
+            ((y - center_y) / cell_height) ** 2 if cell_height else 0
+        )
+        key = (row, column)
+        previous = representatives.get(key)
+        if previous is None or (distance, *pixel) < (previous[0], *previous[1]):
+            representatives[key] = (distance, pixel)
+
+    return [representatives[key][1] for key in sorted(representatives)]
+
+
 async def spatial_snapshot(db, land_id: str, point: dict | None) -> dict | None:
     if not point:
         return None
@@ -310,15 +365,15 @@ async def spatial_snapshot(db, land_id: str, point: dict | None) -> dict | None:
             valid.append([lon, lat, value])
     if not valid:
         return None
-    step = max(1, (len(valid) + 1599) // 1600)
+    display_pixels = _sample_spatial_pixels(valid)
     return {
         "date": point["date"],
         "valid_pixels": len(valid),
         "total_pixels": len(pixels),
         "low_green_pct": round(sum(p[2] < 0.35 for p in valid) / len(valid) * 100, 1),
         "ndvi_stddev": round(pstdev(p[2] for p in valid), 4),
-        "pixels": valid[::step],
-        "display_sampled": step > 1,
+        "pixels": display_pixels,
+        "display_sampled": len(display_pixels) < len(valid),
         "note": "低绿度比例仅按有效像元统计（NDVI < 0.35），不代表受灾面积。",
     }
 
