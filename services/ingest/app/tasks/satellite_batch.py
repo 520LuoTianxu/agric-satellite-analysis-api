@@ -1716,25 +1716,39 @@ def process_satellite_batch(
                         retry_decloud_snapshots.append((land, raw_results))
             try:
                 from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
-
-                for land, raw_results in retry_decloud_snapshots:
-                    schedule_decloud_after_raw(
-                        land_id=land["meta"]["land_id"],
-                        date_from=str(retry_d0),
-                        date_to=str(retry_d1),
-                        raw_results=raw_results,
-                        mq_task_id=(
-                            f"{retry_mq_task_id or job_id}:"
-                            f"{land['meta']['land_id']}"
-                        ),
-                        season_months=land.get("season_months"),
-                        crop_type=land.get("crop_type"),
-                    )
             except Exception:
                 logger.exception(
-                    "satellite_batch_soft_timeout_decloud_schedule_failed",
+                    "satellite_batch_soft_timeout_decloud_scheduler_unavailable",
                     job_id=job_id,
                 )
+            else:
+                # 各地块独立排程；单块数据或缓存异常不能阻断同批其他地块补排。
+                for land, raw_results in retry_decloud_snapshots:
+                    land_id = str(land["meta"]["land_id"])
+                    try:
+                        schedule_decloud_after_raw(
+                            land_id=land_id,
+                            date_from=str(retry_d0),
+                            date_to=str(retry_d1),
+                            raw_results=raw_results,
+                            mq_task_id=(
+                                f"{retry_mq_task_id or job_id}:{land_id}"
+                            ),
+                            season_months=land.get("season_months"),
+                            crop_type=land.get("crop_type"),
+                        )
+                    except Exception:
+                        # 记录失败地块以便测试环境按地块核对；不要丢弃同批后续地块的排程机会。
+                        logger.exception(
+                            "satellite_batch_soft_timeout_decloud_schedule_failed",
+                            job_id=job_id,
+                            land_id=land_id,
+                            raw_scene_ids=[
+                                str(result.get("scene_id") or result.get("stac_id") or "")
+                                for result in raw_results
+                                if isinstance(result, dict)
+                            ],
+                        )
         retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
         logger.warning(
             "satellite_batch_soft_time_limit",
