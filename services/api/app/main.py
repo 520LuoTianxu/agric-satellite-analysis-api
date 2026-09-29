@@ -40,6 +40,7 @@ from app.routers import (
     internal_work,
     internal_lands,
     internal_jobs,
+    internal_decloud_schedules,
     internal_agri,
     internal_results,
     internal_schedule,
@@ -138,6 +139,7 @@ app.include_router(mq_tasks.router, prefix=PREFIX, tags=["mq"])
 app.include_router(internal_work.router, prefix=PREFIX)
 app.include_router(internal_lands.router, prefix=PREFIX)
 app.include_router(internal_jobs.router, prefix=PREFIX)
+app.include_router(internal_decloud_schedules.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
 app.include_router(internal_results.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)

@@ -29,6 +29,10 @@ __all__ = [
     "cache_results",
     "assessment_bundle",
     "agri_satellite_batch_inputs",
+    "create_decloud_schedule",
+    "claim_decloud_schedules",
+    "complete_decloud_schedule",
+    "fail_decloud_schedule",
     "complete_work",
     "data_readiness",
     "daily_satellite_prepare",
@@ -335,6 +339,72 @@ def patch_job(
         return _do(client)
     with internal_client() as c:
         return _do(c)
+
+
+def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
+    """把已发布 S2 的去云排程意图持久化到 API 数据库 Outbox。"""
+    with internal_client(timeout=30.0) as client:
+        response = client.post(
+            "/v1/internal/decloud-schedules",
+            json=_json_safe_payload(payload),
+        )
+        _raise_for_status(response, context="decloud-schedules/create")
+        data = response.json()
+        if not isinstance(data, dict) or not data.get("schedule_key"):
+            raise InternalApiError("decloud-schedules/create returned invalid response")
+        return data
+
+
+def claim_decloud_schedules(
+    *,
+    worker_id: str,
+    schedule_key: str | None = None,
+    limit: int = 25,
+    lease_seconds: int = 900,
+) -> list[dict[str, Any]]:
+    """用数据库租约领取待排程项；多 dispatcher 并发时不会同时领取同一行。"""
+    body = {
+        "worker_id": worker_id,
+        "schedule_key": schedule_key,
+        "limit": limit,
+        "lease_seconds": lease_seconds,
+    }
+    with internal_client(timeout=30.0) as client:
+        response = client.post(
+            "/v1/internal/decloud-schedules/claim",
+            json=body,
+        )
+        _raise_for_status(response, context="decloud-schedules/claim")
+        data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise InternalApiError("decloud-schedules/claim returned invalid response")
+        return [item for item in data["items"] if isinstance(item, dict)]
+
+
+def complete_decloud_schedule(*, schedule_key: str, worker_id: str) -> None:
+    """确认去云计划已经成功交给下游 Celery 队列。"""
+    with internal_client() as client:
+        response = client.post(
+            f"/v1/internal/decloud-schedules/{schedule_key}/complete",
+            json={"worker_id": worker_id},
+        )
+        _raise_for_status(response, context="decloud-schedules/complete")
+
+
+def fail_decloud_schedule(
+    *, schedule_key: str, worker_id: str, error: str
+) -> dict[str, Any]:
+    """保留排程失败原因并按 API 端退避时间重新开放领取。"""
+    with internal_client() as client:
+        response = client.post(
+            f"/v1/internal/decloud-schedules/{schedule_key}/fail",
+            json={"worker_id": worker_id, "error": str(error)[:2000]},
+        )
+        _raise_for_status(response, context="decloud-schedules/fail")
+        data = response.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("decloud-schedules/fail returned invalid response")
+        return data
 
 
 def agri_land_meta(

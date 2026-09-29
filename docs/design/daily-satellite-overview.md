@@ -14,7 +14,7 @@ SCHEDULE_OVERVIEW_REFRESH_ENABLED=false
 
 需要同步部署API、共享包、ingest、Beat及前端。既有MQ消费者/HTTP claim需要包含`satellite_batch`支持，结果写入服务正常运行。下载机配置`API_BASE_URL`、`INTERNAL_API_TOKEN`和本地Celery Redis；保持一个Beat实例。下载机不得直连API Postgres或API Redis。
 
-复用现有`jobs`、`land_parcels`、`parcel_scene_products`和`overview_stats_daily`，不新增业务表。原每周单地块光学调度已移除；总览缓存刷新仍可单独显式开启。天气需要开启对应开关，既有手动多年回填、去云流程继续使用。
+快照计算复用现有`jobs`、`land_parcels`、`parcel_scene_products`和`overview_stats_daily`。为恢复迟到S2的去云排程，另新增`satellite_decloud_schedule_outbox`表；迁移与部署顺序见[去云排程恢复运行说明](satellite-decloud-outbox-runbook.md)。原每周单地块光学调度已移除；总览缓存刷新仍可单独显式开启。天气需要开启对应开关，既有手动多年回填、去云流程继续使用。
 
 每日批次将有效地块交给10×10公里动态窗口贪心规划器临时分组，不查询或持久化虚拟项目区。下载机每次从遥感源重新检索并读取整组所需的COG，在内存中按每块地的边界裁剪，再只把S2指数和S1的VV/VH地块级结果写回原地块。S2优先使用AWS / Element84公开 Sentinel-2 COG；主源无结果或读取失败时降级到Planetary Computer，S1继续使用现有数据源。共享窗口不写入OSS，也不做本地持久缓存。
 

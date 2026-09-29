@@ -4,7 +4,7 @@
 
 全国态势需要每日更新干旱和洪涝，并能查看当天和历史。逐地块独立下载会重复读取相邻地块共用影像；只刷新查询缓存则无法保证新影像已入库，也无法稳定保留历史。
 
-采用现有Celery Beat、Internal HTTP、`satellite_batch`任务、OSS/MQ结果写入和`overview_stats_daily`，不新增调度服务或数据库表。
+采用现有Celery Beat、Internal HTTP、`satellite_batch`任务、OSS/MQ结果写入和`overview_stats_daily`，不新增调度服务。每日快照仍复用现有统计表；S2迟到去云的可靠恢复另用持久化Outbox，详见[去云排程恢复ADR](../design/adr-20260930-satellite-decloud-outbox.md)。
 
 ```mermaid
 flowchart LR

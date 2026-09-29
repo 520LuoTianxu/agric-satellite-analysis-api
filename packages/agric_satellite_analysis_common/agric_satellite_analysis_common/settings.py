@@ -25,6 +25,8 @@ class CommonSettings(BaseSettings):
     schedule_overview_refresh_enabled: bool = False
     # 五年历史遥感回填默认关闭，开启后按周触发一次动态 10km 分组补齐。
     schedule_satellite_history_enabled: bool = False
+    # Outbox 由下载机 Beat 扫描；生产 compose 显式开启，开发环境默认不加后台轮询。
+    schedule_decloud_outbox_enabled: bool = False
 
     # Celery / kombu Redis transport. Defaults match a remote broker over a
     # flaky path (download-machine, nested Docker NAT). 0 max retries = forever.

@@ -140,6 +140,7 @@ services:
     restart: unless-stopped
     environment:
       REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+      SCHEDULE_DECLOUD_OUTBOX_ENABLED: ${SCHEDULE_DECLOUD_OUTBOX_ENABLED:-true}
 
   mq_consumer:
     network_mode: host

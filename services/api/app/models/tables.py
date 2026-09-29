@@ -7,6 +7,7 @@ from datetime import date as _date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    ARRAY,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -323,6 +325,74 @@ class SatelliteJobProductReceipt(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class SatelliteDecloudScheduleOutbox(Base):
+    """持久化原始 S2 场景的去云排程意图，供下载机可靠重试。"""
+
+    __tablename__ = "satellite_decloud_schedule_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed')",
+            name="satellite_decloud_schedule_outbox_status_ck",
+        ),
+        CheckConstraint(
+            "attempts >= 0", name="satellite_decloud_schedule_outbox_attempts_ck"
+        ),
+        CheckConstraint(
+            "date_from <= date_to", name="satellite_decloud_schedule_outbox_dates_ck"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(raw_results) = 'array'",
+            name="satellite_decloud_schedule_outbox_raw_results_ck",
+        ),
+        Index(
+            "ix_satellite_decloud_schedule_outbox_pending",
+            "available_at",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ix_satellite_decloud_schedule_outbox_expired_lease",
+            "lease_until",
+            postgresql_where=text("status = 'processing'"),
+        ),
+    )
+
+    schedule_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    land_id: Mapped[str] = mapped_column(Text, nullable=False)
+    date_from: Mapped[_date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[_date] = mapped_column(Date, nullable=False)
+    raw_results = mapped_column(JSONB, nullable=False)
+    mq_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    season_months = mapped_column(ARRAY(SmallInteger), nullable=True)
+    crop_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

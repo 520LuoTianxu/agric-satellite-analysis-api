@@ -15,6 +15,7 @@ INGEST_INCLUDES = [
     "app.tasks.agri_lonlat",
     "app.tasks.satellite_batch",
     "app.tasks.decloud_uncrtaints",
+    "app.tasks.decloud_schedule_outbox",
     "app.tasks.agri_alerts",
     "app.tasks.sentinel1",
     "app.tasks.assessment_report",

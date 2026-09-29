@@ -40,6 +40,7 @@ CPU_TASK_PREFIXES = (
     "app.tasks.assessment_report.",
     "app.tasks.season_growth_report.",
     "app.tasks.overview_preagg.",
+    "app.tasks.decloud_schedule_outbox.",
 )
 
 
@@ -79,6 +80,7 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "app.tasks.assessment_report.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.season_growth_report.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.overview_preagg.*": {"queue": CPU_COMPUTE_QUEUE},
+    "app.tasks.decloud_schedule_outbox.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.storage.*": {"queue": "storage"},
 }
 
@@ -102,6 +104,11 @@ BEAT_SCHEDULE: dict[str, dict[str, Any]] = {
         # 周一 18:30 UTC = 北京时间周二 02:30；默认关闭，避免升级后自动拉取五年数据。
         "schedule": crontab(day_of_week=1, hour=18, minute=30),
     },
+    "retry-decloud-schedule-outbox": {
+        "task": "app.tasks.decloud_schedule_outbox.dispatch_pending_schedules",
+        # 每分钟恢复派发失败的去云意图；它只通过 API 访问数据库，不会直接读地块栅格。
+        "schedule": crontab(minute="*/1"),
+    },
 }
 
 BEAT_SWITCHES = {
@@ -109,6 +116,7 @@ BEAT_SWITCHES = {
     "refresh-satellite-overview-daily": "schedule_daily_satellite_enabled",
     "refresh-overview-stats-daily": "schedule_overview_refresh_enabled",
     "satellite-history-weekly": "schedule_satellite_history_enabled",
+    "retry-decloud-schedule-outbox": "schedule_decloud_outbox_enabled",
 }
 
 

@@ -834,8 +834,6 @@ def _schedule_late_decloud_result(
     """父线程已封口后，为刚发布成功的单景补排去云任务。"""
     if not raw_result or not raw_result.get("date"):
         return
-    from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
-
     land_id = str(land["meta"]["land_id"])
     date_str = str(raw_result["date"])[:10]
     scene_id = str(raw_result.get("scene_id") or raw_result.get("stac_id") or "")
@@ -844,7 +842,12 @@ def _schedule_late_decloud_result(
         f"{mq_task_id or job_id}:{land_id}:late:{date_str}:{scene_id or 'unknown'}"
     )
     try:
-        schedule_decloud_after_raw(
+        from app.tasks.decloud_schedule_outbox import (
+            persist_and_dispatch_decloud_schedule,
+        )
+
+        result = persist_and_dispatch_decloud_schedule(
+            job_id=job_id,
             land_id=land_id,
             date_from=date_from,
             date_to=date_to,
@@ -852,7 +855,16 @@ def _schedule_late_decloud_result(
             mq_task_id=late_task_id,
             season_months=season_months,
             crop_type=crop_type,
+            schedule_kind="late",
         )
+        if result is None:
+            logger.error(
+                "satellite_batch_late_decloud_schedule_unrecoverable",
+                job_id=job_id,
+                land_id=land_id,
+                date=date_str,
+                scene_id=scene_id,
+            )
     except Exception:
         # 原始产品已经成功落地；单独记录派发失败，不能把它误记成影像发布失败。
         logger.exception(
@@ -1610,7 +1622,9 @@ def process_satellite_batch(
             workers=workers,
         )
         if sensor == "S2" and decloud_enabled():
-            from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
+            from app.tasks.decloud_schedule_outbox import (
+                persist_and_dispatch_decloud_schedule,
+            )
 
             # 与worker的迟到发布共用状态锁：快照前完成的结果由本轮统一规划，
             # 快照后到达的结果由worker按单景补排，避免漏排或重复提交整批日期。
@@ -1623,7 +1637,8 @@ def process_satellite_batch(
                         decloud_snapshots.append((land, raw_results))
             for land, raw_results in decloud_snapshots:
                 if raw_results:
-                    schedule_decloud_after_raw(
+                    persisted = persist_and_dispatch_decloud_schedule(
+                        job_id=job_id,
                         land_id=land["meta"]["land_id"],
                         date_from=str(d0),
                         date_to=str(d1),
@@ -1631,7 +1646,14 @@ def process_satellite_batch(
                         mq_task_id=f"{mq_task_id or job_id}:{land['meta']['land_id']}",
                         season_months=land["season_months"],
                         crop_type=land["crop_type"],
+                        schedule_kind="snapshot",
                     )
+                    if persisted is None:
+                        logger.error(
+                            "satellite_batch_decloud_schedule_unrecoverable",
+                            job_id=job_id,
+                            land_id=land["meta"]["land_id"],
+                        )
         # 先尽力提交未确认的场景回执；迟到worker后续仍会按同一幂等增量补写。
         patch_progress()
         status_progress = progress_snapshot()
@@ -1715,7 +1737,9 @@ def process_satellite_batch(
                     if raw_results:
                         retry_decloud_snapshots.append((land, raw_results))
             try:
-                from app.tasks.decloud_uncrtaints import schedule_decloud_after_raw
+                from app.tasks.decloud_schedule_outbox import (
+                    persist_and_dispatch_decloud_schedule,
+                )
             except Exception:
                 logger.exception(
                     "satellite_batch_soft_timeout_decloud_scheduler_unavailable",
@@ -1726,7 +1750,8 @@ def process_satellite_batch(
                 for land, raw_results in retry_decloud_snapshots:
                     land_id = str(land["meta"]["land_id"])
                     try:
-                        schedule_decloud_after_raw(
+                        persisted = persist_and_dispatch_decloud_schedule(
+                            job_id=job_id,
                             land_id=land_id,
                             date_from=str(retry_d0),
                             date_to=str(retry_d1),
@@ -1736,7 +1761,14 @@ def process_satellite_batch(
                             ),
                             season_months=land.get("season_months"),
                             crop_type=land.get("crop_type"),
+                            schedule_kind="soft-timeout",
                         )
+                        if persisted is None:
+                            logger.error(
+                                "satellite_batch_soft_timeout_decloud_schedule_unrecoverable",
+                                job_id=job_id,
+                                land_id=land_id,
+                            )
                     except Exception:
                         # 记录失败地块以便测试环境按地块核对；不要丢弃同批后续地块的排程机会。
                         logger.exception(
