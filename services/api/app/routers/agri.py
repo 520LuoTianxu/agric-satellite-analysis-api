@@ -430,10 +430,15 @@ def _build_scene_product_items(rows: list[Any], *, include_pixels: bool) -> list
                 data["pixel_count"] = len(db_lonlat)
             is_decloud = is_decloud_product(data.get("source"), data.get("scene_id"))
             # 新产品的稳定预览对象键已单独入库，直接重签即可，避免为取RGB再次下载含像元的整份OSS JSON。
-            # 去云衍生产品只发布像元JSON、不生成RGB/热图；跳过旧JSON媒体探测可避免重复下载整份像元对象。
+            # 去云衍生产品和S1产品只发布像元/统计值，不生成RGB/热图；跳过无效媒体探测可避免重复下载整份像元对象。
+            skip_legacy_media_probe = (
+                bool(data.get("rgb_oss_key"))
+                or is_decloud
+                or str(data.get("sensor") or "").strip().upper() == "S1"
+            )
             media = (
                 None
-                if data.get("rgb_oss_key") or is_decloud
+                if skip_legacy_media_probe
                 else _load_oss_scene_media(
                     data.get("json_oss_key"), read_budget=oss_read_budget
                 )
