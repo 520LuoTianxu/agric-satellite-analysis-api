@@ -1992,6 +1992,27 @@ def build_season_facts(
     return facts
 
 
+def _sample_temporal_series(
+    points: list[dict[str, Any]], max_points: int
+) -> list[dict[str, Any]]:
+    """均匀覆盖完整时间窗，保留首尾观测，避免压缩后丢失近期变化。"""
+    if max_points <= 0:
+        return []
+    if len(points) <= max_points:
+        return points
+    if max_points == 1:
+        # 只允许保留一个点时优先保留最新观测，供模型判断当前长势。
+        return [points[-1]]
+
+    last_index = len(points) - 1
+    denominator = max_points - 1
+    indices = [
+        (index * last_index + denominator // 2) // denominator
+        for index in range(max_points)
+    ]
+    return [points[index] for index in indices]
+
+
 def facts_for_llm(
     facts: dict[str, Any],
     *,
@@ -2003,25 +2024,25 @@ def facts_for_llm(
     """Compact facts for Bailian prompt (truncate long series / day lists)."""
     ndvi = dict(facts.get("ndvi") or {})
     ndmi = dict(facts.get("ndmi") or {})
+    # 限制模型输入长度，同时用均匀时间采样覆盖整季，首尾点分别代表起始与最新状态。
+    series_limit = max(1, max_series)
     # Keep scalars; drop bulky nested raw rows if present.
     for key in ("mean", "peak", "latest", "min", "max"):
         if key in (facts.get("ndvi") or {}):
             ndvi[key] = (facts.get("ndvi") or {}).get(key)
     series = list(ndvi.get("series") or [])
-    if len(series) > max_series:
-        step = max(1, len(series) // max_series)
-        series = series[::step][:max_series]
-        ndvi["series"] = series
+    if len(series) > series_limit:
+        ndvi["series"] = _sample_temporal_series(series, series_limit)
         ndvi["series_truncated"] = True
-        ndvi["series_original_n"] = len(list((facts.get("ndvi") or {}).get("series") or []))
+        ndvi["series_original_n"] = len(series)
     else:
         ndvi["series"] = series
         ndvi["series_truncated"] = False
     ndmi_series = list(ndmi.get("series") or [])
-    if len(ndmi_series) > max_series:
-        step = max(1, len(ndmi_series) // max_series)
-        ndmi["series"] = ndmi_series[::step][:max_series]
+    if len(ndmi_series) > series_limit:
+        ndmi["series"] = _sample_temporal_series(ndmi_series, series_limit)
         ndmi["series_truncated"] = True
+        ndmi["series_original_n"] = len(ndmi_series)
     else:
         ndmi["series"] = ndmi_series
         ndmi["series_truncated"] = False
