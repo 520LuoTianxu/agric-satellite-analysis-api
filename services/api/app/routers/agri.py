@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from app.core.agri_classify import parse_s1_relative_orbit
+from app.core.agri_classify import is_decloud_product, parse_s1_relative_orbit
 from app.core.database import get_db
 from app.core.storage import ObjectTooLargeError, get_parcel_product_storage
 from app.middleware.auth import OrgContext, require_roles
@@ -428,10 +428,12 @@ def _build_scene_product_items(rows: list[Any], *, include_pixels: bool) -> list
             data["pixel_data"] = None
             if not data.get("pixel_count"):
                 data["pixel_count"] = len(db_lonlat)
+            is_decloud = is_decloud_product(data.get("source"), data.get("scene_id"))
             # 新产品的稳定预览对象键已单独入库，直接重签即可，避免为取RGB再次下载含像元的整份OSS JSON。
+            # 去云衍生产品只发布像元JSON、不生成RGB/热图；跳过旧JSON媒体探测可避免重复下载整份像元对象。
             media = (
                 None
-                if data.get("rgb_oss_key")
+                if data.get("rgb_oss_key") or is_decloud
                 else _load_oss_scene_media(
                     data.get("json_oss_key"), read_budget=oss_read_budget
                 )
