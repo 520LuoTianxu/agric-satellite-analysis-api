@@ -20,10 +20,11 @@ from urllib.parse import urlparse
 import httpx
 from agric_satellite_analysis_common.database_sync import SyncSession
 from agric_satellite_analysis_common.settings import settings
-from agric_satellite_analysis_common.storage import get_storage
+from agric_satellite_analysis_common.storage import ObjectTooLargeError, get_storage
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
+RESULT_JSON_MAX_BYTES = 8 * 1024 * 1024
 
 __all__ = [
     "UPSERT_SCENE_SQL",
@@ -175,25 +176,105 @@ ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
 
 
 def _download_json(url: str) -> Any | None:
-    """HTTP GET JSON from a public OSS URL, or storage.get for our bucket keys."""
-    try:
-        parsed = urlparse(url)
-        bucket = settings.oss_bucket
-        if bucket and parsed.netloc.startswith(f"{bucket}."):
-            key = parsed.path.lstrip("/")
-            if key:
-                raw = get_storage().get_bytes(key)
-                return json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        logger.warning("storage_get_failed url=%s err=%s", url[:120], exc)
+    """有界读取本项目 OSS JSON；拒绝非配置 OSS 主机及跨主机重定向。"""
+    if not isinstance(url, str) or len(url) > 8192:
+        logger.warning("result_json_url_rejected reason=invalid_length")
+        return None
 
     try:
-        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            return resp.json()
+        parsed = urlparse(url)
+        endpoint = urlparse(settings.oss_endpoint)
+    except ValueError:
+        logger.warning("result_json_url_rejected reason=invalid_url")
+        return None
+    endpoint_authority = endpoint.netloc or endpoint.path
+    expected_authority = f"{settings.oss_bucket}.{endpoint_authority}".casefold()
+    expected_scheme = (endpoint.scheme or "https").casefold()
+    # 回执可能跨 HTTP/MQ 到达，只有精确匹配配置存储的地址才允许 API 主机代为下载。
+    # 同时拒绝 userinfo 和片段，避免相似前缀域名、凭据混入等歧义。
+    if (
+        not settings.oss_bucket
+        or not endpoint_authority
+        or parsed.scheme.casefold() != expected_scheme
+        or parsed.netloc.casefold() != expected_authority
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        logger.warning(
+            "result_json_url_rejected host=%s",
+            parsed.hostname,
+        )
+        return None
+
+    key = parsed.path.lstrip("/")
+    if not key:
+        logger.warning("result_json_url_rejected reason=missing_object_key")
+        return None
+
+    try:
+        raw = get_storage().get_bytes(key, max_bytes=RESULT_JSON_MAX_BYTES)
+    except ObjectTooLargeError:
+        # API 场景读取也限制为8 MiB；在公共结果入口采用同一边界，防止大对象耗尽内存。
+        logger.warning("result_json_object_too_large host=%s", parsed.hostname)
+        return None
     except Exception as exc:
-        logger.warning("http_get_failed url=%s err=%s", url[:120], exc)
+        # 存储凭证/SDK暂不可用时仍可尝试读取公开对象，但不记录签名URL或对象键。
+        logger.warning(
+            "storage_get_failed host=%s error_type=%s",
+            parsed.hostname,
+            type(exc).__name__,
+        )
+    else:
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "result_json_invalid host=%s error_type=%s",
+                parsed.hostname,
+                type(exc).__name__,
+            )
+            return None
+
+    try:
+        # HTTP回退也逐块限流；禁止自动跟随重定向，避免OSS之外的二次请求。
+        with httpx.Client(timeout=60.0, follow_redirects=False) as client:
+            with client.stream("GET", url) as resp:
+                if resp.is_redirect:
+                    logger.warning(
+                        "result_json_redirect_rejected host=%s status=%s",
+                        parsed.hostname,
+                        resp.status_code,
+                    )
+                    return None
+                resp.raise_for_status()
+                content_length = resp.headers.get("content-length")
+                if (
+                    content_length is not None
+                    and int(content_length) > RESULT_JSON_MAX_BYTES
+                ):
+                    logger.warning(
+                        "result_json_object_too_large host=%s content_length=%s",
+                        parsed.hostname,
+                        content_length,
+                    )
+                    return None
+                raw = bytearray()
+                for chunk in resp.iter_bytes():
+                    if len(raw) + len(chunk) > RESULT_JSON_MAX_BYTES:
+                        logger.warning(
+                            "result_json_object_too_large host=%s",
+                            parsed.hostname,
+                        )
+                        return None
+                    raw.extend(chunk)
+            return json.loads(raw)
+    except Exception as exc:
+        logger.warning(
+            "http_get_failed host=%s error_type=%s",
+            parsed.hostname,
+            type(exc).__name__,
+        )
         return None
 
 
