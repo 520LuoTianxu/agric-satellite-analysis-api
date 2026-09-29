@@ -1995,7 +1995,7 @@ def build_season_facts(
 def _sample_temporal_series(
     points: list[dict[str, Any]], max_points: int
 ) -> list[dict[str, Any]]:
-    """均匀覆盖完整时间窗，保留首尾观测，避免压缩后丢失近期变化。"""
+    """按日历时间均匀覆盖完整区间，并保留首尾观测。"""
     if max_points <= 0:
         return []
     if len(points) <= max_points:
@@ -2004,13 +2004,57 @@ def _sample_temporal_series(
         # 只允许保留一个点时优先保留最新观测，供模型判断当前长势。
         return [points[-1]]
 
-    last_index = len(points) - 1
-    denominator = max_points - 1
-    indices = [
-        (index * last_index + denominator // 2) // denominator
-        for index in range(max_points)
-    ]
-    return [points[index] for index in indices]
+    parsed_dates = [_parse_date(point.get("date")) for point in points]
+    ordered_dates = [day for day in parsed_dates if day is not None]
+    has_ordered_dates = len(ordered_dates) == len(points) and all(
+        left <= right for left, right in zip(ordered_dates, ordered_dates[1:])
+    )
+    if has_ordered_dates and ordered_dates[0] < ordered_dates[-1]:
+        # 按目标日历分箱且每箱至多取一点；空箱保留为空，避免密集日期簇挤占整季输入名额。
+        first_day, last_day = ordered_dates[0], ordered_dates[-1]
+        span_days = (last_day - first_day).days
+        indices = {0, len(points) - 1}
+        selected_days = {first_day, last_day}
+        denominator = max_points - 1
+        for slot in range(1, max_points - 1):
+            target_day = first_day + timedelta(
+                days=round(span_days * slot / denominator)
+            )
+            lower_day = first_day + timedelta(
+                days=(span_days * (2 * slot - 1)) // (2 * denominator)
+            )
+            upper_day = first_day + timedelta(
+                days=(span_days * (2 * slot + 1)) // (2 * denominator)
+            )
+            if upper_day <= lower_day:
+                continue
+            start_index = bisect_left(ordered_dates, lower_day)
+            end_index = bisect_left(ordered_dates, upper_day)
+            candidates = [
+                index
+                for index in range(start_index, end_index)
+                if ordered_dates[index] not in selected_days
+            ]
+            if candidates:
+                index = min(
+                    candidates,
+                    key=lambda candidate: (
+                        abs((ordered_dates[candidate] - target_day).days),
+                        candidate,
+                    ),
+                )
+                indices.add(index)
+                selected_days.add(ordered_dates[index])
+        selected_indices = sorted(indices)
+    else:
+        # 日期缺失、未排序或全为同一天时没有可靠日历跨度，退回均匀序号采样。
+        last_index = len(points) - 1
+        denominator = max_points - 1
+        selected_indices = [
+            (index * last_index + denominator // 2) // denominator
+            for index in range(max_points)
+        ]
+    return [points[index] for index in selected_indices]
 
 
 def facts_for_llm(
