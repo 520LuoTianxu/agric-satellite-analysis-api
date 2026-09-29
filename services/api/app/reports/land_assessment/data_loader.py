@@ -9,7 +9,7 @@ import json
 import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -298,14 +298,27 @@ def load_agri_pixel_date_index(
     land_id: str,
     *,
     cloud_max: float | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> list[dict[str, Any]]:
-    """Lightweight maize-season S2 date index (no pixel payload) for stage picking."""
+    """Lightweight S2 date index (no pixel payload), optionally restricted to a date window."""
     if not land_id:
         return []
     params: dict[str, Any] = {
         "land_id": land_id,
         "cloud_max": CLOUD_MAX_PCT if cloud_max is None else cloud_max,
     }
+    where = [
+        "land_id = :land_id",
+        "sensor = 'S2'",
+        official_s2_sql(""),
+    ]
+    if start_date:
+        params["start_date"] = start_date
+        where.append("date >= CAST(:start_date AS date)")
+    if end_date:
+        params["end_date"] = end_date
+        where.append("date <= CAST(:end_date AS date)")
     sql = f"""
         SELECT date, ndvi_avg,
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud,
@@ -317,8 +330,7 @@ def load_agri_pixel_date_index(
                  ELSE 0
                END AS npix
         FROM agric_satellite.parcel_scene_products
-        WHERE land_id = :land_id AND sensor = 'S2'
-          AND {official_s2_sql("")}
+        WHERE {" AND ".join(where)}
         ORDER BY date
     """
     try:

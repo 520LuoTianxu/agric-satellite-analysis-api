@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -70,7 +70,25 @@ def _load_stage_pixels(
     if year is None:
         return {}
 
-    index = load_agri_pixel_date_index(session, land_id, cloud_max=None)
+    # 阶段候选由单个观测周期决定，先取得该周期边界，避免扫描地块全部历史像元JSON。
+    preliminary_stages = pick_phenology_stages(by_date, year)
+    window = preliminary_stages.get("_window") or {}
+    observed_start = window.get("observed_start")
+    observed_end = window.get("observed_end")
+    index_bounds: dict[str, date] = {}
+    if observed_start and observed_end:
+        # 备用影像只接受阶段观测日期±12天，索引查询同步覆盖两端缓冲区。
+        index_bounds = {
+            "start_date": (
+                datetime.fromisoformat(observed_start).date() - timedelta(days=12)
+            ),
+            "end_date": (
+                datetime.fromisoformat(observed_end).date() + timedelta(days=12)
+            ),
+        }
+    index = load_agri_pixel_date_index(
+        session, land_id, cloud_max=None, **index_bounds
+    )
     pixel_dates = {row["date"] for row in index if row.get("has_pixels")}
     stages = pick_phenology_stages(by_date, year, pixel_dates=pixel_dates or None)
     wanted = sorted(
@@ -89,8 +107,6 @@ def _load_stage_pixels(
 
     # If a stage date lacked pixels, try nearby index dates (±12d) with pixels
     if len(pixels) < len(wanted):
-        from datetime import datetime
-
         extras: list[str] = []
         have = set(pixels)
         for d in wanted:
