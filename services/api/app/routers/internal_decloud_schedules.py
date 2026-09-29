@@ -21,6 +21,8 @@ router = APIRouter(
     prefix="/internal/decloud-schedules", tags=["internal-decloud-schedules"]
 )
 
+# 同一条语句完成领取与租约更新；SKIP LOCKED允许多个dispatcher分批并行，
+# 过期的processing租约也可重新领取，避免worker异常退出后排程永久卡住。
 _CLAIM_SCHEDULES = text("""
     WITH eligible AS (
         SELECT schedule_key
@@ -55,6 +57,7 @@ _CLAIM_SCHEDULES = text("""
         outbox.attempts
 """)
 
+# 完成时同时核对租约持有人，作为fencing保护：旧worker不能覆盖新worker重新领取后的状态。
 _COMPLETE_SCHEDULE = text("""
     UPDATE agric_satellite.satellite_decloud_schedule_outbox
     SET status = 'completed',
@@ -69,6 +72,7 @@ _COMPLETE_SCHEDULE = text("""
     RETURNING schedule_key
 """)
 
+# 失败后释放租约并按5秒起步、指数增长且最多1小时的间隔重试；attempts在领取时递增。
 _FAIL_SCHEDULE = text("""
     UPDATE agric_satellite.satellite_decloud_schedule_outbox
     SET status = 'pending',
@@ -133,7 +137,10 @@ class DecloudScheduleClaimOut(BaseModel):
 def _normalize_raw_results(
     raw_results: list[dict[str, Any]], *, date_from: date, date_to: date
 ) -> list[dict[str, Any]]:
-    """只保留去云择景需要的有限元数据，避免 Outbox 携带产品或像元大对象。"""
+    """只保留去云择景需要的有限元数据，避免 Outbox 携带产品或像元大对象。
+
+    日期窗口和云量范围在API侧再次核验，防止内部调用方把越界或非法值写入可重试的排程意图。
+    """
     normalized: list[dict[str, Any]] = []
     for item in raw_results:
         raw_date = str(item.get("date") or "").strip()[:10]
@@ -208,6 +215,7 @@ async def create_decloud_schedule(
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     job_params = job.params_json if isinstance(job.params_json, dict) else {}
+    # 排程类型以已落库任务参数为准，不能只信worker请求体，避免给非S2任务挂接去云工作。
     if str(job_params.get("sensor") or "").upper() != "S2":
         raise HTTPException(
             status_code=422, detail="decloud schedule requires an S2 job"
