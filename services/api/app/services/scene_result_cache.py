@@ -56,6 +56,7 @@ return removed
 """
 
 _PROMOTE_DUE_RETRIES_SCRIPT = """
+-- 使用Redis服务器时间统一判断到期点，避免多台API主机时钟偏差造成提前重试。
 local now = redis.call('TIME')
 local now_seconds = tonumber(now[1]) + tonumber(now[2]) / 1000000
 local due_ids = redis.call(
@@ -77,6 +78,7 @@ return #due_ids
 
 _SCHEDULE_RETRY_SCRIPT = """
 if redis.call('EXISTS', KEYS[4]) == 0 then
+    -- 原始回执已过期时清理残留队列索引，避免无效ID长期留在processing或延迟集合。
     local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
     if removed > 0 then
         redis.call('LREM', KEYS[2], 0, ARGV[1])
@@ -85,6 +87,7 @@ if redis.call('EXISTS', KEYS[4]) == 0 then
     redis.call('ZREM', KEYS[5], ARGV[1])
     return {removed, 0, 0}
 end
+-- 延迟记录或死信原因已存在，表示此前已结算；响应丢失后重跑不能再次增加重试次数。
 if redis.call('EXISTS', KEYS[6]) == 1
     or redis.call('ZSCORE', KEYS[5], ARGV[1]) then
     local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
@@ -104,6 +107,7 @@ for i = 2, tonumber(attempt) do
 end
 local now = redis.call('TIME')
 local now_seconds = tonumber(now[1]) + tonumber(now[2]) / 1000000
+-- 按2倍指数退避并封顶；Redis脚本将延迟记录与processing移出操作原子提交。
 redis.call('ZADD', KEYS[5], now_seconds + delay, ARGV[1])
 redis.call('EXPIRE', KEYS[5], ARGV[2])
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
@@ -116,6 +120,7 @@ return {removed, attempt, delay}
 """
 
 _ACK_RESULT_SCRIPT = """
+-- 只在processing中实际移除本回执时清理缓存和各索引，重复确认保持幂等。
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed > 0 then
     redis.call('LREM', KEYS[2], 0, ARGV[1])
@@ -136,6 +141,7 @@ if redis.call('EXISTS', KEYS[4]) == 1 then
     redis.call('EXPIRE', KEYS[3], ARGV[3])
     redis.call('SET', KEYS[5], ARGV[2], 'EX', ARGV[3])
 end
+-- 先持久化死信，再清除processing、重试计数和延迟索引，防止坏回执被重新当作新任务消费。
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed > 0 then
     redis.call('LREM', KEYS[2], 0, ARGV[1])
