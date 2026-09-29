@@ -324,26 +324,10 @@ def _sample_spatial_pixels(valid: list[list[float]]) -> list[list[float]]:
     return [representatives[key][1] for key in sorted(representatives)]
 
 
-async def spatial_snapshot(db, land_id: str, point: dict | None) -> dict | None:
-    if not point:
+def _spatial_snapshot_from_data(point: dict, pixel_data: Any) -> dict | None:
+    if not isinstance(pixel_data, dict) or pixel_data.get("format") != "lonlat_v1":
         return None
-    row = (
-        await db.execute(
-            text("""
-        SELECT pixel_data FROM agric_satellite.parcel_scene_products
-        WHERE land_id = :land AND sensor = 'S2' AND date = :day AND scene_id = :scene
-        LIMIT 1
-    """),
-            {
-                "land": land_id,
-                "day": date.fromisoformat(point["date"]),
-                "scene": point["scene_id"],
-            },
-        )
-    ).scalar_one_or_none()
-    if not isinstance(row, dict) or row.get("format") != "lonlat_v1":
-        return None
-    pixels = row.get("pixels") or []
+    pixels = pixel_data.get("pixels") or []
     valid = []
     for pixel in pixels:
         # 像元缺质量标记时不假定清晰；地块日均有效不代表每一个像元都可用。
@@ -376,6 +360,65 @@ async def spatial_snapshot(db, land_id: str, point: dict | None) -> dict | None:
         "display_sampled": len(display_pixels) < len(valid),
         "note": "低绿度比例仅按有效像元统计（NDVI < 0.35），不代表受灾面积。",
     }
+
+
+async def spatial_snapshots(
+    db, points_by_land: dict[str, dict | None]
+) -> dict[str, dict | None]:
+    # 多地块洞察一次批量取各自最新展示景，避免在地块循环内串行产生最多20次数据库往返。
+    snapshots = {land_id: None for land_id in points_by_land}
+    requested = [
+        (land_id, point)
+        for land_id, point in points_by_land.items()
+        if point is not None
+    ]
+    if not requested:
+        return snapshots
+
+    values = ", ".join(
+        "(CAST(:land_{i} AS text), CAST(:day_{i} AS date), CAST(:scene_{i} AS text))".format(
+            i=index
+        )
+        for index in range(len(requested))
+    )
+    params = {}
+    for index, (land_id, point) in enumerate(requested):
+        params.update(
+            {
+                f"land_{index}": land_id,
+                f"day_{index}": date.fromisoformat(point["date"]),
+                f"scene_{index}": point["scene_id"],
+            }
+        )
+    rows = (
+        (
+            await db.execute(
+                text(f"""
+        WITH requested(land_id, scene_date, scene_id) AS (VALUES {values})
+        SELECT requested.land_id, product.pixel_data
+        FROM requested
+        JOIN LATERAL (
+            SELECT pixel_data
+            FROM agric_satellite.parcel_scene_products
+            WHERE land_id = requested.land_id
+              AND sensor = 'S2'
+              AND date = requested.scene_date
+              AND scene_id = requested.scene_id
+            LIMIT 1
+        ) AS product ON TRUE
+    """),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
+    for row in rows:
+        land_id = row["land_id"]
+        point = points_by_land[land_id]
+        if point is not None:
+            snapshots[land_id] = _spatial_snapshot_from_data(point, row["pixel_data"])
+    return snapshots
 
 
 async def build_insights(db, request: InsightsRequest) -> dict[str, Any]:
@@ -444,6 +487,10 @@ async def build_insights(db, request: InsightsRequest) -> dict[str, Any]:
         parsed = number(value)
         if parsed is not None:
             rain[land_id].append(parsed)
+    spatial_by_land = await spatial_snapshots(
+        db,
+        {land_id: points[-1] if points else None for land_id, points in series.items()},
+    )
     items = []
     for land_id in request.land_ids:
         land, points = by_id[land_id], series[land_id]
@@ -556,7 +603,7 @@ async def build_insights(db, request: InsightsRequest) -> dict[str, Any]:
             notes.append("生育窗未能自动确定，可填写人工窗口再分析。")
         if land.crop_type is None:
             notes.append("未登记作物；请补充作物信息后解释地块差异。")
-        spatial = await spatial_snapshot(db, land_id, points[-1] if points else None)
+        spatial = spatial_by_land[land_id]
         if spatial and spatial["valid_pixels"] < 9:
             notes.append("可用像元很少，边界混合对结果影响较大；空间比例只作线索。")
         items.append(
