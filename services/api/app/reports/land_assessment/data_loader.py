@@ -218,7 +218,14 @@ def _extract_lonlat_pixels(
             continue
         out.append(pix)
     if prefer_clear:
-        cleared = [p for p in out if int(p.get("clear") or 0) == 1]
+        # 历史像元JSON可能缺少clear或含非数字脏值；未知标记不能中断整景解析。
+        def _is_explicitly_clear(pixel: dict[str, Any]) -> bool:
+            try:
+                return int(pixel.get("clear") or 0) == 1
+            except (OverflowError, TypeError, ValueError):
+                return False
+
+        cleared = [p for p in out if _is_explicitly_clear(p)]
         if cleared:
             return cleared
     return out
