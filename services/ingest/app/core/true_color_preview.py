@@ -96,13 +96,18 @@ def compute_scene_preview_grid(
     return transform, (height, width), (minx, miny, maxx, maxy)
 
 
-def _as_reflectance(arr: np.ndarray) -> np.ndarray:
+def _as_reflectance(
+    arr: np.ndarray, calibration: dict[str, float] | None = None
+) -> np.ndarray:
     """Map DN or reflectance to ~0–1 reflectance.
 
     Sentinel-2 L2A COGs are commonly stored as uint16 DN scaled by 10000.
     If max DN > 1.5 treat as 0–10000; otherwise assume already reflectance.
     """
     a = arr.astype(np.float64, copy=False)
+    if calibration is not None:
+        # S2基线04.00后含加性偏移，预览必须与指数使用相同的反射率还原。
+        return a * float(calibration["scale"]) + float(calibration["offset"])
     finite = a[np.isfinite(a)]
     if finite.size == 0:
         return a
@@ -151,6 +156,7 @@ def joint_stretch_rgb(
     lo: float = _DISPLAY_LO,
     hi: float = _DISPLAY_HI,
     gamma: float = _DISPLAY_GAMMA,
+    band_radiometry: dict[str, dict[str, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Shared lo/hi stretch + optional gamma → three uint8 bands.
 
@@ -158,9 +164,10 @@ def joint_stretch_rgb(
     When ``valid_mask`` is set, only those pixels contribute to optional
     luminance refinement; output outside the mask is left at 0.
     """
-    rf = _as_reflectance(r)
-    gf = _as_reflectance(g)
-    bf = _as_reflectance(b)
+    radiometry = band_radiometry or {}
+    rf = _as_reflectance(r, radiometry.get("B04"))
+    gf = _as_reflectance(g, radiometry.get("B03"))
+    bf = _as_reflectance(b, radiometry.get("B02"))
 
     if valid_mask is not None:
         mask = valid_mask.astype(bool) & np.isfinite(rf) & np.isfinite(gf) & np.isfinite(
@@ -212,6 +219,7 @@ def _rgb_from_bands(
     bands: dict[str, np.ndarray],
     *,
     valid_mask: np.ndarray | None,
+    band_radiometry: dict[str, dict[str, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     need = ("B04", "B03", "B02")
     if any(k not in bands for k in need):
@@ -221,6 +229,7 @@ def _rgb_from_bands(
         bands["B03"],
         bands["B02"],
         valid_mask=valid_mask,
+        band_radiometry=band_radiometry,
     )
 
 
@@ -277,6 +286,7 @@ def render_field_rgb_png(
     field_mask: np.ndarray,
     *,
     visual: np.ndarray | bytes | None = None,
+    band_radiometry: dict[str, dict[str, float]] | None = None,
 ) -> bytes | None:
     """Build RGBA PNG (B04=R, B03=G, B02=B); transparent outside parcel mask.
 
@@ -299,7 +309,9 @@ def render_field_rgb_png(
             )
 
     if r is None:
-        rgb = _rgb_from_bands(bands, valid_mask=mask)
+        rgb = _rgb_from_bands(
+            bands, valid_mask=mask, band_radiometry=band_radiometry
+        )
         if rgb is None:
             return None
         if bands["B04"].shape != mask.shape:
@@ -330,6 +342,7 @@ def render_scene_rgb_jpeg(
     visual: np.ndarray | bytes | None = None,
     field_outline: np.ndarray | None = None,
     quality: int = 85,
+    band_radiometry: dict[str, dict[str, float]] | None = None,
 ) -> bytes | None:
     """Opaque true-color JPEG for scene-context / large preview (no mask punch-out).
 
@@ -355,7 +368,9 @@ def render_scene_rgb_jpeg(
             for k in ("B04", "B03", "B02"):
                 if k in bands:
                     valid &= np.isfinite(bands[k]) & (bands[k] != 0)
-            rgb = _rgb_from_bands(bands, valid_mask=valid)
+            rgb = _rgb_from_bands(
+                bands, valid_mask=valid, band_radiometry=band_radiometry
+            )
             if rgb is not None:
                 r, g, b = rgb
 
@@ -388,6 +403,7 @@ def upload_field_rgb_preview(
     bands: dict[str, np.ndarray],
     field_mask: np.ndarray,
     sensor: str = "S2",
+    band_radiometry: dict[str, dict[str, float]] | None = None,
     visual: np.ndarray | bytes | None = None,
     scene_bands: dict[str, np.ndarray] | None = None,
     scene_visual: np.ndarray | bytes | None = None,
@@ -412,7 +428,12 @@ def upload_field_rgb_preview(
     out = dict(empty)
     try:
         storage = get_storage()
-        png = render_field_rgb_png(bands, field_mask, visual=visual)
+        png = render_field_rgb_png(
+            bands,
+            field_mask,
+            visual=visual,
+            band_radiometry=band_radiometry,
+        )
         if png:
             key = field_rgb_oss_key(land_id, date_str, sensor)
             storage.put_bytes(key, png, content_type="image/png")
@@ -435,7 +456,10 @@ def upload_field_rgb_preview(
                     error=str(exc),
                 )
         jpg = render_scene_rgb_jpeg(
-            large_src, visual=large_visual, field_outline=scene_outline
+            large_src,
+            visual=large_visual,
+            field_outline=scene_outline,
+            band_radiometry=band_radiometry,
         )
         if jpg:
             large_key = scene_rgb_oss_key(land_id, date_str, sensor)

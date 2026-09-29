@@ -79,7 +79,8 @@ class SceneProductOut(BaseModel):
     source: str | None = Field(
         default=None,
         description=(
-            "pixel_data.source: stac_direct / stac_s1_direct for raw observations, "
+            "Normalized product_source with legacy pixel_data.source fallback: "
+            "stac_direct / stac_s1_direct for raw observations, "
             "uncrtaints_decloud for the additive cloud-removal product."
         ),
     )

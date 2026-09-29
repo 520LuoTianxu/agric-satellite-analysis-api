@@ -60,7 +60,11 @@ from app.core.processing_window import (
     build_complete_processing_window,
     resolve_processing_window_km,
 )
-from app.core.agri_classify import parse_s1_relative_orbit
+from app.core.agri_classify import (
+    parse_s1_platform,
+    parse_s1_relative_orbit,
+    s1_calibration_epoch,
+)
 from app.core.s1_stac import (
     S1_STAC_COLLECTION,
     open_s1_stac_client,
@@ -503,6 +507,29 @@ def _dn_to_db(dn: np.ndarray) -> np.ndarray:
     return db
 
 
+def _s1_processing_version(properties: dict[str, Any]) -> str | None:
+    """从STAC处理扩展或软件字段提取可选的上游版本标识。"""
+    value = properties.get("processing:version")
+    if value is None:
+        software = properties.get("processing:software")
+        if isinstance(software, dict):
+            version = software.get("version")
+            name = software.get("name")
+            if version is not None:
+                value = f"{name}:{version}" if name else version
+            else:
+                versions = []
+                for software_name, software_version in sorted(software.items()):
+                    if isinstance(software_version, dict):
+                        software_version = software_version.get("version")
+                    if software_version is not None:
+                        versions.append(f"{software_name}:{software_version}")
+                value = ";".join(versions) if versions else None
+    if isinstance(value, (str, int, float)):
+        return str(value).strip() or None
+    return None
+
+
 def search_s1_scenes(
     land_geom_geojson: dict, date_from: date, date_to: date, *, dedupe_week: bool = True
 ) -> list[dict]:
@@ -513,7 +540,9 @@ def search_s1_scenes(
         collections=[STAC_S1_COLLECTION],
         intersects=land_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
-        max_items=200,
+        # max_items是整个查询的返回上限，不是单页大小；设为200会让多年回填静默漏景。
+        # 这里保留服务端分页，由后续按周筛选在完整候选集上做去重。
+        max_items=None,
     )
     items = list(search.items())
     skipped_no_vvvh = 0
@@ -580,18 +609,45 @@ def search_s1_scenes(
         # 同周候选中优先选有VV/VH定标资产的产品，避免不必要地回退到固定幅度比例。
         if vv_calibration_href and vh_calibration_href:
             score += 1
+        acquisition_datetime = item.datetime
+        if acquisition_datetime is not None:
+            normalized_datetime = (
+                acquisition_datetime.replace(tzinfo=timezone.utc)
+                if acquisition_datetime.tzinfo is None
+                else acquisition_datetime.astimezone(timezone.utc)
+            )
+            selection_key = (normalized_datetime.isoformat(), str(item.id or ""))
+        else:
+            selection_key = (
+                str(props.get("datetime") or props.get("start_datetime") or item_date),
+                str(item.id or ""),
+            )
         entry = weekly.get(week_str)
-        if entry is None or score > entry["score"]:
+        # STAC分页顺序不保证稳定；同周同质量候选按采集时刻和ID固定择景，避免重算漂移。
+        if (
+            entry is None
+            or score > entry["score"]
+            or (score == entry["score"] and selection_key < entry["selection_key"])
+        ):
             rel_orbit = props.get("sat:relative_orbit") or props.get("relative_orbit")
             weekly[week_str] = {
                 "item": item,
                 "date": item_date,
                 "score": score,
+                "selection_key": selection_key,
                 "vv_href": vv_href,
                 "vh_href": vh_href,
                 "vv_calibration_href": vv_calibration_href,
                 "vh_calibration_href": vh_calibration_href,
                 "relative_orbit": rel_orbit,
+                # 保留平台、上游处理版本和采集时刻，供历史洪涝基线隔离不同物理口径。
+                "platform": parse_s1_platform(props.get("platform"), item.id),
+                "processing_version": _s1_processing_version(props),
+                "acquisition_datetime": (
+                    acquisition_datetime.isoformat()
+                    if acquisition_datetime
+                    else props.get("datetime") or props.get("start_datetime")
+                ),
             }
     if skipped_no_vvvh:
         logger.info(
@@ -618,6 +674,9 @@ def search_s1_scenes(
                 "vv_calibration_href": e.get("vv_calibration_href"),
                 "vh_calibration_href": e.get("vh_calibration_href"),
                 "relative_orbit": e.get("relative_orbit"),
+                "platform": e.get("platform"),
+                "processing_version": e.get("processing_version"),
+                "acquisition_datetime": e.get("acquisition_datetime"),
                 "geometry": e["item"].geometry,
             }
         )
@@ -739,7 +798,7 @@ def _s1_radiometric_calibration(scene: dict[str, Any]) -> dict[str, Any]:
     else:
         method = "fixed_amplitude_scale_approximation"
         scale = _S1_DN_CAL
-    return {
+    result = {
         "method": method,
         "coefficient": "sigma0",
         "units": "dB",
@@ -748,6 +807,28 @@ def _s1_radiometric_calibration(scene: dict[str, Any]) -> dict[str, Any]:
         # 记录本代码路径做过的操作；不推断STAC数据提供方是否已做上游噪声处理。
         "thermal_noise_correction": "not_performed_by_this_pipeline",
     }
+    scene_id = str(scene.get("id") or "")
+    platform = parse_s1_platform(scene.get("platform"), scene_id)
+    if platform:
+        result["platform"] = platform
+    processing_version = scene.get("processing_version")
+    if processing_version:
+        result["processing_version"] = str(processing_version)
+    acquisition_datetime = scene.get("acquisition_datetime")
+    if isinstance(acquisition_datetime, datetime):
+        acquisition_datetime = acquisition_datetime.isoformat()
+    if acquisition_datetime:
+        result["acquisition_datetime"] = str(acquisition_datetime)
+    epoch = s1_calibration_epoch(
+        platform,
+        acquisition_datetime,
+        scene_id=scene_id,
+        acquisition_date=scene.get("date"),
+    )
+    if epoch:
+        # ESA在2026-02-03约15:14 UTC变更S1C AUX_CAL；仅分开基线，不伪称完成历史后向补偿。
+        result["calibration_epoch"] = epoch
+    return result
 
 
 def _write_index_cog(
@@ -1075,7 +1156,11 @@ def _maybe_s1_progress(
     total_scenes: int | None = None,
     scene_id: str | None = None,
 ) -> None:
-    """Redis hot-path progress; never touches Postgres from scene workers."""
+    """Redis hot-path progress; never touches Postgres from scene workers.
+
+    场景线程只写轻量Redis进度，避免共享Postgres会话和逐景提交拖慢像元处理；
+    进度属于可恢复的观测信息，写入异常只记录日志，不应丢弃遥感产品。
+    """
     try:
         mark_scene_progress(
             job_id,

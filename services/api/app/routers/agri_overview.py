@@ -543,13 +543,18 @@ async def _compute_live_stats(
         if allow_pixels and pixels_parcels > 0:
             drought_source = "pixels"
 
-        # 洪涝必须比较近期历史基线；每页内保留该页地块的完整 S1 序列。
+        # 洪涝必须比较近期完整S1序列，并带上平台/校准时期，避免汇总和单地块预警口径不一致。
         s1_rows = (
             await db.execute(
                 text(
                     f"""
                     SELECT s.land_id, s.date, s.vv_avg, s.vh_avg, s.scene_id,
                            s.pixel_data->>'relative_orbit' AS relative_orbit,
+                           s.pixel_data->>'stac_item_id' AS stac_item_id,
+                           s.pixel_data->'radiometric_calibration'->>'platform' AS platform,
+                           s.pixel_data->'radiometric_calibration'->>'processing_version' AS processing_version,
+                           s.pixel_data->'radiometric_calibration'->>'calibration_epoch' AS calibration_epoch,
+                           s.pixel_data->'radiometric_calibration'->>'acquisition_datetime' AS acquisition_datetime,
                            s.pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
                            NULLIF(s.pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
                     FROM agric_satellite.parcel_scene_products s
@@ -572,7 +577,12 @@ async def _compute_live_stats(
                     "vv": row.vv_avg,
                     "vh": row.vh_avg,
                     "scene_id": getattr(row, "scene_id", None),
+                    "stac_item_id": getattr(row, "stac_item_id", None),
                     "relative_orbit": getattr(row, "relative_orbit", None),
+                    "platform": getattr(row, "platform", None),
+                    "processing_version": getattr(row, "processing_version", None),
+                    "calibration_epoch": getattr(row, "calibration_epoch", None),
+                    "acquisition_datetime": getattr(row, "acquisition_datetime", None),
                     "calibration_method": getattr(row, "calibration_method", None),
                     "calibration_scale": getattr(row, "calibration_scale", None),
                 }

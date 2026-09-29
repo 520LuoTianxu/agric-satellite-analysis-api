@@ -27,6 +27,7 @@ def shifted(day: date, year: int) -> date:
 
 def official_points(rows: list[dict]) -> list[dict]:
     """同日只留一个有效产品，优先清晰原始影像；不让重建重复增加证据数量。"""
+    # SQL按规范列优先并回退旧JSONB，确保不同入库路径使用同一去云/云量来源判据。
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         value = number(row.get("ndvi_avg"))
@@ -41,6 +42,7 @@ def official_points(rows: list[dict]) -> list[dict]:
                     "decloud_quality",
                     "parcel_cloud_cover_pct",
                     "cloud_cover",
+                    "cloud_cover_over_30",
                     "parcel_cloud_source",
                 )
             }
@@ -246,9 +248,10 @@ async def load_points(
                 text("""
         SELECT land_id, date, scene_id, ndvi_avg, evi_avg, ndmi_avg,
                cloud_cover, parcel_cloud_cover_pct,
-               pixel_data->>'source' AS source,
-               pixel_data->>'decloud_quality' AS decloud_quality,
-               pixel_data->>'parcel_cloud_source' AS parcel_cloud_source
+               COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
+               COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
+               COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
+               cloud_cover_over_30
         FROM agric_satellite.parcel_scene_products
         WHERE land_id = ANY(:land_ids) AND sensor = 'S2'
           AND ((date BETWEEN :start AND :end) OR (date BETWEEN :ref_start AND :ref_end))

@@ -45,14 +45,14 @@ def sign_s1_href(href: str) -> str:
 
 def open_s1_stac_client():
     """创建S1 STAC客户端，并在MPC响应中统一签名资产地址。"""
-    from pystac_client import Client as STACClient
+    from app.core.stac_client import open_stac_client
 
     url = s1_stac_api_url()
     if s1_uses_planetary_computer():
         import planetary_computer as pc
 
-        return STACClient.open(url, modifier=pc.sign_inplace)
-    return STACClient.open(url)
+        return open_stac_client(url, modifier=pc.sign_inplace)
+    return open_stac_client(url)
 
 
 def s1_gdal_env() -> dict[str, str]:

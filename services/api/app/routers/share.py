@@ -180,22 +180,23 @@ async def _load_agri_share_series(
     Returns (available_index_types, stats_by_type, all_stats, heatmap_available).
     """
     try:
-        rows = (
-            (
-                await db.execute(
-                    text(
-                        """
+        # 可选规范表在旧环境中可能缺失；用保存点隔离失败，保留外层已读取的ORM状态供旧表回退。
+        async with db.begin_nested():
+            result = await db.execute(
+                text(
+                    """
+                    -- 标量质量元数据为空时兼容读取 JSONB，防止公开报告将旧去云景误判为原始景。
                     SELECT date, sensor,
                            ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
                            mndwi_avg, cire_avg, vv_avg, vh_avg,
                            parcel_cloud_cover_pct, cloud_cover,
                            cloud_cover_over_30,
                            scene_id,
-                           pixel_data->>'source' AS source,
+                           COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
                            pixel_data->'quality_metrics' AS quality_metrics,
-                           pixel_data->>'decloud_quality' AS decloud_quality,
+                           COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
                            pixel_data->'decloud_reasons' AS decloud_reasons,
-                           pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
+                           COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
                            CASE
                              WHEN pixel_data->>'format' = 'lonlat_v1'
                               AND jsonb_typeof(pixel_data->'pixels') = 'array'
@@ -207,13 +208,10 @@ async def _load_agri_share_series(
                     ORDER BY date DESC
                     LIMIT 500
                     """
-                    ),
-                    {"land_id": land_id},
-                )
+                ),
+                {"land_id": land_id},
             )
-            .mappings()
-            .all()
-        )
+            rows = result.mappings().all()
     except Exception as exc:  # noqa: BLE001 — application schema may be absent
         logger.warning("agri share series load failed land_id=%s: %s", land_id, exc)
         return [], {}, [], False
@@ -459,61 +457,21 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     rs_source: str | None = None
 
     # 兼容历史栅格表中的图层，但关联键始终是同一张地块表的 land_id。
-    types_result = await db.execute(
-        select(RasterLayer.layer_type)
+    # PostgreSQL DISTINCT ON按类型一次选最新图层，同时构造类型列表，避免逐指数重复查询。
+    latest_layers_result = await db.execute(
+        select(RasterLayer)
         .where(RasterLayer.land_id == field.land_id)
-        .distinct()
+        .distinct(RasterLayer.layer_type)
+        .order_by(RasterLayer.layer_type, RasterLayer.date.desc())
     )
-    available_index_types: list[str] = sorted(t for (t) in types_result.all())
-
-    # Latest layer per index type
-    layers_by_type: dict[str, RasterLayer] = {}
-    for idx_type in available_index_types:
-        lyr_result = await db.execute(
-            select(RasterLayer)
-            .where(RasterLayer.land_id == field.land_id, RasterLayer.layer_type == idx_type)
-            .order_by(RasterLayer.date.desc())
-            .limit(1)
-        )
-        lyr = lyr_result.scalar_one_or_none()
-        if lyr:
-            layers_by_type[idx_type] = lyr
+    latest_layers = latest_layers_result.scalars().all()
+    layers_by_type: dict[str, RasterLayer] = {
+        layer.layer_type: layer for layer in latest_layers
+    }
+    available_index_types: list[str] = sorted(layers_by_type)
 
     # 最新 NDVI 图层
     latest_layer = layers_by_type.get("NDVI")
-
-    # Stats (last 12 for each available index, merged & grouped)
-    all_stats: list[Any] = []
-    stats_by_type: dict[str, list[Any]] = {}
-    for idx_type in available_index_types:
-        stats_result = await db.execute(
-            select(FieldStat, RasterLayer.provenance_json)
-            .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
-            .where(FieldStat.land_id == field.land_id, RasterLayer.layer_type == idx_type)
-            .order_by(FieldStat.date.desc())
-            .limit(12)
-        )
-        idx_stats = []
-        for stat, provenance in stats_result.all():
-            method = extract_quality_score_method(provenance)
-            score = (
-                float(stat.quality_score)
-                if stat.quality_score is not None
-                and method == PARCEL_VALID_FRACTION_V1
-                else None
-            )
-            # 分享报告保留趋势统计，但未知旧口径只返回空质量分并显式标记。
-            point = ShareStatPoint.model_validate(stat).model_copy(
-                update={
-                    "quality_score": score,
-                    "quality_score_method": method or "unknown",
-                }
-            )
-            idx_stats.append(point)
-        stats_by_type[idx_type] = idx_stats
-        all_stats.extend(idx_stats)
-    # Sort descending by date
-    all_stats.sort(key=lambda s: s.date, reverse=True)
 
     # 规范遥感时序直接读取 parcel_scene_products；不再按标签在两套地块
     # 身份之间切换。历史 raster_layers/field_stats 仅作为同一 land_id 下
@@ -524,16 +482,55 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
         agri_all_stats,
         agri_heatmap_available,
     ) = await _load_agri_share_series(db, land_id)
+
+    all_stats: list[Any] = []
+    stats_by_type: dict[str, list[Any]] = {}
     if agri_types:
+        # 规范场景已有时序时，旧统计结果会被覆盖，因此跳过逐指数读取旧 field_stats。
         available_index_types = agri_types
         stats_by_type = agri_stats_by_type
         all_stats = agri_all_stats
+    else:
+        # 规范场景尚无可展示指数时，才从历史栅格统计表回退。
+        for idx_type in available_index_types:
+            stats_result = await db.execute(
+                select(FieldStat, RasterLayer.provenance_json)
+                .join(RasterLayer, FieldStat.layer_id == RasterLayer.id)
+                .where(
+                    FieldStat.land_id == land_id,
+                    RasterLayer.layer_type == idx_type,
+                )
+                .order_by(FieldStat.date.desc())
+                .limit(12)
+            )
+            idx_stats = []
+            for stat, provenance in stats_result.all():
+                method = extract_quality_score_method(provenance)
+                score = (
+                    float(stat.quality_score)
+                    if stat.quality_score is not None
+                    and method == PARCEL_VALID_FRACTION_V1
+                    else None
+                )
+                # 分享报告保留趋势统计，但未知旧口径只返回空质量分并显式标记。
+                point = ShareStatPoint.model_validate(stat).model_copy(
+                    update={
+                        "quality_score": score,
+                        "quality_score_method": method or "unknown",
+                    }
+                )
+                idx_stats.append(point)
+            stats_by_type[idx_type] = idx_stats
+            all_stats.extend(idx_stats)
+
+    # 新旧两条数据路径都按日期倒序返回，保证公开报告图表顺序一致。
+    all_stats.sort(key=lambda s: s.date, reverse=True)
     rs_source = "agri"
 
     # Recent alerts (last 10)
     alerts_result = await db.execute(
         select(Alert)
-        .where(Alert.land_id == field.land_id)
+        .where(Alert.land_id == land_id)
         .order_by(Alert.created_at.desc())
         .limit(10)
     )
@@ -542,7 +539,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     # Recent scouting (last 10)
     scouting_result = await db.execute(
         select(ScoutingObservation)
-        .where(ScoutingObservation.land_id == field.land_id)
+        .where(ScoutingObservation.land_id == land_id)
         .order_by(ScoutingObservation.created_at.desc())
         .limit(10)
     )
@@ -569,68 +566,75 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
             )
         )
 
-    # Weather summary (last 30 days)
-    weather_summary = None
+    # 一次读取90天数据，同时供图表与30天摘要使用；只选展示和汇总所需的8列。
     weather_result = await db.execute(
-        select(WeatherDaily)
-        .where(
-            WeatherDaily.land_id == field.land_id,
-            WeatherDaily.date >= (now.date() - timedelta(days=30)),
+        select(
+            WeatherDaily.date,
+            WeatherDaily.precipitation_sum,
+            WeatherDaily.et0_fao_mm,
+            WeatherDaily.temperature_2m_mean,
+            WeatherDaily.temperature_2m_min,
+            WeatherDaily.temperature_2m_max,
+            WeatherDaily.drought_index,
+            WeatherDaily.soil_moisture_0_1cm,
         )
-        .order_by(WeatherDaily.date.desc())
+        .where(
+            WeatherDaily.land_id == land_id,
+            WeatherDaily.date >= (now.date() - timedelta(days=90)),
+        )
+        .order_by(WeatherDaily.date.asc())
     )
-    weather_rows = weather_result.scalars().all()
-    if weather_rows:
-        latest_w = weather_rows[0]
-        total_precip = sum(float(r.precipitation_sum or 0) for r in weather_rows)
-        total_et0 = sum(float(r.et0_fao_mm or 0) for r in weather_rows)
+    weather_rows = weather_result.mappings().all()
+
+    # 30天边界与摘要口径保持原样；升序结果的最后一条就是最近观测。
+    summary_start = now.date() - timedelta(days=30)
+    summary_rows = [row for row in weather_rows if row["date"] >= summary_start]
+    weather_summary = None
+    if summary_rows:
+        latest_w = summary_rows[-1]
+        total_precip = sum(float(row["precipitation_sum"] or 0) for row in summary_rows)
+        total_et0 = sum(float(row["et0_fao_mm"] or 0) for row in summary_rows)
         temps = [
-            float(r.temperature_2m_mean)
-            for r in weather_rows
-            if r.temperature_2m_mean is not None
+            float(row["temperature_2m_mean"])
+            for row in summary_rows
+            if row["temperature_2m_mean"] is not None
         ]
         weather_summary = {
-            "period_days": len(weather_rows),
+            "period_days": len(summary_rows),
             "total_precip_mm": round(total_precip, 1),
             "total_et0_mm": round(total_et0, 1),
             "avg_temp_c": round(sum(temps) / len(temps), 1) if temps else None,
             "water_balance_mm": round(total_precip - total_et0, 1),
         }
-        if latest_w.drought_index is not None:
-            weather_summary["drought_index"] = round(float(latest_w.drought_index), 2)
-        if latest_w.soil_moisture_0_1cm is not None:
+        if latest_w["drought_index"] is not None:
+            weather_summary["drought_index"] = round(
+                float(latest_w["drought_index"]), 2
+            )
+        if latest_w["soil_moisture_0_1cm"] is not None:
             weather_summary["soil_moisture_top"] = round(
-                float(latest_w.soil_moisture_0_1cm), 3
+                float(latest_w["soil_moisture_0_1cm"]), 3
             )
 
     # Weather daily rows for chart overlay (last 90 days)
     weather_data_out: list[dict[str, Any]] = []
-    wd_result = await db.execute(
-        select(WeatherDaily)
-        .where(
-            WeatherDaily.land_id == field.land_id,
-            WeatherDaily.date >= (now.date() - timedelta(days=90)),
-        )
-        .order_by(WeatherDaily.date.asc())
-    )
-    for wd in wd_result.scalars().all():
+    for wd in weather_rows:
         weather_data_out.append(
             {
-                "date": wd.date.isoformat(),
-                "precipitation_sum": float(wd.precipitation_sum)
-                if wd.precipitation_sum is not None
+                "date": wd["date"].isoformat(),
+                "precipitation_sum": float(wd["precipitation_sum"])
+                if wd["precipitation_sum"] is not None
                 else None,
-                "et0_fao_mm": float(wd.et0_fao_mm)
-                if wd.et0_fao_mm is not None
+                "et0_fao_mm": float(wd["et0_fao_mm"])
+                if wd["et0_fao_mm"] is not None
                 else None,
-                "temperature_2m_mean": float(wd.temperature_2m_mean)
-                if wd.temperature_2m_mean is not None
+                "temperature_2m_mean": float(wd["temperature_2m_mean"])
+                if wd["temperature_2m_mean"] is not None
                 else None,
-                "temperature_2m_min": float(wd.temperature_2m_min)
-                if wd.temperature_2m_min is not None
+                "temperature_2m_min": float(wd["temperature_2m_min"])
+                if wd["temperature_2m_min"] is not None
                 else None,
-                "temperature_2m_max": float(wd.temperature_2m_max)
-                if wd.temperature_2m_max is not None
+                "temperature_2m_max": float(wd["temperature_2m_max"])
+                if wd["temperature_2m_max"] is not None
                 else None,
             }
         )
@@ -638,7 +642,7 @@ async def get_shared_report(token: str, db: Annotated[AsyncSession, Depends(get_
     # Soil summary
     soil_summary_out: dict[str, Any] | None = None
     soil_result = await db.execute(
-        select(SoilFieldSummary).where(SoilFieldSummary.land_id == field.land_id)
+        select(SoilFieldSummary).where(SoilFieldSummary.land_id == land_id)
     )
     soil_sum = soil_result.scalar_one_or_none()
     if soil_sum:

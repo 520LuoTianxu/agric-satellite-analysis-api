@@ -290,14 +290,22 @@ def crop_shared_array(
     return destination
 
 
-def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=None):
+def _load_lands(
+    land_ids,
+    sensor,
+    force,
+    season_months=None,
+    growing_seasons=None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
     """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
     land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
     if not land_ids or any(not land_id for land_id in land_ids):
         raise RuntimeError("遥感批次地块清单为空或包含空编号")
 
     lands = []
-    # 每批最多50个边界并复用一个HTTP连接；强制重算时不额外查询已处理日期。
+    # 每批最多50个边界并复用一个HTTP连接；已有日期仅需覆盖当前卫星搜索窗口。
     with internal_client(timeout=60.0) as client:
         for start in range(0, len(land_ids), SATELLITE_BATCH_INPUTS_LAND_LIMIT):
             batch_ids = land_ids[start : start + SATELLITE_BATCH_INPUTS_LAND_LIMIT]
@@ -305,6 +313,8 @@ def _load_lands(land_ids, sensor, force, season_months=None, growing_seasons=Non
                 land_ids=batch_ids,
                 sensor=sensor,
                 include_existing_dates=not force,
+                date_from=date_from.isoformat() if date_from is not None else None,
+                date_to=date_to.isoformat() if date_to is not None else None,
                 client=client,
             )
             remote_by_id = {
@@ -381,7 +391,11 @@ def select_complete_processing_lands(
     download_bbox=None,
     processing_boundary=None,
 ):
-    """Return the shared processing geometry and only fully covered parcels."""
+    """Return the shared processing geometry and only fully covered parcels.
+
+    动态窗口按锚点地块与空间分组预先规划；这里只选择被窗口完整包含的地块，
+    防止任务排队后边界变化或邻景幅边界使指标只覆盖地块的一部分。
+    """
     if not lands:
         raise ValueError("satellite batch has no land parcels")
     anchor = next(
@@ -720,7 +734,11 @@ def _publish_land(
     )
     indices = {}
     for definition in agri_optical_index_defs():
-        array = definition.formula({key: bands[key] for key in definition.bands})
+        # 共享窗口仍缓存原始DN，只有指数入口按STAC定标恢复到物理反射率。
+        array = definition.formula(
+            {key: bands[key] for key in definition.bands},
+            band_radiometry=scene.get("band_radiometry"),
+        )
         array[~np.isfinite(array) | ~field_mask] = np.nan
         indices[INDEX_KEY_TO_PIXEL[definition.key]] = array
     if decloud_enabled():
@@ -738,6 +756,9 @@ def _publish_land(
                 target_transform=target_transform,
                 target_crs=target_crs,
                 field_mask=field_mask,
+                band_radiometry=scene.get("band_radiometry"),
+                band_radiometry_source=scene.get("band_radiometry_source"),
+                band_radiometry_sources=scene.get("band_radiometry_sources"),
             )
         except Exception as exc:
             # 去云缓存与旧光学流程一样尽力保存，缓存失败不能阻断原始地块结果。
@@ -755,6 +776,7 @@ def _publish_land(
         date_str=scene["date"].isoformat(),
         bands=bands,
         field_mask=field_mask,
+        band_radiometry=scene.get("band_radiometry"),
         scene_bands=shared_bands,
         scene_field_mask=shared_mask,
     )
@@ -829,12 +851,11 @@ def _process_one_batch_scene(
     def clear_active_reservation() -> None:
         active_reservations.pop(reservation_key(), None)
 
-    def abandoned_cleanup(reserved_lands) -> bool:
-        """若批次已放弃本景，释放占位并跳过进度回写。返回 True 表示调用方应直接 return。"""
+    def abandoned_cleanup() -> bool:
+        """若父任务已放弃本景，交由父线程统一释放占位并直接返回。"""
         if not abandon_event.is_set():
             return False
-        _release_scene_date_reservation(reserved_lands, scene_date)
-        clear_active_reservation()
+        # 保留活动预留作为失败地块清单；父线程需要据此精准补偿未发布部分。
         return True
 
     scene_date = scene["date"]
@@ -848,7 +869,12 @@ def _process_one_batch_scene(
             land["existing"].add(scene_date)
         reserved = list(selected)
         if reserved:
-            active_reservations[reservation_key()] = (scene_date, list(reserved))
+            # 同步保留本景已成功发布地块，超时补偿只回收仍未完成的占位。
+            active_reservations[reservation_key()] = (
+                scene_date,
+                list(reserved),
+                set(),
+            )
 
     if not reserved:
         with state_lock:
@@ -947,18 +973,12 @@ def _process_one_batch_scene(
                     unresolved.pop(str(land["meta"]["land_id"]), None)
 
     with state_lock:
-        if abandoned_cleanup(reserved):
+        if abandoned_cleanup():
             return
         published_land_ids: set[str] = set()
         for product_scene, product_lands, shared_bands, scl in scene_products:
             if abandon_event.is_set():
-                leftover = [
-                    land
-                    for land in reserved
-                    if str(land["meta"]["land_id"]) not in published_land_ids
-                ]
-                _release_scene_date_reservation(leftover, scene_date)
-                clear_active_reservation()
+                # 留待父线程读取活动预留并释放未发布地块，避免丢失精确补偿范围。
                 return
             for land in product_lands:
                 land_id = str(land["meta"]["land_id"])
@@ -981,6 +1001,9 @@ def _process_one_batch_scene(
                             }
                         )
                         published_land_ids.add(land_id)
+                        reservation = active_reservations.get(reservation_key())
+                        if reservation is not None:
+                            reservation[2].add(land_id)
                     else:
                         progress["failed"] += 1
                         record_failures([land], product_scene.get("id"))
@@ -1027,14 +1050,14 @@ def _process_one_batch_scene(
             if leftover:
                 _release_scene_date_reservation(leftover, scene_date)
 
-        clear_active_reservation()
         if abandon_event.is_set():
-            # 父任务已把本景记入 abandoned/failed；已发布结果保留，不再重复累计 scenes_done。
+            # 父线程负责释放活动预留并记录失败；worker不再清空补偿证据或回写进度。
             return
         progress["failed_land_ids"] = sorted(failed_land_ids)
         progress["failed_scene_ids"] = sorted(failed_scene_ids)
         progress["scenes_done"] += 1
         patch_job(job_id, {"progress_json": dict(progress)})
+        clear_active_reservation()
 
 
 @celery_app.task(
@@ -1091,6 +1114,8 @@ def process_satellite_batch(
             params.get("force", False),
             season_months=params.get("season_months"),
             growing_seasons=params.get("growing_seasons"),
+            date_from=d0,
+            date_to=d1,
         )
         if not lands:
             patch_job(
@@ -1261,6 +1286,23 @@ def process_satellite_batch(
                                     sid = str(scene.get("id") or "")
                                     if sid:
                                         failed_scene_ids.add(sid)
+                                    key = sid or str(id(scene))
+                                    info = active_reservations.pop(key, None)
+                                    if info is not None:
+                                        # 只回收未发布地块；同景已成功产品无需重复补偿。
+                                        unpublished = [
+                                            land
+                                            for land in info[1]
+                                            if str(land["meta"]["land_id"])
+                                            not in info[2]
+                                        ]
+                                        failed_land_ids.update(
+                                            str(land["meta"]["land_id"])
+                                            for land in unpublished
+                                        )
+                                        _release_scene_date_reservation(
+                                            unpublished, info[0]
+                                        )
                                     progress["failed_land_ids"] = sorted(
                                         failed_land_ids
                                     )
@@ -1292,8 +1334,19 @@ def process_satellite_batch(
                                 if info is None and sid:
                                     info = active_reservations.pop(str(id(scene)), None)
                                 if info is not None:
+                                    # 已发布地块保留原结果，只释放并补偿本景未完成部分。
+                                    unpublished = [
+                                        land
+                                        for land in info[1]
+                                        if str(land["meta"]["land_id"])
+                                        not in info[2]
+                                    ]
+                                    failed_land_ids.update(
+                                        str(land["meta"]["land_id"])
+                                        for land in unpublished
+                                    )
                                     _release_scene_date_reservation(
-                                        info[1], info[0]
+                                        unpublished, info[0]
                                     )
                                 if sid:
                                     failed_scene_ids.add(sid)

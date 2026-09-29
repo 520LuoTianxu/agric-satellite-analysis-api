@@ -6,11 +6,12 @@ from datetime import date
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.agri_classify import decloud_scene_id_sql
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import LandParcel
 
@@ -37,6 +38,8 @@ class SatelliteBatchInputsRequest(BaseModel):
     )
     sensor: Literal["S1", "S2"]
     include_existing_dates: bool = True
+    date_from: date | None = None
+    date_to: date | None = None
 
     @field_validator("land_ids", mode="before")
     @classmethod
@@ -52,6 +55,19 @@ class SatelliteBatchInputsRequest(BaseModel):
             raise ValueError("land_ids must not contain empty values")
         # 同一请求内去重并保留调用方顺序，避免重复地块导致重复下载。
         return list(dict.fromkeys(normalized))
+
+    @model_validator(mode="after")
+    def validate_date_window(self) -> SatelliteBatchInputsRequest:
+        # 已有日期只需覆盖本次任务窗口；日期边界必须成对提供且顺序有效。
+        if (self.date_from is None) != (self.date_to is None):
+            raise ValueError("date_from and date_to must be provided together")
+        if (
+            self.date_from is not None
+            and self.date_to is not None
+            and self.date_from > self.date_to
+        ):
+            raise ValueError("date_from must be on or before date_to")
+        return self
 
 
 class SatelliteBatchLandInputOut(BaseModel):
@@ -116,20 +132,26 @@ async def satellite_batch_inputs(
 
     dates_by_land: dict[str, list[date]] = {land_id: [] for land_id in land_ids}
     if body.include_existing_dates:
+        # 批任务只在 STAC 日期窗口内筛选已处理日，避免读取和传输无关历史。
+        # 来源列为空时回退 JSONB，防止旧记录中的去云产品被误记为原始处理日期。
+        date_filter = ""
+        date_params: dict[str, Any] = {"land_ids": land_ids, "sensor": body.sensor}
+        if body.date_from is not None and body.date_to is not None:
+            date_filter = "AND date >= :date_from AND date <= :date_to"
+            date_params.update({"date_from": body.date_from, "date_to": body.date_to})
         date_query = text(
-            """
+            f"""
             SELECT DISTINCT land_id, date
             FROM agric_satellite.parcel_scene_products
             WHERE land_id IN :land_ids
               AND sensor = :sensor
-              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
-              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+              {date_filter}
+              AND NOT ({decloud_scene_id_sql()})
+              AND LOWER(COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), ''), '')) <> 'uncrtaints_decloud'
             ORDER BY land_id, date
             """
         ).bindparams(bindparam("land_ids", expanding=True))
-        date_rows = await db.execute(
-            date_query, {"land_ids": land_ids, "sensor": body.sensor}
-        )
+        date_rows = await db.execute(date_query, date_params)
         for land_id, scene_date in date_rows:
             if scene_date is not None:
                 dates_by_land[land_id].append(scene_date)
@@ -216,16 +238,17 @@ async def land_scene_dates(
     ).scalar()
     if not exists:
         raise HTTPException(status_code=404, detail="land parcel not found")
+    # 同步排除派生去云景，并从旧 JSONB 补足规范来源列缺失的记录。
     rows = (
         await db.execute(
             text(
-                """
+                f"""
                 SELECT DISTINCT date
                 FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id
                   AND sensor = :sensor
-                  AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
-                  AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+                  AND NOT ({decloud_scene_id_sql()})
+                  AND LOWER(COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), ''), '')) <> 'uncrtaints_decloud'
                 ORDER BY date
                 """
             ),

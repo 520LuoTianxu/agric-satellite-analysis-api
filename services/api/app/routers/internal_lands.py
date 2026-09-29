@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.agri_classify import decloud_scene_id_sql
 from app.core.geo import geojson_centroid
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
@@ -241,17 +242,18 @@ async def data_readiness(
         if date_to < date_from:
             raise HTTPException(status_code=400, detail="date_to must be >= date_from")
         span_days = (date_to - date_from).days + 1
+        # 回填旧 JSONB 来源字段后再排除去云产品，避免派生景虚增原始观测覆盖率。
         row = (
             await db.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                       count(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
                       count(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
                     FROM agric_satellite.parcel_scene_products
                     WHERE land_id = :land_id AND date >= :date_from AND date <= :date_to
-                      AND coalesce(scene_id, '') NOT LIKE '%_decloud'
-                      AND coalesce(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+                      AND NOT ({decloud_scene_id_sql()})
+                      AND LOWER(COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), ''), '')) <> 'uncrtaints_decloud'
                     """
                 ),
                 {"land_id": land_id, "date_from": date_from, "date_to": date_to},
@@ -319,13 +321,17 @@ def _sync_load_season_growth_inputs(
         def iso(value: Any) -> str:
             return value.isoformat()[:10] if hasattr(value, "isoformat") else str(value)[:10]
 
+        # 质量字段以规范列为准，兼容早期产品仅在pixel_data JSONB中保留元数据的情况。
         scene_rows = session.execute(
             sa_text(
                 """
                 SELECT date, sensor, scene_id, ndvi_avg, evi_avg, ndmi_avg, mndwi_avg,
-                       vv_avg, vh_avg, parcel_cloud_cover_pct, cloud_cover,
-                       pixel_data->>'source' AS source,
-                       pixel_data->>'decloud_quality' AS decloud_quality,
+                       vv_avg, vh_avg, parcel_cloud_cover_pct,
+                       COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
+                       cloud_cover, cloud_cover_over_30,
+                       COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
+                        pixel_data->'radiometry'->>'method' AS radiometry_method,
+                       COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
                        pixel_data->>'relative_orbit' AS relative_orbit,
                        rgb_url, large_rgb_url, rgb_oss_key
                 FROM agric_satellite.parcel_scene_products
@@ -343,14 +349,23 @@ def _sync_load_season_growth_inputs(
         s1_rows: list[dict[str, Any]] = []
         for item in scene_rows:
             if item["sensor"] == "S2":
-                cloud = cloud_pct(item["parcel_cloud_cover_pct"], item["cloud_cover"])
+                # 选景需保留云量来源和兼容标志，不能把缺少元数据误当作晴空原始景。
+                cloud = cloud_pct(
+                    item["parcel_cloud_cover_pct"],
+                    item["cloud_cover"],
+                    parcel_cloud_source=item.get("parcel_cloud_source"),
+                    source=item.get("source"),
+                    scene_id=item.get("scene_id"),
+                )
                 official = is_official_optical_product(
                     source=item.get("source"),
                     scene_id=item.get("scene_id"),
                     parcel_cloud_cover_pct=item["parcel_cloud_cover_pct"],
                     cloud_cover=item["cloud_cover"],
+                    cloud_cover_over_30=item.get("cloud_cover_over_30"),
                     decloud_quality=item.get("decloud_quality"),
                     cloud_max_pct=CLOUD_MAX_PCT,
+                    parcel_cloud_source=item.get("parcel_cloud_source"),
                 )
                 s2_rows.append(
                     {
@@ -361,8 +376,13 @@ def _sync_load_season_growth_inputs(
                         "ndmi_avg": number(item["ndmi_avg"]),
                         "mndwi_avg": number(item["mndwi_avg"]),
                         "cloud_pct": number(cloud),
+                        "parcel_cloud_cover_pct": number(item["parcel_cloud_cover_pct"]),
+                        "parcel_cloud_source": item.get("parcel_cloud_source"),
+                        "cloud_cover": number(item["cloud_cover"]),
+                        "cloud_cover_over_30": item.get("cloud_cover_over_30"),
                         "decloud_quality": item.get("decloud_quality"),
                         "source": item.get("source"),
+                        "radiometry_method": item.get("radiometry_method"),
                         "official": bool(official),
                         "clear": cloud is not None and cloud <= CLOUD_MAX_PCT,
                         "rgb_url": item.get("rgb_url"),

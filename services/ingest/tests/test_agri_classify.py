@@ -12,10 +12,12 @@ from app.core.agri_classify import (
     classify_flood_scene,
     classify_flood_series,
     optical_tooltip_fields,
+    parse_s1_platform,
     parse_s1_relative_orbit,
     pick_official_optical,
     pick_optical_for_ndvi,
     scene_cloud_fields,
+    s1_calibration_epoch,
 )
 
 
@@ -149,6 +151,111 @@ class ClassifyFloodTests(unittest.TestCase):
         cls = classify_flood_scene(-15.5, -20.5, -12.0, -8.0)
         self.assertEqual(cls, "watch")
 
+    def test_insufficient_baseline_does_not_claim_dry_or_confirmed_flood(self) -> None:
+        self.assertIsNone(classify_flood_scene(-12.0, -18.0, None, None))
+        observations = [
+            {
+                "date": "2026-06-01",
+                "scene_id": "S1A_IW_GRDH_1SDV_20260601T120000_20260601T120025_010000_000001",
+                "relative_orbit": 42,
+                "vv": -12.0,
+                "vh": -18.5,
+                "calibration_method": "esa_sigma_nought_lut",
+            },
+            {
+                "date": "2026-06-13",
+                "scene_id": "S1A_IW_GRDH_1SDV_20260613T120000_20260613T120025_010175_000002",
+                "relative_orbit": 42,
+                "vv": -18.0,
+                "vh": -23.5,
+                "calibration_method": "esa_sigma_nought_lut",
+            },
+        ]
+
+        out = dict(classify_flood_series(observations))
+        self.assertIsNone(out["2026-06-01"])
+        self.assertEqual(out["2026-06-13"], "watch")
+
+    def test_three_compatible_samples_allow_cross_orbit_baseline_fallback(self) -> None:
+        observations = [
+            {
+                "date": "2026-06-01",
+                "relative_orbit": 42,
+                "vv": -12.0,
+                "vh": -18.5,
+                "calibration_method": "esa_sigma_nought_lut",
+            },
+            {
+                "date": "2026-06-13",
+                "relative_orbit": 42,
+                "vv": -18.0,
+                "vh": -23.5,
+                "calibration_method": "esa_sigma_nought_lut",
+            },
+            {
+                "date": "2026-06-25",
+                "relative_orbit": 57,
+                "vv": -12.0,
+                "vh": -18.5,
+                "calibration_method": "esa_sigma_nought_lut",
+            },
+        ]
+
+        out = dict(classify_flood_series(observations))
+        self.assertEqual(out["2026-06-13"], "flood_moderate")
+
+    def test_s1c_calibration_change_does_not_create_false_flood_drop(self) -> None:
+        # 若把两种配置混成一组，中位数会变成-14 dB，使-18 dB新期场景出现4 dB假降幅。
+        observations = []
+        for stamps, base_orbit, vv, vh in (
+            (["20260101T120000", "20260113T120000", "20260125T120000"], 10000, -10.0, -18.0),
+            (["20260203T160000", "20260215T160000", "20260227T160000"], 13500, -18.0, -23.0),
+        ):
+            for index, stamp in enumerate(stamps):
+                next_stamp = stamp[:9] + f"{int(stamp[9:]) + 25:06d}"
+                observations.append(
+                    {
+                        "date": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}",
+                        "scene_id": f"S1C_IW_GRDH_1SDV_{stamp}_{next_stamp}_{base_orbit + index * 175:06d}_AAAAAA",
+                        "vv": vv,
+                        "vh": vh,
+                        "calibration_method": "esa_sigma_nought_lut",
+                    }
+                )
+
+        out = dict(classify_flood_series(observations))
+        self.assertEqual(out["2026-02-27"], "watch")
+        self.assertEqual(
+            s1_calibration_epoch("S1C", "2026-02-03T15:13:00Z"),
+            "s1c-auxcal-pre-2026-02-03",
+        )
+        self.assertEqual(
+            s1_calibration_epoch("S1C", "2026-02-03T15:15:00Z"),
+            "s1c-auxcal-post-2026-02-03",
+        )
+
+    def test_platforms_do_not_share_flood_baselines(self) -> None:
+        observations = []
+        for platform, stamps, base_orbit, vv, vh in (
+            ("S1A", ["20240601T120000", "20240613T120000", "20240625T120000"], 10000, -10.0, -18.0),
+            ("S1D", ["20260601T120000", "20260613T120000", "20260625T120000"], 4762, -18.0, -23.0),
+        ):
+            for index, stamp in enumerate(stamps):
+                next_stamp = stamp[:9] + f"{int(stamp[9:]) + 25:06d}"
+                observations.append(
+                    {
+                        "date": f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}",
+                        "scene_id": f"{platform}_IW_GRDH_1SDV_{stamp}_{next_stamp}_{base_orbit + index * 175:06d}_AAAAAA",
+                        "relative_orbit": 171,
+                        "vv": vv,
+                        "vh": vh,
+                        "calibration_method": "esa_sigma_nought_lut",
+                    }
+                )
+
+        out = dict(classify_flood_series(observations))
+        self.assertEqual(out["2026-06-25"], "watch")
+
 
 class OrbitParseTests(unittest.TestCase):
     def test_parse_s1a_relative_orbit(self) -> None:
@@ -160,6 +267,17 @@ class OrbitParseTests(unittest.TestCase):
 
     def test_prefers_explicit_relative_orbit(self) -> None:
         self.assertEqual(parse_s1_relative_orbit("nope", 42), 42)
+
+    def test_parse_s1d_relative_orbit(self) -> None:
+        scene_id = "S1D_IW_GRDH_1SDV_20260927T095427_20260927T095452_004762_008EBC"
+        self.assertEqual(parse_s1_relative_orbit(scene_id), 171)
+        self.assertEqual(parse_s1_platform("sentinel-1d", scene_id), "S1D")
+        self.assertEqual(
+            parse_s1_relative_orbit(
+                "S1D_IW_GRDH_1SDV_20260928T011434_20260928T011459_004771_008F14"
+            ),
+            5,
+        )
 
 
 class ProductPickTests(unittest.TestCase):

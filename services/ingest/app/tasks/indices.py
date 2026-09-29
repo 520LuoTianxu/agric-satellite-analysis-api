@@ -15,8 +15,24 @@ import numpy as np
 # ── Formula functions ────────────────────────────────────────────────
 
 
+def _reflectance_band(
+    bands: dict[str, np.ndarray],
+    band_key: str,
+    radiometry: dict[str, dict[str, float]] | None,
+) -> np.ndarray:
+    """将单波段还原到反射率单位；已是反射率的数据默认使用单位变换。"""
+    values = np.asarray(bands[band_key], dtype=np.float32)
+    calibration = (radiometry or {}).get(band_key)
+    if calibration is None:
+        return values
+    # 指数中的常数按反射率定义；只除量化值会漏掉 S2 基线 04.00 后的加性偏移。
+    return values * float(calibration["scale"]) + float(calibration["offset"])
+
+
 def _ndvi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
-    nir, red = bands["B08"], bands["B04"]
+    radiometry = _kw.get("band_radiometry")
+    nir = _reflectance_band(bands, "B08", radiometry)
+    red = _reflectance_band(bands, "B04", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (nir - red) / (nir + red)
     return np.clip(result, -1.0, 1.0)
@@ -29,14 +45,19 @@ def _evi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     routinely exceed 1.0; hard-clipping to 1.0 saturates float COGs and
     stuck parcel means at 1.000. TiTiler / UI rescale separately.
     """
-    nir, red, blue = bands["B08"], bands["B04"], bands["B02"]
+    radiometry = _kw.get("band_radiometry")
+    nir = _reflectance_band(bands, "B08", radiometry)
+    red = _reflectance_band(bands, "B04", radiometry)
+    blue = _reflectance_band(bands, "B02", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = 2.5 * (nir - red) / (nir + 6.0 * red - 7.5 * blue + 1.0)
     return np.clip(result, -1.0, 2.0)
 
 
 def _savi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
-    nir, red = bands["B08"], bands["B04"]
+    radiometry = _kw.get("band_radiometry")
+    nir = _reflectance_band(bands, "B08", radiometry)
+    red = _reflectance_band(bands, "B04", radiometry)
     L = _kw.get("savi_l", 0.5)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = ((nir - red) / (nir + red + L)) * (1.0 + L)
@@ -44,7 +65,9 @@ def _savi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
 
 
 def _ndwi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
-    green, nir = bands["B03"], bands["B08"]
+    radiometry = _kw.get("band_radiometry")
+    green = _reflectance_band(bands, "B03", radiometry)
+    nir = _reflectance_band(bands, "B08", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (green - nir) / (green + nir)
     return np.clip(result, -1.0, 1.0)
@@ -52,7 +75,9 @@ def _ndwi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
 
 def _ndmi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     """Normalized Difference Moisture Index: (NIR - SWIR16) / (NIR + SWIR16)."""
-    nir, swir = bands["B08"], bands["B11"]
+    radiometry = _kw.get("band_radiometry")
+    nir = _reflectance_band(bands, "B08", radiometry)
+    swir = _reflectance_band(bands, "B11", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (nir - swir) / (nir + swir)
     return np.clip(result, -1.0, 1.0)
@@ -60,7 +85,9 @@ def _ndmi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
 
 def _ndre(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     """Normalized Difference Red Edge: (NIR - RedEdge1) / (NIR + RedEdge1)."""
-    nir, re1 = bands["B08"], bands["B05"]
+    radiometry = _kw.get("band_radiometry")
+    nir = _reflectance_band(bands, "B08", radiometry)
+    re1 = _reflectance_band(bands, "B05", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (nir - re1) / (nir + re1)
     return np.clip(result, -1.0, 1.0)
@@ -68,7 +95,9 @@ def _ndre(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
 
 def _cire(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     """Chlorophyll Index red-edge: (RedEdge3 / RedEdge1) - 1  (B07/B05 - 1)."""
-    re3, re1 = bands["B07"], bands["B05"]
+    radiometry = _kw.get("band_radiometry")
+    re3 = _reflectance_band(bands, "B07", radiometry)
+    re1 = _reflectance_band(bands, "B05", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (re3 / re1) - 1.0
     # Physical range is open-ended; keep a wide float bound for COG storage.
@@ -77,7 +106,9 @@ def _cire(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
 
 def _mndwi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     """Modified NDWI (Xu 2006): (Green - SWIR16) / (Green + SWIR16)."""
-    green, swir = bands["B03"], bands["B11"]
+    radiometry = _kw.get("band_radiometry")
+    green = _reflectance_band(bands, "B03", radiometry)
+    swir = _reflectance_band(bands, "B11", radiometry)
     with np.errstate(divide="ignore", invalid="ignore"):
         result = (green - swir) / (green + swir)
     return np.clip(result, -1.0, 1.0)

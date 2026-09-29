@@ -48,6 +48,7 @@ _SCENE_PIXEL_STORAGE_LIMIT_BYTES = 12 * 1024 * 1024
 _SCENE_OSS_JSON_LIMIT_BYTES = 8 * 1024 * 1024
 _SCENE_OSS_PAGE_LIMIT_BYTES = 16 * 1024 * 1024
 
+# 质量筛选字段优先读规范标量列，旧产品只写入 JSONB 时再回退，避免前端漏掉去云等级和云量来源。
 # Averages + meta; pixel_data excluded unless include_pixels=1
 _SCENE_COLS = """
     land_id, tile_id, date, sensor, scene_id, land_name,
@@ -63,16 +64,16 @@ _SCENE_COLS = """
     vv_avg, vv_min, vv_max,
     vh_avg, vh_min, vh_max,
     generated_at_shanghai, ingested_at,
-    pixel_data->>'source' AS source,
+    COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
     pixel_data->>'stac_item_id' AS stac_item_id,
     pixel_data->>'algorithm_version' AS algorithm_version,
     pixel_data->'analysis_grid' AS analysis_grid,
     pixel_data->'radiometric_calibration' AS radiometric_calibration,
     pixel_data->'quality_metrics' AS quality_metrics,
-    pixel_data->>'decloud_quality' AS decloud_quality,
+    COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
     NULLIF(pixel_data->>'decloud_score', '')::float AS decloud_score,
     pixel_data->'decloud_reasons' AS decloud_reasons,
-    pixel_data->>'parcel_cloud_source' AS parcel_cloud_source,
+    COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
     NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
 """
 
@@ -565,21 +566,37 @@ async def list_land_scenes(
     order: Literal["asc", "desc"] = Query(
         "asc",
         description=(
-            "Sort by date (then sensor, scene_id). For timeseries UI prefer "
+            "Sort by date and sensor; scene_id remains ascending for stable keyset paging. "
+            "For timeseries UI prefer "
             "order=desc&limit=500 then reverse client-side, or "
             "order=asc&offset=max(0,total-limit)."
         ),
     ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    before_date: date | None = Query(None),
+    before_scene_id: str | None = Query(None, max_length=512),
 ):
     """返回地块 S1/S2 时序；默认轻量统计，按需返回有界像元详情。
 
     Timeseries UI should load the newest window first: ``order=desc&limit=500``
     then reverse items ascending for charts, or
     ``order=asc&offset=max(0, total-limit)``. Single-day heatmap fetches
-    (``from``/``to`` same day) can keep the default ``asc``.
+    (``from``/``to`` same day) can keep the default ``asc``. Descending cursor
+    pages pass both ``before_date`` and ``before_scene_id`` from the last item
+    to page through older scenes without large OFFSET scans.
     """
+    if (before_date is None) != (before_scene_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="before_date 与 before_scene_id 必须同时提供",
+        )
+    if before_date is not None and (sensor is None or order != "desc" or offset != 0):
+        raise HTTPException(
+            status_code=422,
+            detail="游标分页要求指定 sensor、order=desc 且 offset=0",
+        )
+
     await _agri_ready(db)
     exists = (
         await db.execute(
@@ -608,6 +625,18 @@ async def list_land_scenes(
     wh = " AND ".join(where)
     order_sql = "DESC" if order == "desc" else "ASC"
 
+    page_where = where.copy()
+    page_params = params.copy()
+    if before_date is not None and before_scene_id is not None:
+        # 日期倒序、场景号正序与现有复合索引方向一致，游标仅过滤当前页而不改变全量 total。
+        page_where.append("date <= :before_date")
+        page_where.append(
+            "(date < :before_date OR (date = :before_date AND scene_id > :before_scene_id))"
+        )
+        page_params["before_date"] = before_date
+        page_params["before_scene_id"] = before_scene_id
+    page_wh = " AND ".join(page_where)
+
     total = (
         await db.execute(
             text(
@@ -619,6 +648,7 @@ async def list_land_scenes(
 
     page_limit = min(limit, _SCENE_PIXEL_PAGE_LIMIT) if include_pixels else limit
     params["limit"] = page_limit
+    page_params["limit"] = page_limit
     if include_pixels:
         # 先只让数据库汇总当前页的像元数和JSONB体积；超过预算时不把像元正文
         # 传到API进程，避免一个大地块或过宽日期窗口占满内存并拖慢响应。
@@ -639,13 +669,13 @@ async def list_land_scenes(
                 FROM (
                     SELECT pixel_count, pixel_data
                     FROM agric_satellite.parcel_scene_products
-                    WHERE {wh}
-                    ORDER BY date {order_sql}, sensor {order_sql}, scene_id {order_sql}
+                    WHERE {page_wh}
+                    ORDER BY date {order_sql}, sensor {order_sql}, scene_id ASC
                     LIMIT :limit OFFSET :offset
                 ) AS page
                 """
             ),
-            params,
+            page_params,
         )
         budget = payload_budget.mappings().one()
         if (
@@ -666,12 +696,12 @@ async def list_land_scenes(
                 f"""
                 SELECT {cols}
                 FROM agric_satellite.parcel_scene_products
-                WHERE {wh}
-                ORDER BY date {order_sql}, sensor {order_sql}, scene_id {order_sql}
+                WHERE {page_wh}
+                ORDER BY date {order_sql}, sensor {order_sql}, scene_id ASC
                 LIMIT :limit OFFSET :offset
                 """
             ),
-            params,
+            page_params,
         )
     ).fetchall()
     # OSS SDK、JSON 解码和大响应序列化都是同步工作；像元模式统一放入线程池，
@@ -987,15 +1017,30 @@ async def list_ndvi_day_grade_shares(
         await db.execute(
             text(
                 f"""
-                SELECT date, scene_id, pixel_data, ndvi_avg,
-                       pixel_data->>'source' AS source,
-                       pixel_data->>'decloud_quality' AS decloud_quality,
-                       parcel_cloud_cover_pct, cloud_cover, cloud_cover_over_30,
-                       pixel_data->>'parcel_cloud_source' AS parcel_cloud_source
-                FROM agric_satellite.parcel_scene_products
-                WHERE {wh}
-                ORDER BY date ASC, scene_id ASC
-                LIMIT :limit
+                WITH selected_dates AS (
+                    -- limit 按完整日期分组，而非场景行数，避免一天的候选产品被截断。
+                    SELECT date
+                    FROM agric_satellite.parcel_scene_products
+                    WHERE {wh}
+                    GROUP BY date
+                    ORDER BY date ASC
+                    LIMIT :limit
+                )
+                SELECT scene.date, scene.scene_id, scene.pixel_data, scene.ndvi_avg,
+                       -- 规范元数据优先，旧 JSONB 回退，保证日分级接口与场景列表采用同一质量口径。
+                       COALESCE(NULLIF(BTRIM(scene.product_source), ''), NULLIF(BTRIM(scene.pixel_data->>'source'), '')) AS source,
+                       COALESCE(NULLIF(BTRIM(scene.decloud_quality), ''), NULLIF(BTRIM(scene.pixel_data->>'decloud_quality'), '')) AS decloud_quality,
+                       scene.parcel_cloud_cover_pct, scene.cloud_cover,
+                       scene.cloud_cover_over_30,
+                       COALESCE(NULLIF(BTRIM(scene.parcel_cloud_source), ''), NULLIF(BTRIM(scene.pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source
+                FROM agric_satellite.parcel_scene_products AS scene
+                JOIN selected_dates USING (date)
+                WHERE scene.land_id = :land_id
+                  AND scene.sensor = 'S2'
+                  AND scene.pixel_data->>'format' = 'lonlat_v1'
+                  AND jsonb_typeof(scene.pixel_data->'pixels') = 'array'
+                  AND jsonb_array_length(scene.pixel_data->'pixels') > 0
+                ORDER BY scene.date ASC, scene.scene_id ASC
                 """
             ),
             params,

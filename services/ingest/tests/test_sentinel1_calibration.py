@@ -37,6 +37,29 @@ def _load_sentinel1_module():
 
 
 class Sentinel1CalibrationCoordinateTests(unittest.TestCase):
+    def test_radiometric_metadata_records_platform_epoch_and_processing_version(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        metadata = sentinel1._s1_radiometric_calibration(
+            {
+                "id": "S1C_IW_GRDH_1SDV_20260203T160000_20260203T160025_000100_00AAAA",
+                "platform": "sentinel-1c",
+                "processing_version": "003.80",
+                "acquisition_datetime": "2026-02-03T16:00:00Z",
+                "vv_calibration_href": "vv.xml",
+                "vh_calibration_href": "vh.xml",
+            }
+        )
+
+        self.assertEqual(metadata["platform"], "S1C")
+        self.assertEqual(metadata["processing_version"], "003.80")
+        self.assertEqual(metadata["calibration_epoch"], "s1c-auxcal-post-2026-02-03")
+        self.assertEqual(
+            sentinel1._s1_processing_version(
+                {"processing:software": {"name": "Sentinel-1 IPF", "version": "004.03"}}
+            ),
+            "Sentinel-1 IPF:004.03",
+        )
+
     def test_zero_based_pixel_centers_include_lut_edge_pixels(self) -> None:
         sentinel1 = _load_sentinel1_module()
         lut = sentinel1.S1CalibrationLUT(

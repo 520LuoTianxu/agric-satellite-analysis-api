@@ -5,19 +5,24 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from app.core.agri_classify import (
     CLOUD_MAX_PCT,
+    NEARBY_CLEAR_DAYS,
     OpticalObs,
     SarObs,
-    classify_drought_series,
+    build_month_drought_baselines,
+    classify_drought_scene,
     classify_flood_series,
     cloud_pct,
     is_drought_day_class,
     is_official_optical_product,
+    pick_official_optical,
+    pick_optical_for_ndvi,
 )
 from app.core.harvest_detect import detect_harvest
 from agric_satellite_analysis_common.growing_seasons import months_from_window
@@ -91,14 +96,18 @@ def load_agri_s2_rows(
 ) -> list[dict[str, Any]]:
     from sqlalchemy import text
 
+    # 规范标量列优先，空值才回退 JSONB，保证季节报告择景沿用完整质量元数据。
     rows = (
         session.execute(
             text(
                 """
             SELECT date, scene_id, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
-                   parcel_cloud_cover_pct, cloud_cover,
-                   pixel_data->>'source' AS source,
-                   pixel_data->>'decloud_quality' AS decloud_quality,
+                   parcel_cloud_cover_pct,
+                   COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
+                   cloud_cover,
+                   cloud_cover_over_30,
+                   COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
+                   COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
                    rgb_url, large_rgb_url, rgb_oss_key,
                    pixel_data->>'format' AS pixel_format,
                    CASE
@@ -124,14 +133,24 @@ def load_agri_s2_rows(
     out: list[dict[str, Any]] = []
     for r in rows:
         d = _iso(r["date"])
-        cloud = cloud_pct(r["parcel_cloud_cover_pct"], r["cloud_cover"])
+        scene_id = r.get("scene_id") or r.get("product_id")
+        # 报告后续还会按日期重新择景，需保留云量来源/阈值元数据，不能只传派生百分比。
+        cloud = cloud_pct(
+            r["parcel_cloud_cover_pct"],
+            r["cloud_cover"],
+            parcel_cloud_source=r.get("parcel_cloud_source"),
+            source=r.get("source"),
+            scene_id=scene_id,
+        )
         official = is_official_optical_product(
             source=r.get("source"),
-            scene_id=r.get("scene_id") or r.get("product_id"),
+            scene_id=scene_id,
             parcel_cloud_cover_pct=r["parcel_cloud_cover_pct"],
             cloud_cover=r["cloud_cover"],
+            cloud_cover_over_30=r.get("cloud_cover_over_30"),
             decloud_quality=r.get("decloud_quality"),
             cloud_max_pct=CLOUD_MAX_PCT,
+            parcel_cloud_source=r.get("parcel_cloud_source"),
         )
         out.append(
             {
@@ -142,7 +161,9 @@ def load_agri_s2_rows(
                 "ndmi_avg": _num(r["ndmi_avg"]),
                 "mndwi_avg": _num(r["mndwi_avg"]),
                 "parcel_cloud_cover_pct": _num(r["parcel_cloud_cover_pct"]),
+                "parcel_cloud_source": r.get("parcel_cloud_source"),
                 "cloud_cover": _num(r["cloud_cover"]),
+                "cloud_cover_over_30": r.get("cloud_cover_over_30"),
                 "cloud_pct": cloud,
                 "decloud_quality": r.get("decloud_quality"),
                 "source": r.get("source"),
@@ -170,6 +191,7 @@ def load_agri_s1_rows(
     start: date,
     end: date,
 ) -> list[dict[str, Any]]:
+    """读取S1序列并保留平台/校准来源，防止报告基线跨处理口径混算。"""
     from sqlalchemy import text
     from app.core.agri_classify import parse_s1_relative_orbit
 
@@ -179,6 +201,11 @@ def load_agri_s1_rows(
                 """
             SELECT date, scene_id, vv_avg, vh_avg,
                    NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit,
+                   pixel_data->>'stac_item_id' AS stac_item_id,
+                   pixel_data->'radiometric_calibration'->>'platform' AS platform,
+                   pixel_data->'radiometric_calibration'->>'processing_version' AS processing_version,
+                   pixel_data->'radiometric_calibration'->>'calibration_epoch' AS calibration_epoch,
+                   pixel_data->'radiometric_calibration'->>'acquisition_datetime' AS acquisition_datetime,
                    pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
                    NULLIF(pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
             FROM agric_satellite.parcel_scene_products
@@ -209,6 +236,11 @@ def load_agri_s1_rows(
                 "vv_avg": _num(r["vv_avg"]),
                 "vh_avg": _num(r["vh_avg"]),
                 "relative_orbit": rel,
+                "stac_item_id": r.get("stac_item_id"),
+                "platform": r.get("platform"),
+                "processing_version": r.get("processing_version"),
+                "calibration_epoch": r.get("calibration_epoch"),
+                "acquisition_datetime": r.get("acquisition_datetime"),
                 "calibration_method": r.get("calibration_method"),
                 "calibration_scale": _num(r.get("calibration_scale")),
             }
@@ -220,22 +252,82 @@ def _drought_summary(
     s2_rows: list[dict[str, Any]], season_months: tuple[int, ...] | list[int]
 ) -> dict[str, Any]:
     observations: list[OpticalObs] = []
+    observations_by_date: dict[str, list[OpticalObs]] = {}
     for r in s2_rows:
-        observations.append(
-            {
-                "date": r["date"],
-                "ndvi": r.get("ndvi_avg"),
-                "ndmi": r.get("ndmi_avg"),
-                "official": bool(r.get("official")),
-                "scene_id": r.get("scene_id"),
-                "decloud_quality": r.get("decloud_quality"),
-                "cloud_cover": r.get("cloud_cover"),
-                "parcel_cloud_cover_pct": r.get("parcel_cloud_cover_pct"),
-            }
-        )
-    classified = classify_drought_series(
-        observations, season_months=season_months or (6, 7, 8, 9)
+        observation: OpticalObs = {
+            "date": _iso(r["date"]),
+            "ndvi": r.get("ndvi_avg"),
+            "ndmi": r.get("ndmi_avg"),
+            "official": bool(r.get("official")),
+            "source": r.get("source"),
+            "scene_id": r.get("scene_id"),
+            "decloud_quality": r.get("decloud_quality"),
+            "cloud_cover": r.get("cloud_cover"),
+            "parcel_cloud_cover_pct": r.get("parcel_cloud_cover_pct"),
+            "parcel_cloud_source": r.get("parcel_cloud_source"),
+            "cloud_cover_over_30": r.get("cloud_cover_over_30"),
+        }
+        observations.append(observation)
+        observations_by_date.setdefault(observation["date"], []).append(observation)
+
+    # 月基线按采集日期计样本；同日原始景与去云景是同一次过境的候选产品，不能重复加权。
+    # 这里沿用预警和前端的官方景优先、邻近晴空原始景择优规则，保证三处分类口径一致。
+    selected_by_date: dict[str, OpticalObs] = {}
+    dates_by_month: dict[int, list[date]] = {}
+    parsed_dates: dict[date, str] = {}
+    for scene_date in observations_by_date:
+        parsed_date = _parse_date(scene_date)
+        if parsed_date is None:
+            continue
+        parsed_dates[parsed_date] = scene_date
+        dates_by_month.setdefault(parsed_date.month, []).append(parsed_date)
+    scene_dates = sorted(parsed_dates)
+
+    for scene_date in sorted(observations_by_date):
+        parsed_date = _parse_date(scene_date)
+        neighbors: list[OpticalObs] = []
+        if parsed_date is not None:
+            # 择景算法只读±45天或同月的其他日期；按日期二分缩小候选，避免长报告区间形成全量两两扫描。
+            left = bisect_left(
+                scene_dates, parsed_date - timedelta(days=NEARBY_CLEAR_DAYS)
+            )
+            right = bisect_right(
+                scene_dates, parsed_date + timedelta(days=NEARBY_CLEAR_DAYS)
+            )
+            neighbor_dates = set(scene_dates[left:right])
+            neighbor_dates.update(dates_by_month[parsed_date.month])
+            neighbor_dates.discard(parsed_date)
+            neighbors = [
+                observation
+                for neighbor_date in sorted(neighbor_dates)
+                for observation in observations_by_date[parsed_dates[neighbor_date]]
+            ]
+
+        group = observations_by_date[scene_date]
+        picked = pick_official_optical(group, neighbors=neighbors)
+        if picked is None:
+            picked = pick_optical_for_ndvi(group, neighbors=neighbors)
+        if picked is None and group:
+            picked = group[0]
+        if picked is not None:
+            selected_by_date[scene_date] = picked
+
+    season = season_months or (6, 7, 8, 9)
+    baselines = build_month_drought_baselines(
+        list(selected_by_date.values()), season_months=season
     )
+
+    def classify(obs: OpticalObs) -> str:
+        parsed_date = _parse_date(obs.get("date"))
+        stats = baselines.get(parsed_date.month) if parsed_date else None
+        return str(classify_drought_scene(obs, stats, season_months=season))
+
+    # scene_classes保留逐产品结果用于审计；统计和时间轴只使用每天被选中的一景。
+    classified = [(str(obs.get("date") or ""), classify(obs)) for obs in observations]
+    selected_classes = [
+        {"date": scene_date, "class": classify(obs)}
+        for scene_date, obs in sorted(selected_by_date.items())
+    ]
     counts: Counter[str] = Counter()
     days: list[dict[str, str]] = []
     scene_classes: list[dict[str, str]] = []
@@ -245,10 +337,9 @@ def _drought_summary(
         scene_classes.append({"date": d, "class": c})
         if is_drought_day_class(cls):
             days.append({"date": d, "class": c})
-    usable = dedupe_usable_scene_classes(scene_classes)
     usable_counts: Counter[str] = Counter()
     usable_days: list[dict[str, str]] = []
-    for sc in usable:
+    for sc in selected_classes:
         c = str(sc.get("class") or "")
         usable_counts[c] += 1
         if is_drought_day_class(c):
@@ -262,7 +353,7 @@ def _drought_summary(
         ),
         "days": usable_days[:40],
         "scene_classes": scene_classes,
-        "usable_scene_classes": usable,
+        "usable_scene_classes": selected_classes,
         "classified": scene_classes,
     }
 
@@ -289,12 +380,18 @@ def _flood_summary(s1_rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "vv": r.get("vv_avg"),
                 "vh": r.get("vh_avg"),
                 "scene_id": r.get("scene_id"),
+                "stac_item_id": r.get("stac_item_id"),
                 "relative_orbit": r.get("relative_orbit"),
+                "platform": r.get("platform"),
+                "processing_version": r.get("processing_version"),
+                "calibration_epoch": r.get("calibration_epoch"),
+                "acquisition_datetime": r.get("acquisition_datetime"),
                 "calibration_method": r.get("calibration_method"),
                 "calibration_scale": _num(r.get("calibration_scale")),
             }
         )
-    classified = classify_flood_series(observations)
+    # 报告展示历史逐景标签，基线必须截止到每个观测日，避免窗口后段影像改写前段结果。
+    classified = classify_flood_series(observations, date_bounded=True)
     counts: Counter[str] = Counter()
     scenes: list[dict[str, Any]] = []
     for i, (d, cls) in enumerate(classified):
@@ -425,8 +522,10 @@ def _methodology() -> dict[str, Any]:
             "以 NDDI=(NDVI-NDMI)/(NDVI+NDMI) 为主，结合同月 NDDI 分位及 NDMI/NDVI 相对同月中位数的下降；"
             "轻度/中度/重度对应 NDDI 阈值与绿度跌幅；季外标「季外」，非官方标「不可靠」。"
         ),
-                "flood": (
-            "Sentinel-1 洪涝：按相对轨道建 VV 基线；"
+        "flood": (
+            "Sentinel-1 洪涝：基线按相对轨道、卫星平台、上游处理版本、校准时期及辐射定标口径分组；"
+            "轨道样本不足时仅回退到同口径跨轨组，同口径有效观测不足3景时不判为干燥或确认洪涝；"
+            "每个日期仅使用报告窗口内当日及此前的影像，窗口外更早历史不参与；"
             "洪涝需同时满足 VV≤-17.0 dB、相对基线下降≥3.0 dB，且 VH 或 VV-VH 辅助条件；"
             "VV≤-15.0 dB 的近阈值情形标「关注」；仅 VV-VH 不会单独判洪涝。"
         ),
@@ -438,7 +537,12 @@ def _build_s2_appendix(
     s2_rows: list[dict[str, Any]], drought: dict[str, Any]
 ) -> list[dict[str, Any]]:
     class_by_date: dict[str, str] = {}
-    for sc in drought.get("scene_classes") or drought.get("classified") or []:
+    selected = drought.get("usable_scene_classes")
+    if not selected:
+        selected = dedupe_usable_scene_classes(
+            drought.get("scene_classes") or drought.get("classified") or []
+        )
+    for sc in selected:
         d = sc.get("date")
         if d and d not in class_by_date:
             class_by_date[str(d)] = str(sc.get("class") or "")

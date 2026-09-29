@@ -19,7 +19,10 @@ For a calendar date:
    82% while STAC is much lower are treated as the padded-window fill bug, not
    real cloud; those dates fall back to STAC. Parcel ~0% while STAC is 80% or
    higher is also treated as missing (not a true clear field). Missing parcel
-   cloud is shown as none, not 0%.
+   cloud is shown as none, not 0%. If both parcel and STAC cloud are missing,
+   only an explicit `cloud_cover_over_30=false` can qualify the raw scene;
+   absent cloud-quality metadata remains unknown and is excluded from official
+   drought baselines.
 2. If raw is cloudy (real parcel > 30%) and a **good** decloud exists, use
    good decloud.
 3. If both exist and raw is borderline (parcel 20-40%) *or* STAC is clear
@@ -27,6 +30,8 @@ For a calendar date:
    to the median of nearby clear raw dates (plus/minus 45 days, else same
    month). Tie-break: raw, then scene id.
 4. Fair/bad decloud never enter official drought, overview, or land RS.
+   Quality and product-source markers ignore surrounding whitespace and case
+   differences so older write paths use the same product classification.
 5. **NDVI / growth series** (`pick_optical_for_ndvi`): when both raw and a
    **good** decloud exist, pick the product whose NDVI (then NDMI) is closer
    to the median of nearby clear raw dates, and that is not absurd versus
@@ -67,9 +72,22 @@ is client-side from that series; the API only exposes orbit when parseable.
 **Flood** if all of:
 
 - parcel median VV ≤ −17 dB
-- VV − per-orbit baseline ≤ −3 dB (baseline = median VV of valid scenes in
-  that relative-orbit group; ≥ 3 samples, else all-scene median)
-- helper: VH ≤ −22 dB **or** VV−VH ≤ per-orbit p40
+- VV − comparable-scene baseline ≤ −3 dB (median VV within the same relative
+  orbit when it has ≥ 3 valid scenes; otherwise use all relative orbits only
+  within the same platform, calibration epoch, processing version, method,
+  and scale when that group has ≥ 3 scenes)
+- helper: VH ≤ −22 dB **or** VV−VH ≤ p40 from ≥ 3 comparable VV/VH scenes
+
+If neither group has enough samples, the baseline is unavailable. A
+water-like single-scene signal may remain `watch`; otherwise the date is
+unclassified rather than `dry` or confirmed flood. This sample floor is an
+operational guard, not a substitute for field validation.
+
+The field timeseries evaluates each date from observations no later than that
+date, so a later acquisition cannot change an earlier date's flood label.
+Scenes from the target calendar date remain in the date-level baseline, matching
+the existing same-day aggregation rule. Loading older history can add earlier
+reference scenes and resolve dates that were previously unclassified.
 
 **Watch** is near-threshold. VV−VH alone never flags flood.
 

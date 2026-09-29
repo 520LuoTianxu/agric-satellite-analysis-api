@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
-from app.models.tables import Job, LandParcel
+from app.models.tables import LandParcel
 from app.services.beat_schedule import (
     STAGGER_SECONDS,
     weekly_date_window,
@@ -407,12 +407,18 @@ async def _export_overview_batch(
                 "pixel_data": row.pixel_data,
             }
 
+    # 定时概览沿用同一分类器，平台和校准时期必须随场景值一起传给下载机预聚合器。
     s1_rows = (
         await db.execute(
             text(
                 f"""
                 SELECT s.land_id, s.date, s.vv_avg, s.vh_avg, s.scene_id,
                        s.pixel_data->>'relative_orbit' AS relative_orbit,
+                       s.pixel_data->>'stac_item_id' AS stac_item_id,
+                       s.pixel_data->'radiometric_calibration'->>'platform' AS platform,
+                       s.pixel_data->'radiometric_calibration'->>'processing_version' AS processing_version,
+                       s.pixel_data->'radiometric_calibration'->>'calibration_epoch' AS calibration_epoch,
+                       s.pixel_data->'radiometric_calibration'->>'acquisition_datetime' AS acquisition_datetime,
                        s.pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
                        NULLIF(s.pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
                 FROM agric_satellite.parcel_scene_products s
@@ -435,7 +441,12 @@ async def _export_overview_batch(
                     "vv": row.vv_avg,
                     "vh": row.vh_avg,
                     "scene_id": str(row.scene_id) if row.scene_id else None,
+                    "stac_item_id": row.stac_item_id,
                     "relative_orbit": row.relative_orbit,
+                    "platform": row.platform,
+                    "processing_version": row.processing_version,
+                    "calibration_epoch": row.calibration_epoch,
+                    "acquisition_datetime": row.acquisition_datetime,
                     "calibration_method": row.calibration_method,
                     "calibration_scale": row.calibration_scale,
                 }

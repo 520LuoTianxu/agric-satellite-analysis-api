@@ -15,6 +15,7 @@ from app.core.agri_classify import (
     WEAK_NDVI_LT,
     classify_drought_series,
     classify_flood_series,
+    decloud_scene_id_sql,
     is_drought_day_class,
     pick_official_optical,
 )
@@ -151,17 +152,22 @@ def _create_weather_drought_alert(
 
 
 def _load_optical_rows(session, land_id: str, as_of: date) -> list[dict[str, Any]]:
+    # 预警择景优先使用规范列，兼容旧 JSONB 元数据，避免来源和去云质量在读取时丢失。
     rows = (
         session.execute(
             text(
-                """
-                SELECT date, scene_id, product_source, decloud_quality,
-                       parcel_cloud_cover_pct, parcel_cloud_source, cloud_cover,
+                f"""
+                SELECT date, scene_id,
+                       COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS product_source,
+                       COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
+                       parcel_cloud_cover_pct,
+                       COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
+                       cloud_cover,
                        cloud_cover_over_30, ndvi_avg, evi_avg, ndmi_avg
                 FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id AND sensor = 'S2'
                   AND date BETWEEN :start_date AND :as_of
-                ORDER BY date, CASE WHEN COALESCE(scene_id, '') LIKE '%_decloud' THEN 1 ELSE 0 END,
+                ORDER BY date, CASE WHEN {decloud_scene_id_sql()} THEN 1 ELSE 0 END,
                          scene_id
                 """
             ),
@@ -218,12 +224,20 @@ def _load_optical_rows(session, land_id: str, as_of: date) -> list[dict[str, Any
 
 
 def _load_sar_rows(session, land_id: str, as_of: date) -> list[dict[str, Any]]:
+    # 预警基线必须拿到平台、处理版本和校准时期，避免跨口径的VV差值触发误报。
     rows = (
         session.execute(
             text(
                 """
                 SELECT date, scene_id, vv_avg, vh_avg,
-                       pixel_data->>'relative_orbit' AS relative_orbit
+                       pixel_data->>'relative_orbit' AS relative_orbit,
+                       pixel_data->>'stac_item_id' AS stac_item_id,
+                       pixel_data->'radiometric_calibration'->>'platform' AS platform,
+                       pixel_data->'radiometric_calibration'->>'processing_version' AS processing_version,
+                       pixel_data->'radiometric_calibration'->>'calibration_epoch' AS calibration_epoch,
+                       pixel_data->'radiometric_calibration'->>'acquisition_datetime' AS acquisition_datetime,
+                       pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
+                       NULLIF(pixel_data->'radiometric_calibration'->>'fallback_scale', '')::float AS calibration_scale
                 FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id AND sensor = 'S1'
                   AND date BETWEEN :start_date AND :as_of
@@ -443,7 +457,14 @@ def _create_flood_alert(
         {
             "date": (_date(row.get("date")) or date.min).isoformat(),
             "scene_id": row.get("scene_id"),
+            "stac_item_id": row.get("stac_item_id"),
             "relative_orbit": row.get("relative_orbit"),
+            "platform": row.get("platform"),
+            "processing_version": row.get("processing_version"),
+            "calibration_epoch": row.get("calibration_epoch"),
+            "acquisition_datetime": row.get("acquisition_datetime"),
+            "calibration_method": row.get("calibration_method"),
+            "calibration_scale": row.get("calibration_scale"),
             "vv": _number(row.get("vv_avg")),
             "vh": _number(row.get("vh_avg")),
         }

@@ -80,7 +80,7 @@ INDEX_KEY_TO_PIXEL = {
     "cire": "CIre",
     "mndwi": "MNDWI",
 }
-AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v3"
+AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v4"
 
 # Element84 / ESA SCL asset names. Optional; missing SCL falls back to STAC.
 SCL_STAC_ASSETS = ("scl", "SCL")
@@ -114,7 +114,11 @@ def _load_land_meta(
     land_id: str,
     remote: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Load metadata from the canonical land_parcels row directly."""
+    """Load metadata from the canonical land_parcels row directly.
+
+    下载机使用内部API返回的地块元数据时仍校验请求ID，避免错配产品归属；
+    直连数据库的兼容路径则从规范地块表读取，并排除已删除地块。
+    """
     if remote is not None:
         if str(remote.get("land_id") or "") != str(land_id):
             raise RuntimeError("internal land response does not match requested land_id")
@@ -200,6 +204,9 @@ def publish_optical_lonlat_to_oss_mq(
     result_delivery: str = "mq",
 ) -> str | None:
     """Upload S2 lonlat JSON and deliver it through the selected result channel.
+
+    先用稳定地块/日期键上传像元JSON，再按部署数据通道发布回执，确保失败重试可覆盖同一产品。
+    批处理HTTP路径由API缓存回执后异步入库；传统任务仍可使用MQ，派生去云产品继续以S2传感器身份供旧客户端读取。
 
     The daily satellite batch uses ``result_delivery='http'`` so the API caches
     the OSS callback in Redis before writing ``parcel_scene_products``. Legacy
@@ -464,6 +471,12 @@ def emit_optical_lonlat(
         "source": "stac_direct",
         "stac_item_id": stac_item_id,
         "algorithm_version": AGRI_OPTICAL_ALGORITHM_VERSION,
+        "radiometry": {
+            "method": "scale_offset_to_reflectance",
+            "source": scene.get("band_radiometry_source"),
+            "band_sources": scene.get("band_radiometry_sources", {}),
+            "bands": scene.get("band_radiometry", {}),
+        },
         "analysis_grid": analysis_grid,
         "pixels": pixels,
     }
@@ -704,6 +717,9 @@ def _process_one_optical_scene(
                     target_transform=target_transform,
                     target_crs=target_crs,
                     field_mask=field_mask,
+                    band_radiometry=scene.get("band_radiometry"),
+                    band_radiometry_source=scene.get("band_radiometry_source"),
+                    band_radiometry_sources=scene.get("band_radiometry_sources"),
                 )
             except Exception as exc:
                 # Decloud scratch cache is best-effort; lonlat OSS/MQ still publish.
@@ -727,7 +743,10 @@ def _process_one_optical_scene(
         index_arrays: dict[str, np.ndarray] = {}
         for index_def in index_defs:
             needed = {b: bands[b] for b in index_def.bands if b in bands}
-            arr = index_def.formula(needed)
+            # 原始COG读取的是量化DN；指数中的常数需在反射率单位下参与计算。
+            arr = index_def.formula(
+                needed, band_radiometry=scene.get("band_radiometry")
+            )
             arr[~np.isfinite(arr)] = np.nan
             arr[~field_mask] = np.nan
             pix_key = INDEX_KEY_TO_PIXEL[index_def.key]
@@ -773,6 +792,7 @@ def _process_one_optical_scene(
             date_str=date_str_rgb,
             bands=bands,
             field_mask=field_mask,
+            band_radiometry=scene.get("band_radiometry"),
             scene_bands=scene_bands,
             scene_visual=scene_visual,
             scene_field_mask=scene_field_mask,
@@ -962,7 +982,6 @@ def _process_agri_optical_http_only(
         max_cloud_cover=extra_cloud,
         extra_assets=extra_assets,
         cloud_dedupe="none",
-        max_items=2000,
     )
 
     from app.core.decloud import (
@@ -1234,7 +1253,6 @@ def process_agri_optical_lonlat(
             max_cloud_cover=extra_cloud,
             extra_assets=extra_assets,
             cloud_dedupe="none",
-            max_items=2000,
         )
         # Out of growing season: skip STAC cloud >30% (no pull, no decloud).
         # In season: keep all cloudy scenes for UnCRtainTS.

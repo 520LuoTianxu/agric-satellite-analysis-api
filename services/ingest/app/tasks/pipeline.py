@@ -23,12 +23,12 @@ from pyproj import Geod
 from rasterio.features import geometry_mask
 from rasterio.transform import from_bounds
 from rasterio.warp import Resampling, reproject, transform_bounds, transform_geom
-from pystac_client import Client as STACClient
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm.attributes import flag_modified
 
 import structlog
+from agric_satellite_analysis_common.agri_classify import decloud_scene_id_sql
 
 from app.core.band_parallel import (
     BandReadResult,
@@ -37,6 +37,7 @@ from app.core.band_parallel import (
     run_parallel_band_jobs,
 )
 from app.core.config import scene_max_workers
+from app.core.stac_client import open_stac_client
 from app.tasks.indices import IndexDef
 
 from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
@@ -45,7 +46,7 @@ logger = structlog.get_logger()
 _WGS84_GEOD = Geod(ellps="WGS84")
 _TARGET_GRID_CELL_SIZE_M = 10.0
 _MAX_ANALYSIS_GRID_CELLS = 4_000_000
-INDEX_PIPELINE_VERSION = "2.2.0"
+INDEX_PIPELINE_VERSION = "2.3.0"
 
 # ── Configuration (same as ndvi.py) ──────────────────────────────────
 
@@ -203,13 +204,14 @@ def existing_agri_scene_dates(session, land_id: str, sensor: str) -> set[date]:
 
     rows = session.execute(
         sa_text(
-            """
+            f"""
             SELECT DISTINCT date
             FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id
               AND sensor = :sensor
-              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
-              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+              AND NOT ({decloud_scene_id_sql()})
+              -- 来源元数据兼容旧 JSONB，避免去云产品日期让原始场景被跳过。
+              AND LOWER(COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), ''), '')) <> 'uncrtaints_decloud'
             """
         ),
         {"land_id": str(land_id), "sensor": sensor},
@@ -291,6 +293,103 @@ def _resolve_band_hrefs(item, index_defs: list[IndexDef]) -> dict[str, str] | No
     return {k: v for k, v in band_hrefs.items() if v is not None}
 
 
+def _s2_baseline_radiometry(item: Any) -> dict[str, float] | None:
+    """按Sentinel-2处理基线推导L2A反射率比例与加性偏移。"""
+    properties = getattr(item, "properties", {}) or {}
+    baseline = properties.get("s2:processing_baseline")
+    if baseline is None:
+        return None
+    try:
+        major = int(str(baseline).strip().split(".", 1)[0])
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= major <= 99:
+        return None
+
+    # PB 04.00起DN增加了-1000偏移；转反射率时必须同时还原量化比例。
+    return {"scale": 0.0001, "offset": -0.1 if major >= 4 else 0.0}
+
+
+def _resolve_band_radiometry(
+    item: Any, index_defs: list[IndexDef]
+) -> tuple[
+    dict[str, dict[str, float]] | None,
+    str | None,
+    dict[str, str],
+    str | None,
+]:
+    """解析每个光谱波段的定标值；缺少可靠依据时返回原因并跳过该景。"""
+    fallback = _s2_baseline_radiometry(item)
+    radiometry: dict[str, dict[str, float]] = {}
+    sources: dict[str, str] = {}
+
+    for index_def in index_defs:
+        for band_key in index_def.bands:
+            if band_key in radiometry:
+                continue
+            asset = None
+            for asset_name in index_def.stac_asset_map.get(
+                band_key, (band_key,)
+            ):
+                candidate = item.assets.get(asset_name)
+                if candidate and getattr(candidate, "href", None):
+                    asset = candidate
+                    break
+            if asset is None:
+                return None, None, sources, f"missing_asset_{band_key}"
+
+            extra_fields = getattr(asset, "extra_fields", {}) or {}
+            raster_bands = extra_fields.get("raster:bands") or []
+            raster_band = (
+                raster_bands[0]
+                if isinstance(raster_bands, list) and raster_bands
+                else {}
+            )
+            if not isinstance(raster_band, dict):
+                raster_band = {}
+
+            raw_scale = raster_band.get("scale")
+            raw_offset = raster_band.get("offset")
+            has_extension_value = raw_scale is not None or raw_offset is not None
+            if not has_extension_value and fallback is None:
+                return None, None, sources, f"missing_calibration_{band_key}"
+
+            try:
+                # 对未给出的扩展字段优先沿用处理基线；仍无信息时使用STAC默认值。
+                scale = float(
+                    raw_scale
+                    if raw_scale is not None
+                    else (fallback["scale"] if fallback else 1.0)
+                )
+                offset = float(
+                    raw_offset
+                    if raw_offset is not None
+                    else (fallback["offset"] if fallback else 0.0)
+                )
+            except (TypeError, ValueError):
+                return None, None, sources, f"invalid_calibration_{band_key}"
+            if (
+                not math.isfinite(scale)
+                or scale <= 0
+                or not math.isfinite(offset)
+            ):
+                return None, None, sources, f"invalid_calibration_{band_key}"
+
+            radiometry[band_key] = {"scale": scale, "offset": offset}
+            if raw_scale is not None and raw_offset is not None:
+                sources[band_key] = "stac_raster_bands"
+            elif has_extension_value and fallback is not None:
+                sources[band_key] = "stac_raster_bands+baseline_fallback"
+            elif has_extension_value:
+                sources[band_key] = "stac_raster_bands_defaults"
+            else:
+                sources[band_key] = "s2_processing_baseline"
+
+    unique_sources = set(sources.values())
+    source = next(iter(unique_sources)) if len(unique_sources) == 1 else "mixed"
+    return radiometry, source, sources, None
+
+
 def _resolve_extra_asset_hrefs(
     item: Any,
     extra_assets: dict[str, tuple[str, ...]] | None,
@@ -340,16 +439,17 @@ def search_scenes_for_defs(
     dedupe = (cloud_dedupe or "week").strip().lower()
     if dedupe not in ("week", "day", "none"):
         dedupe = "week"
-    item_cap = int(max_items) if max_items is not None else (2000 if dedupe == "none" else 100)
+    # max_items是所有分页累计返回的总上限；未明确要求截断时必须读取完整时序。
+    item_cap = int(max_items) if max_items is not None else None
     t0 = time.perf_counter()
     selected_catalog_url = catalog_url or STAC_API_URL
     if planetary_computer_signing:
         # PC 的私有化签名链接必须通过官方 signer 即时生成 SAS，过期后不缓存。
         import planetary_computer as pc
 
-        catalog = STACClient.open(selected_catalog_url, modifier=pc.sign_inplace)
+        catalog = open_stac_client(selected_catalog_url, modifier=pc.sign_inplace)
     else:
-        catalog = STACClient.open(selected_catalog_url)
+        catalog = open_stac_client(selected_catalog_url)
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=land_geom_geojson,
@@ -399,6 +499,24 @@ def search_scenes_for_defs(
         item = entry["item"]
         band_hrefs = _resolve_band_hrefs(item, index_defs)
         if band_hrefs:
+            (
+                band_radiometry,
+                band_radiometry_source,
+                band_radiometry_sources,
+                radiometry_error,
+            ) = _resolve_band_radiometry(item, index_defs)
+            if band_radiometry is None:
+                # 指数常数按物理反射率定义，缺少定标元数据时不能静默用DN计算。
+                logger.warning(
+                    "stac_scene_missing_radiometry",
+                    scene_id=item.id,
+                    index=label,
+                    processing_baseline=(item.properties or {}).get(
+                        "s2:processing_baseline"
+                    ),
+                    reason=radiometry_error,
+                )
+                continue
             band_hrefs.update(_resolve_extra_asset_hrefs(item, extra_assets))
             scenes.append(
                 {
@@ -409,6 +527,9 @@ def search_scenes_for_defs(
                     # 聚合下载需要按景覆盖范围筛选地块，避免写入景外的填充值。
                     "geometry": item.geometry,
                     "source_catalog": source_catalog or "element84",
+                    "band_radiometry": band_radiometry,
+                    "band_radiometry_source": band_radiometry_source,
+                    "band_radiometry_sources": band_radiometry_sources,
                 }
             )
         else:
@@ -996,7 +1117,9 @@ def process_scene(
     # -- compute index --
     update_job_progress(session, job, compute_step)
     kwargs = extra_params or {}
-    index_data = index_def.formula(bands, **kwargs)
+    # 指数计算接收物理反射率定标；额外参数只用于原有公式选项，避免被场景元数据覆盖。
+    formula_kwargs = {**kwargs, "band_radiometry": scene["band_radiometry"]}
+    index_data = index_def.formula(bands, **formula_kwargs)
     index_data[~np.isfinite(index_data)] = np.nan
     index_data[~field_mask] = np.nan
     complete_step(session, job, compute_step)
@@ -1048,6 +1171,9 @@ def process_scene(
             provenance_json={
                 "scene_id": scene_id,
                 "bands": band_hrefs,
+                "band_radiometry": scene["band_radiometry"],
+                "band_radiometry_source": scene["band_radiometry_source"],
+                "band_radiometry_sources": scene["band_radiometry_sources"],
                 "processed_at": datetime.now(timezone.utc).isoformat(),
                 "pipeline_version": INDEX_PIPELINE_VERSION,
                 "quality_score_method": PARCEL_VALID_FRACTION_V1,

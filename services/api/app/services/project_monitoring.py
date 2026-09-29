@@ -8,7 +8,12 @@ from typing import Any
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.agri_classify import CLOUD_MAX_PCT, effective_cloud_pct, official_s2_sql
+from app.core.agri_classify import (
+    CLOUD_MAX_PCT,
+    decloud_scene_id_sql,
+    effective_cloud_pct,
+    official_s2_sql,
+)
 from app.models.tables import Alert, LandParcel
 from app.schemas.project_monitoring import (
     ProjectAlert,
@@ -172,13 +177,14 @@ async def get_project_monitoring(
                     SELECT DISTINCT ON (s.date)
                            s.date, s.ndvi_avg, s.evi_avg, s.ndmi_avg,
                            s.cloud_cover, s.parcel_cloud_cover_pct, s.scene_id,
-                           s.parcel_cloud_source, s.product_source
+                           COALESCE(NULLIF(BTRIM(s.parcel_cloud_source), ''), NULLIF(BTRIM(s.pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
+                           COALESCE(NULLIF(BTRIM(s.product_source), ''), NULLIF(BTRIM(s.pixel_data->>'source'), '')) AS product_source
                     FROM agric_satellite.parcel_scene_products s
                     WHERE s.land_id = p.land_id AND s.sensor = 'S2'
                       AND s.date <= :as_of AND s.ndvi_avg BETWEEN -1 AND 1
                       AND {official_s2_sql("s")}
                     ORDER BY s.date DESC,
-                             CASE WHEN s.scene_id LIKE '%_decloud' THEN 1 ELSE 0 END,
+                             CASE WHEN {decloud_scene_id_sql("s")} THEN 1 ELSE 0 END,
                              s.scene_id
                     LIMIT 2
                 ) obs ON true

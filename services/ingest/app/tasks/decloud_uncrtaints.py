@@ -70,10 +70,15 @@ from app.core.uncrtaints import (
     get_inferencer,
     stack_s2_13,
 )
-from app.tasks.agri_lonlat import AGRI_OPTICAL_INDEX_KEYS, INDEX_KEY_TO_PIXEL
+from app.tasks.agri_lonlat import (
+    AGRI_OPTICAL_INDEX_KEYS,
+    INDEX_KEY_TO_PIXEL,
+    agri_optical_index_defs,
+)
 from app.tasks.indices import get_index
 from app.tasks.pipeline import (
     RETRY_DELAYS,
+    _resolve_band_radiometry,
     compute_target_grid,
     get_db_session,
     read_bands_windowed_parallel,
@@ -83,7 +88,24 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 S1_MATCH_DAYS = 6
-DECLOUD_ALGORITHM_VERSION = "uncrtaints-decloud-v5"
+DECLOUD_ALGORITHM_VERSION = "uncrtaints-decloud-v7"
+
+
+def _ndvi_from_raw_window(
+    bands: dict[str, np.ndarray],
+    band_radiometry: dict[str, dict[str, float]] | None,
+) -> np.ndarray | None:
+    """用原始窗口和场景定标缓存物理NDVI，供去云质量回退读取。"""
+    if not band_radiometry or not {"B04", "B08"}.issubset(bands):
+        return None
+    if not {"B04", "B08"}.issubset(band_radiometry):
+        return None
+    ndvi = get_index("ndvi").formula(
+        {"B04": bands["B04"], "B08": bands["B08"]},
+        band_radiometry=band_radiometry,
+    )
+    ndvi[~np.isfinite(ndvi)] = np.nan
+    return ndvi
 
 
 def _database_url_configured() -> bool:
@@ -228,9 +250,25 @@ def cache_optical_s2_window(
     target_transform,
     target_crs: str,
     field_mask: np.ndarray,
+    band_radiometry: dict[str, dict[str, float]] | None = None,
+    band_radiometry_source: str | None = None,
+    band_radiometry_sources: dict[str, str] | None = None,
 ) -> None:
-    """Store a parcel-window S2 stack from the optical download (not a full scene)."""
+    """Store a parcel-window S2 stack from the optical download (not a full scene).
+
+    原始光学下载已完成时直接复用对齐后的13波段窗口和定标元数据，避免后续去云重复拉取同一景；
+    缓存键同时绑定地块掩膜与目标网格，避免边界变化后把旧网格数组当成新数据使用。
+    """
     hrefs = {k: v for k, v in (band_hrefs or {}).items() if k != "SCL" and v}
+    radiometry_meta = {
+        key: value
+        for key, value in {
+            "band_radiometry": band_radiometry,
+            "band_radiometry_source": band_radiometry_source,
+            "band_radiometry_sources": band_radiometry_sources,
+        }.items()
+        if value is not None
+    }
     put_window_meta(
         land_id=str(land_id),
         date_str=date_str,
@@ -238,6 +276,7 @@ def cache_optical_s2_window(
         cloud_cover=cloud_cover,
         stac_id=stac_id,
         band_hrefs=hrefs,
+        extra=radiometry_meta,
     )
     if not bands:
         return
@@ -245,6 +284,8 @@ def cache_optical_s2_window(
     from app.core.decloud_cache import window_grid_key
 
     stack = stack_s2_13(bands)
+    # 质量回退需要按反射率计算历史NDVI，缓存时从未裁剪的原始数组预先生成。
+    ndvi = _ndvi_from_raw_window(bands, band_radiometry)
     grid_key = window_grid_key(
         target_crs, target_shape, target_transform, field_mask
     )
@@ -256,6 +297,7 @@ def cache_optical_s2_window(
             grid_key=grid_key,
             stack=stack,
             field_mask=field_mask,
+            ndvi=ndvi,
         )
     except OSError as exc:
         logger.warning(
@@ -276,7 +318,11 @@ def schedule_decloud_after_raw(
     season_months: tuple[int, ...] | list[int] | None = None,
     crop_type: str | None = None,
 ) -> dict[str, Any]:
-    """Apply ``plan_decloud_after_raw`` and enqueue the chosen path."""
+    """Apply ``plan_decloud_after_raw`` and enqueue the chosen path.
+
+    根据同地块原始结果和邻景缓存覆盖率，在逐景补云与批量缓冲之间选择；
+    邻景不够时暂缓正式去云，避免把样本不足的重建误标成可用于旱情分析的官方产品。
+    """
     if not decloud_enabled():
         return {"enabled": False, "batch": False, "per_scene": []}
     from app.core.decloud import decloud_season_months
@@ -354,18 +400,18 @@ def _search_s2_l2a_windows(
     """STAC search for full L2A band HREFs (parcel windows only)."""
     import os
 
-    from pystac_client import Client as STACClient
-
     from app.tasks.pipeline import STAC_API_URL, STAC_COLLECTION
+    from app.core.stac_client import open_stac_client
 
-    catalog = STACClient.open(os.environ.get("STAC_API_URL", STAC_API_URL))
+    catalog = open_stac_client(os.environ.get("STAC_API_URL", STAC_API_URL))
     search = catalog.search(
         collections=[STAC_COLLECTION],
         intersects=land_geom_geojson,
         datetime=f"{date_from.isoformat()}/{date_to.isoformat()}",
         # lte so DECLOUD_STAC_CLOUD_MAX_PCT=100 includes 100.0% scenes
         query={"eo:cloud_cover": {"lte": max_cloud}},
-        max_items=80,
+        # 邻景查询也要完整分页，避免长时序只保留接口先返回的80景。
+        max_items=None,
     )
     items = list(search.items())
     by_date: dict[date, dict[str, Any]] = {}
@@ -388,6 +434,23 @@ def _search_s2_l2a_windows(
             hrefs[band] = href
         if not ok:
             continue
+        (
+            band_radiometry,
+            band_radiometry_source,
+            band_radiometry_sources,
+            radiometry_error,
+        ) = _resolve_band_radiometry(item, agri_optical_index_defs())
+        if band_radiometry is None:
+            # 模型缓冲景也要保留可核验的反射率定标，避免质量回退混用DN口径。
+            logger.warning(
+                "decloud_s2_missing_radiometry",
+                scene_id=item.id,
+                processing_baseline=(item.properties or {}).get(
+                    "s2:processing_baseline"
+                ),
+                reason=radiometry_error,
+            )
+            continue
         cloud = float(item.properties.get("eo:cloud_cover", 100) or 100)
         prev = by_date.get(item_date)
         if prev is None or cloud < prev["cloud_cover"]:
@@ -396,6 +459,9 @@ def _search_s2_l2a_windows(
                 "date": item_date,
                 "cloud_cover": cloud,
                 "band_hrefs": hrefs,
+                "band_radiometry": band_radiometry,
+                "band_radiometry_source": band_radiometry_source,
+                "band_radiometry_sources": band_radiometry_sources,
             }
     return [by_date[d] for d in sorted(by_date)]
 
@@ -469,7 +535,7 @@ def _index_arrays_from_reflectance(
     rec_01: np.ndarray,
     land_mask: np.ndarray | None,
 ) -> dict[str, np.ndarray]:
-    """Recompute agri optical indices from reconstructed 13-band S2 (DN).
+    """从已还原到0–1反射率单位的13波段S2数据重算农业指数。
 
     ``land_mask`` is optional. Publishing samples the polygon itself; masking
     first can wipe every cell on a small parcel and yield ``no_pixels``.
@@ -550,6 +616,9 @@ def _neighbor_ndvi_http(land_id: str, target: date) -> float | None:
     for row in bundle.get("s2_rows") or []:
         if str(row.get("date") or "")[:10] == target.isoformat():
             continue
+        # 旧产品的NDVI未必含基线加性偏移；质量比较只接收明确记载定标口径的结果。
+        if row.get("radiometry_method") != "scale_offset_to_reflectance":
+            continue
         if not row.get("official"):
             continue
         try:
@@ -580,6 +649,7 @@ def _neighbor_ndvi(session, land_id: str, target: date) -> float | None:
               AND s.date BETWEEN CAST(:d0 AS date) AND CAST(:d1 AS date)
               AND s.date <> CAST(:target AS date)
               AND s.ndvi_avg IS NOT NULL
+              AND s.pixel_data->'radiometry'->>'method' = 'scale_offset_to_reflectance'
               AND {official_s2_sql("s")}
             """
         ),
@@ -811,6 +881,15 @@ def _cache_s2_scene(
         cloud_cover=scene.get("cloud_cover"),
         stac_id=scene.get("id") or scene.get("stac_id"),
         band_hrefs=hrefs or None,
+        extra={
+            key: scene[key]
+            for key in (
+                "band_radiometry",
+                "band_radiometry_source",
+                "band_radiometry_sources",
+            )
+            if scene.get(key) is not None
+        },
     )
     from app.core.decloud_cache import window_grid_key
 
@@ -837,6 +916,7 @@ def _cache_s2_scene(
         },
     )
     stack = stack_s2_13(bands)
+    ndvi = _ndvi_from_raw_window(bands, scene.get("band_radiometry"))
     write_window_array(
         str(land_id),
         iso,
@@ -844,6 +924,7 @@ def _cache_s2_scene(
         grid_key=grid_key,
         stack=stack,
         field_mask=field_mask,
+        ndvi=ndvi,
     )
     return stack
 
@@ -898,6 +979,13 @@ def _buffer_s2_windows(
                     "date": cached["date"],
                     "cloud_cover": cached.get("cloud_cover"),
                     "band_hrefs": cached.get("band_hrefs") or {},
+                    "band_radiometry": cached.get("band_radiometry"),
+                    "band_radiometry_source": cached.get(
+                        "band_radiometry_source"
+                    ),
+                    "band_radiometry_sources": cached.get(
+                        "band_radiometry_sources"
+                    ),
                     "stack": arr["stack"],
                 }
             )
@@ -985,15 +1073,14 @@ def _neighbor_ndvi_from_cache(
         land_mask = None if arr is None else arr.get("field_mask")
         if land_mask is None or tuple(land_mask.shape) != tuple(stack.shape[-2:]):
             continue
-        # B08=7, B04=3 in the 13-band DN stack (0-10000).
-        nir = stack[7].astype("float64")
-        red = stack[3].astype("float64")
-        denom = nir + red
-        ok = (denom != 0) & np.asarray(land_mask, dtype=bool)
-        if not ok.any():
+        ndvi = None if arr is None else arr.get("ndvi")
+        if ndvi is None:
+            # 旧缓存的DN栈可能已被模型输入裁剪，缺少原始定标NDVI时宁可不作质量比较。
             continue
-        ndvi = (nir[ok] - red[ok]) / denom[ok]
-        finite = ndvi[np.isfinite(ndvi)]
+        if tuple(ndvi.shape) != tuple(land_mask.shape):
+            continue
+        valid = np.asarray(land_mask, dtype=bool) & np.isfinite(ndvi)
+        finite = ndvi[valid]
         if finite.size:
             vals.append(float(np.mean(finite)))
     if not vals:
@@ -1017,7 +1104,11 @@ def _decloud_one_from_buffer(
     parcel_cloud: float | None,
     mq_task_id: str | None,
 ) -> dict[str, Any]:
-    """Run UnCRtainTS on one cloudy date using already-buffered windows."""
+    """Run UnCRtainTS on one cloudy date using already-buffered windows.
+
+    只消费调用方已按同一地块网格缓冲的S2/S1窗口，不在每个目标日期重复检索和重投影；
+    先检查可用邻景数量，再构造固定长度时序输入，质量门决定结果能否进入官方序列。
+    """
     land_id = str(land_meta["land_id"])
     from app.core.decloud_cache import window_grid_key
 
@@ -1090,7 +1181,8 @@ def _decloud_one_from_buffer(
         return {"status": "skipped", "reason": "unavailable", "detail": str(exc)}
 
     # Sample/publish without pre-masking so weak reconstructions still store.
-    index_arrays = _index_arrays_from_reflectance(rec_01 * 10000.0, None)
+    # 重建结果已是物理反射率，直接传入可避免把EVI/SAVI常数放大一万倍。
+    index_arrays = _index_arrays_from_reflectance(rec_01, None)
     rgb_mean, rgb_raw, rgb_std, rgb_std_raw = _rgb_stats(
         rec_01, s2_stack[-1], land_mask
     )
@@ -1314,6 +1406,9 @@ def decloud_parcel_batch(
     season_months: list[int] | None = None,
 ) -> dict[str, Any]:
     """Buffer S2 (+ S1) parcel windows for the job, then decloud cloudy dates.
+
+    先为整个任务窗口一次性准备并缓存邻景，再逐目标日重建，以复用STAC读取和空间对齐成本；
+    邻景未就绪时保留跳过/非官方状态，不能仅因模型有输出就提升成官方观测。
 
     Official cloudy-date OSS/MQ is published only after neighbors are in the
     local cache. Fair/bad products are stored and flagged non-official.

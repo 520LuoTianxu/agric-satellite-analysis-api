@@ -80,6 +80,7 @@ _admin = require_roles("owner", "admin")
 
 _BACKFILL_STALE_HOURS = 6
 _BACKFILL_WAVE_FALLBACK_HOURS = 48
+_ENSURE_LOOKUP_BATCH_SIZE = 1000
 _MAX_GEOJSON_IMPORT_BYTES = 20 * 1024 * 1024
 _MAX_GEOJSON_IMPORT_FEATURES = 5000
 _MAX_GEOJSON_IMPORT_ERRORS = 100
@@ -1063,32 +1064,54 @@ async def ensure_soil_weather(
     if farm_id is not None:
         query = query.where(LandParcel.farm_id == farm_id)
     lands = (await db.execute(query)).scalars().all()
+
+    land_ids = [land.land_id for land in lands]
+    soil_land_ids: set[str] = set()
+    weather_land_ids: set[str] = set()
+    soil_exists = (
+        select(SoilFieldSummary.id)
+        .where(SoilFieldSummary.land_id == LandParcel.land_id)
+        .exists()
+        .label("has_soil")
+    )
+    weather_exists = (
+        select(WeatherDaily.id)
+        .where(WeatherDaily.land_id == LandParcel.land_id)
+        .exists()
+        .label("has_weather")
+    )
+    # 用索引支持的 EXISTS 按批检查，找到首条即停止，避免逐块发SQL或扫描天气多年明细去重。
+    for offset in range(0, len(land_ids), _ENSURE_LOOKUP_BATCH_SIZE):
+        land_id_batch = land_ids[offset : offset + _ENSURE_LOOKUP_BATCH_SIZE]
+        existence_rows = (
+            await db.execute(
+                select(LandParcel.land_id, soil_exists, weather_exists).where(
+                    LandParcel.land_id.in_(land_id_batch)
+                )
+            )
+        ).all()
+        for land_id, has_soil, has_weather in existence_rows:
+            if has_soil:
+                soil_land_ids.add(land_id)
+            if has_weather:
+                weather_land_ids.add(land_id)
+
     items: list[dict[str, Any]] = []
     for land in lands:
-        soil_exists = (
-            await db.execute(
-                select(SoilFieldSummary.id)
-                .where(SoilFieldSummary.land_id == land.land_id)
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        weather_exists = (
-            await db.execute(
-                select(WeatherDaily.id)
-                .where(WeatherDaily.land_id == land.land_id)
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if soil_exists is None:
+        has_soil = land.land_id in soil_land_ids
+        has_weather = land.land_id in weather_land_ids
+        if not has_soil:
             send_task("app.tasks.soil.fetch_soil_for_land", args=[land.land_id])
-        if weather_exists is None:
-            send_task("app.tasks.weather.backfill_weather_for_land", args=[land.land_id])
+        if not has_weather:
+            send_task(
+                "app.tasks.weather.backfill_weather_for_land", args=[land.land_id]
+            )
         items.append(
             {
                 "land_id": land.land_id,
                 "land_name": land.land_name,
-                "soil_enqueued": soil_exists is None,
-                "weather_enqueued": weather_exists is None,
+                "soil_enqueued": not has_soil,
+                "weather_enqueued": not has_weather,
             }
         )
     return {"status": "dispatched", "scanned": len(lands), "items": items}

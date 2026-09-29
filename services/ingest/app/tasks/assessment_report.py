@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import func, select
+from agric_satellite_analysis_common.agri_classify import decloud_scene_id_sql
 from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.tasks.storage_tasks import upload_file_via_storage
@@ -409,7 +410,7 @@ def _agri_rs_coverage_ok(
     row = (
         session.execute(
             sa_text(
-                """
+                f"""
             SELECT
               COUNT(DISTINCT date) FILTER (WHERE sensor = 'S2') AS s2_dates,
               COUNT(DISTINCT date) FILTER (WHERE sensor = 'S1') AS s1_dates
@@ -417,8 +418,9 @@ def _agri_rs_coverage_ok(
             WHERE land_id = :land_id
               AND date >= :d0
               AND date <= :d1
-              AND COALESCE(scene_id, '') NOT LIKE '%_decloud'
-              AND COALESCE(pixel_data->>'source', '') <> 'uncrtaints_decloud'
+              AND NOT ({decloud_scene_id_sql()})
+              -- 来源元数据兼容旧 JSONB，避免去云产品日期计入原始遥感覆盖率。
+              AND LOWER(COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), ''), '')) <> 'uncrtaints_decloud'
             """
             ),
             {"land_id": str(land_id), "d0": start, "d1": end},
