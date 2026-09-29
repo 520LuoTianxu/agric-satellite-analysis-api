@@ -358,7 +358,5 @@ async def decloud_schedule_pending_count(
         """)
     )
     counts = {"pending": 0, "processing": 0, "completed": 0}
-    counts.update(
-        {row["status"]: int(row["count"]) for row in result.mappings().all()}
-    )
+    counts.update({row["status"]: int(row["count"]) for row in result.mappings().all()})
     return counts
