@@ -1479,12 +1479,16 @@ def process_satellite_batch(
             progress = _compensation_progress(
                 progress, compensation_attempt, active=False
             )
+        # 每景增量已由 patch_progress 持久化，终态只提交汇总字段，避免再次上传累计回执。
+        final_progress = {
+            key: value for key, value in progress.items() if key != "published_products"
+        }
         patch_job(
             job_id,
             {
                 "status": status,
                 "touch_finished": True,
-                "progress_json": progress,
+                "progress_json": final_progress,
                 "error": f"{progress['failed']}个地块景处理失败"
                 if progress["failed"]
                 else "",

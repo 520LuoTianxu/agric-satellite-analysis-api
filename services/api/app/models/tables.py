@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -295,6 +296,33 @@ class Job(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class SatelliteJobProductReceipt(Base):
+    """记录遥感任务已发布的地块场景，避免把增长中的回执历史塞进任务 JSON。"""
+
+    __tablename__ = "satellite_job_product_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "sensor IN ('S1', 'S2')", name="satellite_job_product_receipts_sensor_ck"
+        ),
+    )
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    land_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    product_date: Mapped[_date] = mapped_column(Date, primary_key=True)
+    sensor: Mapped[str] = mapped_column(String(2), primary_key=True)
+    # 空场景号仅用于兼容旧 worker；新 worker 始终上报 STAC scene_id。
+    scene_id: Mapped[str] = mapped_column(
+        Text, primary_key=True, server_default=text("''")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 

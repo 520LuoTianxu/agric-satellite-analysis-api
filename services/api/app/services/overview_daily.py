@@ -19,7 +19,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
 )
 from agric_satellite_analysis_common.task_priority import BACKGROUND_TASK_PRIORITY
 from app.core.config import settings
-from app.models.tables import Job, LandParcel
+from app.models.tables import Job, LandParcel, SatelliteJobProductReceipt
 from app.mq_publish import publish_api_task
 from app.schemas.agri import OverviewStatsOut
 from app.services.satellite_batch import satellite_land_geometry
@@ -67,6 +67,14 @@ def _affected_ratio(count: int, total: int) -> float:
     if total <= 0 or count <= 0:
         return 0.0
     return round(min(count / total, 1.0), 6)
+
+
+def _published_product_count(progress: dict[str, Any]) -> int:
+    """将旧任务进度计数安全转换为非负数，避免坏数据中断全国快照汇总。"""
+    try:
+        return max(0, int(progress.get("products_published") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def aggregate_snapshots(
@@ -413,8 +421,42 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         str(job.id) for job in jobs if job.status in FAILED_SATELLITE_JOB_STATUSES
     ]
     failed_land_ids: set[str] = set()
-    expected = set()
+    expected: set[tuple[str, str, str, str]] = set()
     unreported = 0
+    normalized_receipt_job_ids = []
+    for job in jobs:
+        progress = job.progress_json or {}
+        products = progress.get("published_products")
+        if (
+            progress.get("product_receipts_normalized")
+            or (
+                not isinstance(products, list)
+                and _published_product_count(progress) > 0
+            )
+        ):
+            normalized_receipt_job_ids.append(job.id)
+
+    # 新 worker 的场景回执按任务批量读取；旧任务仍从 JSONB 读取，兼容部署前运行中的任务。
+    receipts_by_job: dict[uuid.UUID, set[tuple[str, str, str, str]]] = defaultdict(set)
+    if normalized_receipt_job_ids:
+        receipt_rows = (
+            await db.execute(
+                select(
+                    SatelliteJobProductReceipt.job_id,
+                    SatelliteJobProductReceipt.land_id,
+                    SatelliteJobProductReceipt.product_date,
+                    SatelliteJobProductReceipt.sensor,
+                    SatelliteJobProductReceipt.scene_id,
+                ).where(
+                    SatelliteJobProductReceipt.job_id.in_(normalized_receipt_job_ids)
+                )
+            )
+        ).all()
+        for job_id, land_id, product_date, sensor, scene_id in receipt_rows:
+            receipts_by_job[job_id].add(
+                (str(land_id), str(product_date)[:10], str(sensor), str(scene_id or ""))
+            )
+
     for job in jobs:
         progress = job.progress_json or {}
         if job.status in FAILED_SATELLITE_JOB_STATUSES:
@@ -428,30 +470,60 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
                 failed_land_ids.update(
                     str(value) for value in (job.params_json or {}).get("land_ids", [])
                 )
-        products = progress.get("published_products", [])
-        unreported += max(0, progress.get("products_published", 0) - len(products))
-        expected.update(
-            (value["land_id"], value["date"], job.params_json["sensor"])
-            for value in products
-        )
-    # 全国结果一次核对，避免逐任务查库；S1/S2分开匹配，旧worker缺少明细时不能误报入库完成。
+        published_count = _published_product_count(progress)
+        sensor = str((job.params_json or {}).get("sensor") or "").upper()
+        if sensor not in {"S1", "S2"}:
+            # 未知传感器不能被误认为已入库；将其作为缺失结果等待或标记部分完成。
+            unreported += published_count
+            continue
+
+        products = progress.get("published_products")
+        if isinstance(products, list):
+            reported = set()
+            for value in products:
+                if not isinstance(value, dict):
+                    continue
+                land_id = str(value.get("land_id") or "").strip()
+                product_date = str(value.get("date") or "").strip()[:10]
+                if land_id and product_date:
+                    reported.add(
+                        (
+                            land_id,
+                            product_date,
+                            sensor,
+                            str(value.get("scene_id") or "").strip(),
+                        )
+                    )
+        else:
+            reported = receipts_by_job.get(job.id, set())
+
+        unreported += max(0, published_count - len(reported))
+        expected.update(reported)
+
+    # 同地块同日可能有多景；优先按 scene_id 核验，旧回执缺少 scene_id 时保留日期级兼容。
     missing = unreported
     if expected:
         missing += (
             await db.execute(
                 text("""
             SELECT count(*) FROM jsonb_to_recordset(CAST(:expected AS jsonb))
-              AS x(land_id text, date date, sensor text)
+              AS x(land_id text, date date, sensor text, scene_id text)
             WHERE NOT EXISTS (
                 SELECT 1 FROM agric_satellite.parcel_scene_products p
                 WHERE p.land_id = x.land_id AND p.date = x.date AND p.sensor = x.sensor
+                  AND (x.scene_id = '' OR p.scene_id = x.scene_id)
             )
         """),
                 {
                     "expected": json.dumps(
                         [
-                            {"land_id": land, "date": day, "sensor": sensor}
-                            for land, day, sensor in sorted(expected)
+                            {
+                                "land_id": land,
+                                "date": product_date,
+                                "sensor": sensor,
+                                "scene_id": scene_id,
+                            }
+                            for land, product_date, sensor, scene_id in sorted(expected)
                         ]
                     )
                 },

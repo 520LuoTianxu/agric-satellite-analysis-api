@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -16,6 +17,14 @@ from app.middleware.internal_auth import InternalAuth
 from app.models.tables import Job
 
 router = APIRouter(prefix="/internal/jobs", tags=["internal-jobs"])
+
+_INSERT_PRODUCT_RECEIPTS = text("""
+    INSERT INTO agric_satellite.satellite_job_product_receipts
+        (job_id, land_id, product_date, sensor, scene_id)
+    VALUES
+        (:job_id, :land_id, :product_date, :sensor, :scene_id)
+    ON CONFLICT DO NOTHING
+""")
 
 
 class InternalJobOut(BaseModel):
@@ -72,10 +81,9 @@ def _patch_out(job: Job, *, include_progress: bool) -> InternalJobOut:
 def _merge_progress_json(
     current: dict[str, Any] | None, patch: dict[str, Any]
 ) -> dict[str, Any]:
-    """合并任务进度，并按稳定场景键幂等追加已发布产品增量。"""
+    """合并轻量任务进度；产品回执由关系表单独保存，不进入 JSONB。"""
     merged = dict(current) if isinstance(current, dict) else {}
     incoming = dict(patch)
-    published_delta = incoming.pop("published_products_delta", None)
     merged.update(incoming)
 
     old_steps = current.get("steps") if isinstance(current, dict) else None
@@ -92,47 +100,57 @@ def _merge_progress_json(
                 steps[key] = value
         merged["steps"] = steps
 
-    if published_delta is not None:
-        if not isinstance(published_delta, list):
-            raise HTTPException(
-                status_code=422, detail="published_products_delta must be a list"
-            )
-        products = merged.get("published_products")
-        if not isinstance(products, list):
-            products = []
-
-        def product_key(product: dict[str, Any]) -> tuple[str, str, str] | None:
-            land_id = str(product.get("land_id") or "").strip()
-            product_date = str(product.get("date") or "").strip()[:10]
-            if not land_id or not product_date:
-                return None
-            return land_id, product_date, str(product.get("scene_id") or "").strip()
-
-        # PATCH 重试可能重复提交同一景增量，重复回执会干扰总览的入库核对。
-        known: set[tuple[str, str, str]] = set()
-        for product in products:
-            if isinstance(product, dict):
-                key = product_key(product)
-                if key is not None:
-                    known.add(key)
-        for product in published_delta:
-            if not isinstance(product, dict):
-                raise HTTPException(
-                    status_code=422,
-                    detail="published_products_delta entries must be objects",
-                )
-            key = product_key(product)
-            if key is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="published products require land_id and date",
-                )
-            if key not in known:
-                products.append(dict(product))
-                known.add(key)
-        merged["published_products"] = products
-
     return merged
+
+
+def _product_receipt_rows(
+    job_id: uuid.UUID,
+    products: Any,
+    default_sensor: str | None,
+) -> list[dict[str, Any]]:
+    """校验 worker 回执并转换为可幂等写入的地块、日期和场景键。"""
+    if products is None:
+        return []
+    if not isinstance(products, list):
+        raise HTTPException(status_code=422, detail="published products must be a list")
+
+    rows = []
+    for product in products:
+        if not isinstance(product, dict):
+            raise HTTPException(
+                status_code=422,
+                detail="published product entries must be objects",
+            )
+        land_id = str(product.get("land_id") or "").strip()
+        raw_date = str(product.get("date") or "").strip()
+        if not land_id or not raw_date:
+            raise HTTPException(
+                status_code=422,
+                detail="published products require land_id and date",
+            )
+        try:
+            product_date = date.fromisoformat(raw_date[:10])
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="published product date must be ISO format"
+            ) from exc
+
+        sensor = str(product.get("sensor") or default_sensor or "").strip().upper()
+        if sensor not in {"S1", "S2"}:
+            raise HTTPException(
+                status_code=422,
+                detail="published products require a valid S1 or S2 sensor",
+            )
+        rows.append(
+            {
+                "job_id": job_id,
+                "land_id": land_id,
+                "product_date": product_date,
+                "sensor": sensor,
+                "scene_id": str(product.get("scene_id") or "").strip(),
+            }
+        )
+    return rows
 
 
 @router.get("/{job_id}", response_model=InternalJobOut)
@@ -190,12 +208,50 @@ async def patch_job(
                 job.finished_at = now
 
     if body.progress_json is not None:
+        # 兼容旧 worker 的累计列表，并接受新 worker 每景发送的增量；
+        # 数据库复合主键负责重试去重，避免在应用内扫描整段历史列表。
+        current_progress = (
+            job.progress_json if isinstance(job.progress_json, dict) else {}
+        )
+        incoming_progress = dict(body.progress_json)
+        published_delta = incoming_progress.pop("published_products_delta", None)
+        published_full = incoming_progress.pop("published_products", None)
+        product_rows = _product_receipt_rows(
+            job.id,
+            current_progress.get("published_products"),
+            (job.params_json or {}).get("sensor"),
+        )
+        product_rows.extend(
+            _product_receipt_rows(
+                job.id, published_full, (job.params_json or {}).get("sensor")
+            )
+        )
+        product_rows.extend(
+            _product_receipt_rows(
+                job.id, published_delta, (job.params_json or {}).get("sensor")
+            )
+        )
+        if product_rows:
+            await db.execute(_INSERT_PRODUCT_RECEIPTS, product_rows)
+
         if body.merge_progress:
             job.progress_json = _merge_progress_json(
-                job.progress_json, body.progress_json
+                job.progress_json, incoming_progress
             )
         else:
-            job.progress_json = body.progress_json
+            job.progress_json = incoming_progress
+        if isinstance(job.progress_json, dict):
+            # 不再让历史 worker 的累计产品数组留在高频更新的任务 JSONB 中。
+            job.progress_json.pop("published_products", None)
+            job.progress_json.pop("published_products_delta", None)
+            if (
+                current_progress.get("product_receipts_normalized")
+                or "published_products" in current_progress
+                or published_full is not None
+                or published_delta is not None
+            ):
+                # 标记后，即使重试把本轮计数归零，总览仍会核验此前已提交的场景回执。
+                job.progress_json["product_receipts_normalized"] = True
         flag_modified(job, "progress_json")
 
     if body.error is not None:
