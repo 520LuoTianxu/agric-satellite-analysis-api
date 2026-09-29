@@ -472,13 +472,12 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
                 )
         published_count = _published_product_count(progress)
         sensor = str((job.params_json or {}).get("sensor") or "").upper()
-        if sensor not in {"S1", "S2"}:
-            # 未知传感器不能被误认为已入库；将其作为缺失结果等待或标记部分完成。
-            unreported += published_count
-            continue
-
         products = progress.get("published_products")
         if isinstance(products, list):
+            if sensor not in {"S1", "S2"}:
+                # 旧JSON回执依赖任务传感器；传感器缺失时按未核实结果处理，避免误报完成。
+                unreported += published_count
+                continue
             reported = set()
             for value in products:
                 if not isinstance(value, dict):
@@ -497,7 +496,11 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
         else:
             reported = receipts_by_job.get(job.id, set())
 
-        unreported += max(0, published_count - len(reported))
+        if sensor not in {"S1", "S2"} and not reported:
+            # 新表回执自带传感器；只有没有可核验回执时才把未知任务计数整体视为缺失。
+            unreported += published_count
+        else:
+            unreported += max(0, published_count - len(reported))
         expected.update(reported)
 
     # 同地块同日可能有多景；优先按 scene_id 核验，旧回执缺少 scene_id 时保留日期级兼容。
