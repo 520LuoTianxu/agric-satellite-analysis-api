@@ -830,6 +830,7 @@ def _process_one_batch_scene(
     progress: dict,
     failed_land_ids: set[str],
     failed_scene_ids: set[str],
+    completed_scene_keys: set[str],
     abandon_event: threading.Event,
     active_reservations: dict,
 ) -> None:
@@ -884,6 +885,8 @@ def _process_one_batch_scene(
             progress["failed_scene_ids"] = sorted(failed_scene_ids)
             progress["scenes_done"] += 1
             patch_job(job_id, {"progress_json": dict(progress)})
+            # 父线程可能在回执返回前判定超时；用内存完成标记避免把已处理景误作失败。
+            completed_scene_keys.add(reservation_key())
         return
 
     scene_products: list[tuple[dict, list, dict, np.ndarray | None]] = []
@@ -1057,6 +1060,7 @@ def _process_one_batch_scene(
         progress["failed_scene_ids"] = sorted(failed_scene_ids)
         progress["scenes_done"] += 1
         patch_job(job_id, {"progress_json": dict(progress)})
+        completed_scene_keys.add(reservation_key())
         clear_active_reservation()
 
 
@@ -1219,6 +1223,7 @@ def process_satellite_batch(
         progress["straggler_timeout_sec"] = straggler_timeout
         abandon_event = threading.Event()
         active_reservations: dict = {}
+        completed_scene_keys: set[str] = set()
         logger.info(
             "scene_parallel_start",
             job_id=job_id,
@@ -1251,6 +1256,7 @@ def process_satellite_batch(
                         progress=progress,
                         failed_land_ids=failed_land_ids,
                         failed_scene_ids=failed_scene_ids,
+                        completed_scene_keys=completed_scene_keys,
                         abandon_event=abandon_event,
                         active_reservations=active_reservations,
                     ): scene
@@ -1330,6 +1336,10 @@ def process_satellite_batch(
                                 scene = futures[fut]
                                 sid = str(scene.get("id") or "")
                                 key = sid or str(id(scene))
+                                if key in completed_scene_keys:
+                                    # worker已完成发布与进度回执，只是Future状态尚未传播到等待线程。
+                                    pending.discard(fut)
+                                    continue
                                 info = active_reservations.pop(key, None)
                                 if info is None and sid:
                                     info = active_reservations.pop(str(id(scene)), None)
@@ -1348,6 +1358,18 @@ def process_satellite_batch(
                                     _release_scene_date_reservation(
                                         unpublished, info[0]
                                     )
+                                else:
+                                    # Future尚未占位时也按场景覆盖范围补齐失败地块，不能退化为空明细。
+                                    unpublished = _scene_lands(
+                                        scene, selected_lands, sensor
+                                    )
+                                    failed_land_ids.update(
+                                        str(land["meta"]["land_id"])
+                                        for land in unpublished
+                                    )
+                                    _release_scene_date_reservation(
+                                        unpublished, scene["date"]
+                                    )
                                 if sid:
                                     failed_scene_ids.add(sid)
                                     abandoned_ids.append(sid)
@@ -1356,8 +1378,13 @@ def process_satellite_batch(
                                 progress["failed"] += 1
                                 progress["scenes_done"] += 1
                                 fut.cancel()
+                            if not abandoned_ids:
+                                # 所有超时候选都已在锁内确认完成，无需把正常结果报成straggler。
+                                last_completion = time.monotonic()
+                                continue
                             progress["failed_land_ids"] = sorted(failed_land_ids)
                             progress["failed_scene_ids"] = sorted(failed_scene_ids)
+                            progress["failed_land_ids_complete"] = True
                             progress["straggler_abandoned_scene_ids"] = sorted(
                                 set(
                                     progress.get("straggler_abandoned_scene_ids")
@@ -1370,7 +1397,7 @@ def process_satellite_batch(
                             job_id=job_id,
                             index=f"satellite_batch_{sensor}",
                             timeout_sec=straggler_timeout,
-                            abandoned=len(not_done),
+                            abandoned=len(abandoned_ids),
                             abandoned_scene_ids=abandoned_ids,
                             scenes_done=progress["scenes_done"],
                             scenes_total=progress["scenes_total"],
@@ -1381,6 +1408,8 @@ def process_satellite_batch(
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
 
+        # 只有全部场景完成或超时分支逐一收集了未完成地块后，空列表才代表“确无失败地块”。
+        progress["failed_land_ids_complete"] = True
         logger.info(
             "scene_parallel_done",
             job_id=job_id,

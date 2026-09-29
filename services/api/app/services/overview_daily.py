@@ -421,8 +421,10 @@ async def finalize_daily(db: AsyncSession, run_id: uuid.UUID) -> dict[str, Any]:
             failed_land_ids.update(
                 str(value) for value in progress.get("failed_land_ids", [])
             )
-            if not progress.get("failed_land_ids"):
-                # 旧worker没有失败明细时，退化为该批次全部地块作为补偿候选。
+            if not progress.get("failed_land_ids") and not progress.get(
+                "failed_land_ids_complete"
+            ):
+                # 旧worker未声明明细完整性时，才退化为该批次全部地块作为补偿候选。
                 failed_land_ids.update(
                     str(value) for value in (job.params_json or {}).get("land_ids", [])
                 )
