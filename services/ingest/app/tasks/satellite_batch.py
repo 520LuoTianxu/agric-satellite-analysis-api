@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import uuid
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 
@@ -828,6 +829,7 @@ def _process_one_batch_scene(
     scene_workers: int,
     state_lock: threading.Lock,
     progress: dict,
+    patch_progress: Callable[[], None],
     failed_land_ids: set[str],
     failed_scene_ids: set[str],
     completed_scene_keys: set[str],
@@ -884,7 +886,7 @@ def _process_one_batch_scene(
             progress["failed_land_ids"] = sorted(failed_land_ids)
             progress["failed_scene_ids"] = sorted(failed_scene_ids)
             progress["scenes_done"] += 1
-            patch_job(job_id, {"progress_json": dict(progress)})
+            patch_progress()
             # 父线程可能在回执返回前判定超时；用内存完成标记避免把已处理景误作失败。
             completed_scene_keys.add(reservation_key())
         return
@@ -1001,6 +1003,7 @@ def _process_one_batch_scene(
                             {
                                 "land_id": land["meta"]["land_id"],
                                 "date": product_scene["date"].isoformat(),
+                                "scene_id": str(product_scene.get("id") or ""),
                             }
                         )
                         published_land_ids.add(land_id)
@@ -1059,7 +1062,7 @@ def _process_one_batch_scene(
         progress["failed_land_ids"] = sorted(failed_land_ids)
         progress["failed_scene_ids"] = sorted(failed_scene_ids)
         progress["scenes_done"] += 1
-        patch_job(job_id, {"progress_json": dict(progress)})
+        patch_progress()
         completed_scene_keys.add(reservation_key())
         clear_active_reservation()
 
@@ -1217,6 +1220,27 @@ def process_satellite_batch(
                 progress, compensation_attempt, active=True
             )
 
+        published_products_persisted = 0
+
+        def patch_progress() -> None:
+            """在持有状态锁时仅提交新增产品，避免每景重传整个回执历史。"""
+            nonlocal published_products_persisted
+            products = progress.get("published_products") or []
+            delta = products[published_products_persisted:]
+            patch = {
+                key: value
+                for key, value in progress.items()
+                if key != "published_products"
+            }
+            patch["published_products_delta"] = delta
+            patch_job(
+                job_id,
+                {"progress_json": patch, "merge_progress": True},
+                include_progress=False,
+            )
+            # 只在服务端确认成功后推进游标；响应丢失时重发由API按场景键去重。
+            published_products_persisted = len(products)
+
         workers = min(scene_max_workers(), max(1, len(scenes))) if scenes else 1
         progress["scene_workers"] = workers
         straggler_timeout = scene_straggler_timeout_sec()
@@ -1254,6 +1278,7 @@ def process_satellite_batch(
                         scene_workers=workers,
                         state_lock=state_lock,
                         progress=progress,
+                        patch_progress=patch_progress,
                         failed_land_ids=failed_land_ids,
                         failed_scene_ids=failed_scene_ids,
                         completed_scene_keys=completed_scene_keys,
@@ -1316,9 +1341,7 @@ def process_satellite_batch(
                                         failed_scene_ids
                                     )
                                     progress["scenes_done"] += 1
-                                    patch_job(
-                                        job_id, {"progress_json": dict(progress)}
-                                    )
+                                    patch_progress()
                             logger.exception(
                                 "satellite_batch_scene_worker_crashed",
                                 job_id=job_id,
@@ -1391,7 +1414,7 @@ def process_satellite_batch(
                                     or []
                                 ).union(abandoned_ids)
                             )
-                            patch_job(job_id, {"progress_json": dict(progress)})
+                            patch_progress()
                         logger.warning(
                             "scene_straggler_timeout",
                             job_id=job_id,

@@ -311,11 +311,20 @@ def patch_job(
     body: dict[str, Any],
     *,
     client: httpx.Client | None = None,
+    include_progress: bool = True,
 ) -> dict[str, Any]:
     """PATCH /v1/internal/jobs/{id} (status / progress / error)."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.patch(f"/v1/internal/jobs/{job_id}", json=body)
+        if include_progress:
+            r = c.patch(f"/v1/internal/jobs/{job_id}", json=body)
+        else:
+            # 高频增量进度只需确认写入状态，省去往返不断增长的产品历史列表。
+            r = c.patch(
+                f"/v1/internal/jobs/{job_id}",
+                json=body,
+                params={"include_progress": "false"},
+            )
         _raise_for_status(r, context="jobs/patch")
         data = r.json()
         if not isinstance(data, dict):
