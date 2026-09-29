@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import shutil
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1449,21 +1453,17 @@ def cache_media_images(
     out_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
 
-    def _save(tag: str, url: str | None) -> Path | None:
-        if not url:
-            return None
-        data = download_url_bytes(url)
-        if not data:
-            return None
-        # sniff extension
-        ext = ".png"
-        if data[:3] == b"\xff\xd8\xff":
-            ext = ".jpg"
-        elif data[:4] == b"RIFF":
-            ext = ".webp"
-        path = out_dir / f"{tag}{ext}"
-        path.write_bytes(data)
-        return path
+    media_tasks: list[tuple[str, str, dict[str, Any] | None, str | None]] = []
+
+    def _add_task(
+        tag: str,
+        url: Any,
+        scene: dict[str, Any] | None = None,
+        local_field: str | None = None,
+    ) -> None:
+        # 下载器本身只接受字符串地址；跳过异常JSON类型，避免破坏整份报告生成。
+        if isinstance(url, str) and url:
+            media_tasks.append((tag, url, scene, local_field))
 
     if flood_evidence:
         for i, sc in enumerate(flood_evidence.get("scenes") or []):
@@ -1474,25 +1474,73 @@ def cache_media_images(
                 or media.get("rgb_url")
                 or media.get("large_rgb_url")
             )
-            p = _save(f"flood_rgb_{d}", preview)
-            if p:
-                written[f"flood_rgb_{d}"] = p
-                sc.setdefault("media", {})["local_rgb_path"] = str(p)
+            _add_task(f"flood_rgb_{d}", preview, sc, "local_rgb_path")
             hp = media.get("heatmap_url") or media.get("s2_heatmap_url")
-            hp_path = _save(f"flood_hm_{d}", hp)
-            if hp_path:
-                written[f"flood_hm_{d}"] = hp_path
-                sc.setdefault("media", {})["local_heatmap_path"] = str(hp_path)
+            _add_task(f"flood_hm_{d}", hp, sc, "local_heatmap_path")
 
     if also_stage_media:
         for d, media in also_stage_media.items():
             preview = media.get("rgb_url") or media.get("large_rgb_url")
-            p = _save(f"stage_rgb_{d}", preview)
-            if p:
-                written[f"stage_rgb_{d}"] = p
+            _add_task(f"stage_rgb_{d}", preview)
             hp = media.get("heatmap_url") or media.get("s2_heatmap_url")
-            hp_path = _save(f"stage_hm_{d}", hp)
-            if hp_path:
-                written[f"stage_hm_{d}"] = hp_path
+            _add_task(f"stage_hm_{d}", hp)
+
+    # 相同签名地址可能同时被洪涝证据和物候阶段引用。去重后并发下载，
+    # 但最终按任务原顺序写入逻辑文件名，保持重复日期时“后一个成功结果覆盖前一个”的既有语义。
+    unique_urls = list(dict.fromkeys(url for _, url, _, _ in media_tasks))
+    cache_run_id = uuid.uuid4().hex
+
+    def _cache_path(url: str) -> Path:
+        url_hash = hashlib.sha256(url.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return out_dir / f".report-media-{cache_run_id}-{url_hash}.cache"
+
+    def _download_once(url: str) -> tuple[Path, str] | None:
+        data = download_url_bytes(url)
+        if not data:
+            return None
+        # 图片字节写入独立临时文件，避免多个大图的响应体同时驻留内存。
+        ext = ".png"
+        if data[:3] == b"\xff\xd8\xff":
+            ext = ".jpg"
+        elif data[:4] == b"RIFF":
+            ext = ".webp"
+        cache_path = _cache_path(url)
+        cache_path.write_bytes(data)
+        return cache_path, ext
+
+    cached_by_url: dict[str, tuple[Path, str] | None] = {}
+    try:
+        if unique_urls:
+            # 报告图片数量有上限；固定小并发度降低等待时间，同时保护OSS和API工作线程。
+            with ThreadPoolExecutor(
+                max_workers=min(3, len(unique_urls)),
+                thread_name_prefix="report-media",
+            ) as executor:
+                futures = {
+                    executor.submit(_download_once, url): url for url in unique_urls
+                }
+                for future in as_completed(futures):
+                    url = futures[future]
+                    cached_by_url[url] = future.result()
+
+        for tag, url, scene, local_field in media_tasks:
+            cached = cached_by_url.get(url)
+            if not cached:
+                continue
+            cache_path, ext = cached
+            path = out_dir / f"{tag}{ext}"
+            shutil.copyfile(cache_path, path)
+            written[tag] = path
+            if scene is not None and local_field is not None:
+                # 兼容历史记录中 media 缺失或为 null 的情况，只在确实下载成功后写回路径。
+                scene_media = scene.get("media")
+                if not isinstance(scene_media, dict):
+                    scene_media = {}
+                    scene["media"] = scene_media
+                scene_media[local_field] = str(path)
+    finally:
+        # 即使并发下载或逻辑文件落盘失败，也清除本次生成的临时媒体缓存。
+        for url in unique_urls:
+            _cache_path(url).unlink(missing_ok=True)
 
     return written
