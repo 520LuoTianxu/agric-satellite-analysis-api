@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -212,11 +213,22 @@ def _extract_lonlat_pixels(
         if lon is None or lat is None:
             continue
         try:
-            float(lon)
-            float(lat)
-        except (TypeError, ValueError):
+            lon_value = float(lon)
+            lat_value = float(lat)
+        except (OverflowError, TypeError, ValueError):
             continue
-        out.append(pix)
+        # lonlat_v1使用WGS84；非有限或越界坐标会污染地图范围与像元落点，不能参与展示。
+        if (
+            not math.isfinite(lon_value)
+            or not math.isfinite(lat_value)
+            or not -180 <= lon_value <= 180
+            or not -90 <= lat_value <= 90
+        ):
+            continue
+        normalized = dict(pix)
+        normalized["lon"] = lon_value
+        normalized["lat"] = lat_value
+        out.append(normalized)
     if prefer_clear:
         # 历史像元JSON可能缺少clear或含非数字脏值；未知标记不能中断整景解析。
         def _is_explicitly_clear(pixel: dict[str, Any]) -> bool:
