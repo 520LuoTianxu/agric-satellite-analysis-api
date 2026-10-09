@@ -41,6 +41,20 @@ v3 在 v2 基础上增加：
 9. **按日插值**（仅查询时，不入库）：同季相邻观测间线性插值，单调，标记
    ``interpolated``，置信度按相邻观测打折。
 
+v4 增加：
+
+10. **留茬/秸秆判据**（v4）：联合收割机留下秸秆，光谱到不了裸土。对辐射定标可信的景
+    （有算法版本且非重复扣偏移），像元在本季峰值之后满足：绿度 ≤ 本像元季峰值 ×
+    ``residue_peak_frac``、NDMI ≤ ``residue_ndmi_max``（水分塌陷）、估算红光反射率 ≥
+    ``residue_red_min``（明亮秸秆/土壤；霜冻或枯死仍站立的冠层因阴影偏暗），并经下一期
+    确认（不回绿、仍为秸秆样或已近裸土）。红光由 NDVI 与 EVI 反解
+    （假设蓝光≈0.7×红光），与原始影像对比误差约 ±0.02。
+    分两档：满足留茬特征但与枯熟站秆难以区分的像元记为**疑似收获**
+    （``suspected_harvest_pct``，粘滞）；疑似像元后续达到裸土级（确认）、检出时为
+    突变（``residue_abrupt_days`` 天内绿度骤降 ≥ ``residue_abrupt_drop``）、或 S1 地块级
+    收获样（且已收获+疑似 ≥50%）时晋升为**已收获**。``harvested_pct`` 与
+    ``harvested_or_suspected_pct`` 均季内单调。
+
 阈值可用环境变量调整；结果带 ``method_version``。光学影像无法区分“已收割”与
 “已完全枯黄未收割”，结果仍需实地核实。
 """
@@ -56,10 +70,13 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
-HARVEST_PROGRESS_METHOD_VERSION = "s2s1_season_monotonic_v3"
+HARVEST_PROGRESS_METHOD_VERSION = "s2s1_residue_monotonic_v4"
 HARVEST_PROGRESS_RULE_ZH = (
-    "估算方法（v3）：按生长季判断，地块返青后、作物像元绿度较本季峰值回落≥{drop_pct}%"
+    "估算方法（v4）：按生长季判断，地块返青后、作物像元绿度较本季峰值回落≥{drop_pct}%"
     "且降到收获阈值以下，并经下一期影像确认，记为已收获，季内只增不减；"
+    "峰值后绿度降到本像元峰值一半左右、含水（NDMI）塌陷且亮度抬升、下一期不回绿的"
+    "秸秆残茬样像元单列为疑似收获（可能是枯熟未收的站秆），后续到裸土级或 S1 佐证后"
+    "转为已收获；"
     "只用无云有效像元，剔除积雪/水体与异常凹陷日，季外日期不计。"
     "光学影像无法区分已收割与完全枯黄未收割，结果需结合实地核实。"
 )
@@ -112,6 +129,15 @@ class HarvestProgressThresholds:
     min_valid_pct: float = 50.0
     snow_mndwi: float = 0.40
     max_bad_radiometry_pct: float = 20.0
+    residue_enabled: bool = True
+    residue_peak_frac: float = 0.55
+    residue_ndmi_max: float = 0.0
+    residue_red_min: float = 0.085
+    # 疑似→已收获的“突变”确认：检出前 residue_abrupt_days 天内该像元绿度最高值
+    # 比检出时高出 ≥ residue_abrupt_drop（绝对绿度）。默认 0 = 不启用：实测 61254
+    # 2024-10-04（疑似枯熟站秆）与 2026-10-04（疑似收割）的突变幅度、间隔相同，不可区分。
+    residue_abrupt_drop: float = 0.0
+    residue_abrupt_days: int = 12
 
     @classmethod
     def from_env(cls) -> "HarvestProgressThresholds":
@@ -164,6 +190,41 @@ class HarvestProgressThresholds:
                 0.0,
                 100.0,
             ),
+            residue_enabled=os.getenv("HARVEST_PROGRESS_RESIDUE_ENABLED", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "no", "off"},
+            residue_peak_frac=_clamp(
+                _env_float("HARVEST_PROGRESS_RESIDUE_PEAK_FRAC", d.residue_peak_frac),
+                0.2,
+                0.9,
+            ),
+            residue_ndmi_max=_clamp(
+                _env_float("HARVEST_PROGRESS_RESIDUE_NDMI_MAX", d.residue_ndmi_max),
+                -0.3,
+                0.2,
+            ),
+            residue_red_min=_clamp(
+                _env_float("HARVEST_PROGRESS_RESIDUE_RED_MIN", d.residue_red_min),
+                0.03,
+                0.3,
+            ),
+            residue_abrupt_drop=_clamp(
+                _env_float(
+                    "HARVEST_PROGRESS_RESIDUE_ABRUPT_DROP", d.residue_abrupt_drop
+                ),
+                0.0,
+                1.0,
+            ),
+            residue_abrupt_days=int(
+                _clamp(
+                    _env_float(
+                        "HARVEST_PROGRESS_RESIDUE_ABRUPT_DAYS", d.residue_abrupt_days
+                    ),
+                    3,
+                    40,
+                )
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +253,11 @@ _PROFILE_FIELDS: dict[str, tuple[float, float, bool]] = {
     "confirm_green": (0.0, 0.95, False),
     "confirm_days": (5, 120, True),
     "harvest_window_days": (15, 180, True),
+    "residue_peak_frac": (0.2, 0.9, False),
+    "residue_ndmi_max": (-0.3, 0.2, False),
+    "residue_red_min": (0.03, 0.3, False),
+    "residue_abrupt_drop": (0.0, 1.0, False),
+    "residue_abrupt_days": (3, 40, True),
 }
 
 
@@ -346,6 +412,8 @@ class _Obs:
     values: dict[tuple[float, float], float]
     mean_ndvi: float | None
     median_green: float = 0.0
+    # 像元键 → (NDMI, 估算红光反射率)；仅辐射定标可信的景填写，用于留茬判据。
+    aux: dict[tuple[float, float], tuple[float, float]] = field(default_factory=dict)
 
     @property
     def valid_pct(self) -> float:
@@ -367,6 +435,11 @@ def _scene_obs(scene: dict[str, Any], thr: HarvestProgressThresholds) -> _Obs | 
         scene.get("algorithm_version"), scene.get("stac_item_id")
     )
     lo, hi = _PLAUSIBLE_RANGE[index]
+    # 留茬判据需要绝对反射率：旧产品（EVI 按 DN）与重复扣偏移的产品不可用。
+    calibrated = bool(str(scene.get("algorithm_version") or "").strip()) and (
+        index == "NDVI"
+    )
+    aux: dict[tuple[float, float], tuple[float, float]] = {}
     values: dict[tuple[float, float], float] = {}
     ndvis: list[float] = []
     bad = 0
@@ -398,6 +471,11 @@ def _scene_obs(scene: dict[str, Any], thr: HarvestProgressThresholds) -> _Obs | 
         nd = _pix_value(p, "NDVI")
         if nd is not None:
             ndvis.append(nd)
+        if calibrated:
+            ndmi = _pix_value(p, "NDMI")
+            red = estimate_red_reflectance(nd, _pix_value(p, "EVI"))
+            if ndmi is not None and red is not None:
+                aux[key] = (ndmi, red)
     if not values:
         return None
     # 指数大面积超出物理范围（饱和/定标失真）的景不可信，整景丢弃。
@@ -411,9 +489,45 @@ def _scene_obs(scene: dict[str, Any], thr: HarvestProgressThresholds) -> _Obs | 
         total=len(pixels),
         values=values,
         mean_ndvi=sum(ndvis) / len(ndvis) if ndvis else None,
+        aux=aux,
     )
     obs.median_green = statistics.median(values.values())
     return obs
+
+
+BLUE_TO_RED_RATIO = 0.7
+
+
+def estimate_red_reflectance(
+    ndvi: float | None, evi: float | None, blue_ratio: float = BLUE_TO_RED_RATIO
+) -> float | None:
+    """由 NDVI 与 EVI 反解红光地表反射率（像元未存波段值）。
+
+    k = NIR/Red = (1+NDVI)/(1−NDVI)；EVI = 2.5(N−R)/(N + 6R − 7.5B + 1)，设 B = 0.7R，
+    得 R = EVI / (2.5(k−1) − EVI·(k + 6 − 7.5·0.7))。61254 于 10-07 与原始影像对比：
+    亮区 0.107（实际 0.126）、暗区 0.056（实际 0.057）。无解或越界时返回 None。
+    """
+    if ndvi is None or evi is None or not -0.95 < ndvi < 0.95:
+        return None
+    k = (1.0 + ndvi) / (1.0 - ndvi)
+    den = 2.5 * (k - 1.0) - evi * (k + 6.0 - 7.5 * blue_ratio)
+    if den <= 1e-6 or evi <= 0:
+        return None
+    red = evi / den
+    return red if 0.0 < red < 1.0 else None
+
+
+def _residue_signature(
+    obs: "_Obs", key: Any, thr: HarvestProgressThresholds, relax: float = 0.0
+) -> bool | None:
+    """秸秆/留茬样：水分塌陷且明亮。无可信辅助数据时返回 None。"""
+    aux = obs.aux.get(key)
+    if aux is None:
+        return None
+    ndmi, red = aux
+    return (
+        ndmi <= thr.residue_ndmi_max + relax and red >= thr.residue_red_min - relax / 5
+    )
 
 
 def _daily_observations(
@@ -468,11 +582,18 @@ def _align_grids(days: list[_Obs]) -> None:
             mapping[key] = _nearest(key, buckets) if isinstance(key[0], float) else None
         for i in members:
             snapped: dict[Any, list[float]] = {}
+            snapped_aux: dict[Any, list[tuple[float, float]]] = {}
             for key, g in days[i].values.items():
                 target = key if key in ref_keys else mapping.get(key)
                 if target is not None:
                     snapped.setdefault(target, []).append(g)
+                    if key in days[i].aux:
+                        snapped_aux.setdefault(target, []).append(days[i].aux[key])
             days[i].values = {k: sum(v) / len(v) for k, v in snapped.items()}
+            days[i].aux = {
+                k: (sum(a for a, _ in v) / len(v), sum(b for _, b in v) / len(v))
+                for k, v in snapped_aux.items()
+            }
 
 
 def _bucket(lon: float, lat: float) -> tuple[int, int]:
@@ -854,6 +975,10 @@ def compute_harvest_series(
     season_of: dict[int, _Season] = {}
     harvested_at: dict[int, set] = {}
     provisional_at: dict[int, set] = {}
+    suspected_at: dict[int, set] = {}
+    residue_at: dict[int, set] = {}
+    promoted_by_at: dict[int, set] = {}
+    refs_of: dict[int, dict] = {}
     for season in _find_seasons(days, thr):
         idx = range(season.start, season.end + 1)
         for k in idx:
@@ -864,11 +989,18 @@ def compute_harvest_series(
             for key, g in days[k].values.items():
                 if g >= thr.season_green:
                     season.crop.add(key)
+        crop_n = len(season.crop)
         harvested: set = set()
         # 尚无后续观测可确认的候选像元：一旦出现就延续到季末，保证季内单调。
         pending: set = set()
+        # 疑似收获：峰值后秸秆样（干、亮、不回绿），但与枯熟站秆难以区分；粘滞。
+        suspected: set = set()
+        # 经留茬判据进入任一档（疑似或已晋升）的像元。
+        residue: set = set()
+        peak_day = days[season.peak].day
         for k in idx:
             obs = days[k]
+            promoted_by: set = set()
             for key, g in obs.values.items():
                 if key not in season.crop or key in harvested or key in pending:
                     continue
@@ -880,17 +1012,60 @@ def compute_harvest_series(
                     and g <= pk * (1.0 - thr.peak_drop)
                 ):
                     verdict = _confirm(days, k, key, season.end, thr)
-                    if verdict is True:
-                        harvested.add(key)
-                        continue
-                    if verdict is None:
+                    if verdict is not None:
+                        if verdict:
+                            harvested.add(key)
+                            if key in suspected:
+                                suspected.discard(key)
+                                promoted_by.add("bare")
+                            continue
+                    else:
                         pending.add(key)
+                        if key in suspected:
+                            suspected.discard(key)
+                            promoted_by.add("bare")
+                        continue
+                if key in suspected:
+                    continue
+                if (
+                    thr.residue_enabled
+                    and k > season.peak
+                    and pk is not None
+                    and pk >= thr.season_green
+                    and g <= pk * thr.residue_peak_frac
+                    and _residue_signature(obs, key, thr)
+                ):
+                    rv = _confirm_residue(days, k, key, pk, season.end, thr)
+                    if rv is not False:
+                        residue.add(key)
+                        if _abrupt(days, k, key, g, thr):
+                            # 突变（数日内绿度骤降）且留茬样：按已收获计。
+                            (harvested if rv else pending).add(key)
+                            promoted_by.add("abrupt")
+                        else:
+                            suspected.add(key)
+                        continue
                 if pk is None or g > pk:
                     peak_green[key] = g
+            # S1 地块级“收获样”且（已收获+疑似）≥50%：疑似整体晋升。
+            if suspected and s1 and obs.day > peak_day and crop_n:
+                refs = refs_of.setdefault(id(season), _s1_refs(s1, peak_day))
+                lo = obs.day - timedelta(days=S1_MATCH_BEFORE_DAYS)
+                hi = obs.day + timedelta(days=S1_MATCH_AFTER_DAYS)
+                share = (len(harvested) + len(pending) + len(suspected)) / crop_n
+                if share >= 0.5 and any(
+                    c is not None and c[3] == "harvest"
+                    for c in (_s1_change(o, refs) for o in s1 if lo <= o.day <= hi)
+                ):
+                    harvested |= suspected
+                    suspected = set()
+                    promoted_by.add("s1")
             harvested_at[k] = set(harvested)
             provisional_at[k] = set(pending)
+            suspected_at[k] = set(suspected)
+            residue_at[k] = set(residue)
+            promoted_by_at[k] = promoted_by
 
-    refs_of: dict[int, dict] = {}
     out: list[dict[str, Any]] = []
     prev_pct: float | None = None
     prev_season: _Season | None = None
@@ -899,13 +1074,17 @@ def compute_harvest_series(
         crop_n = len(season.crop) if season else 0
         done = harvested_at.get(k, set())
         pend = provisional_at.get(k, set())
+        res = residue_at.get(k, set()) if season is not None and crop_n else set()
+        susp = suspected_at.get(k, set()) if season is not None and crop_n else set()
         if season is None or not crop_n:
             status, pct, count = "off_season", 0.0, 0
+            susp_pct = 0.0
             prev_pct, prev_season = None, None
             season = None
         else:
             count = len(done) + len(pend)
             pct = round(100.0 * count / crop_n, 1)
+            susp_pct = round(100.0 * (count + len(susp)) / crop_n, 1) - pct
             if count == 0 or pct <= 0.0:
                 status = "growing"
             elif pct >= 99.95:
@@ -951,11 +1130,19 @@ def compute_harvest_series(
 
         # 判定量离阈值的距离。
         if status in ("harvesting", "harvested"):
-            gaps = [
-                thr.harvest_green - obs.values[key]
-                for key in (done | pend)
-                if key in obs.values
-            ]
+            gaps = []
+            for key in done | pend:
+                if key in res and key in obs.aux:
+                    # 留茬像元：离水分/亮度阈值的较小余量。
+                    ndmi, red = obs.aux[key]
+                    gaps.append(
+                        min(
+                            thr.residue_ndmi_max - ndmi,
+                            2.0 * (red - thr.residue_red_min),
+                        )
+                    )
+                elif key in obs.values:
+                    gaps.append(thr.harvest_green - obs.values[key])
             margin = statistics.median(gaps) if gaps else None
         elif status == "growing":
             margin = obs.median_green - thr.harvest_green
@@ -973,6 +1160,12 @@ def compute_harvest_series(
             s1_confirmed=s1_confirmed,
             min_valid_pct=thr.min_valid_pct,
         )
+        if res & (done | pend):
+            reasons.append("residue_signature")
+        if susp:
+            reasons.append("suspected_harvest")
+        for how in sorted(promoted_by_at.get(k, ())):
+            reasons.append(f"promoted_{how}")
         out.append(
             {
                 "date": obs.day.isoformat(),
@@ -987,6 +1180,15 @@ def compute_harvest_series(
                 "valid_pct": round(obs.valid_pct, 1),
                 "valid_pixel_count": len(obs.values),
                 "harvested_pixel_count": count,
+                "suspected_harvest_pct": round(susp_pct, 1),
+                "harvested_or_suspected_pct": round(pct + susp_pct, 1),
+                "suspected_pixel_count": len(susp),
+                "residue_pixel_count": len(res),
+                "residue_harvested_pct": round(
+                    100.0 * len(res & (done | pend)) / crop_n, 1
+                )
+                if crop_n
+                else 0.0,
                 "crop_pixel_count": crop_n,
                 "total_pixel_count": obs.total,
                 "mean_ndvi": round(obs.mean_ndvi, 4)
@@ -1056,6 +1258,10 @@ def interpolate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         p0 = float(row.get("harvested_pct") or 0.0)
         p1 = max(p0, float(nxt.get("harvested_pct") or 0.0))
+        has_susp = "harvested_or_suspected_pct" in row
+        q0 = max(p0, float(row.get("harvested_or_suspected_pct") or p0))
+        q1 = max(q0, p1, float(nxt.get("harvested_or_suspected_pct") or p1))
+        prev_q = q0
         c0, c1 = row.get("confidence"), nxt.get("confidence")
         conf = (
             round(INTERPOLATED_FACTOR * min(float(c0), float(c1)), 3)
@@ -1070,6 +1276,10 @@ def interpolate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         prev = p0
         for step in range(1, span):
             pct = round(min(p1, max(prev, p0 + (p1 - p0) * step / span)), 1)
+            comb = round(
+                max(pct, min(q1, max(prev_q, q0 + (q1 - q0) * step / span))), 1
+            )
+            prev_q = comb
             if pct <= 0:
                 status = "growing"
             elif pct >= 99.95:
@@ -1101,6 +1311,14 @@ def interpolate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "confidence_level": confidence_level(conf),
                     "confidence_reasons": reasons,
                     "interpolated": True,
+                    **(
+                        {
+                            "suspected_harvest_pct": round(comb - pct, 1),
+                            "harvested_or_suspected_pct": comb,
+                        }
+                        if has_susp
+                        else {}
+                    ),
                 }
             )
             prev = pct
@@ -1120,4 +1338,44 @@ def _confirm(
             continue
         # 季已结束后的观测（下一季返青）也可作为确认依据：低值则确认。
         return g <= thr.confirm_green
+    return None if k <= last else False
+
+
+def _abrupt(
+    days: list[_Obs], k: int, key: Any, g: float, thr: HarvestProgressThresholds
+) -> bool:
+    """检出前 residue_abrupt_days 天内该像元绿度最高值比当前高 ≥ residue_abrupt_drop。"""
+    if thr.residue_abrupt_drop <= 0:
+        return False
+    since = days[k].day - timedelta(days=thr.residue_abrupt_days)
+    prev = [
+        days[j].values[key]
+        for j in range(k - 1, -1, -1)
+        if days[j].day >= since and key in days[j].values
+    ]
+    return bool(prev) and max(prev) - g >= thr.residue_abrupt_drop
+
+
+def _confirm_residue(
+    days: list[_Obs],
+    k: int,
+    key: Any,
+    peak: float,
+    last: int,
+    thr: HarvestProgressThresholds,
+) -> bool | None:
+    """留茬候选的确认：下一次有效观测不回绿，且仍为秸秆样（或已近裸土）。"""
+    limit = days[k].day + timedelta(days=thr.confirm_days)
+    for m in range(k + 1, len(days)):
+        if days[m].day > limit:
+            return False
+        g = days[m].values.get(key)
+        if g is None:
+            continue
+        if g <= thr.confirm_green:
+            return True
+        if g > peak * thr.residue_peak_frac + 0.05:
+            return False
+        sig = _residue_signature(days[m], key, thr, relax=0.05)
+        return True if sig is None else sig
     return None if k <= last else False
