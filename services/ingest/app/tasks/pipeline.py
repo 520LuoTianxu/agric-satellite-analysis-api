@@ -310,6 +310,15 @@ def _s2_baseline_radiometry(item: Any) -> dict[str, float] | None:
     return {"scale": 0.0001, "offset": -0.1 if major >= 4 else 0.0}
 
 
+def _boa_offset_already_applied(item: Any) -> bool:
+    """STAC 条目声明 DN 已扣除 BOA 偏移（Earth Search ``sentinel-2-l2a``）。"""
+    properties = getattr(item, "properties", {}) or {}
+    raw = properties.get("earthsearch:boa_offset_applied")
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"true", "1", "yes"}
+    return raw is True
+
+
 def _resolve_band_radiometry(
     item: Any, index_defs: list[IndexDef]
 ) -> tuple[
@@ -322,6 +331,10 @@ def _resolve_band_radiometry(
     fallback = _s2_baseline_radiometry(item)
     radiometry: dict[str, dict[str, float]] = {}
     sources: dict[str, str] = {}
+    # Earth Search v1 ``sentinel-2-l2a`` 的 COG 已扣除 PB≥04.00 的 BOA 偏移
+    # （earthsearch:boa_offset_applied=true），但 raster:bands 仍声明 offset=-0.1；
+    # 再扣一次会让暗目标反射率变负、NDVI 饱和为 1.0，故这类条目偏移必须置 0。
+    offset_applied = _boa_offset_already_applied(item)
 
     for index_def in index_defs:
         for band_key in index_def.bands:
@@ -375,6 +388,8 @@ def _resolve_band_radiometry(
             ):
                 return None, None, sources, f"invalid_calibration_{band_key}"
 
+            if offset_applied and offset != 0.0:
+                offset = 0.0
             radiometry[band_key] = {"scale": scale, "offset": offset}
             if raw_scale is not None and raw_offset is not None:
                 sources[band_key] = "stac_raster_bands"
@@ -384,6 +399,8 @@ def _resolve_band_radiometry(
                 sources[band_key] = "stac_raster_bands_defaults"
             else:
                 sources[band_key] = "s2_processing_baseline"
+            if offset_applied:
+                sources[band_key] += "+boa_offset_already_applied"
 
     unique_sources = set(sources.values())
     source = next(iter(unique_sources)) if len(unique_sources) == 1 else "mixed"

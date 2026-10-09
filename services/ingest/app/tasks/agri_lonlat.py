@@ -80,7 +80,8 @@ INDEX_KEY_TO_PIXEL = {
     "cire": "CIre",
     "mndwi": "MNDWI",
 }
-AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v4"
+# v5：Earth Search sentinel-2-l2a 不再重复扣除 BOA 偏移（v3/v4 该来源 NDVI 偏高/饱和）。
+AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v5"
 
 # Element84 / ESA SCL asset names. Optional; missing SCL falls back to STAC.
 SCL_STAC_ASSETS = ("scl", "SCL")
