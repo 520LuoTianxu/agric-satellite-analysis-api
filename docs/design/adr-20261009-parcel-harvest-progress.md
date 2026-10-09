@@ -65,6 +65,7 @@ COG 已扣除 BOA 偏移（`earthsearch:boa_offset_applied=true`，2026-07-15 �
 | `HARVEST_PROGRESS_SNOW_MNDWI` | 0.40 | 积雪/水体 MNDWI 阈值 |
 | `HARVEST_PROGRESS_MAX_BAD_RADIOMETRY_PCT` | 20 | 指数越界像元占比上限 |
 | `HARVEST_PROGRESS_ENABLED` | true | 关闭后不入队、不启动后台重算 |
+| `HARVEST_PROGRESS_PROFILES` | 空 | v3：按作物/省份覆盖阈值的 JSON（见下） |
 
 ### 实测（测试环境真实像元，2025-06～2026-10-08）
 - 61251（夏玉米一季，全部 EVI）：2026 年 1–6 月全为季外 0%；06-25 返青；09-10 1.7% → 09-13 4.3% → 09-23 81.0% → 10-03 95.8% → 10-08 98.3%（待确认）；6 个整景云日期剔除。2025 季 09-13 起至 11-12 98.7%。
@@ -75,7 +76,7 @@ COG 已扣除 BOA 偏移（`earthsearch:boa_offset_applied=true`，2026-07-15 �
 ### 存储与触发
 - 迁移 `scripts/20261009_parcel_harvest_progress.sql`（可重复执行）：新建或升级 `parcel_harvest_progress`
   （新增 `crop_pixel_count / greenness / peak_greenness / season_start / vegetation_index / confirmed`，删除 `peak_ndvi`，
-  状态约束改为 `off_season | growing | harvesting | harvested`，并删除非 v2 结果）与 `parcel_harvest_progress_outbox`。
+  状态约束改为 `off_season | growing | harvesting | harvested`，并删除 v1 结果；更新版本的结果由服务按地块替换）与 `parcel_harvest_progress_outbox`。
 - 场景结果入库后（`scene_result_cache`）只写 outbox；API 后台 `run_harvest_progress_outbox` 按租约领取，
   `recompute_land` 读取整季上下文（`SEASON_CONTEXT_DAYS=330`），从受影响日期前 `REVISION_DAYS=60` 天重算到今天
   （先删后写，同时删除该地块旧 `method_version` 结果，幂等）。下载机不访问 Postgres。
@@ -88,8 +89,74 @@ COG 已扣除 BOA 偏移（`earthsearch:boa_offset_applied=true`，2026-07-15 �
 - 默认隐藏 0%（季外与未开始收获）；新增 `season_start / vegetation_index / greenness / confirmed` 字段；
 - 返回 `heuristic=true` 与 `rule_zh`，前端提示为估算值。
 
+## 决策：v3（`s2s1_season_monotonic_v3`）
+在 v2 之上增加四项，判定主体（分季、像元粘滞、单调）不变。
+
+### 1. 阈值来源：配置档 → 自适应 → 默认
+- `HARVEST_PROGRESS_PROFILES`（JSON）按 `land_parcels.crop_type` / `province_code` 覆盖
+  `season_green / harvest_green / peak_drop / confirm_green / confirm_days / harvest_window_days`，
+  优先级 `作物@省份` > `作物` > `@省份`，取值按 v2 同样范围钳制。例：
+  `{"corn@13": {"harvest_green": 0.22}, "@21": {"harvest_window_days": 75}}`。
+- 无配置档命中时用地块自身历史（读取至少 `ADAPTIVE_HISTORY_DAYS=730` 天，需 ≥2 季、≥12 期）：
+  峰值 P = 各季峰值中位绿度的中位数（上限 1.0），谷值 T = 全部观测中位绿度 10% 分位，幅度 A = P − T ≥ 0.30；
+  返青 = T + 0.50A、收获 = T + 0.28A、确认 = T + 0.39A，再钳制在默认值 ±0.05
+  （0.40–0.50 / 0.20–0.30 / 0.30–0.40）。首版曾放宽到 0.35–0.60，实测把麦后玉米返青推迟、7 月仍显示小麦已收，故收紧。
+- 否则用默认值。来源写入 `threshold_source`，实际阈值与自适应统计写入 `params`。
+- 目前组 12268 只有 61251 有 `crop_type`（corn），其余为空，实际走自适应。
+
+### 2. Sentinel-1 佐证（不改变占比）
+像元级验证（同轨道、同版本，光学判定的收获像元 vs 未收获像元）：
+
+| 地块 / 时段 | 光学期间收获的像元 ΔVH 中位 / <−2 dB 占比 | 对照像元 | 结论 |
+|---|---|---|---|
+| 61251 09-13→09-25（轨道 142） | −0.49 dB / 0.20 | −0.05 dB / 0.16 | 与斑点噪声不可分 |
+| 61251 09-06→09-30（轨道 40） | +0.43 dB / 0.14 | +0.36 dB / 0.11 | 不可分 |
+| 61239 2025-10-09→11-02（轨道 25） | −3.73 dB / 0.80 | 尚未收获像元同样 −3.47 dB / 0.78 | 全地块同步下降（季节性） |
+
+因此 S1 **不用于像元级判定或补云缺口**（会凭噪声造出占比），只做地块级佐证：
+- 观测日之后（必须在本季峰值后）取前 3 天～后 6 天内最近的 S1，与同轨道、同 `algorithm_version` 的峰值期
+  （峰值 ±20 天）S1 中位数比较：ΔVH、Δ(VH−VV)；
+- 收获样：Δ比值 ≤ −0.75 dB 且 ΔVH ≤ +1 dB，或 ΔVH ≤ −1.5 dB；仍有作物：Δ比值 > −0.4 且 ΔVH > −0.75；其余不确定；
+- 一致性：占比 ≥50% 且收获样，或 <10% 且仍有作物 → agree；相反 → disagree；其余 ambiguous；
+- 最新一期含待确认像元时，若其后 `confirm_days` 内有收获样 S1，则 `confirmed=true, confirmed_by=s1`（占比不变）；
+- S1 入库也会触发重算。
+
+### 3. 逐观测置信度
+因子 q∈[0,1]，得分 = Σwᵢqᵢ / Σwᵢ（S1 因子仅在 agree/disagree 时参与）：
+
+| 因子 | 权重 | 公式 | 原因码 |
+|---|---|---|---|
+| 数据量 | 0.25 | (0.4 + 0.6·clamp((valid_pct − 50)/(90 − 50))) × min(1, 有效像元/50) | `low_valid_pct`（<70%）、`few_pixels`（<50） |
+| 间隔 | 0.15 | 1 − 0.7·clamp((gap_days − 6)/30)；首期 1 | `long_gap`（>15 天） |
+| 阈值余量 | 0.25 | clamp(0.3 + m/0.15)；已收获：m = 中位(收获阈值 − 已收获像元绿度)；未收获：m = 中位绿度 − 收获阈值；季外：返青阈值 − 中位绿度 | `small_margin`（q<0.6） |
+| 确认 | 0.25 | 1 − 0.6·待确认占比（S1 佐证时 1 − 0.2·待确认占比） | `unconfirmed` / `s1_confirmed` |
+| S1 | 0.10 | agree 1.0，disagree 0.2 | `s1_agree` / `s1_disagree` |
+
+上限：待确认 ≥25%（未被 S1 佐证）或 S1 矛盾时得分 ≤ 0.74。等级：≥0.75 high、≥0.50 medium、其余 low。
+插值点：0.7 × min(前后观测得分)，原因码 `interpolated`（及 `unconfirmed`）。
+落库列：`confidence / confidence_level / confidence_reasons(jsonb) / confirmed_by / gap_days / s1_date /
+s1_delta_vh_db / s1_delta_ratio_db / s1_agreement / threshold_source`（`scripts/20261009_parcel_harvest_progress_v3.sql`）。
+
+### 4. 按日插值（查询参数，不入库）
+`interpolate=daily`：同季相邻观测之间按日线性插值，单调，`interpolated=true`，`valid_pct` 等影像字段为空；
+不跨季、不在季外、不在最后一期之后外推。插值行的 `newly_harvested_pct` 为日增量；观测行原样返回（其新增仍相对上一期观测）。
+
+### 实测 v2 → v3（同一份真实像元，只读）
+| 地块 | 关键日期 v2 → v3 | 阈值来源 | 置信度 |
+|---|---|---|---|
+| 61251 | 09-10 1.7→1.8；09-13 4.3→5.9；09-23 81.0→88.3；10-03 95.8→97.4；10-08 98.3→98.9（待确认） | adaptive（0.50/0.28/0.39） | 90 期全 high；09-23 起 S1 agree |
+| 61233 | 小麦 06-10 55.0→74.4、06-22 84.9→86.2；玉米 10-03 13.9→18.6、10-08 54.1→59.3 | adaptive（0.50/0.30/0.40） | 10-08 medium（待确认）；其余 high |
+| 61236 | 小麦 06-10 60.6→71.3、06-22 93.0→95.9；玉米 10-03 9.6→21.3、10-08 56.0→60.4 | adaptive（0.50/0.30/0.40） | 10-08 medium（待确认） |
+| 61239 | 2025 10-24 24.6→50.7、11-03 97.6→99.2、11-13 起 100；2026-09-19 12.4→13.0 | adaptive（0.50/0.30/0.40） | 2026-09-19 medium；2025-11 S1 agree |
+
+差异全部来自自适应收获阈值 0.28–0.30（默认 0.25），各季仍为 0→100% 单调。S1：61233/61236 最新 S1 为 09-25，
+无法佐证 10 月玉米收获；61251 最新 S1 10-07 早于光学 10-08，未能提前确认。
+
 ## 局限
 - 光学影像无法区分“已收割”与“完全枯黄未收割”；秸秆覆盖、倒伏、间套作会影响判断；
-- 阴雨季可能长时间无有效观测，最新几期可能尚未确认；S1 VV/VH 可作为后续补充信号；
+- 阴雨季可能长时间无有效观测，最新几期可能尚未确认；S1 在本数据上像元级不可分，只作地块级佐证，不能补出占比；
+- S1 仅单星（S1D）、两条轨道（如 142/40）交替，未做热噪声校正；旧版 S1 产品（无 algorithm_version）比 v6 低约 5 dB，
+  只在同版本同轨道内比较；部分地块 S1 滞后于光学（61233/61236 截至 09-25）；
+- 置信度是规则化的质量分，不是经实地标定的概率；
 - 绿度端元与阈值为经验值，需结合农艺实测校准；
 - Earth Search 重复扣偏移问题修复并重处理历史景之前，NDVI 不可直接用于其他绝对阈值业务。

@@ -1126,16 +1126,24 @@ async def get_harvest_progress(
         False,
         description="是否返回已收获占比为 0 的观测日（季外与未开始收获，默认隐藏）",
     ),
+    interpolate: Literal["none", "daily"] = Query(
+        "none",
+        description=(
+            "daily：在同季相邻观测之间按日线性插值（interpolated=true，置信度打折），"
+            "仅用于展示，不入库、不外推"
+        ),
+    ),
 ):
     """按观测日期返回地块已收获面积占比及较上期新增（分季、单调的启发式估算）。
 
     优先读 ``parcel_harvest_progress`` 落库结果；区间内尚无落库记录时现场计算
-    并加入重算队列，后续请求即可直接读表。
+    并加入重算队列，后续请求即可直接读表。每期带置信度（0–1、等级、原因码）。
     """
     await _agri_ready(db)
     from app.core.harvest_progress import (
         HARVEST_PROGRESS_METHOD_VERSION,
         HarvestProgressThresholds,
+        interpolate_daily,
     )
     from app.services import harvest_progress as hp
 
@@ -1165,11 +1173,22 @@ async def get_harvest_progress(
                 await db.rollback()
                 logger.exception("harvest_progress_enqueue_failed land_id=%s", land_id)
 
+    daily = interpolate == "daily"
+    if daily:
+        rows = interpolate_daily(rows)
     items = [
         HarvestProgressItem.model_validate(r)
         for r in rows
         if include_zero or float(r.get("harvested_pct") or 0) > 0
     ]
+    threshold_source = next(
+        (
+            r.get("threshold_source")
+            for r in reversed(rows)
+            if r.get("threshold_source")
+        ),
+        None,
+    )
     return HarvestProgressOut(
         land_id=land_id,
         date_from=date_from,
@@ -1181,6 +1200,8 @@ async def get_harvest_progress(
         rule_zh=thr.rule_zh(),
         source=source,
         thresholds=thr.to_dict(),
+        threshold_source=threshold_source,
+        interpolate="daily" if daily else "none",
         items=items,
     )
 
