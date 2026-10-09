@@ -28,6 +28,7 @@ from app.schemas.agri import (
     AgriTableCount,
     HarvestDetectOut,
     HarvestProgressItem,
+    HarvestPixelsOut,
     HarvestProgressOut,
     LandParcelOut,
     LandScenesSummaryOut,
@@ -1207,6 +1208,87 @@ async def get_harvest_progress(
         threshold_source=threshold_source,
         interpolate="daily" if daily else "none",
         items=items,
+    )
+
+
+@router.get(
+    "/lands/{land_id}/harvest-pixels",
+    response_model=HarvestPixelsOut,
+)
+async def get_harvest_pixels(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    on_date: date | None = Query(
+        None, alias="date", description="观测日；默认今天，取当天或之前最近一期"
+    ),
+):
+    """逐像元收获状态：0 未收获 / 1 疑似收获 / 2 已收获 / 255 无数据。
+
+    与 NDVI 像元一样返回 ``pixels_lonlat``（lon/lat 点集）。优先读落库结果；
+    尚未落库（未执行迁移或未补算）时现场计算，只读、不入队。
+    """
+    await _agri_ready(db)
+    from app.core.harvest_progress import (
+        HARVEST_PROGRESS_METHOD_VERSION,
+        decode_pixel_states,
+        pixel_state_counts,
+    )
+    from app.services import harvest_progress as hp
+
+    exists, _area = await hp.load_land_area_mu(db, land_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Land parcel not found")
+    requested = on_date or date.today()
+    data = None
+    try:
+        data = await hp.load_stored_pixel_states(db, land_id, requested)
+    except Exception:
+        # 迁移未执行（无表/列）等：回滚后现场计算。
+        await db.rollback()
+        logger.warning("harvest_pixels_stored_unavailable land_id=%s", land_id)
+    if data is None:
+        data = await hp.compute_live_pixel_states(db, land_id, requested)
+    if data is None:
+        raise HTTPException(status_code=404, detail="该日期之前没有可用的收获像元结果")
+
+    keys = data["pixel_keys"]
+    states = decode_pixel_states(data.get("pixel_states"), len(keys))
+    if len(states) != len(keys):
+        raise HTTPException(status_code=500, detail="收获像元状态与坐标数量不一致")
+    counts = pixel_state_counts(states)
+    crop_n = int(data.get("crop_pixel_count") or 0)
+    if crop_n:
+        known = counts["unharvested"] + counts["suspected"] + counts["harvested"]
+        crop_pct = {
+            "unharvested": round(100.0 * counts["unharvested"] / crop_n, 1),
+            "suspected": round(100.0 * counts["suspected"] / crop_n, 1),
+            "harvested": round(100.0 * counts["harvested"] / crop_n, 1),
+            "nodata": round(100.0 * max(0, crop_n - known) / crop_n, 1),
+        }
+    else:
+        crop_pct = {}
+    return HarvestPixelsOut(
+        land_id=land_id,
+        requested_date=requested,
+        date=data["date"],
+        method_version=HARVEST_PROGRESS_METHOD_VERSION,
+        source=data["source"],
+        status=data.get("status"),
+        season_start=data.get("season_start"),
+        scene_id=data.get("scene_id"),
+        harvested_pct=data.get("harvested_pct"),
+        suspected_harvest_pct=data.get("suspected_harvest_pct"),
+        harvested_or_suspected_pct=data.get("harvested_or_suspected_pct"),
+        valid_pct=data.get("valid_pct"),
+        crop_pixel_count=crop_n or None,
+        pixel_count=len(keys),
+        counts=counts,
+        crop_pct=crop_pct,
+        pixels_lonlat=[
+            {"lon": float(k[0]), "lat": float(k[1]), "state": v}
+            for k, v in zip(keys, states)
+        ],
     )
 
 

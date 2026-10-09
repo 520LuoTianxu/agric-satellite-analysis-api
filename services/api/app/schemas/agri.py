@@ -452,6 +452,59 @@ class HarvestProgressItem(BaseModel):
     interpolated: bool = Field(False, description="true 表示按日插值的展示点，非真实观测")
 
 
+class HarvestPixel(BaseModel):
+    lon: float
+    lat: float
+    state: int = Field(description="0=未收获、1=疑似收获、2=已收获、255=无数据")
+
+
+class HarvestPixelStats(BaseModel):
+    unharvested: float = 0
+    suspected: float = 0
+    harvested: float = 0
+    nodata: float = 0
+
+
+class HarvestPixelsOut(BaseModel):
+    """某观测日的逐像元收获状态（lonlat_v1 点集，与 NDVI 像元同结构）。
+
+    ``date`` 为实际使用的观测日（≤ ``requested_date`` 的最近一期）。
+    """
+
+    land_id: str
+    requested_date: date
+    date: date
+    method_version: str
+    source: Literal["stored", "live"]
+    status: str | None = None
+    season_start: date | None = None
+    scene_id: str | None = None
+    harvested_pct: float | None = None
+    suspected_harvest_pct: float | None = None
+    harvested_or_suspected_pct: float | None = None
+    valid_pct: float | None = None
+    crop_pixel_count: int | None = None
+    format: Literal["lonlat_v1"] = "lonlat_v1"
+    nodata: int = 255
+    state_labels: dict[str, str] = Field(
+        default_factory=lambda: {
+            "0": "未收获",
+            "1": "疑似收获",
+            "2": "已收获",
+            "255": "无数据",
+        }
+    )
+    pixel_count: int
+    counts: HarvestPixelStats = Field(description="各状态像元数（全部像元）")
+    crop_pct: HarvestPixelStats = Field(
+        description=(
+            "占本季作物像元的百分比；已收获/疑似与 harvested_pct/"
+            "suspected_harvest_pct 一致（四舍五入误差 ≤0.1）；无数据=作物像元中本期云/无效"
+        )
+    )
+    pixels_lonlat: list[HarvestPixel]
+
+
 class HarvestProgressOut(BaseModel):
     land_id: str
     date_from: date

@@ -202,6 +202,22 @@ NDMI 与 NDTI 不能区分两区（两区都已干透：09-29→10-02 全块 NDM
 
 已收获档在全部样本上与 v3 一致（默认配置下只会通过裸土确认或 S1 晋升）；各季两档均单调 0→100%，黄熟期（NDMI>0）无疑似。
 
+## 逐像元收获状态（harvest-pixels）
+每个观测行另存逐像元状态，与 v4 两档算法同源、季内单调：`0` 未收获、`1` 疑似收获、`2` 已收获（含待确认）、`255` 无数据
+（季外、非作物像元、本期云/无效且此前未计入收获/疑似；已计入的像元即使本期有云也保留 1/2）。
+
+存储（`scripts/20261009_parcel_harvest_pixel_states.sql`）：
+- `parcel_harvest_pixel_sets(land_id, set_hash, pixel_count, pixels)`：像元坐标集合，`pixels = {"format":"lonlat_index_v1","lon":[..],"lat":[..]}`，
+  按内容哈希去重，每地块通常一份；重算后不再被引用的集合自动删除。
+- `parcel_harvest_progress.pixel_set_hash` + `pixel_states`（每像元一个字符 `0/1/2/.`，顺序与坐标集合一致）。
+- 实测 61254（2823 像元、193 期，2024-01～2026-10）：状态列合计约 14 KB、坐标集合约 21 KB（PG 压缩后）。
+
+计算：`recompute_land`（日常 outbox 与 `harvest-progress/backfill` 共用）调用 `compute_harvest_series(pixel_states=True)` 一并写入。
+
+接口：`GET /v1/agri/lands/{id}/harvest-pixels?date=YYYY-MM-DD`（默认今天，取 ≤date 的最近一期），返回与 NDVI 像元相同的
+`pixels_lonlat`（`[{lon,lat,state}]`，`format=lonlat_v1`、`nodata=255`），另含 `counts`（各状态像元数）与 `crop_pct`
+（占本季作物像元百分比，已收获/疑似与 `harvested_pct`/`suspected_harvest_pct` 一致）。未落库时现场计算（只读，不入队）。
+
 ## 局限
 - 光学影像无法可靠区分“已收割”与“完全枯黄未收割”；v4 用亮度区分留茬与暗的枯死冠层，但全块同时变干变亮（如 61254 2024-10-04）仍可能是站秆；秸秆覆盖、倒伏、间套作会影响判断；
 - 阴雨季可能长时间无有效观测，最新几期可能尚未确认；S1 在本数据上像元级不可分，只作地块级佐证，不能补出占比；
