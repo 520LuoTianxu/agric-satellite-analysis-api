@@ -6,7 +6,7 @@
    把 (land_id, 最早受影响日期) 合并写入 ``parcel_harvest_progress_outbox``；
 2. API 进程内 :func:`run_harvest_progress_outbox` 周期按租约领取地块，调用
    :func:`recompute_land` 幂等重算该地块受影响日期到今天的序列；
-3. 历史补算走 ``POST /v1/internal/harvest-progress/backfill``（批量入队）或
+3. 历史补算走 ``POST /v1/internal/agri/harvest-progress/backfill``（批量入队）或
    ``python -m app.services.harvest_progress --land-id ... --from ...``（直接计算）。
 """
 
@@ -27,6 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.agri_classify import is_official_optical_product
 from app.core.harvest_progress import (
     HARVEST_PROGRESS_METHOD_VERSION,
+    REVISION_DAYS,
+    SEASON_CONTEXT_DAYS,
     HarvestProgressThresholds,
     compute_harvest_series,
 )
@@ -63,11 +65,13 @@ _LOAD_AREA = text(
     """
 )
 
-# 只取像元数组和质量字段，避免把整份产品 JSON 拉进内存。
+# 只取像元数组、质量字段与辐射定标来源，避免把整份产品 JSON 拉进内存。
 _LOAD_SCENES = text(
     """
     SELECT date, scene_id,
            pixel_data->'pixels' AS pixels,
+           pixel_data->>'algorithm_version' AS algorithm_version,
+           pixel_data->>'stac_item_id' AS stac_item_id,
            COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
            COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
            parcel_cloud_cover_pct, cloud_cover, cloud_cover_over_30,
@@ -82,11 +86,19 @@ _LOAD_SCENES = text(
     """
 )
 
+# 区间内连同旧算法版本（如 v1）的结果一起删除，表里只保留当前版本。
 _DELETE_RANGE = text(
     """
     DELETE FROM agric_satellite.parcel_harvest_progress
-    WHERE land_id = :land_id AND sensor = :sensor AND method_version = :method_version
+    WHERE land_id = :land_id AND sensor = :sensor
       AND obs_date >= :date_from AND obs_date <= :date_to
+    """
+)
+
+_DELETE_OLD_VERSIONS = text(
+    """
+    DELETE FROM agric_satellite.parcel_harvest_progress
+    WHERE land_id = :land_id AND sensor = :sensor AND method_version <> :method_version
     """
 )
 
@@ -96,12 +108,15 @@ _UPSERT_ROW = text(
         land_id, obs_date, sensor, method_version, scene_id, status,
         harvested_pct, newly_harvested_pct, harvested_area_mu, parcel_area_mu,
         valid_pct, valid_pixel_count, harvested_pixel_count, total_pixel_count,
-        mean_ndvi, peak_ndvi, peak_date, official, params, updated_at
+        crop_pixel_count, mean_ndvi, greenness, peak_greenness, peak_date,
+        season_start, vegetation_index, confirmed, official, params, updated_at
     ) VALUES (
         :land_id, :obs_date, :sensor, :method_version, :scene_id, :status,
         :harvested_pct, :newly_harvested_pct, :harvested_area_mu, :parcel_area_mu,
         :valid_pct, :valid_pixel_count, :harvested_pixel_count, :total_pixel_count,
-        :mean_ndvi, :peak_ndvi, :peak_date, :official, CAST(:params AS jsonb), now()
+        :crop_pixel_count, :mean_ndvi, :greenness, :peak_greenness, :peak_date,
+        :season_start, :vegetation_index, :confirmed, :official,
+        CAST(:params AS jsonb), now()
     )
     ON CONFLICT (land_id, obs_date, sensor, method_version) DO UPDATE SET
         scene_id = EXCLUDED.scene_id,
@@ -114,9 +129,14 @@ _UPSERT_ROW = text(
         valid_pixel_count = EXCLUDED.valid_pixel_count,
         harvested_pixel_count = EXCLUDED.harvested_pixel_count,
         total_pixel_count = EXCLUDED.total_pixel_count,
+        crop_pixel_count = EXCLUDED.crop_pixel_count,
         mean_ndvi = EXCLUDED.mean_ndvi,
-        peak_ndvi = EXCLUDED.peak_ndvi,
+        greenness = EXCLUDED.greenness,
+        peak_greenness = EXCLUDED.peak_greenness,
         peak_date = EXCLUDED.peak_date,
+        season_start = EXCLUDED.season_start,
+        vegetation_index = EXCLUDED.vegetation_index,
+        confirmed = EXCLUDED.confirmed,
         official = EXCLUDED.official,
         params = EXCLUDED.params,
         updated_at = now()
@@ -124,7 +144,9 @@ _UPSERT_ROW = text(
 )
 
 
-async def load_land_area_mu(db: AsyncSession, land_id: str) -> tuple[bool, float | None]:
+async def load_land_area_mu(
+    db: AsyncSession, land_id: str
+) -> tuple[bool, float | None]:
     row = (await db.execute(_LOAD_AREA, {"land_id": land_id})).first()
     if row is None:
         return False, None
@@ -152,6 +174,9 @@ async def load_scene_inputs(
                 "date": d.get("date"),
                 "scene_id": d.get("scene_id"),
                 "pixels": pixels,
+                "source": d.get("source"),
+                "algorithm_version": d.get("algorithm_version"),
+                "stac_item_id": d.get("stac_item_id"),
                 "official": is_official_optical_product(
                     source=d.get("source"),
                     scene_id=d.get("scene_id"),
@@ -175,9 +200,9 @@ async def compute_land_series(
     area_mu: float | None = None,
     thresholds: HarvestProgressThresholds | None = None,
 ) -> list[dict[str, Any]]:
-    """计算 [date_from, date_to] 内的序列；额外读取回看窗口作为季节峰值与上期上下文。"""
+    """计算 [date_from, date_to] 内的序列；额外读取整季上下文（返青、峰值、上期状态）。"""
     thr = thresholds or HarvestProgressThresholds.from_env()
-    context_from = date_from - timedelta(days=thr.lookback_days)
+    context_from = date_from - timedelta(days=SEASON_CONTEXT_DAYS)
     scenes = await load_scene_inputs(db, land_id, context_from, date_to)
     series = compute_harvest_series(scenes, parcel_area_mu=area_mu, thresholds=thr)
     lo, hi = date_from.isoformat(), date_to.isoformat()
@@ -196,6 +221,8 @@ async def recompute_land(
     thr = thresholds or HarvestProgressThresholds.from_env()
     date_to = date_to or date.today()
     date_from = date_from or (date_to - timedelta(days=DEFAULT_RECENT_DAYS))
+    # 新观测会改写之前若干期：确认候选像元、判定凹陷日、返青切季，都需回头重写。
+    date_from = date_from - timedelta(days=REVISION_DAYS)
     exists, area_mu = await load_land_area_mu(db, land_id)
     if not exists:
         return 0
@@ -207,8 +234,12 @@ async def recompute_land(
         "sensor": SENSOR,
         "method_version": HARVEST_PROGRESS_METHOD_VERSION,
     }
-    # 先删区间再写入：影像被替换或不再满足有效像元要求时不会残留旧结果。
-    await db.execute(_DELETE_RANGE, {**base, "date_from": date_from, "date_to": date_to})
+    # 先删区间再写入：影像被替换或不再满足有效像元要求时不会残留旧结果；
+    # 旧算法版本的结果整体删除，避免与当前版本混读。
+    await db.execute(
+        _DELETE_RANGE, {**base, "date_from": date_from, "date_to": date_to}
+    )
+    await db.execute(_DELETE_OLD_VERSIONS, base)
     params_json = json.dumps(thr.to_dict(), separators=(",", ":"))
     for row in rows:
         await db.execute(
@@ -226,11 +257,14 @@ async def recompute_land(
                 "valid_pixel_count": row["valid_pixel_count"],
                 "harvested_pixel_count": row["harvested_pixel_count"],
                 "total_pixel_count": row["total_pixel_count"],
+                "crop_pixel_count": row.get("crop_pixel_count"),
                 "mean_ndvi": row.get("mean_ndvi"),
-                "peak_ndvi": row.get("peak_ndvi"),
-                "peak_date": date.fromisoformat(row["peak_date"])
-                if row.get("peak_date")
-                else None,
+                "greenness": row.get("greenness"),
+                "peak_greenness": row.get("peak_greenness"),
+                "peak_date": _iso_date(row.get("peak_date")),
+                "season_start": _iso_date(row.get("season_start")),
+                "vegetation_index": row.get("vegetation_index"),
+                "confirmed": bool(row.get("confirmed", True)),
                 "official": bool(row.get("official", True)),
                 "params": params_json,
             },
@@ -241,8 +275,9 @@ async def recompute_land(
 _LIST_STORED = text(
     """
     SELECT obs_date, sensor, scene_id, status, harvested_pct, newly_harvested_pct,
-           harvested_area_mu, parcel_area_mu, valid_pct, mean_ndvi, peak_ndvi,
-           peak_date, official
+           harvested_area_mu, parcel_area_mu, valid_pct, mean_ndvi, greenness,
+           peak_greenness, peak_date, season_start, vegetation_index, confirmed,
+           official
     FROM agric_satellite.parcel_harvest_progress
     WHERE land_id = :land_id AND sensor = :sensor AND method_version = :method_version
       AND obs_date >= :date_from AND obs_date <= :date_to
@@ -281,12 +316,22 @@ async def list_stored(
                 "parcel_area_mu": _num(d.get("parcel_area_mu")),
                 "valid_pct": float(d["valid_pct"]),
                 "mean_ndvi": _num(d.get("mean_ndvi"), 4),
-                "peak_ndvi": _num(d.get("peak_ndvi"), 4),
+                "greenness": _num(d.get("greenness"), 4),
+                "peak_greenness": _num(d.get("peak_greenness"), 4),
                 "peak_date": d["peak_date"].isoformat() if d.get("peak_date") else None,
+                "season_start": d["season_start"].isoformat()
+                if d.get("season_start")
+                else None,
+                "vegetation_index": d.get("vegetation_index"),
+                "confirmed": bool(d.get("confirmed", True)),
                 "official": bool(d.get("official")),
             }
         )
     return out
+
+
+def _iso_date(value: Any) -> date | None:
+    return date.fromisoformat(str(value)[:10]) if value else None
 
 
 def _num(value: Any, digits: int = 2) -> float | None:
@@ -393,7 +438,10 @@ def harvest_target_from_scene_result(
     while isinstance(stats.get("apply"), dict):
         stats = stats["apply"]
     oss = stats.get("oss") if isinstance(stats.get("oss"), dict) else {}
-    if max(int(stats.get("scene_upserts") or 0), int(oss.get("scene_upserts") or 0)) <= 0:
+    if (
+        max(int(stats.get("scene_upserts") or 0), int(oss.get("scene_upserts") or 0))
+        <= 0
+    ):
         return None
     sources = [
         envelope.get("extras"),
@@ -465,7 +513,9 @@ async def _drain_once(worker_id: str) -> int:
         try:
             async with async_session() as db:
                 n = await recompute_land(db, land_id, item.get("date_from"))
-                await db.execute(_COMPLETE, {"land_id": land_id, "worker_id": worker_id})
+                await db.execute(
+                    _COMPLETE, {"land_id": land_id, "worker_id": worker_id}
+                )
                 await db.commit()
             logger.info(
                 "harvest_progress_recomputed",
