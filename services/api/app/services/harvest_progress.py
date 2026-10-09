@@ -1,8 +1,8 @@
-"""地块逐日收获占比：读取 S2 像元、计算、落库，以及新影像入库后的 outbox 重算。
+"""地块逐日收获占比：读取 S2/S1 像元、计算、落库，以及新影像入库后的 outbox 重算。
 
 链路（全部在 API 机，下载机不碰 Postgres）：
 
-1. ``scene_result_cache`` 场景结果入库成功后调用 :func:`enqueue_from_scene_result`，
+1. ``scene_result_cache`` S2 或 S1 场景结果入库成功后调用 :func:`enqueue_from_scene_result`，
    把 (land_id, 最早受影响日期) 合并写入 ``parcel_harvest_progress_outbox``；
 2. API 进程内 :func:`run_harvest_progress_outbox` 周期按租约领取地块，调用
    :func:`recompute_land` 幂等重算该地块受影响日期到今天的序列；
@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.agri_classify import is_official_optical_product
 from app.core.harvest_progress import (
+    ADAPTIVE_HISTORY_DAYS,
     HARVEST_PROGRESS_METHOD_VERSION,
     REVISION_DAYS,
     SEASON_CONTEXT_DAYS,
@@ -34,7 +35,9 @@ from app.core.harvest_progress import (
 )
 from app.core.logging import logger
 
+# 结果行以光学观测为主键；S1 只作佐证，不单独成行。
 SENSOR = "S2"
+TRIGGER_SENSORS = frozenset({"S2", "S1"})
 DEFAULT_RECENT_DAYS = 60
 OUTBOX_POLL_SECONDS = 10
 OUTBOX_CLAIM_LIMIT = 10
@@ -59,9 +62,25 @@ def _jsonish(value: Any) -> Any:
 
 _LOAD_AREA = text(
     """
-    SELECT COALESCE(land_area_mu, area_ha * 15) AS area_mu
+    SELECT COALESCE(land_area_mu, area_ha * 15) AS area_mu, crop_type, province_code
     FROM agric_satellite.land_parcels
     WHERE land_id = :land_id
+    """
+)
+
+_LOAD_S1 = text(
+    """
+    SELECT date,
+           pixel_data->'pixels' AS pixels,
+           pixel_data->>'algorithm_version' AS algorithm_version,
+           NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
+    FROM agric_satellite.parcel_scene_products
+    WHERE land_id = :land_id
+      AND sensor = 'S1'
+      AND date >= :date_from AND date <= :date_to
+      AND pixel_data->>'format' = 'lonlat_v1'
+      AND jsonb_typeof(pixel_data->'pixels') = 'array'
+    ORDER BY date ASC, scene_id ASC
     """
 )
 
@@ -109,14 +128,20 @@ _UPSERT_ROW = text(
         harvested_pct, newly_harvested_pct, harvested_area_mu, parcel_area_mu,
         valid_pct, valid_pixel_count, harvested_pixel_count, total_pixel_count,
         crop_pixel_count, mean_ndvi, greenness, peak_greenness, peak_date,
-        season_start, vegetation_index, confirmed, official, params, updated_at
+        season_start, vegetation_index, confirmed, official, params,
+        confidence, confidence_level, confidence_reasons, confirmed_by, gap_days,
+        s1_date, s1_delta_vh_db, s1_delta_ratio_db, s1_agreement, threshold_source,
+        updated_at
     ) VALUES (
         :land_id, :obs_date, :sensor, :method_version, :scene_id, :status,
         :harvested_pct, :newly_harvested_pct, :harvested_area_mu, :parcel_area_mu,
         :valid_pct, :valid_pixel_count, :harvested_pixel_count, :total_pixel_count,
         :crop_pixel_count, :mean_ndvi, :greenness, :peak_greenness, :peak_date,
         :season_start, :vegetation_index, :confirmed, :official,
-        CAST(:params AS jsonb), now()
+        CAST(:params AS jsonb),
+        :confidence, :confidence_level, CAST(:confidence_reasons AS jsonb),
+        :confirmed_by, :gap_days, :s1_date, :s1_delta_vh_db, :s1_delta_ratio_db,
+        :s1_agreement, :threshold_source, now()
     )
     ON CONFLICT (land_id, obs_date, sensor, method_version) DO UPDATE SET
         scene_id = EXCLUDED.scene_id,
@@ -139,19 +164,59 @@ _UPSERT_ROW = text(
         confirmed = EXCLUDED.confirmed,
         official = EXCLUDED.official,
         params = EXCLUDED.params,
+        confidence = EXCLUDED.confidence,
+        confidence_level = EXCLUDED.confidence_level,
+        confidence_reasons = EXCLUDED.confidence_reasons,
+        confirmed_by = EXCLUDED.confirmed_by,
+        gap_days = EXCLUDED.gap_days,
+        s1_date = EXCLUDED.s1_date,
+        s1_delta_vh_db = EXCLUDED.s1_delta_vh_db,
+        s1_delta_ratio_db = EXCLUDED.s1_delta_ratio_db,
+        s1_agreement = EXCLUDED.s1_agreement,
+        threshold_source = EXCLUDED.threshold_source,
         updated_at = now()
     """
 )
 
 
+async def load_land_info(db: AsyncSession, land_id: str) -> dict[str, Any] | None:
+    """地块面积（亩）、作物类型、省份编码；地块不存在时返回 None。"""
+    row = (await db.execute(_LOAD_AREA, {"land_id": land_id})).first()
+    if row is None:
+        return None
+    d = dict(row._mapping)
+    area = d.get("area_mu")
+    return {
+        "area_mu": float(area) if area is not None else None,
+        "crop_type": d.get("crop_type"),
+        "province_code": d.get("province_code"),
+    }
+
+
 async def load_land_area_mu(
     db: AsyncSession, land_id: str
 ) -> tuple[bool, float | None]:
-    row = (await db.execute(_LOAD_AREA, {"land_id": land_id})).first()
-    if row is None:
+    info = await load_land_info(db, land_id)
+    if info is None:
         return False, None
-    area = row[0]
-    return True, float(area) if area is not None else None
+    return True, info["area_mu"]
+
+
+async def load_s1_inputs(
+    db: AsyncSession, land_id: str, date_from: date, date_to: date
+) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(
+            _LOAD_S1, {"land_id": land_id, "date_from": date_from, "date_to": date_to}
+        )
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r._mapping)
+        pixels = _jsonish(d.get("pixels"))
+        if isinstance(pixels, list) and pixels:
+            out.append({**d, "pixels": pixels})
+    return out
 
 
 async def load_scene_inputs(
@@ -199,12 +264,32 @@ async def compute_land_series(
     *,
     area_mu: float | None = None,
     thresholds: HarvestProgressThresholds | None = None,
+    land_info: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """计算 [date_from, date_to] 内的序列；额外读取整季上下文（返青、峰值、上期状态）。"""
+    """计算 [date_from, date_to] 内的序列。
+
+    额外读取整季上下文（返青、峰值、上期状态），且至少读取 ``ADAPTIVE_HISTORY_DAYS``
+    的历史供自适应阈值使用，使增量重算与全量补算得到相近的阈值。
+    """
     thr = thresholds or HarvestProgressThresholds.from_env()
-    context_from = date_from - timedelta(days=SEASON_CONTEXT_DAYS)
+    if land_info is None:
+        land_info = await load_land_info(db, land_id) or {}
+    if area_mu is None:
+        area_mu = land_info.get("area_mu")
+    context_from = min(
+        date_from - timedelta(days=SEASON_CONTEXT_DAYS),
+        date_to - timedelta(days=ADAPTIVE_HISTORY_DAYS),
+    )
     scenes = await load_scene_inputs(db, land_id, context_from, date_to)
-    series = compute_harvest_series(scenes, parcel_area_mu=area_mu, thresholds=thr)
+    s1_scenes = await load_s1_inputs(db, land_id, context_from, date_to)
+    series = compute_harvest_series(
+        scenes,
+        parcel_area_mu=area_mu,
+        thresholds=thr,
+        s1_scenes=s1_scenes,
+        crop_type=land_info.get("crop_type"),
+        region_code=land_info.get("province_code"),
+    )
     lo, hi = date_from.isoformat(), date_to.isoformat()
     return [row for row in series if lo <= row["date"] <= hi]
 
@@ -223,11 +308,11 @@ async def recompute_land(
     date_from = date_from or (date_to - timedelta(days=DEFAULT_RECENT_DAYS))
     # 新观测会改写之前若干期：确认候选像元、判定凹陷日、返青切季，都需回头重写。
     date_from = date_from - timedelta(days=REVISION_DAYS)
-    exists, area_mu = await load_land_area_mu(db, land_id)
-    if not exists:
+    info = await load_land_info(db, land_id)
+    if info is None:
         return 0
     rows = await compute_land_series(
-        db, land_id, date_from, date_to, area_mu=area_mu, thresholds=thr
+        db, land_id, date_from, date_to, thresholds=thr, land_info=info
     )
     base = {
         "land_id": land_id,
@@ -240,8 +325,11 @@ async def recompute_land(
         _DELETE_RANGE, {**base, "date_from": date_from, "date_to": date_to}
     )
     await db.execute(_DELETE_OLD_VERSIONS, base)
-    params_json = json.dumps(thr.to_dict(), separators=(",", ":"))
     for row in rows:
+        params_json = json.dumps(
+            {**thr.to_dict(), **(row.get("thresholds") or {})},
+            separators=(",", ":"),
+        )
         await db.execute(
             _UPSERT_ROW,
             {
@@ -267,6 +355,16 @@ async def recompute_land(
                 "confirmed": bool(row.get("confirmed", True)),
                 "official": bool(row.get("official", True)),
                 "params": params_json,
+                "confidence": row.get("confidence"),
+                "confidence_level": row.get("confidence_level"),
+                "confidence_reasons": json.dumps(row.get("confidence_reasons") or []),
+                "confirmed_by": row.get("confirmed_by"),
+                "gap_days": row.get("gap_days"),
+                "s1_date": _iso_date(row.get("s1_date")),
+                "s1_delta_vh_db": row.get("s1_delta_vh_db"),
+                "s1_delta_ratio_db": row.get("s1_delta_ratio_db"),
+                "s1_agreement": row.get("s1_agreement"),
+                "threshold_source": row.get("threshold_source"),
             },
         )
     return len(rows)
@@ -277,7 +375,9 @@ _LIST_STORED = text(
     SELECT obs_date, sensor, scene_id, status, harvested_pct, newly_harvested_pct,
            harvested_area_mu, parcel_area_mu, valid_pct, mean_ndvi, greenness,
            peak_greenness, peak_date, season_start, vegetation_index, confirmed,
-           official
+           official, confidence, confidence_level, confidence_reasons, confirmed_by,
+           gap_days, s1_date, s1_delta_vh_db, s1_delta_ratio_db, s1_agreement,
+           threshold_source
     FROM agric_satellite.parcel_harvest_progress
     WHERE land_id = :land_id AND sensor = :sensor AND method_version = :method_version
       AND obs_date >= :date_from AND obs_date <= :date_to
@@ -325,9 +425,24 @@ async def list_stored(
                 "vegetation_index": d.get("vegetation_index"),
                 "confirmed": bool(d.get("confirmed", True)),
                 "official": bool(d.get("official")),
+                "confidence": _num(d.get("confidence"), 3),
+                "confidence_level": d.get("confidence_level"),
+                "confidence_reasons": _reasons(d.get("confidence_reasons")),
+                "confirmed_by": d.get("confirmed_by"),
+                "gap_days": d.get("gap_days"),
+                "s1_date": d["s1_date"].isoformat() if d.get("s1_date") else None,
+                "s1_delta_vh_db": _num(d.get("s1_delta_vh_db")),
+                "s1_delta_ratio_db": _num(d.get("s1_delta_ratio_db")),
+                "s1_agreement": d.get("s1_agreement"),
+                "threshold_source": d.get("threshold_source"),
             }
         )
     return out
+
+
+def _reasons(value: Any) -> list[str]:
+    value = _jsonish(value)
+    return [str(v) for v in value] if isinstance(value, list) else []
 
 
 def _iso_date(value: Any) -> date | None:
@@ -432,7 +547,7 @@ async def enqueue_lands(
 def harvest_target_from_scene_result(
     envelope: dict[str, Any], stats: dict[str, Any]
 ) -> tuple[str, date | None] | None:
-    """从场景结果回执中取 (land_id, 场景日期)；非 S2 或未入库时返回 None。"""
+    """从场景结果回执中取 (land_id, 场景日期)；非 S2/S1 或未入库时返回 None。"""
     while isinstance(envelope.get("apply"), dict):
         envelope = envelope["apply"]
     while isinstance(stats.get("apply"), dict):
@@ -460,7 +575,7 @@ def harvest_target_from_scene_result(
 
     land_id = first("land_id")
     sensor = str(first("sensor") or "").upper()
-    if not land_id or (sensor and sensor != SENSOR):
+    if not land_id or (sensor and sensor not in TRIGGER_SENSORS):
         return None
     raw_date = first("date")
     scene_date = None

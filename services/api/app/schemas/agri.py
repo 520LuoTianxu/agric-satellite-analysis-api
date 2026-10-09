@@ -370,7 +370,7 @@ class NdviDayGradeSharesOut(BaseModel):
 
 
 class HarvestProgressItem(BaseModel):
-    """一个真实观测日的已收获面积占比（无插值，季内单调不减）。"""
+    """一个观测日（或 interpolate=daily 时的插值日）的已收获面积占比，季内单调不减。"""
 
     date: date
     sensor: str = "S2"
@@ -384,7 +384,7 @@ class HarvestProgressItem(BaseModel):
     status: str = Field(
         description="off_season（季外，0%）| growing（本季未开始收获）| harvesting | harvested"
     )
-    valid_pct: float = Field(description="无云有效像元占比")
+    valid_pct: float | None = Field(None, description="无云有效像元占比（插值行为空）")
     mean_ndvi: float | None = Field(
         None, description="有效像元原始 NDVI 均值（仅供参考）"
     )
@@ -402,6 +402,35 @@ class HarvestProgressItem(BaseModel):
     )
     scene_id: str | None = None
     official: bool = True
+    confidence: float | None = Field(
+        None, ge=0, le=1, description="本期结果置信度 0–1（公式见 ADR）"
+    )
+    confidence_level: Literal["high", "medium", "low"] | None = Field(
+        None, description="high ≥0.75，medium ≥0.50，其余 low"
+    )
+    confidence_reasons: list[str] = Field(
+        default_factory=list,
+        description=(
+            "原因码：low_valid_pct、few_pixels、long_gap、small_margin、unconfirmed、"
+            "s1_confirmed、s1_agree、s1_disagree、interpolated"
+        ),
+    )
+    confirmed_by: Literal["s2", "s1"] | None = Field(
+        None, description="已确认的依据：下一期光学（s2）或 Sentinel-1 佐证（s1）"
+    )
+    gap_days: int | None = Field(None, description="距上一有效光学观测的天数")
+    s1_date: date | None = Field(None, description="用于比对的 Sentinel-1 影像日期")
+    s1_delta_vh_db: float | None = Field(
+        None, description="S1 地块中位 VH 相对本季峰值期的变化（dB）"
+    )
+    s1_delta_ratio_db: float | None = Field(
+        None, description="S1 地块中位 VH−VV 相对本季峰值期的变化（dB）"
+    )
+    s1_agreement: Literal["agree", "disagree", "ambiguous"] | None = None
+    threshold_source: str | None = Field(
+        None, description="阈值来源：profile:<键> | adaptive | default"
+    )
+    interpolated: bool = Field(False, description="true 表示按日插值的展示点，非真实观测")
 
 
 class HarvestProgressOut(BaseModel):
@@ -415,4 +444,6 @@ class HarvestProgressOut(BaseModel):
     rule_zh: str
     source: Literal["stored", "live"] = "stored"
     thresholds: dict[str, Any] = Field(default_factory=dict)
+    threshold_source: str | None = None
+    interpolate: Literal["none", "daily"] = "none"
     items: list[HarvestProgressItem] = Field(default_factory=list)

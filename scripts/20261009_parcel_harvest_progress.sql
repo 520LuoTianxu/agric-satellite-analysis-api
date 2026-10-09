@@ -48,8 +48,9 @@ ALTER TABLE agric_satellite.parcel_harvest_progress
     DROP COLUMN IF EXISTS peak_ndvi;
 ALTER TABLE agric_satellite.parcel_harvest_progress
     DROP CONSTRAINT IF EXISTS parcel_harvest_progress_status_ck;
+-- 只清 v1；更新版本（v3 起）的结果由服务按地块重算时自行替换，重复执行本脚本不会误删。
 DELETE FROM agric_satellite.parcel_harvest_progress
-WHERE method_version <> 's2_season_monotonic_v2';
+WHERE method_version = 's2_ndvi_peak_drop_v1';
 ALTER TABLE agric_satellite.parcel_harvest_progress
     ADD CONSTRAINT parcel_harvest_progress_status_ck
         CHECK (status IN ('off_season', 'growing', 'harvesting', 'harvested'));
