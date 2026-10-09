@@ -1123,10 +1123,11 @@ async def get_harvest_progress(
     date_from: date | None = Query(None, alias="from", description="默认当年1月1日"),
     date_to: date | None = Query(None, alias="to", description="默认今天"),
     include_zero: bool = Query(
-        False, description="是否返回已收获占比为 0 的观测日（默认隐藏）"
+        False,
+        description="是否返回已收获占比为 0 的观测日（季外与未开始收获，默认隐藏）",
     ),
 ):
-    """按观测日期返回地块已收获面积占比及较上期新增（首版 NDVI 启发式估算）。
+    """按观测日期返回地块已收获面积占比及较上期新增（分季、单调的启发式估算）。
 
     优先读 ``parcel_harvest_progress`` 落库结果；区间内尚无落库记录时现场计算
     并加入重算队列，后续请求即可直接读表。

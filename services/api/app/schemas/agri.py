@@ -370,20 +370,36 @@ class NdviDayGradeSharesOut(BaseModel):
 
 
 class HarvestProgressItem(BaseModel):
-    """一个真实观测日的已收获面积占比（无插值）。"""
+    """一个真实观测日的已收获面积占比（无插值，季内单调不减）。"""
 
     date: date
     sensor: str = "S2"
-    harvested_pct: float = Field(description="已收获像元占有效像元百分比 0–100")
-    newly_harvested_pct: float = Field(description="较上一有效观测日新增的百分点，不为负")
+    harvested_pct: float = Field(
+        description="本季已收获作物像元占本季作物像元百分比 0–100，季内单调不减"
+    )
+    newly_harvested_pct: float = Field(
+        description="较同季上一有效观测日新增的百分点，不为负；新一季首期等于本期占比"
+    )
     harvested_area_mu: float | None = None
     status: str = Field(
-        description="no_growth | growing | not_harvested | harvesting | harvested"
+        description="off_season（季外，0%）| growing（本季未开始收获）| harvesting | harvested"
     )
     valid_pct: float = Field(description="无云有效像元占比")
-    mean_ndvi: float | None = None
-    peak_ndvi: float | None = None
-    peak_date: date | None = None
+    mean_ndvi: float | None = Field(
+        None, description="有效像元原始 NDVI 均值（仅供参考）"
+    )
+    greenness: float | None = Field(
+        None, description="有效像元统一绿度中位数（0≈裸土，1≈茂密植被）"
+    )
+    peak_greenness: float | None = Field(None, description="本季地块绿度峰值")
+    peak_date: date | None = Field(None, description="本季地块绿度峰值日期")
+    season_start: date | None = Field(None, description="本季返青日期（季标识）")
+    vegetation_index: str | None = Field(
+        None, description="本期使用的植被指数（NDVI/EVI，按产品辐射定标来源选择）"
+    )
+    confirmed: bool = Field(
+        True, description="false 表示含尚待下一期影像确认的候选像元（仅最新几期）"
+    )
     scene_id: str | None = None
     official: bool = True
 
