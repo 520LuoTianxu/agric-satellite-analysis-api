@@ -33,7 +33,7 @@ dependencies = [
 include = ["app*"]
 
 [tool.setuptools.package-data]
-"app.reports.land_assessment" = ["fonts/*.ttf"]
+"app.reports.land_assessment" = ["fonts/*.ttf", "assets/*.jpg"]
 
 [build-system]
 requires = ["setuptools>=68.0"]
