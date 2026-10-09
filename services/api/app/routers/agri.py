@@ -491,6 +491,7 @@ def _serialize_scene_page(
 
 
 async def _agri_ready(db: AsyncSession) -> None:
+    """确认遥感业务 schema 已安装，缺迁移时尽早返回可操作的 503 错误。"""
     q = await db.execute(
         text(
             "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'agric_satellite' LIMIT 1"
@@ -509,7 +510,7 @@ async def agri_stats(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Read-only row counts for agri tables (import health check)."""
+    """只读汇总遥感业务表行数，供数据导入和同步健康检查使用。"""
     await _agri_ready(db)
     tables = [
         "land_parcels",
@@ -538,6 +539,7 @@ async def get_land(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """读取权威地块元数据；场景像元和媒体由独立接口按需查询。"""
     await _agri_ready(db)
     row = (
         await db.execute(
@@ -761,6 +763,7 @@ async def land_scenes_summary(
     ctx: Annotated[OrgContext, Depends(_reader)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """汇总地块各传感器的场景数量和观测日期范围，不读取像元正文。"""
     await _agri_ready(db)
     exists = (
         await db.execute(
@@ -846,7 +849,7 @@ async def harvest_detect_for_land(
     label: str | None = Query(None),
     body: dict[str, Any] | None = Body(None),
 ):
-    """Observation-only harvest day from official NDVI (soft-fail → uncertain)."""
+    """仅用正式 NDVI 观测识别收获信号；证据不足或处理失败时降级为不确定。"""
     try:
         await _agri_ready(db)
         exists = (

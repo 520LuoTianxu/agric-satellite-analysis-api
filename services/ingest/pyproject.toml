@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "agric-satellite-analysis ingest Celery worker (STAC / weather / soil / raster)"
 requires-python = ">=3.11"
 dependencies = [
-    "sqlalchemy[asyncio]>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.0,<2.1",
     "asyncpg>=0.29.0",
     "psycopg2-binary>=2.9.0",
     "pydantic[email]>=2.0.0",

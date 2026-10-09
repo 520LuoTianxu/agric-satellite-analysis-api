@@ -30,6 +30,7 @@ async def phenology(
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
 ):
+    """在有界历史窗口内推断单地块物候，避免无日期范围的场景扫描。"""
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     end = end_date or today
     start = start_date or end - timedelta(days=550)
@@ -53,6 +54,7 @@ async def analyze(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db=Depends(get_db),
 ):
+    """生成多地块遥感洞察；历史模式保存结果快照，近期模式只返回本次计算。"""
     result = await build_insights(db, body)
     now = datetime.now(timezone.utc)
     result.update(snapshot_id=None, created_at=now.isoformat())
@@ -82,6 +84,7 @@ async def history(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
+    """分页读取历史分析索引，只返回请求摘要以避免列表重复传输完整报告。"""
     predicate = (
         Job.type == "parcel_insights",
         Job.status == "succeeded",
@@ -115,6 +118,7 @@ async def history(
 
 
 async def read_snapshot(db, snapshot_id: UUID, ctx: OrgContext) -> dict:
+    """读取已固化的历史结果，保证详情页和 PDF 不随实时观测更新而漂移。"""
     job = (
         await db.execute(
             select(Job).where(
@@ -135,6 +139,7 @@ async def read_snapshot(db, snapshot_id: UUID, ctx: OrgContext) -> dict:
 async def detail(
     snapshot_id: UUID, ctx: Annotated[OrgContext, Depends(_reader)], db=Depends(get_db)
 ):
+    """返回已保存的历史分析快照，不因后续新影像入库而重新计算。"""
     return await read_snapshot(db, snapshot_id, ctx)
 
 
@@ -142,6 +147,7 @@ async def detail(
 async def report(
     snapshot_id: UUID, ctx: Annotated[OrgContext, Depends(_reader)], db=Depends(get_db)
 ):
+    """在线程池渲染历史快照，避免 PDF 绘图占用异步 API 事件循环。"""
     from app.reports.parcel_insights import render_report
 
     snapshot = await read_snapshot(db, snapshot_id, ctx)

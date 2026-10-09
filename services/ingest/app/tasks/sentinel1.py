@@ -531,9 +531,15 @@ def _s1_processing_version(properties: dict[str, Any]) -> str | None:
 
 
 def search_s1_scenes(
-    land_geom_geojson: dict, date_from: date, date_to: date, *, dedupe_week: bool = True
+    land_geom_geojson: dict,
+    date_from: date,
+    date_to: date,
+    *,
+    dedupe_week: bool = True,
+    target_dates: set[date] | None = None,
+    require_sigma0: bool = False,
 ) -> list[dict]:
-    """默认每周优选IW双极化景；聚合窗口保留全部景以覆盖不同轨道的地块。"""
+    """默认每周优选IW双极化景；定向回算可限定日期并要求VV/VH双LUT。"""
     t0 = time.perf_counter()
     catalog = open_s1_stac_client()
     search = catalog.search(
@@ -547,6 +553,8 @@ def search_s1_scenes(
     items = list(search.items())
     skipped_no_vvvh = 0
     skipped_incomplete_calibration = 0
+    skipped_no_sigma0_lut = 0
+    skipped_missing_datetime = 0
     logger.info(
         "s1_stac_search_results",
         count=len(items),
@@ -561,6 +569,18 @@ def search_s1_scenes(
 
     weekly: dict[str, Any] = {}
     for item in items:
+        acquisition_datetime = item.datetime
+        if acquisition_datetime is None:
+            if target_dates is not None:
+                # 定向升级必须精确对应既有产品日期，缺采集时刻的条目不能猜测日期。
+                skipped_missing_datetime += 1
+                continue
+            item_date = date_from
+        else:
+            # 历史产品日期由原流程的 item.datetime.date() 生成，回算复用此规则避免跨日错位。
+            item_date = acquisition_datetime.date()
+        if target_dates is not None and item_date not in target_dates:
+            continue
         assets = item.assets or {}
         vv = assets.get("vv") or assets.get("VV")
         vh = assets.get("vh") or assets.get("VH")
@@ -593,7 +613,15 @@ def search_s1_scenes(
                 has_vh_calibration=bool(vh_calibration_href),
             )
             continue
-        item_date = item.datetime.date() if item.datetime else date_from
+        if require_sigma0 and not (vv_calibration_href and vh_calibration_href):
+            skipped_no_sigma0_lut += 1
+            logger.info(
+                "s1_scene_skipped",
+                reason="sigma_nought_lut_pair_required",
+                scene_id=item.id,
+                acquisition_date=item_date.isoformat(),
+            )
+            continue
         week_key = item_date.isocalendar()[:2]
         week_str = f"{week_key[0]}-W{week_key[1]:02d}" if dedupe_week else item.id
         # Prefer dual-pol IW GRDH (DV) when multiple per week
@@ -661,6 +689,19 @@ def search_s1_scenes(
             skipped=skipped_incomplete_calibration,
             kept_weeks=len(weekly),
         )
+    if skipped_no_sigma0_lut:
+        logger.info(
+            "s1_stac_skipped_no_sigma0_lut",
+            skipped=skipped_no_sigma0_lut,
+            kept_scenes=len(weekly),
+            target_date_count=len(target_dates) if target_dates is not None else None,
+        )
+    if skipped_missing_datetime:
+        logger.info(
+            "s1_stac_skipped_missing_datetime",
+            skipped=skipped_missing_datetime,
+            target_date_count=len(target_dates) if target_dates is not None else None,
+        )
 
     scenes = []
     for week_str in sorted(weekly.keys()):
@@ -677,6 +718,7 @@ def search_s1_scenes(
                 "platform": e.get("platform"),
                 "processing_version": e.get("processing_version"),
                 "acquisition_datetime": e.get("acquisition_datetime"),
+                "selection_score": e["score"],
                 "geometry": e["item"].geometry,
             }
         )

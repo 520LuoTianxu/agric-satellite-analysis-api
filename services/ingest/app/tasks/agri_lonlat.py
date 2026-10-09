@@ -106,6 +106,7 @@ def parcel_cloud_from_scl_window(
 
 
 def agri_optical_index_defs():
+    """从统一指数注册表读取光学产品定义，避免处理入口各自维护公式。"""
     return [get_index(k) for k in AGRI_OPTICAL_INDEX_KEYS]
 
 
@@ -152,6 +153,7 @@ def _dsn() -> str:
 
 
 def count_parcel_scene_rows(session, land_id: str, sensor: str | None = None) -> int:
+    """优先通过内部 API 查询已有场景数；内部接口不可用时回退当前数据库。"""
     try:
         from agric_satellite_analysis_common.internal_api import (
             agri_scenes_summary,
@@ -368,6 +370,7 @@ def upsert_optical_lonlat_row(
     *,
     mq_task_id: str | None = None,
 ) -> str | None:
+    """兼容旧调用名；实际负责上传像元并发布回执，落库由结果写入器完成。"""
     return publish_optical_lonlat_to_oss_mq(
         row, mq_task_id=mq_task_id
     )

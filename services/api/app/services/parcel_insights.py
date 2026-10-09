@@ -81,6 +81,7 @@ def official_points(rows: list[dict]) -> list[dict]:
 
 
 def summary(points: list[dict]) -> dict:
+    """汇总有效观测数量、NDVI/NDMI统计和最大日期间隔，不对缺测日插值。"""
     values = [p["ndvi"] for p in points]
     moisture = [p["ndmi"] for p in points if p.get("ndmi") is not None]
     return {
@@ -238,6 +239,8 @@ async def load_points(
     end: date,
     reference: tuple[date, date] | None = None,
 ) -> dict[str, list[dict]]:
+    """一次读取目标期和可选参照期的 S2 候选景，再按统一质量口径去重。"""
+    # 将所选与参照日期并入同一条地块集合查询，并只取洞察所需字段，避免逐地块往返或扫描整段无关历史。
     params = {
         "land_ids": land_ids,
         "start": start,
@@ -325,6 +328,7 @@ def _sample_spatial_pixels(valid: list[list[float]]) -> list[list[float]]:
 
 
 def _spatial_snapshot_from_data(point: dict, pixel_data: Any) -> dict | None:
+    """仅用明确标清且坐标/NDVI有效的像元计算全量统计，再生成地图代表点。"""
     if not isinstance(pixel_data, dict) or pixel_data.get("format") != "lonlat_v1":
         return None
     pixels = pixel_data.get("pixels") or []
@@ -365,6 +369,7 @@ def _spatial_snapshot_from_data(point: dict, pixel_data: Any) -> dict | None:
 async def spatial_snapshots(
     db, points_by_land: dict[str, dict | None]
 ) -> dict[str, dict | None]:
+    """一次批量读取各地块最新展示景的像元，并按地块生成空间快照。"""
     # 多地块洞察一次批量取各自最新展示景，避免在地块循环内串行产生最多20次数据库往返。
     snapshots = {land_id: None for land_id in points_by_land}
     requested = [
@@ -422,6 +427,7 @@ async def spatial_snapshots(
 
 
 async def build_insights(db, request: InsightsRequest) -> dict[str, Any]:
+    """组合有效 S2 时序、降雨、物候、收获与空间证据，并保留缺测和不确定状态。"""
     lands = (
         (
             await db.execute(

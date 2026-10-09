@@ -311,6 +311,7 @@ def _download_json(url: str) -> Any | None:
 
 
 def _is_lonlat_scene_product(obj: Any) -> bool:
+    """只接收字段齐全且像元格式为 lonlat_v1 的场景对象进入场景表。"""
     if not isinstance(obj, dict):
         return False
     pixel_data = obj.get("pixel_data")
@@ -329,7 +330,7 @@ def _is_lonlat_scene_product(obj: Any) -> bool:
 def apply_parcel_scene_product(
     obj: dict[str, Any], *, json_oss_key: str | None = None
 ) -> None:
-    """Upsert one lonlat_v1 scene product into agric_satellite.parcel_scene_products."""
+    """解析并幂等写入单景地块产品；高频筛选字段单独入列，像元正文保留为 JSONB。"""
     pixel_data = obj.get("pixel_data")
     pixel_data_obj: dict[str, Any] = {}
     if isinstance(pixel_data, dict):
@@ -411,6 +412,7 @@ def apply_parcel_scene_product(
 
 
 def apply_weather_payload(payload: dict[str, Any]) -> int:
+    """按地块和日期写入天气行，并在回填后重算对应地块的历史滚动水分指标。"""
     rows = payload.get("rows") or []
     if not isinstance(rows, list) or not rows:
         return 0
@@ -513,7 +515,7 @@ def apply_weather_payload(payload: dict[str, Any]) -> int:
 
 
 def apply_soil_payload(payload: dict[str, Any]) -> None:
-    """Replace soil profile/layers/summary for field from inline payload."""
+    """按地块整体替换土壤剖面、分层和汇总，避免不同采样批次的数据混合。"""
     land_id = payload.get("land_id")
     profile = payload.get("profile") or {}
     layers = payload.get("layers") or []
@@ -523,7 +525,7 @@ def apply_soil_payload(payload: dict[str, Any]) -> None:
 
     session = SyncSession()
     try:
-        # Delete old profiles (cascade layers) + summary for field
+        # 土壤资料按地块整组替换：先清理旧剖面及其分层，再写入本次采样，避免新旧结果混用。
         old_ids = (
             session.execute(
                 text(
@@ -679,7 +681,7 @@ def _apply_assessment_job_progress(
     *,
     status: str = "success",
 ) -> bool:
-    """Update agric_satellite.jobs from assessment_report ResultMessage when job_id present."""
+    """将评估报告回执写回 API 作业状态；下载机没有对应作业时返回未更新。"""
     job_id = payload.get("job_id")
     if not job_id:
         return False
@@ -787,7 +789,7 @@ def _apply_season_growth_job_progress(
     *,
     status: str = "success",
 ) -> bool:
-    """Update agric_satellite.jobs from season_growth_report ResultMessage when job_id present."""
+    """将季报回执写回 API 作业状态；下载机没有对应作业时返回未更新。"""
     job_id = payload.get("job_id")
     if not job_id:
         return False
@@ -873,6 +875,7 @@ def _apply_domain_from_payload(
     *,
     status: str = "success",
 ) -> dict[str, Any]:
+    """按业务类型分发天气、土壤和报告回执，并跳过不完整的 OSS 占位数据。"""
     stats: dict[str, Any] = {}
     if not payload or not isinstance(payload, dict):
         return stats
@@ -890,8 +893,7 @@ def _apply_domain_from_payload(
         apply_soil_payload(payload)
         stats["soil"] = "upserted"
     elif kind == "assessment_report":
-        # PDF already on OSS. Cross-host: Job row lives on API/process DB —
-        # update it here from ResultMessage payload (download host may lack Job).
+        # PDF已存入OSS；作业行只在API侧数据库，因此由跨主机回执携带的job_id回写状态。
         job_updated = _apply_assessment_job_progress(payload, status=status)
         stats["assessment_report"] = {
             "recorded": True,
@@ -924,7 +926,7 @@ def apply_domain_from_payload(
     *,
     status: str = "success",
 ) -> dict[str, Any]:
-    """Public alias for domain apply (assessment / season / weather / soil)."""
+    """公开的业务回执适配入口，统一转交天气、土壤和报告结果分发器。"""
     return _apply_domain_from_payload(payload, status=status)
 
 
@@ -996,18 +998,15 @@ def _download_and_apply_oss(
 
 
 def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Apply a ResultMessage-like or complete-result dict.
+    """统一解析任务回执并分发场景、天气、土壤及报告结果。
 
-    Accepted shapes:
-    - ``{kind, ...}`` domain inline (assessment / weather / soil / season_growth)
-    - ``{status, payload|inline, oss_urls, extras?}`` MQ-like envelope
-    - ``{apply: {...}}`` nested domain payload
-    - ``{scenes: [lonlat_v1, ...]}`` inline scene list
+    兼容直接业务对象、MQ外层回执、嵌套apply对象和lonlat_v1场景列表。
+    返回处理统计；仅有派发凭证或没有业务载荷时标记为跳过。
     """
     if not isinstance(envelope, dict):
         return {"skipped": True, "reason": "non_object"}
 
-    # Nested apply key
+    # 兼容由apply包裹的历史/内部回执，递归复用同一套类型和状态归一化逻辑。
     if isinstance(envelope.get("apply"), dict) and "kind" not in envelope:
         inner = apply_result_envelope(envelope["apply"])
         return {"apply": inner}
@@ -1020,7 +1019,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
     stats: dict[str, Any] = {}
 
-    # Direct domain kind on the envelope itself
+    # 直接业务对象无需再解包，按其kind分发后即可结束本次处理。
     if envelope.get("kind") in (
         "weather_daily",
         "soil_profile",
@@ -1030,7 +1029,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         stats["domain"] = _apply_domain_from_payload(envelope, status=status)
         return stats
 
-    # Inline scene list
+    # 内联场景列表只接受格式有效的lonlat_v1产品，避免把任意对象写入场景表。
     scenes = envelope.get("scenes")
     if isinstance(scenes, list):
         n = 0
@@ -1073,7 +1072,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     if inline is None:
         inline = envelope.get("inline")
     if isinstance(inline, dict):
-        # Prefer extras.job_id when payload omitted it
+        # 报告载荷未带作业ID时使用外层extras补齐，确保完成回执能更新原作业。
         extras = envelope.get("extras")
         if (
             inline.get("kind") in ("assessment_report", "season_growth_report")
@@ -1092,7 +1091,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         stats["domain"] = _apply_domain_from_payload(inline, status=status)
 
     if not stats:
-        # Dispatch-only complete payloads (celery_id / dispatched) — no-op
+        # 仅包含派发凭证的消息不是业务结果，不能误当作入库失败或成功回执。
         if envelope.get("dispatched") or envelope.get("celery_id"):
             return {"skipped": True, "reason": "dispatch_ack"}
         return {"skipped": True, "reason": "no_domain_payload"}
@@ -1100,7 +1099,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_complete_result(result: dict[str, Any] | None) -> dict[str, Any]:
-    """Entry point for work_items complete.result JSON."""
+    """应用 work_items 的 complete.result；单条回执异常会记录日志并返回错误摘要。"""
     if not result:
         return {"skipped": True, "reason": "empty"}
     try:
@@ -1113,5 +1112,5 @@ def apply_complete_result(result: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def handle_result_message_dict(payload: dict[str, Any]) -> dict[str, Any]:
-    """Apply a raw ResultMessage dict (without mq_task_results row write)."""
+    """处理原始 ResultMessage 字典，但不写 mq_task_results 去重记录。"""
     return apply_result_envelope(payload)

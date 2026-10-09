@@ -396,6 +396,126 @@ class SatelliteDecloudScheduleOutbox(Base):
     )
 
 
+class S1Sigma0DispatchOutbox(Base):
+    """持久化 S1 Sigma0 子任务派发意图，恢复数据库提交后的消息缺口。"""
+
+    __tablename__ = "s1_sigma0_dispatch_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'discarded')",
+            name="s1_sigma0_dispatch_outbox_status_ck",
+        ),
+        CheckConstraint(
+            "attempts >= 0", name="s1_sigma0_dispatch_outbox_attempts_ck"
+        ),
+        Index(
+            "ix_s1_sigma0_dispatch_outbox_pending",
+            "available_at",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ix_s1_sigma0_dispatch_outbox_expired_lease",
+            "lease_until",
+            postgresql_where=text("status = 'processing'"),
+        ),
+    )
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    land_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class SatelliteBatchDispatchOutbox(Base):
+    """持久化通用卫星批任务的MQ派发意图，保证Job提交后仍可恢复投递。"""
+
+    __tablename__ = "satellite_batch_dispatch_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'discarded')",
+            name="satellite_batch_dispatch_outbox_status_ck",
+        ),
+        CheckConstraint(
+            "attempts >= 0", name="satellite_batch_dispatch_outbox_attempts_ck"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(extras_json) = 'object'",
+            name="satellite_batch_dispatch_outbox_extras_ck",
+        ),
+        Index(
+            "ix_satellite_batch_dispatch_outbox_pending",
+            "available_at",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ix_satellite_batch_dispatch_outbox_expired_lease",
+            "lease_until",
+            postgresql_where=text("status = 'processing'"),
+        ),
+    )
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    land_id: Mapped[str] = mapped_column(Text, nullable=False)
+    extras_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

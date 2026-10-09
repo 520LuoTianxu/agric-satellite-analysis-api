@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.middleware.internal_auth import InternalAuth
@@ -96,6 +96,7 @@ async def apply_results(
 @router.post("/cache", response_model=CacheResponse)
 async def cache_results(
     body: ApplyRequest,
+    request: Request,
     _: InternalAuth,
 ):
     """仅缓存下载机结果通知，实际 OSS 下载和 PG 入库由 API 后台消费完成。"""
@@ -103,7 +104,9 @@ async def cache_results(
 
     envelope = _envelope_from_body(body)
     try:
-        cached = await enqueue_scene_result(envelope)
+        # 优先复用应用生命周期管理的Redis客户端；无lifespan上下文时由服务层兼容创建。
+        redis_client = getattr(request.app.state, "redis_client", None)
+        cached = await enqueue_scene_result(envelope, redis_client)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

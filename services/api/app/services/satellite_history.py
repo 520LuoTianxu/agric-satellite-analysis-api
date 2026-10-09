@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from app.core.config import settings
 from app.models.tables import Job, LandParcel
@@ -43,8 +43,6 @@ async def backfill_satellite_history(
 ) -> dict[str, Any]:
     """下发历史 S1/S2 回填；共享范围只在 Job 参数中暂存，不写 OSS 或分组表。"""
     from app.core.database import async_session
-    from app.mq_publish import publish_api_task
-
     if date_from is None or date_to is None:
         default_from, default_to = default_history_window(as_of=date_to, years=years)
         date_from = date_from or default_from
@@ -55,7 +53,14 @@ async def backfill_satellite_history(
     requested = list(dict.fromkeys(str(value).strip() for value in (land_ids or ()) if str(value).strip()))
     execution_id = parent_job_id or uuid.uuid4()
     async with async_session() as db:
-        stmt = select(LandParcel).where(LandParcel.deleted_at.is_(None))
+        # 全量历史回填只需要ID和几何规划字段，避免把来源/土壤等大JSON列全部读入API进程。
+        stmt = select(LandParcel).options(
+            load_only(
+                LandParcel.land_id,
+                LandParcel.boundary_geojson,
+                LandParcel.boundary_srid,
+            )
+        ).where(LandParcel.deleted_at.is_(None))
         if land_ids is not None:
             stmt = stmt.where(LandParcel.land_id.in_(requested))
         lands = list((await db.execute(stmt.order_by(LandParcel.land_id))).scalars().all())
@@ -85,12 +90,14 @@ async def backfill_satellite_history(
         parent = Job(
             id=execution_id,
             type="satellite_history_backfill",
-            status="pending",
+            status="running" if jobs else "completed",
             progress_json={
-                "stage": "queued",
+                "stage": "queued" if jobs else "completed",
                 "land_count": len(valid_lands),
                 "group_count": len(groups),
                 "job_count": len(jobs),
+                "queued_count": len(jobs),
+                "failed_count": 0,
             },
             params_json={
                 "land_ids": [str(land.land_id) for land in valid_lands],
@@ -104,30 +111,7 @@ async def backfill_satellite_history(
         db.add(parent)
         await db.commit()
 
-        failed_job_ids: list[str] = []
-        for job in jobs:
-            try:
-                await asyncio.to_thread(
-                    publish_api_task,
-                    type="satellite_batch",
-                    land_id=job.land_id,
-                    task_id=str(job.id),
-                    extras={"job_id": str(job.id)},
-                )
-            except Exception as exc:
-                job.status = "failed"
-                job.error = f"历史遥感任务派发失败：{str(exc)[:3900]}"
-                failed_job_ids.append(str(job.id))
-        parent.status = "partial" if failed_job_ids else ("running" if jobs else "completed")
-        parent.progress_json = {
-            **(parent.progress_json or {}),
-            "stage": "dispatched" if jobs else "completed",
-            "queued_count": len(jobs) - len(failed_job_ids),
-            "failed_count": len(failed_job_ids),
-        }
-        await db.commit()
-
-    result_status = "partial" if failed_job_ids else ("queued" if jobs else "completed")
+    result_status = "queued" if jobs else "completed"
     return {
         "status": result_status,
         "parent_job_id": str(execution_id),
@@ -137,8 +121,8 @@ async def backfill_satellite_history(
         "missing_land_ids": missing_land_ids,
         "group_count": len(groups),
         "job_count": len(jobs),
-        "queued_job_ids": [str(job.id) for job in jobs if str(job.id) not in failed_job_ids],
-        "failed_job_ids": failed_job_ids,
+        "queued_job_ids": [str(job.id) for job in jobs],
+        "failed_job_ids": [],
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
     }

@@ -481,6 +481,8 @@ async def create_assessment_reports_batch(
             force=body.force,
             parent_job_id=batch_id,
             chunk_days=settings.index_backfill_chunk_days,
+            dispatch_priority=INTERACTIVE_REPORT_PRIORITY,
+            dispatch_extras={"assessment_batch_id": str(batch_id)},
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -537,29 +539,18 @@ async def create_assessment_reports_batch(
     db.add(parent)
     for job in report_jobs:
         db.add(job)
+    for job in satellite_jobs:
+        job.params_json = {
+            **(job.params_json or {}),
+            "dispatch_status": "queued",
+            "mq_task_id": str(job.id),
+        }
     await db.commit()
 
     try:
         from app.mq_publish import publish_api_task
 
-        # 先派发共享遥感任务，再派发天气/土壤和报告 follow-up，
-        # 确保报告任务天然等待同一批次的遥感覆盖，而不是重复逐地块下载。
-        for job in satellite_jobs:
-            task_id = str(job.id)
-            mq_task_id = await asyncio.to_thread(
-                publish_api_task,
-                type="satellite_batch",
-                land_id=str(job.land_id),
-                task_id=task_id,
-                extras={"job_id": task_id, "assessment_batch_id": str(batch_id)},
-                priority=INTERACTIVE_REPORT_PRIORITY,
-            )
-            job.params_json = {
-                **(job.params_json or {}),
-                "dispatch_status": "queued",
-                "mq_task_id": mq_task_id,
-            }
-
+        # 遥感派发意图已与子Job同事务保存；报告入口仍派发天气/土壤后续任务。
         report_by_land = {str(job.land_id): job for job in report_jobs}
         for land in ordered_lands:
             land_id = str(land.land_id)
@@ -802,7 +793,7 @@ async def create_assessment_report(
         if pull_data:
             # 报告单地块入口也先建立 10km 共享窗口任务，bootstrap 只拉天气/土壤，
             # 避免同一个报告请求又启动旧的单地块遥感下载链路。
-            # publish_api_task also inserts work_items when dual|claim (D4).
+            # WorkItem或MQ Outbox已在创建子Job时同事务写入，后续只需等待遥感覆盖。
             _, satellite_jobs, _ = await create_satellite_batch_jobs(
                 db,
                 [field],
@@ -812,6 +803,7 @@ async def create_assessment_report(
                 force=False,
                 parent_job_id=job.id,
                 chunk_days=settings.index_backfill_chunk_days,
+                dispatch_priority=INTERACTIVE_REPORT_PRIORITY,
             )
             satellite_job_ids = [str(item.id) for item in satellite_jobs]
             job.params_json = {
@@ -819,15 +811,6 @@ async def create_assessment_report(
                 "satellite_batch_job_ids": satellite_job_ids,
             }
             await db.commit()
-            for satellite_job in satellite_jobs:
-                await asyncio.to_thread(
-                    publish_api_task,
-                    type="satellite_batch",
-                    land_id=satellite_job.land_id,
-                    task_id=str(satellite_job.id),
-                    extras={"job_id": str(satellite_job.id)},
-                    priority=INTERACTIVE_REPORT_PRIORITY,
-                )
 
             assessment_mq_task_id = str(uuid.uuid4())
             bootstrap_extras: dict[str, Any] = {

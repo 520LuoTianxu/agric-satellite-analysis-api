@@ -19,7 +19,10 @@ from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 from app.core.config import settings
 from app.models.tables import Job, LandParcel
 from app.services.mysql_land_sync import sync_selected_lands
-from app.services.satellite_batch import build_satellite_batch_jobs
+from app.services.satellite_batch import (
+    build_satellite_batch_jobs,
+    stage_satellite_batch_dispatches,
+)
 
 
 SMART_BACKFILL_MAX_LANDS = 1000
@@ -292,7 +295,6 @@ async def run_smart_land_backfill(
 ) -> dict[str, Any]:
     """在 API 机执行一次参数化 Smart 回填，并派发已有遥感下载任务。"""
     from app.core.database import async_session
-    from app.mq_publish import publish_api_task
 
     async with async_session() as db:
         lands, selection = await ensure_land_parcels(
@@ -317,12 +319,14 @@ async def run_smart_land_backfill(
         parent_job = Job(
             id=execution_parent_id,
             type="smart_land_backfill",
-            status="pending",
+            status="running" if jobs else "completed",
             progress_json={
-                "stage": "queued",
+                "stage": "queued" if jobs else "completed",
                 "land_count": len(lands),
                 "group_count": len(groups),
                 "job_count": len(jobs),
+                "queued_count": len(jobs),
+                "failed_count": 0,
                 "requested_land_count": selection["requested_land_count"]
                 if selection
                 else len(land_ids),
@@ -353,38 +357,16 @@ async def run_smart_land_backfill(
         db.add(parent_job)
         for job in jobs:
             db.add(job)
-        await db.commit()
-
-        failed_job_ids: list[str] = []
-        for job in jobs:
-            try:
-                # Smart 凭据不进入 MQ payload；下载机只拿到任务 ID 并通过 Internal HTTP 取数据。
-                await asyncio.to_thread(
-                    publish_api_task,
-                    type="satellite_batch",
-                    land_id=job.land_id,
-                    task_id=str(job.id),
-                    extras={"job_id": str(job.id)},
-                    priority=MANUAL_TASK_PRIORITY,
-                )
-            except Exception as exc:
-                job.status = "failed"
-                job.error = f"遥感聚合任务派发失败：{str(exc)[:3900]}"
-                failed_job_ids.append(str(job.id))
-
-        parent_job.status = (
-            "partial" if failed_job_ids else ("running" if jobs else "completed")
+        # Smart凭据不进入MQ payload；下载机只拿Job ID，再经Internal HTTP读取受控任务参数。
+        await stage_satellite_batch_dispatches(
+            db,
+            jobs,
+            priority=MANUAL_TASK_PRIORITY,
         )
-        parent_job.progress_json = {
-            **(parent_job.progress_json or {}),
-            "stage": "dispatched" if jobs else "completed",
-            "queued_count": len(jobs) - len(failed_job_ids),
-            "failed_count": len(failed_job_ids),
-        }
         await db.commit()
 
     return {
-        "status": "partial" if failed_job_ids else ("queued" if jobs else "completed"),
+        "status": "queued" if jobs else "completed",
         "parent_job_id": str(execution_parent_id),
         "requested_land_count": selection["requested_land_count"] if selection else len(land_ids),
         "selected_land_ids": selected_land_ids,
@@ -394,8 +376,8 @@ async def run_smart_land_backfill(
         "land_count": len(lands),
         "group_count": len(groups),
         "job_count": len(jobs),
-        "queued_job_ids": [str(job.id) for job in jobs if str(job.id) not in failed_job_ids],
-        "failed_job_ids": failed_job_ids,
+        "queued_job_ids": [str(job.id) for job in jobs],
+        "failed_job_ids": [],
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "source_sync": selection.get("source_sync") if selection else None,

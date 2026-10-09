@@ -14,6 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
     MAX_SCHEDULE_LAND_AREA_MU,
@@ -145,9 +146,17 @@ async def prepare_weekly_index(
     lands = (
         (
             await db.execute(
-                select(LandParcel).where(
-                    LandParcel.land_id.in_(list(stale_windows)),
-                    LandParcel.deleted_at.is_(None),
+                select(LandParcel)
+                # 过期窗口已由SQL计算；空间规划只需要地块ID与边界字段，避免整行读取。
+                .options(
+                    load_only(
+                        LandParcel.land_id,
+                        LandParcel.boundary_geojson,
+                        LandParcel.boundary_srid,
+                    )
+                )
+                .where(
+                    LandParcel.land_id.in_(list(stale_windows)), LandParcel.deleted_at.is_(None)
                 )
             )
         )
@@ -180,6 +189,8 @@ async def prepare_weekly_index(
             parent_job_id=None,
             chunk_days=settings.index_backfill_chunk_days,
             land_date_windows=valid_windows,
+            # 此接口把任务清单交还给外部Beat逐项调度，不能同时写API Outbox重复派发。
+            durable_dispatch=False,
             extra_params={"schedule": "weekly-index"},
         )
         jobs_by_id = {str(job.id): job for job in jobs}

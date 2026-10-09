@@ -60,13 +60,68 @@ async def lifespan(app: FastAPI):
     from app.services.scene_result_cache import consume_cached_scene_results
 
     app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    # 回执入队与后台消费共用进程级Redis客户端，复用连接池并由应用生命周期统一释放。
+    app.state.redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=2.0,
+        socket_timeout=10.0,
+    )
+    # API本机任务保留强引用；启动扫描只恢复claim模式下未写入任何Job的S1回算。
+    app.state.api_admin_task_tasks = {}
+    app.state.api_admin_recovery_task = asyncio.create_task(
+        admin_ops.recover_interrupted_s1_claim_backfills(app),
+        name="recover-interrupted-s1-claim-backfills",
+    )
+    app.state.s1_sigma0_dispatch_outbox_task = None
+    app.state.satellite_batch_dispatch_outbox_task = None
+    from app.services.work_items import work_queue_mode
+
+    if work_queue_mode() in {"legacy", "dual"}:
+        # 事务Outbox仅服务MQ派发模式；claim模式直接原子创建WorkItem，不启动冗余扫描。
+        from app.services.s1_sigma0_dispatch_outbox import (
+            run_s1_sigma0_dispatch_outbox,
+        )
+        from app.services.satellite_batch_dispatch_outbox import (
+            run_satellite_batch_dispatch_outbox,
+        )
+
+        app.state.s1_sigma0_dispatch_outbox_task = asyncio.create_task(
+            run_s1_sigma0_dispatch_outbox(),
+            name="s1-sigma0-dispatch-outbox",
+        )
+        app.state.satellite_batch_dispatch_outbox_task = asyncio.create_task(
+            run_satellite_batch_dispatch_outbox(),
+            name="satellite-batch-dispatch-outbox",
+        )
     # API 进程负责从 Redis 消费下载结果，下载机只做 HTTP 入队，不参与数据库写入。
-    scene_result_consumer = asyncio.create_task(consume_cached_scene_results())
+    scene_result_consumer = asyncio.create_task(
+        consume_cached_scene_results(app.state.redis_client)
+    )
     try:
         yield
     finally:
+        app.state.api_admin_recovery_task.cancel()
+        if app.state.s1_sigma0_dispatch_outbox_task is not None:
+            app.state.s1_sigma0_dispatch_outbox_task.cancel()
+        if app.state.satellite_batch_dispatch_outbox_task is not None:
+            app.state.satellite_batch_dispatch_outbox_task.cancel()
+        await asyncio.gather(
+            app.state.api_admin_recovery_task, return_exceptions=True
+        )
+        if app.state.s1_sigma0_dispatch_outbox_task is not None:
+            await asyncio.gather(
+                app.state.s1_sigma0_dispatch_outbox_task,
+                return_exceptions=True,
+            )
+        if app.state.satellite_batch_dispatch_outbox_task is not None:
+            await asyncio.gather(
+                app.state.satellite_batch_dispatch_outbox_task,
+                return_exceptions=True,
+            )
         scene_result_consumer.cancel()
         await asyncio.gather(scene_result_consumer, return_exceptions=True)
+        await app.state.redis_client.aclose()
         await app.state.http_client.aclose()
 
 

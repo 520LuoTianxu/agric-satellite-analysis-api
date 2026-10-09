@@ -10,8 +10,10 @@ Keep SyncSession PG writes until ``INGEST_PG_WRITES=0`` or claim+HTTP.
 
 from __future__ import annotations
 
+import atexit
 import math
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from numbers import Integral, Real
@@ -27,6 +29,7 @@ __all__ = [
     "api_base_url",
     "apply_results",
     "cache_results",
+    "close_cached_result_client",
     "assessment_bundle",
     "agri_satellite_batch_inputs",
     "create_decloud_schedule",
@@ -67,6 +70,11 @@ class InternalApiError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+_result_client_lock = threading.Lock()
+_result_client: httpx.Client | None = None
+_result_client_pid: int | None = None
 
 
 def _env(name: str, default: str = "") -> str:
@@ -179,6 +187,63 @@ def internal_client(*, timeout: float = 30.0) -> Iterator[httpx.Client]:
         event_hooks={"request": [attach_trace_header]},
     ) as client:
         yield client
+
+
+def _cached_result_client(*, timeout: float = 30.0) -> httpx.Client:
+    """复用下载worker的回执HTTP连接池，避免每景结果都重新握手。"""
+    global _result_client, _result_client_pid
+
+    base = api_base_url()
+    if not base:
+        raise InternalApiError("API_BASE_URL is required for internal HTTP")
+    token = internal_api_token()
+    if not token:
+        raise InternalApiError("INTERNAL_API_TOKEN is required for internal HTTP")
+
+    pid = os.getpid()
+    with _result_client_lock:
+        if (
+            _result_client is not None
+            and _result_client_pid == pid
+            and not _result_client.is_closed
+        ):
+            return _result_client
+
+        # Celery prefork子进程不可沿用父进程的socket；进程号变化时重建连接池。
+        if _result_client is not None:
+            _result_client.close()
+
+        from agric_satellite_analysis_common.trace import (
+            TRACE_HEADER,
+            attach_trace_header,
+        )
+
+        headers = _headers()
+        # trace由request hook按每次调用注入，不能固化首次建池线程的trace值。
+        headers.pop(TRACE_HEADER, None)
+        _result_client = httpx.Client(
+            base_url=base,
+            timeout=timeout,
+            headers=headers,
+            event_hooks={"request": [attach_trace_header]},
+        )
+        _result_client_pid = pid
+        return _result_client
+
+
+def close_cached_result_client(*_args: Any, **_kwargs: Any) -> None:
+    """worker退出时释放共享回执连接池；重复关闭保持安全。"""
+    global _result_client, _result_client_pid
+
+    with _result_client_lock:
+        client = _result_client
+        _result_client = None
+        _result_client_pid = None
+    if client is not None:
+        client.close()
+
+
+atexit.register(close_cached_result_client)
 
 
 def _raise_for_status(r: httpx.Response, *, context: str) -> None:
@@ -595,7 +660,7 @@ def cache_results(
     client: httpx.Client | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """POST /v1/internal/results/cache — enqueue a result in API Redis."""
+    """将单景处理结果回执到 API 队列，默认复用进程级 HTTP 连接池。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.post("/v1/internal/results/cache", json={"result": result})
@@ -607,8 +672,7 @@ def cache_results(
 
     if client is not None:
         return _do(client)
-    with internal_client(timeout=timeout) as c:
-        return _do(c)
+    return _do(_cached_result_client(timeout=timeout))
 
 
 def complete_work(

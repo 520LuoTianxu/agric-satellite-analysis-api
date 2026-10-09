@@ -41,9 +41,6 @@ class LandAssessmentPdfSmoke(unittest.TestCase):
                 # scoring still produced a numeric score
                 self.assertIsInstance(result["score"], (int, float))
                 reader = PdfReader(result["out_path"])
-                n_pages = len(reader.pages)
-                # 完整版保留全部章节，不再通过删减内容压到十页以内。
-                self.assertGreater(n_pages, 10)
                 front = "".join((pg.extract_text() or "") for pg in reader.pages[:4])
                 self.assertIn("目录", front)
                 self.assertIn("二、地块基础画像", front)
@@ -52,6 +49,13 @@ class LandAssessmentPdfSmoke(unittest.TestCase):
                     or "score_radar.png" in (result.get("charts") or [])
                 )
                 all_text = "".join((pg.extract_text() or "") for pg in reader.pages)
+                # 完整版保留全部章节；短章节接续排版，不以删减内容换取页数。
+                from app.reports.land_assessment.pdf_render import TOC_ENTRIES
+
+                page_texts = [pg.extract_text() or "" for pg in reader.pages]
+                body_text = "".join(t for t in page_texts if "目录" not in t)
+                for title, _ in TOC_ENTRIES:
+                    self.assertIn(title, body_text)
                 self.assertIn("乡合农服", all_text)
                 self.assertNotIn("openfarm", all_text.lower())
                 self.assertEqual(reader.metadata.author, "乡合农服")

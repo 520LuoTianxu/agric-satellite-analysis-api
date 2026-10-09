@@ -1002,6 +1002,8 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
                         "quality_score": float(r.get("quality_score") or 0.5),
                     }
                 )
+    from app.core.crops import crop_name_zh
+
     area_ha = float(field.get("area_ha") or 0)
     return {
         "field": {
@@ -1014,7 +1016,9 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
             "location": field.get("location") or field.get("name") or "—",
             "boundary": field.get("boundary")
             or "测绘 WGS 坐标（档案地块，不是手画框）",
-            "crop_label": field.get("crop_type") or "作物未登记",
+            "crop_label": crop_name_zh(field.get("crop_type"))
+            if field.get("crop_type")
+            else "作物未登记",
             "crop_key": field.get("crop_type") or "unknown",
             "land_id": None,
             "boundary_source": "survey",

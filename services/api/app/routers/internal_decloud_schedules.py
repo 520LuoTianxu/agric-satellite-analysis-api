@@ -31,7 +31,8 @@ _CLAIM_SCHEDULES = text("""
             (status = 'pending' AND available_at <= now())
             OR (status = 'processing' AND lease_until <= now())
         )
-          AND (:schedule_key IS NULL OR schedule_key = :schedule_key)
+          -- 空值代表领取所有可用排程；显式类型转换避免PostgreSQL无法推断NULL参数类型。
+          AND (CAST(:schedule_key AS text) IS NULL OR schedule_key = :schedule_key)
         ORDER BY available_at, created_at
         FOR UPDATE SKIP LOCKED
         LIMIT :limit

@@ -26,6 +26,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.orm import load_only
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_excluded_schedule_base_id,
@@ -469,7 +470,19 @@ async def _apply_batch(
 ) -> None:
     ids = [record.land_id for record in records]
     existing_rows = (
-        await db.execute(select(LandParcel).where(LandParcel.land_id.in_(ids)))
+        await db.execute(
+            select(LandParcel)
+            # 幂等比较只读取稳定tile标识、源哈希和软删状态，避免重复传输整行边界与大字段。
+            .options(
+                load_only(
+                    LandParcel.land_id,
+                    LandParcel.tile_id,
+                    LandParcel.source_properties,
+                    LandParcel.deleted_at,
+                )
+            )
+            .where(LandParcel.land_id.in_(ids))
+        )
     ).scalars().all()
     existing = {str(row.land_id): row for row in existing_rows}
 
@@ -601,6 +614,14 @@ async def _apply_batch(
     selected_lands = (
         await db.execute(
             select(LandParcel)
+            # 后续10km分组只依赖几何和地块ID；源属性JSON由上面的精简查询单独读取。
+            .options(
+                load_only(
+                    LandParcel.land_id,
+                    LandParcel.boundary_geojson,
+                    LandParcel.boundary_srid,
+                )
+            )
             .where(LandParcel.land_id.in_(selected_ids))
             .execution_options(populate_existing=True)
         )
@@ -654,61 +675,31 @@ async def _apply_batch(
         "area_count": len(groups),
     }
     parent.progress_json = {
-        "stage": "dispatching",
+        "stage": "queued",
         "land_count": len(selected_ids),
         "area_count": len(groups),
         "job_count": len(area_jobs),
-        "dispatched_job_ids": [],
+        "dispatch_intent_staged": True,
+        "queued_count": len(area_jobs),
+        "failed_count": 0,
     }
-    await db.commit()
 
-    dispatched_job_ids: list[str] = []
-    failed_job_ids: list[str] = []
+    # 子Job与持久派发意图已原子提交，不再逐条等待MQ确认；兼容字段rs_dispatched在此表示已持久排队数。
     for job in area_jobs:
-        try:
-            from app.mq_publish import publish_api_task
-
-            await asyncio.to_thread(
-                publish_api_task,
-                type="satellite_batch",
-                land_id=job.land_id,
-                task_id=str(job.id),
-                extras={"job_id": str(job.id)},
-            )
-        except Exception as exc:
-            summary["dispatch_failed"] += 1
-            logger.exception(
-                "mysql_land_sync_satellite_batch_dispatch_failed",
-                land_id=job.land_id,
-                job_id=str(job.id),
-                error=str(exc),
-            )
-            job.status = "failed"
-            job.error = f"10km 遥感分组任务派发失败：{str(exc)[:3900]}"
-            failed_job_ids.append(str(job.id))
-            continue
         job.params_json = {**(job.params_json or {}), "dispatch_status": "queued"}
-        dispatched_job_ids.append(str(job.id))
         summary["rs_dispatched"] += 1
 
     for record, _, sentinel in dispatch:
-        land_job_ids = jobs_by_land.get(record.land_id, [])
-        failed_for_land = any(job_id in failed_job_ids for job_id in land_job_ids)
-        sentinel.status = "failed" if failed_for_land else "completed"
+        sentinel.status = "completed"
         sentinel.finished_at = now
         sentinel.params_json = {
             **(sentinel.params_json or {}),
-            "dispatch_status": "partial" if failed_for_land else "queued",
+            "dispatch_status": "queued",
         }
 
-    parent.progress_json = {
-        **(parent.progress_json or {}),
-        "stage": "dispatched",
-        "dispatched_job_ids": dispatched_job_ids,
-        "failed_count": len(area_jobs) - len(dispatched_job_ids),
-    }
-    parent.status = "partial" if failed_job_ids else "completed"
+    parent.status = "completed"
     parent.finished_at = now
+    # 源同步哨兵、子Job、claim项/Outbox与汇总状态共用一个提交点，避免重启后状态卡在planning。
     await db.commit()
 
 

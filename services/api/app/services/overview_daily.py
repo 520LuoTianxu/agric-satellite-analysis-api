@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
     EXCLUDED_SCHEDULE_BASE_IDS,
@@ -31,6 +32,8 @@ RUN_TYPE = "overview_daily"
 CHINA_TZ = timezone(timedelta(hours=8))
 # 每批写入多个区划快照，减少每日终态汇总时的数据库往返次数。
 OVERVIEW_UPSERT_BATCH_SIZE = 200
+# 旧每日批次的补派可能有数百个子Job；按500个ID预取，避免逐任务查询并控制SQL参数规模。
+LEGACY_DISPATCH_LOOKUP_BATCH_SIZE = 500
 # 子任务进入失败/取消也是终态；兼容旧worker使用的 succeeded，汇总只等待未终态任务。
 TERMINAL_SATELLITE_JOB_STATUSES = frozenset(
     {"completed", "succeeded", "failed", "cancelled"}
@@ -304,6 +307,14 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
             (
                 await db.execute(
                     select(LandParcel)
+                    # 全国规划只读取地块ID和几何；来源属性等大JSON不参与分组，避免整行传入内存。
+                    .options(
+                        load_only(
+                            LandParcel.land_id,
+                            LandParcel.boundary_geojson,
+                            LandParcel.boundary_srid,
+                        )
+                    )
                     .where(LandParcel.deleted_at.is_(None))
                     .where(
                         or_(
@@ -354,6 +365,8 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                 "group_count": len(groups),
                 "job_count": len(jobs),
                 "invalid_land_ids": invalid,
+                # 同事务Outbox记录与父Job一并提交；不冒充已得到MQ确认。
+                "dispatch_intent_staged": True,
                 "dispatched_job_ids": [],
             },
         )
@@ -361,13 +374,42 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
         await db.commit()
     if run.status in ("completed", "partial"):
         return run_summary(run)
-    # 重试只补派上次未确认入队的任务；稳定task_id使HTTP claim的幂等键保持一致。
+    # 兼容旧的每日批次：只补派升级前未确认入队的任务，新批次由事务Outbox恢复。
     progress = dict(run.progress_json or {})
     dispatched = set(progress.get("dispatched_job_ids", []))
+    durably_queued = (
+        set(run.params_json["job_ids"])
+        if progress.get("dispatch_intent_staged")
+        else set(progress.get("outbox_job_ids", []))
+    )
+    legacy_dispatch_ids: list[str] = []
+    seen_dispatch_ids = dispatched | durably_queued
     for job_id in run.params_json["job_ids"]:
-        if job_id in dispatched:
+        if job_id in seen_dispatch_ids:
             continue
-        job = await db.get(Job, uuid.UUID(job_id))
+        seen_dispatch_ids.add(job_id)
+        legacy_dispatch_ids.append(job_id)
+
+    # 只对升级前未确认入队的子Job批量预取；之后仍逐条发送并提交游标，保留崩溃恢复能力。
+    legacy_jobs_by_id: dict[str, Job] = {}
+    for offset in range(0, len(legacy_dispatch_ids), LEGACY_DISPATCH_LOOKUP_BATCH_SIZE):
+        id_batch = legacy_dispatch_ids[
+            offset : offset + LEGACY_DISPATCH_LOOKUP_BATCH_SIZE
+        ]
+        job_rows = (
+            await db.execute(
+                select(Job).where(Job.id.in_([uuid.UUID(job_id) for job_id in id_batch]))
+            )
+        ).scalars().all()
+        legacy_jobs_by_id.update({str(job.id): job for job in job_rows})
+
+    for job_id in legacy_dispatch_ids:
+        job = legacy_jobs_by_id.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=503,
+                detail="每日遥感批次引用的子任务不存在，请检查批次记录后重试",
+            )
         await asyncio.to_thread(
             publish_api_task,
             type="satellite_batch",

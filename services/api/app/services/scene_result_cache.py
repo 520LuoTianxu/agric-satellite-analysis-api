@@ -179,7 +179,9 @@ def _result_id(envelope: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-async def enqueue_scene_result(envelope: dict[str, Any]) -> dict[str, Any]:
+async def enqueue_scene_result(
+    envelope: dict[str, Any], redis_client: Any | None = None
+) -> dict[str, Any]:
     """将待入库 OSS 回调放入 Redis，缓存项最多保留 1 天。"""
     if not isinstance(envelope, dict):
         raise ValueError("scene result envelope must be an object")
@@ -194,12 +196,14 @@ async def enqueue_scene_result(envelope: dict[str, Any]) -> dict[str, Any]:
         separators=(",", ":"),
         default=str,
     )
-    redis_client = aioredis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-        socket_connect_timeout=2.0,
-        socket_timeout=5.0,
-    )
+    owns_redis_client = redis_client is None
+    if redis_client is None:
+        redis_client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2.0,
+            socket_timeout=5.0,
+        )
     try:
         created = await redis_client.eval(
             _ENQUEUE_SCRIPT,
@@ -211,7 +215,8 @@ async def enqueue_scene_result(envelope: dict[str, Any]) -> dict[str, Any]:
             result_id,
         )
     finally:
-        await redis_client.aclose()
+        if owns_redis_client:
+            await redis_client.aclose()
     return {
         "result_id": result_id,
         "queued": bool(created),
@@ -336,14 +341,16 @@ def _scene_result_failures(stats: dict[str, Any]) -> tuple[list[str], dict[str, 
     return retryable_labels, permanent_reasons
 
 
-async def consume_cached_scene_results() -> None:
+async def consume_cached_scene_results(redis_client: Any | None = None) -> None:
     """API 进程后台消费 Redis，并在 API 机执行 OSS 下载及 PostgreSQL 入库。"""
-    redis_client = aioredis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-        socket_connect_timeout=2.0,
-        socket_timeout=10.0,
-    )
+    owns_redis_client = redis_client is None
+    if redis_client is None:
+        redis_client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2.0,
+            socket_timeout=10.0,
+        )
     try:
         while True:
             try:
@@ -463,4 +470,5 @@ async def consume_cached_scene_results() -> None:
                     # Redis本身不可用时没有任务ID可记录退避，短暂等待避免错误热循环。
                     await asyncio.sleep(2)
     finally:
-        await redis_client.aclose()
+        if owns_redis_client:
+            await redis_client.aclose()

@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
+from typing import Any
 
 import numpy as np
 import structlog
@@ -299,6 +300,7 @@ def _load_lands(
     growing_seasons=None,
     date_from: date | None = None,
     date_to: date | None = None,
+    target_dates_by_land: dict[str, list[str]] | None = None,
 ):
     """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
     land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
@@ -327,6 +329,8 @@ def _load_lands(
                 raise RuntimeError("遥感批量内部HTTP返回的地块清单不完整")
 
             for land_id in batch_ids:
+                if target_dates_by_land is not None and land_id not in target_dates_by_land:
+                    continue
                 remote = remote_by_id[land_id]
                 # 入队后规则可能变化；执行前再过滤，避免已排除地块访问卫星数据。
                 if not is_scheduled_land_allowed(
@@ -370,6 +374,15 @@ def _load_lands(
                         ),
                         "grid_crs": land_crs,
                         "existing": existing,
+                        # 指定目标日期表示有意重算旧口径产品；仅这些日期可绕过已有日期跳过逻辑。
+                        "target_dates": (
+                            {
+                                date.fromisoformat(str(value)[:10])
+                                for value in target_dates_by_land[land_id]
+                            }
+                            if target_dates_by_land is not None
+                            else None
+                        ),
                         # 显式回填轮作月份优先于作物默认季节，避免区域下载误过滤用户指定窗口。
                         "season_months": normalize_season_months(
                             season_months=season_months,
@@ -437,10 +450,20 @@ def select_complete_processing_lands(
 
 
 def _scene_lands(scene, lands, sensor):
+    """筛出无同日结果且被场景完整覆盖的地块，并对 S2 附加季节/高云筛选。"""
     footprint = shape(scene["geometry"]) if scene.get("geometry") else None
     selected = []
     for land in lands:
-        if scene["date"] in land["existing"]:
+        target_dates = land.get("target_dates")
+        if target_dates is not None:
+            target_land_ids = scene.get("target_land_ids")
+            land_id = str(land["meta"]["land_id"])
+            if target_land_ids is not None:
+                if land_id not in target_land_ids:
+                    continue
+            elif scene["date"] not in target_dates:
+                continue
+        elif scene["date"] in land["existing"]:
             continue
         # 同一组可能横跨卫星瓦片边缘，只让完整覆盖地块的景生成结果。
         if footprint is not None and not footprint.covers(land["geom"]):
@@ -455,7 +478,116 @@ def _scene_lands(scene, lands, sensor):
     return selected
 
 
+def _assign_s1_target_scenes(scenes, lands):
+    """每个地块日期固定分配一景，避免同日多景并发争抢导致回算结果漂移。"""
+    scenes_by_date: dict[date, list[tuple[int, dict, Any]]] = {}
+    for index, scene in enumerate(scenes):
+        scene_date = scene.get("date")
+        if not isinstance(scene_date, date):
+            continue
+        geometry = scene.get("geometry")
+        if not geometry:
+            logger.info(
+                "s1_sigma0_backfill_scene_skipped",
+                reason="missing_scene_geometry",
+                scene_id=scene.get("id"),
+            )
+            continue
+        try:
+            footprint = shape(geometry)
+        except (TypeError, ValueError):
+            logger.info(
+                "s1_sigma0_backfill_scene_skipped",
+                reason="invalid_scene_geometry",
+                scene_id=scene.get("id"),
+            )
+            continue
+        if footprint.is_empty or not footprint.is_valid:
+            logger.info(
+                "s1_sigma0_backfill_scene_skipped",
+                reason="invalid_scene_geometry",
+                scene_id=scene.get("id"),
+            )
+            continue
+        scenes_by_date.setdefault(scene_date, []).append((index, scene, footprint))
+
+    assigned: dict[int, set[str]] = {}
+    for land in lands:
+        land_id = str(land["meta"]["land_id"])
+        for target_date in sorted(land.get("target_dates") or ()):
+            candidates = [
+                (index, scene)
+                for index, scene, footprint in scenes_by_date.get(target_date, [])
+                # 定向回算必须证明影像完整覆盖地块，不能把目录相交误当作全幅覆盖。
+                if footprint.covers(land["geom"])
+            ]
+            # 同等质量时按采集时间和景号固定取舍，不依赖STAC分页或线程启动顺序。
+            candidates.sort(
+                key=lambda pair: (
+                    -int(pair[1].get("selection_score") or 0),
+                    str(pair[1].get("acquisition_datetime") or ""),
+                    str(pair[1].get("id") or ""),
+                )
+            )
+            if candidates:
+                assigned.setdefault(candidates[0][0], set()).add(land_id)
+
+    return [
+        {**scene, "target_land_ids": sorted(assigned[index])}
+        for index, scene in enumerate(scenes)
+        if index in assigned
+    ]
+
+
+def _s1_target_date_report(target_dates_by_land, scenes, lands, published_products):
+    """逐地块核对定标回算目标日期是否命中双LUT景并成功发布。"""
+    expected = {
+        (str(land_id), str(value)[:10])
+        for land_id, values in target_dates_by_land.items()
+        for value in values
+    }
+    scene_available: set[tuple[str, str]] = set()
+    for scene in scenes:
+        scene_date = scene.get("date")
+        if not isinstance(scene_date, date):
+            try:
+                scene_date = date.fromisoformat(str(scene_date)[:10])
+            except (TypeError, ValueError):
+                continue
+        day = scene_date.isoformat()
+        for land in _scene_lands(scene, lands, "S1"):
+            land_id = str(land["meta"]["land_id"])
+            if (land_id, day) in expected:
+                scene_available.add((land_id, day))
+
+    published = {
+        (str(item.get("land_id")), str(item.get("date"))[:10])
+        for item in published_products
+        if isinstance(item, dict)
+    } & expected
+    missing_scenes = expected - scene_available
+    failed_products = scene_available - published
+
+    def dates_by_land(keys):
+        result: dict[str, list[str]] = {}
+        for land_id, day in sorted(keys):
+            result.setdefault(land_id, []).append(day)
+        return result
+
+    return {
+        "requested_count": len(expected),
+        "dual_lut_scene_available_count": len(scene_available),
+        "published_count": len(published),
+        "missing_scene_count": len(missing_scenes),
+        "processing_failed_count": len(failed_products),
+        "published_dates_by_land": dates_by_land(published),
+        "missing_scene_dates_by_land": dates_by_land(missing_scenes),
+        "processing_failed_dates_by_land": dates_by_land(failed_products),
+    }
+
+
 def _search_s2_options() -> dict:
+    """按去云开关构造 S2 搜索参数，确保主产品与去云缓存需要的资产同批检索。"""
     extra_assets = {"SCL": SCL_STAC_ASSETS}
     cloud_max = None
     if decloud_enabled():
@@ -676,6 +808,7 @@ def _publish_land(
     processing_window_km: float | None = None,
     raw_result_out: dict | None = None,
 ) -> bool:
+    """将共享窗口裁至单地块网格、应用掩膜并发布 S1/S2 产品与预览。"""
     target_transform, target_shape, field_mask, _ = land["grid"]
     target_crs = land["grid_crs"]
     shared_crs = analysis_crs_for_bounds(shared_grid[3])
@@ -1223,6 +1356,17 @@ def process_satellite_batch(
         sensor = params["sensor"]
         if sensor not in {"S1", "S2"}:
             raise ValueError(f"不支持的遥感传感器: {sensor}")
+        raw_target_dates = params.get("target_dates_by_land")
+        target_dates_by_land = (
+            raw_target_dates if isinstance(raw_target_dates, dict) else None
+        )
+        sigma0_backfill = bool(params.get("s1_sigma0_calibration_backfill"))
+        if sigma0_backfill and (sensor != "S1" or target_dates_by_land is None):
+            raise ValueError("S1定标回算必须限定传感器并提供逐地块目标日期")
+        if target_dates_by_land is not None and sensor != "S1":
+            raise ValueError("逐地块目标日期回算当前仅支持Sentinel-1")
+        if target_dates_by_land is not None and not sigma0_backfill:
+            raise ValueError("逐地块S1目标日期必须启用严格Sigma0定标门槛")
         d0, d1 = (
             date.fromisoformat(params["date_from"]),
             date.fromisoformat(params["date_to"]),
@@ -1236,6 +1380,7 @@ def process_satellite_batch(
             growing_seasons=params.get("growing_seasons"),
             date_from=d0,
             date_to=d1,
+            target_dates_by_land=target_dates_by_land,
         )
         if not lands:
             patch_job(
@@ -1303,9 +1448,25 @@ def process_satellite_batch(
         )
         try:
             if sensor == "S1":
-                scenes = search_s1_scenes(
-                    mapping(processing_geom), d0, d1, dedupe_week=False
+                target_dates = (
+                    {
+                        date.fromisoformat(str(value)[:10])
+                        for values in target_dates_by_land.values()
+                        for value in values
+                    }
+                    if target_dates_by_land is not None
+                    else None
                 )
+                scenes = search_s1_scenes(
+                    mapping(processing_geom),
+                    d0,
+                    d1,
+                    dedupe_week=False,
+                    target_dates=target_dates,
+                    require_sigma0=sigma0_backfill,
+                )
+                if target_dates_by_land is not None:
+                    scenes = _assign_s1_target_scenes(scenes, selected_lands)
             else:
                 scenes = _search_s2_scenes(processing_geom, d0, d1)
         except Exception:
@@ -1330,6 +1491,10 @@ def process_satellite_batch(
             "straggler_timeout_sec": scene_straggler_timeout_sec(),
             "straggler_abandoned_scene_ids": [],
         }
+        if target_dates_by_land is not None:
+            progress["target_date_report"] = _s1_target_date_report(
+                target_dates_by_land, scenes, selected_lands, []
+            )
         progress_revision = {"value": 0}
         if compensation_attempt:
             progress = _compensation_progress(
@@ -1344,12 +1509,21 @@ def process_satellite_batch(
             nonlocal published_products_persisted, published_progress_revision
             with progress_patch_lock:
                 with state_lock:
-                    revision = progress_revision["value"]
-                    if revision <= published_progress_revision:
+                    if progress_revision["value"] <= published_progress_revision:
                         return
                     products = progress.get("published_products") or []
                     product_count = len(products)
                     delta = products[published_products_persisted:product_count]
+                    if target_dates_by_land is not None:
+                        # 将每个目标日期的可用景与成功发布情况随同进度原子快照保存。
+                        progress["target_date_report"] = _s1_target_date_report(
+                            target_dates_by_land,
+                            scenes,
+                            selected_lands,
+                            products,
+                        )
+                        progress_revision["value"] += 1
+                    revision = progress_revision["value"]
                     # 补偿轮次和阶段由父任务单独推进；迟到worker不得用旧快照回退它们。
                     patch = {
                         key: value

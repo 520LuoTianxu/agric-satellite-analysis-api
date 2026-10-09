@@ -887,6 +887,7 @@ async def backfill_land_indices(
             parent_job_id=sentinel_id,
             job_land_id=land_id,
             chunk_days=settings.index_backfill_chunk_days,
+            dispatch_priority=MANUAL_TASK_PRIORITY,
             extra_params={
                 "is_backfill": True,
                 "sentinel_job_id": str(sentinel_id),
@@ -911,19 +912,6 @@ async def backfill_land_indices(
 
     from app.mq_publish import publish_api_task
 
-    for job in jobs:
-        try:
-            await asyncio.to_thread(
-                publish_api_task,
-                type="satellite_batch",
-                land_id=job.land_id,
-                task_id=str(job.id),
-                extras={"job_id": str(job.id)},
-                priority=MANUAL_TASK_PRIORITY,
-            )
-        except Exception as exc:
-            job.status = "failed"
-            job.error = f"10km 分组回填任务派发失败：{str(exc)[:3900]}"
     # 遥感由 10km 共享任务负责；天气仍按地块拉取并复用同一回填时间窗。
     try:
         await asyncio.to_thread(
@@ -1060,12 +1048,15 @@ async def ensure_soil_weather(
     """Ensure soil/weather data for every canonical parcel; tags are not required."""
     from app.celery_client import send_task
 
-    query = select(LandParcel).where(LandParcel.deleted_at.is_(None))
+    # 全量运维扫描只返回编号和展示名；不把每块地的边界、来源JSON等大字段读入API进程。
+    query = select(LandParcel.land_id, LandParcel.land_name).where(
+        LandParcel.deleted_at.is_(None)
+    )
     if farm_id is not None:
         query = query.where(LandParcel.farm_id == farm_id)
-    lands = (await db.execute(query)).scalars().all()
+    land_rows = (await db.execute(query)).all()
 
-    land_ids = [land.land_id for land in lands]
+    land_ids = [land_id for land_id, _ in land_rows]
     soil_land_ids: set[str] = set()
     weather_land_ids: set[str] = set()
     soil_exists = (
@@ -1097,21 +1088,21 @@ async def ensure_soil_weather(
                 weather_land_ids.add(land_id)
 
     items: list[dict[str, Any]] = []
-    for land in lands:
-        has_soil = land.land_id in soil_land_ids
-        has_weather = land.land_id in weather_land_ids
+    for land_id, land_name in land_rows:
+        has_soil = land_id in soil_land_ids
+        has_weather = land_id in weather_land_ids
         if not has_soil:
-            send_task("app.tasks.soil.fetch_soil_for_land", args=[land.land_id])
+            send_task("app.tasks.soil.fetch_soil_for_land", args=[land_id])
         if not has_weather:
             send_task(
-                "app.tasks.weather.backfill_weather_for_land", args=[land.land_id]
+                "app.tasks.weather.backfill_weather_for_land", args=[land_id]
             )
         items.append(
             {
-                "land_id": land.land_id,
-                "land_name": land.land_name,
+                "land_id": land_id,
+                "land_name": land_name,
                 "soil_enqueued": not has_soil,
                 "weather_enqueued": not has_weather,
             }
         )
-    return {"status": "dispatched", "scanned": len(lands), "items": items}
+    return {"status": "dispatched", "scanned": len(land_rows), "items": items}

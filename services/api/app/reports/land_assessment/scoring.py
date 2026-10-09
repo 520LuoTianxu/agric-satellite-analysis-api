@@ -17,12 +17,13 @@ from typing import Any
 import numpy as np
 
 from agric_satellite_analysis_common.phenology import infer_index_rows, window_months
-from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
 
 from app.reports.land_assessment.soil_labels import (
     soil_drainage_zh,
     soil_texture_zh,
 )
+
+from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
 
 SEASON_MONTHS = {6, 7, 8, 9}
 PEAK_MONTHS = {7, 8}
@@ -181,26 +182,26 @@ def build_soil_analysis_plain(soil: dict[str, Any], crop_label: str) -> str:
     awc = soil.get("rootzone_awc_mm")
     wl = soil.get("waterlogging_risk")
     soc = soil.get("total_soc_stock_t_ha") or soil.get("topsoil_soc_stock_t_ha")
-    bits: list[str] = [f"这块地土壤以「{texture}」为主"]
+    bits: list[str] = [f"土壤质地以{texture}为主"]
     if ph is not None:
         ph_f = float(ph)
         if ph_f > 7.5:
-            bits.append(f"偏碱（pH {ph_f:.2f}），对{crop_label}养分有效性略有影响")
+            bits.append(f"pH {ph_f:.2f}，呈碱性，可能降低{crop_label}对磷及微量元素的吸收")
         elif ph_f < 5.5:
-            bits.append(f"偏酸（pH {ph_f:.2f}），要注意钙镁与部分微量元素")
+            bits.append(f"pH {ph_f:.2f}，呈酸性，需关注钙、镁及微量元素供应")
         else:
-            bits.append(f"酸碱适中（pH {ph_f:.2f}）")
-    bits.append(f"排水等级：{drain}")
+            bits.append(f"pH {ph_f:.2f}，酸碱度适中")
+    bits.append(f"排水等级为{drain}")
     if awc is not None:
-        bits.append(f"根系层有效持水约 {float(awc):.0f} mm，决定干旱时能「扛几天」")
+        bits.append(f"根系层有效持水量约 {float(awc):.0f} mm，决定无降水期的土壤供水能力")
     if wl is not None:
         wlf = float(wl)
         if wlf > 0.3:
-            bits.append(f"渍水风险偏高（{wlf:.2f}），连阴雨后低洼处要盯积水")
+            bits.append(f"渍水风险指数 {wlf:.2f}，偏高，连续降雨后低洼区域易积水")
         else:
-            bits.append(f"渍水风险不高（{wlf:.2f}）")
+            bits.append(f"渍水风险指数 {wlf:.2f}，较低")
     if soc is not None:
-        bits.append(f"有机碳储量约 {float(soc):.1f} t/ha，肥力家底可参考")
+        bits.append(f"有机碳储量约 {float(soc):.1f} t/ha")
     return "；".join(bits) + "。"
 
 
@@ -212,8 +213,8 @@ def summarize_weather_history(
     wh = weather_history or {}
     if not wh.get("season_totals") and not wh.get("months"):
         return (
-            f"暂无足够的历史日天气记录，天气项仍以近月摘要为主；"
-            f"有数据后将按{crop_label}生育期统计降水与高温。"
+            f"历史逐日气象记录不足，天气项以近月摘要为准；"
+            f"补齐后按{crop_label}生育期统计降水与高温。"
         )
     precip = wh.get("season_precip_mm")
     et0 = wh.get("season_et0_mm")
@@ -234,16 +235,16 @@ def summarize_weather_history(
         bal = float(precip) - float(et0)
         if bal >= 30:
             bits.append(
-                f"降水整体多于蒸散（盈约 {bal:.0f} mm），偏湿风险要结合土壤排水看"
+                f"降水多于蒸散（盈余约 {bal:.0f} mm），偏湿风险需结合土壤排水条件评估"
             )
         elif bal <= -40:
-            bits.append(f"蒸散明显大于降水（亏约 {-bal:.0f} mm），旺长期更怕卡脖旱")
+            bits.append(f"蒸散明显大于降水（亏缺约 {-bal:.0f} mm），需防范旺长期水分胁迫")
         else:
-            bits.append(f"水热大致平衡（盈亏约 {bal:.0f} mm）")
+            bits.append(f"水分收支基本平衡（盈亏约 {bal:.0f} mm）")
     if heat is not None:
         bits.append(f"日最高温≥33℃ 约 {int(heat)} 天")
     if dry is not None and int(dry) >= 10:
-        bits.append(f"最长连续少雨约 {int(dry)} 天，需对照绿度是否同步走弱")
+        bits.append(f"最长连续少雨约 {int(dry)} 天，需对照同期 NDVI 是否同步下降")
     elif dry is not None:
         bits.append(f"最长连续少雨约 {int(dry)} 天")
     return "；".join(bits) + "。" if bits else "历史天气记录有限，仅作参考。"
@@ -272,27 +273,27 @@ def build_narrative_bridge(
         if mean is None:
             continue
         if bare:
-            stage_bits.append(f"{label}像未种植/极低绿度（NDVI≈{mean:.2f}）")
+            stage_bits.append(f"{label}疑似未种植或极低覆盖（NDVI≈{mean:.2f}）")
         else:
-            stage_bits.append(f"{label}均绿度≈{mean:.2f}")
-    stage_txt = "；".join(stage_bits) if stage_bits else "生育阶段绿度样本不足"
+            stage_bits.append(f"{label} NDVI 均值≈{mean:.2f}")
+    stage_txt = "；".join(stage_bits) if stage_bits else "生育阶段 NDVI 样本不足"
     soil_short = (soil_plain or "").rstrip("。")
     weather_short = (weather_plain or "").rstrip("。")
     vigor_bit = (
-        f"生育期场景里优+良约占 {good:.0f}%，差约占 {poor:.0f}%"
+        f"生育期场景中优、良等级合计约 {good:.0f}%，差等级约 {poor:.0f}%"
         if gs.get("n")
         else "生育期等级样本不足"
     )
     bare_bit = ""
     if uncropped_years:
-        bare_bit = f"另有 {uncropped_years} 年峰值极低，更像当年大面积未种/绝产，不宜当成「种得很差」。"
+        bare_bit = f"{uncropped_years} 年峰值 NDVI 极低，疑似当年未种植或绝收，不计入长势优劣判断。"
     return (
-        f"把土壤、天气和绿度放在一起看：{soil_short}。"
-        f"天气侧：{weather_short}。"
-        f"{crop_label}旺季平均绿度约 {peak_mean:.2f}，{vigor_bit}；"
-        f"按生育阶段：{stage_txt}。"
+        f"土壤：{soil_short}。"
+        f"气象：{weather_short}。"
+        f"{crop_label}峰值期 NDVI 均值约 {peak_mean:.2f}，{vigor_bit}；"
+        f"分阶段：{stage_txt}。"
         f"{bare_bit}"
-        "因此涝旱提醒要对照排水与降水节律，长势结论只采信生育期内非裸地场景。"
+        "涝旱风险需结合排水条件与降水节律判断，长势评价仅采用生育期内非裸地场景。"
     )
 
 
@@ -738,7 +739,7 @@ def compute_assessment(
     elif peak_mean >= PEAK_WEAK:
         vigor = 55.0
         vigor_plain = (
-            f"峰值期平均 NDVI≈{peak_mean:.2f}，生育期长势偏弱，建议看密度/水肥"
+            f"峰值期平均 NDVI≈{peak_mean:.2f}，生育期长势偏弱，建议核查种植密度与水肥管理"
         )
     else:
         vigor = 40.0
@@ -908,13 +909,13 @@ def compute_assessment(
 
     hard_flood = abs_water >= 1
     if not hard_flood and not hard_drought and overall >= 70:
-        one_liner = f"适合{crop_label}，生长季长势不错；没有真涝真旱硬证据，涝旱项已按保守提醒重算。"
+        one_liner = f"适宜种植{crop_label}：生长季长势良好，未见渍涝或干旱硬证据，涝旱项按保守口径计分。"
     elif overall >= 70:
-        one_liner = "生育期长势尚可，综合条件中等偏好"
+        one_liner = "生育期长势尚可，综合条件中等偏好。"
     elif overall >= 55:
-        one_liner = f"能种{crop_label}，但要盯生育期水肥与局部未种植斑块"
+        one_liner = f"基本适宜种植{crop_label}，需关注生育期水肥管理及局部未种植斑块。"
     else:
-        one_liner = "短板明显，建议先核实种植记录再谈改种"
+        one_liner = "限制因素明显，建议先核实历史种植记录再作选地决策。"
 
     thinking = (
         f"按{season_label}重算，不用全年 NDVI 平均。{vigor_note}"
@@ -922,7 +923,7 @@ def compute_assessment(
         f"{crop_label}适宜性 {crop_score}。土壤 {texture or '—'}、pH {ph:.2f}。"
         f"涝硬证据明水面={abs_water} 景；旱无成灾档案。"
         f"疑似未种植/极低绿度年份：{uncropped_years or '未发现（地块均值口径）'}。"
-        f"分数仍是开源体检不是买地判决。"
+        f"评分为遥感综合评估结果，不替代实地踏勘与准入审查。"
     )
 
     if not observed_windows:

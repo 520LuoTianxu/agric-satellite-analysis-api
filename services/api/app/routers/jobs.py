@@ -142,7 +142,11 @@ async def get_job(
     job = await db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    progress = job.progress_json
+    progress = (
+        dict(job.progress_json)
+        if isinstance(job.progress_json, dict)
+        else job.progress_json
+    )
     # Prefer live Redis hot-path counters when present (graceful no-op if down).
     try:
         from agric_satellite_analysis_common.job_progress_redis import merge_progress_for_api
@@ -152,6 +156,9 @@ async def get_job(
             progress = merged
     except Exception:
         pass
+    if isinstance(progress, dict):
+        # 公开任务状态只显示派发状态，旧版本写入的内部异常摘要不能随进度接口外发。
+        progress.pop("dispatch_last_error", None)
     if job.type == "assessment_report":
         progress = report_progress_for_response(progress)
     # 构造响应而不是修改 ORM，确保签名 URL不会落库，也不会污染 Redis 快照。

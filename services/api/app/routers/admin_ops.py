@@ -10,14 +10,15 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from app.core.database import async_session, get_db
 from app.core.config import settings
+from app.core.logging import logger
 from app.models.tables import AdminTaskRun, DownloadWorker, Job, WorkItem
 from app.middleware.auth import OrgContext, require_roles
 from app.services import work_items as wi
@@ -64,10 +65,16 @@ _TASK_CATALOG: dict[str, dict[str, str]] = {
         "task_name": "app.tasks.satellite_history.schedule_satellite_history_backfill",
         "schedule": "每周二 02:30（北京时间，默认关闭）",
     },
+    "s1-sigma0-calibration-backfill": {
+        "label": "S1旧口径Sigma0定向回算",
+        "description": "仅回算明确选择地块中缺少ESA双极化LUT定标的日期，并逐日期报告影像命中与发布情况。",
+        "task_name": "app.services.s1_sigma0_backfill.run_s1_sigma0_calibration_backfill",
+        "schedule": "按参数手动运行（仅下载旧口径日期）",
+    },
 }
 
 # 取消后的运行记录不再读取 Celery 结果覆盖，避免页面重新刷新后恢复成运行中。
-_TERMINAL_STATUSES = {"success", "failed", "cancelled"}
+_TERMINAL_STATUSES = {"success", "failed", "cancelled", "partial"}
 
 
 class ScheduledTaskOut(BaseModel):
@@ -339,6 +346,9 @@ _PROGRESS_SUMMARY_KEYS = (
     "land_count",
     "batch_count",
     "rows_count",
+    "dispatch_status",
+    "dispatch_attempts",
+    "dispatch_available_at",
 )
 
 
@@ -396,6 +406,15 @@ _EXECUTION_TERMINAL_STATUSES = {
 }
 _EXECUTION_SUCCESS_STATUSES = {"completed", "succeeded", "done", "success"}
 _EXECUTION_FAILED_STATUSES = {"failed", "cancelled", "partial"}
+_AGGREGATED_PARENT_JOB_TYPES = frozenset(
+    {
+        "assessment_batch",
+        "satellite_history_backfill",
+        "smart_land_backfill",
+        "smart_land_sync_satellite",
+        "s1_sigma0_calibration_backfill",
+    }
+)
 
 
 @dataclass
@@ -410,6 +429,8 @@ class _ExecutionGroup:
     # 列表接口使用数据库聚合结果，不再把全部子行装进 ORM 列表。
     child_counts_override: dict[str, int] | None = None
     sort_at_override: datetime | None = None
+    started_at_override: datetime | None = None
+    finished_at_override: datetime | None = None
     error_override: str | None = None
 
 
@@ -426,6 +447,21 @@ def _as_uuid(value: Any) -> uuid.UUID | None:
 
 def _json_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _is_aggregated_parent_job(job: Job) -> bool:
+    """判断Job是否是由子任务反映执行进度的编排根节点。"""
+    if job.type in _AGGREGATED_PARENT_JOB_TYPES:
+        return True
+    # 只有带sentinel标记的backfill才是批量编排根任务；普通回填Job需保留自身进度。
+    return job.type == "backfill" and bool(_json_dict(job.params_json).get("sentinel"))
+
+
+def _is_dispatch_only_parent_job(job: Job) -> bool:
+    """判断父Job结束时间只代表任务拆分/入队完成，而非子任务处理结束。"""
+    return job.type == "smart_land_sync_satellite" or (
+        job.type == "backfill" and _is_aggregated_parent_job(job)
+    )
 
 
 def _job_parent_id_from_params(
@@ -630,10 +666,9 @@ def _group_child_counts(group: _ExecutionGroup) -> dict[str, int]:
 
 
 def _group_status(group: _ExecutionGroup) -> str:
-    # 批量父 Job 只在派发时写一次 running；所有子任务结束后由子任务计数
-    # 推导最终态，避免“失败 1、未终态 0”仍被显示为运行中。
+    # 批量父Job状态只代表编排/派发阶段；子任务未全部终结前，以实时子任务计数展示执行状态。
     if group.parent_job is not None:
-        if group.parent_job.type in {"assessment_batch", "smart_land_backfill"}:
+        if _is_aggregated_parent_job(group.parent_job):
             counts = _group_child_counts(group)
             if not counts["missing"] and not counts["pending"] and not counts["running"]:
                 if counts["failed"] and counts["completed"]:
@@ -642,6 +677,12 @@ def _group_status(group: _ExecutionGroup) -> str:
                     return "failed"
                 if counts["completed"] == counts["total"] and counts["total"]:
                     return "completed"
+            if counts["pending"] or counts["running"]:
+                # 已有子任务完成/失败或运行时显示处理中；尚未开始时保持排队，避免父Job过早变终态。
+                has_started = any(
+                    counts[key] for key in ("running", "completed", "failed")
+                )
+                return "running" if has_started else "pending"
         return group.parent_job.status
     counts = _group_child_counts(group)
     child_job_ids = {job.id for job, _ in group.jobs}
@@ -677,6 +718,87 @@ def _group_created_at(group: _ExecutionGroup) -> datetime | None:
         ] if value is not None),
         default=None,
     )
+
+
+def _group_started_at(group: _ExecutionGroup) -> datetime | None:
+    """批量根Job没有自身启动回调时，以最早启动的子Job作为开始时间。"""
+    if group.started_at_override is not None:
+        return group.started_at_override
+    parent = group.parent_job
+    if parent is not None:
+        if parent.started_at is not None:
+            return parent.started_at
+        if _is_aggregated_parent_job(parent):
+            return min(
+                (job.started_at for job, _ in group.jobs if job.started_at is not None),
+                default=None,
+            )
+        return None
+    return min(
+        (
+            value
+            for value in [
+                *(job.started_at for job, _ in group.jobs),
+                *(item.created_at for item, _ in group.work_items),
+            ]
+            if value is not None
+        ),
+        default=None,
+    )
+
+
+def _group_finished_at(group: _ExecutionGroup) -> datetime | None:
+    """根Job尚未回写终态时，仅在所有子任务终结后汇总其真实结束时间。"""
+    parent = group.parent_job
+    if parent is not None:
+        if _is_dispatch_only_parent_job(parent):
+            if _group_status(group) not in _EXECUTION_TERMINAL_STATUSES:
+                # 此类父Job的finished_at记录的是派发意图落库时间，不能误当成遥感处理完成时间。
+                return None
+            if group.finished_at_override is not None:
+                return group.finished_at_override
+            child_finished_at = [job.finished_at for job, _ in group.jobs]
+            if child_finished_at and all(value is not None for value in child_finished_at):
+                return max(child_finished_at)
+            # 无子任务时父Job完成时间有效；子任务缺结束时间时不回退到入队时间。
+            return parent.finished_at if not group.jobs else None
+        if parent.finished_at is not None:
+            return parent.finished_at
+        if _is_aggregated_parent_job(parent) and _group_status(group) in _EXECUTION_TERMINAL_STATUSES:
+            if group.finished_at_override is not None:
+                return group.finished_at_override
+            child_finished_at = [job.finished_at for job, _ in group.jobs]
+            if child_finished_at and all(value is not None for value in child_finished_at):
+                return max(child_finished_at)
+        return None
+    return _max_datetime(
+        [
+            *(job.finished_at for job, _ in group.jobs),
+            *(item.updated_at for item, _ in group.work_items),
+        ]
+    )
+
+
+def _group_progress_summary(group: _ExecutionGroup) -> dict[str, Any]:
+    """批量根Job只保存编排快照；列表进度按子Job即时汇总，避免排队数字过期。"""
+    parent = group.parent_job
+    if parent is not None and _is_aggregated_parent_job(parent):
+        counts = _group_child_counts(group)
+        progress = {
+            **_json_dict(parent.progress_json),
+            "total": counts["total"],
+            "completed": counts["completed"],
+            "failed": counts["failed"],
+            "pending_jobs": counts["pending"],
+        }
+        return _progress_summary(progress)
+    if parent is not None:
+        return _progress_summary(parent.progress_json)
+    if group.jobs:
+        return _progress_summary(group.jobs[0][0].progress_json)
+    if group.work_items:
+        return _progress_summary(group.work_items[0][0].progress_json)
+    return {}
 
 
 def _group_land_id(group: _ExecutionGroup) -> str | None:
@@ -729,31 +851,67 @@ def _group_sort_value(group: _ExecutionGroup) -> datetime:
 
 
 def _to_job_monitor_out(
-    job: Job, parent_job_id: uuid.UUID | None = None
+    job: Job,
+    parent_job_id: uuid.UUID | None = None,
+    *,
+    group: _ExecutionGroup | None = None,
 ) -> JobMonitorOut:
+    is_aggregated_parent = bool(
+        group is not None
+        and group.parent_job is not None
+        and group.parent_job.id == job.id
+        and _is_aggregated_parent_job(job)
+    )
     return JobMonitorOut(
         id=job.id,
         land_id=job.land_id,
         type=job.type,
-        status=job.status,
+        status=_group_status(group) if is_aggregated_parent else job.status,
         parent_job_id=parent_job_id,
-        progress_summary=_progress_summary(job.progress_json),
+        progress_summary=(
+            _group_progress_summary(group)
+            if is_aggregated_parent
+            else _progress_summary(job.progress_json)
+        ),
         error=job.error,
         created_at=job.created_at,
-        started_at=job.started_at,
-        finished_at=job.finished_at,
+        started_at=_group_started_at(group) if is_aggregated_parent else job.started_at,
+        finished_at=_group_finished_at(group) if is_aggregated_parent else job.finished_at,
     )
 
 
 def _to_job_detail_out(
-    job: Job, parent_job_id: uuid.UUID | None = None
+    job: Job,
+    parent_job_id: uuid.UUID | None = None,
+    *,
+    group: _ExecutionGroup | None = None,
 ) -> JobDetailOut:
+    progress_json = dict(job.progress_json or {}) if job.progress_json else None
+    if progress_json is not None:
+        # 运维路由当前与公开任务接口共用全局认证配置，不能返回旧记录的内部错误明细。
+        progress_json.pop("dispatch_last_error", None)
+    if (
+        progress_json is not None
+        and group is not None
+        and group.parent_job is not None
+        and group.parent_job.id == job.id
+        and _is_aggregated_parent_job(job)
+    ):
+        counts = _group_child_counts(group)
+        progress_json.update(
+            {
+                "stage": _group_status(group),
+                "job_count": counts["total"],
+                "queued_count": counts["pending"],
+                "running_count": counts["running"],
+                "completed_count": counts["completed"],
+                "failed_count": counts["failed"],
+            }
+        )
     return JobDetailOut(
-        **_to_job_monitor_out(job, parent_job_id).model_dump(),
+        **_to_job_monitor_out(job, parent_job_id, group=group).model_dump(),
         params_json=dict(job.params_json or {}) if job.params_json else None,
-        progress_json=report_progress_for_response(
-            dict(job.progress_json or {}) if job.progress_json else None
-        ),
+        progress_json=report_progress_for_response(progress_json),
     )
 
 
@@ -791,40 +949,17 @@ def _to_work_item_detail_out(
 
 def _to_execution_group_out(group: _ExecutionGroup) -> ExecutionGroupOut:
     parent = group.parent_job
-    first_job = group.jobs[0][0] if group.jobs else None
-    first_item = group.work_items[0][0] if group.work_items else None
     return ExecutionGroupOut(
         id=group.key,
         parent_job_id=parent.id if parent is not None else None,
         type=_group_type(group),
         status=_group_status(group),
         land_id=_group_land_id(group),
-        progress_summary=_progress_summary(
-            parent.progress_json
-            if parent is not None
-            else (first_job.progress_json if first_job is not None else first_item.progress_json if first_item is not None else {})
-        ),
+        progress_summary=_group_progress_summary(group),
         error=_group_error(group),
         created_at=_group_created_at(group),
-        started_at=(
-            parent.started_at
-            if parent is not None
-            else min(
-                (value for value in [
-                    *(job.started_at for job, _ in group.jobs),
-                    *(item.created_at for item, _ in group.work_items),
-                ] if value is not None),
-                default=None,
-            )
-        ),
-        finished_at=(
-            parent.finished_at
-            if parent is not None
-            else _max_datetime([
-                *(job.finished_at for job, _ in group.jobs),
-                *(item.updated_at for item, _ in group.work_items),
-            ])
-        ),
+        started_at=_group_started_at(group),
+        finished_at=_group_finished_at(group),
         child_counts=_group_child_counts(group),
     )
 
@@ -835,7 +970,7 @@ def _to_execution_group_detail_out(
     return ExecutionGroupDetailOut(
         **_to_execution_group_out(group).model_dump(),
         parent_job=(
-            _to_job_monitor_out(group.parent_job)
+            _to_job_monitor_out(group.parent_job, group=group)
             if group.parent_job is not None
             else None
         ),
@@ -944,6 +1079,18 @@ async def _load_execution_group_summaries(
                 func.max(Job.error)
                 .filter(Job.id != tree.c.root_id)
                 .label("job_error"),
+                # 新增字段放在末尾，兼容旧的tuple型查询替身位置约定。
+                func.min(Job.started_at)
+                .filter(Job.id != tree.c.root_id)
+                .label("job_started_at"),
+                func.max(Job.finished_at)
+                .filter(Job.id != tree.c.root_id)
+                .label("job_finished_at"),
+                func.count(Job.id)
+                .filter(
+                    (Job.id != tree.c.root_id) & Job.finished_at.is_(None)
+                )
+                .label("job_missing_finished_at"),
             )
             .join(Job, Job.id == tree.c.job_id)
             .group_by(tree.c.root_id)
@@ -1076,6 +1223,17 @@ async def _load_execution_group_summaries(
                 parent_job=root,
                 child_counts_override=counts,
                 sort_at_override=latest_at,
+                started_at_override=(
+                    _row_value(job_row, "job_started_at", 8) if job_row else None
+                ),
+                finished_at_override=(
+                    _row_value(job_row, "job_finished_at", 9)
+                    if job_row
+                    and job_count > 0
+                    and int(_row_value(job_row, "job_missing_finished_at", 10) or 0)
+                    == 0
+                    else None
+                ),
                 error_override=(
                     _row_value(job_row, "job_error", 7)
                     if job_row
@@ -1196,6 +1354,9 @@ def _task_outputs() -> list[ScheduledTaskOut]:
         # 页面仍提供手动触发，但启用状态直接反映 API 的源开关。
         if key in {"mysql-land-sync", "smart-land-backfill"}:
             enabled = settings.mysql_source_enabled
+        elif key == "s1-sigma0-calibration-backfill":
+            # 该任务无周期调度，但可由管理员显式选择少量地块后手动运行。
+            enabled = True
         else:
             # 历史回填的 enabled 仅表示周期开关，手动按钮仍可单独触发。
             enabled = switch_name_by_key[key] in enabled_names
@@ -1217,7 +1378,7 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
     now = datetime.now(timezone.utc)
     async with async_session() as db:
         run = await db.get(AdminTaskRun, run_id)
-        if run is None:
+        if run is None or run.status in _TERMINAL_STATUSES:
             return
         run.status = "running"
         run.started_at = run.started_at or now
@@ -1252,6 +1413,16 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
                 force=bool(task_params.get("force", False)),
                 parent_job_id=run_id,
             )
+        elif task_key == "s1-sigma0-calibration-backfill":
+            from app.services.s1_sigma0_backfill import (
+                run_s1_sigma0_calibration_backfill,
+            )
+
+            result = await run_s1_sigma0_calibration_backfill(
+                land_ids=task_params["land_ids"],
+                years=int(task_params.get("years") or 5),
+                parent_job_id=run_id,
+            )
         else:
             from app.services.mysql_land_sync import run_land_sync
 
@@ -1260,7 +1431,7 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
     except Exception as exc:
         async with async_session() as db:
             run = await db.get(AdminTaskRun, run_id)
-            if run is not None:
+            if run is not None and run.status not in _TERMINAL_STATUSES:
                 run.status = "failed"
                 run.error = str(exc)[:4000]
                 run.finished_at = datetime.now(timezone.utc)
@@ -1270,8 +1441,13 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
 
     async with async_session() as db:
         run = await db.get(AdminTaskRun, run_id)
-        if run is not None:
-            run.status = "success"
+        if run is not None and run.status not in _TERMINAL_STATUSES:
+            # 子任务派发部分失败时保留partial终态，避免运维页误报为全部成功。
+            run.status = (
+                "partial"
+                if isinstance(result, dict) and result.get("status") == "partial"
+                else "success"
+            )
             run.result_json = result
             # 运行完成后把参数中的地块清单替换为实际入队清单，避免页面展示几万条
             # 请求编号；原始数量和选择范围仍保留，便于核对被自动截断的原因。
@@ -1291,6 +1467,74 @@ async def _run_api_admin_task(run_id: uuid.UUID) -> None:
             run.finished_at = datetime.now(timezone.utc)
             run.updated_at = run.finished_at
             await db.commit()
+
+
+def _schedule_api_admin_task(app: FastAPI, run_id: uuid.UUID) -> asyncio.Task[None]:
+    """保留API本机管理员任务的强引用，并合并同一运行ID的重复调度。"""
+    tasks = getattr(app.state, "api_admin_task_tasks", None)
+    if not isinstance(tasks, dict):
+        tasks = {}
+        app.state.api_admin_task_tasks = tasks
+    existing = tasks.get(run_id)
+    if existing is not None and not existing.done():
+        return existing
+
+    task = asyncio.create_task(
+        _run_api_admin_task(run_id), name=f"api-admin-task-{run_id}"
+    )
+    tasks[run_id] = task
+
+    def discard_finished(completed: asyncio.Task[None]) -> None:
+        if tasks.get(run_id) is completed:
+            tasks.pop(run_id, None)
+
+    task.add_done_callback(discard_finished)
+    return task
+
+
+async def recover_interrupted_s1_claim_backfills(app: FastAPI) -> int:
+    """仅恢复claim队列下尚未创建任何Job的新版S1运行记录。"""
+    if wi.work_queue_mode() != "claim":
+        return 0
+
+    try:
+        async with async_session() as db:
+            run_ids = list(
+                (
+                    await db.execute(
+                        select(AdminTaskRun.id)
+                        .where(
+                            AdminTaskRun.task_key
+                            == "s1-sigma0-calibration-backfill",
+                            AdminTaskRun.status.in_({"queued", "running"}),
+                            AdminTaskRun.params_json[
+                                "claim_recovery_version"
+                            ].as_integer()
+                            == 1,
+                            ~exists().where(
+                                or_(
+                                    Job.id == AdminTaskRun.id,
+                                    Job.parent_job_id == AdminTaskRun.id,
+                                )
+                            ),
+                        )
+                        .order_by(AdminTaskRun.created_at, AdminTaskRun.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:
+        # 恢复扫描不得阻止API启动；下一次启动仍可重新检查未落Job的安全候选。
+        logger.exception("s1_claim_admin_task_recovery_scan_failed")
+        return 0
+
+    for run_id in run_ids:
+        # 顺序恢复可避免大量历史任务同时争用全局S1规划锁和数据库连接。
+        await _schedule_api_admin_task(app, run_id)
+    if run_ids:
+        logger.info("s1_claim_admin_tasks_recovery_processed", count=len(run_ids))
+    return len(run_ids)
 
 
 @router.get("/overview", response_model=AdminOpsOverviewOut)
@@ -1391,6 +1635,10 @@ async def job_detail(
     job = await db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    if _is_aggregated_parent_job(job):
+        group = await _load_execution_group(db, f"job:{job.id}")
+        if group is not None:
+            return _to_job_detail_out(job, group=group)
     return _to_job_detail_out(job)
 
 
@@ -1410,6 +1658,7 @@ async def work_item_detail(
 @router.post("/task-runs", response_model=TaskRunOut, status_code=202)
 async def trigger_task(
     body: TriggerTaskRequest,
+    request: Request,
     ctx: Annotated[OrgContext, Depends(_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -1474,6 +1723,29 @@ async def trigger_task(
             "sensors": list(body.sensors or ["S1", "S2"]),
             "force": body.force,
         }
+    if body.task_key == "s1-sigma0-calibration-backfill":
+        from app.services.s1_sigma0_backfill import S1_SIGMA0_BACKFILL_MAX_LANDS
+
+        requested_ids = [str(value).strip() for value in (body.land_ids or [])]
+        if not requested_ids or any(not value for value in requested_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="S1定标回算必须明确填写地块编号，不支持空清单全量触发",
+            )
+        resolved_ids = list(dict.fromkeys(requested_ids))
+        if len(resolved_ids) > S1_SIGMA0_BACKFILL_MAX_LANDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"单次S1定标回算最多选择{S1_SIGMA0_BACKFILL_MAX_LANDS}个地块",
+            )
+        params = {
+            "land_ids": resolved_ids,
+            "requested_land_count": len(resolved_ids),
+            "years": body.years or 5,
+            "target": "missing_esa_sigma_nought_lut",
+            # 仅claim队列下本版本的原子入队过程可自动恢复，旧派发模式禁止重放。
+            "claim_recovery_version": 1 if wi.work_queue_mode() == "claim" else 0,
+        }
 
     run = AdminTaskRun(
         task_key=body.task_key,
@@ -1488,11 +1760,12 @@ async def trigger_task(
         "mysql-land-sync",
         "smart-land-backfill",
         "satellite-history-backfill",
+        "s1-sigma0-calibration-backfill",
     }:
         # 这些任务都需要在 API 机访问 PostgreSQL/Smart；不放入下载机 claim 队列，
         # 避免泄露源库连接信息且不占用卫星下载 worker。
         await db.commit()
-        asyncio.create_task(_run_api_admin_task(run.id))
+        _schedule_api_admin_task(request.app, run.id)
         return _to_task_out(run)
     # 将管理员运行 ID 传给任务本身；下载机 claim/legacy 两种模式都能回写真实状态，
     # 同时避免手动触发任务被误认为是 Beat 自动执行记录。
