@@ -1,4 +1,4 @@
-"""收获占比 v3：分季、像元粘滞、单调；阈值配置/自适应、S1 佐证、置信度、按日插值；
+"""收获占比 v4：留茬判据；v3：分季、像元粘滞、单调；阈值配置/自适应、S1 佐证、置信度、按日插值；
 回执解析与接口过滤。"""
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from app.core.harvest_progress import (
     HARVEST_PROGRESS_METHOD_VERSION,
     HarvestProgressThresholds,
     compute_harvest_series,
+    estimate_red_reflectance,
     interpolate_daily,
     load_threshold_profiles,
     match_threshold_profile,
@@ -64,7 +65,7 @@ def _assert_monotonic_within_seasons(tc: unittest.TestCase, rows) -> None:
 
 class HarvestSeriesTests(unittest.TestCase):
     def test_method_version(self) -> None:
-        self.assertEqual(HARVEST_PROGRESS_METHOD_VERSION, "s2s1_season_monotonic_v3")
+        self.assertEqual(HARVEST_PROGRESS_METHOD_VERSION, "s2s1_residue_monotonic_v4")
 
     def test_gradual_harvest_rises_0_to_100(self) -> None:
         scenes = [
@@ -348,6 +349,249 @@ def _s1(day: str, vh: float, vv: float, *, orbit: int = 142, version: str = "v6"
 
 
 _S1_PEAK = [_s1("2026-07-01", -15, -8), _s1("2026-07-13", -15, -8)]
+
+
+V5 = "stac-optical-lonlat-v5"
+# 典型地物的地表反射率 (red, nir, NDMI)；蓝光取 0.7×红光，与估算假设一致。
+CANOPY = (0.03, 0.45, 0.40)
+SENESCENT = (0.05, 0.25, 0.20)  # 黄熟但仍含水的冠层
+FROSTED = (0.055, 0.17, -0.10)  # 霜冻/枯死仍站立：干但阴影偏暗
+RESIDUE = (0.12, 0.26, -0.05)  # 收后秸秆残茬：干且亮
+SOIL = (0.16, 0.21, -0.15)
+
+
+def _v5_pixel(i: int, red: float, nir: float, ndmi: float) -> dict:
+    blue = 0.7 * red
+    return {
+        "lon": 115.0 + i * 1e-4,
+        "lat": 38.9,
+        "NDVI": (nir - red) / (nir + red),
+        "EVI": 2.5 * (nir - red) / (nir + 6 * red - 7.5 * blue + 1),
+        "NDMI": ndmi,
+        "clear": 1,
+    }
+
+
+def _v5_scene(day: str, states: list[tuple[float, float, float]], **kw) -> dict:
+    return {
+        "date": day,
+        "pixels": [_v5_pixel(i, *st) for i, st in enumerate(states)],
+        "scene_id": f"s_{day}",
+        "algorithm_version": V5,
+        **kw,
+    }
+
+
+def _residue_season(tail: list[tuple[str, list]], n: int = 10) -> list[dict]:
+    """返青→峰值→黄熟，再接 ``tail``（日期、各像元状态）。"""
+    head = [
+        ("2026-04-20", [SOIL] * n),
+        ("2026-05-20", [SENESCENT] * n),
+        ("2026-06-20", [CANOPY] * n),
+        ("2026-07-20", [CANOPY] * n),
+        ("2026-08-20", [CANOPY] * n),
+        ("2026-09-15", [SENESCENT] * n),
+    ]
+    return [_v5_scene(d, st) for d, st in head + tail]
+
+
+def _mixed(res: int, frost: int, sen: int) -> list:
+    return [RESIDUE] * res + [FROSTED] * frost + [SENESCENT] * sen
+
+
+class ResidueCriterionTests(unittest.TestCase):
+    def _run(self, tail, n: int = 10, **kw):
+        kw.setdefault("thresholds", THR)
+        return _by_day(
+            compute_harvest_series(_residue_season(tail, n=n), adaptive=False, **kw)
+        )
+
+    def test_red_estimate_inverts_ndvi_evi(self) -> None:
+        for red, nir, _ in (CANOPY, SENESCENT, FROSTED, RESIDUE, SOIL):
+            px = _v5_pixel(0, red, nir, 0.0)
+            self.assertAlmostEqual(
+                estimate_red_reflectance(px["NDVI"], px["EVI"]), red, places=4
+            )
+        self.assertIsNone(estimate_red_reflectance(None, 0.3))
+        self.assertIsNone(estimate_red_reflectance(0.99, 0.3))
+
+    def test_bright_dry_residue_is_suspected_dark_frosted_canopy_is_not(self) -> None:
+        tail = [
+            (d, _mixed(4, 3, 3)) for d in ("2026-10-01", "2026-10-06", "2026-10-11")
+        ]
+        rows = self._run(tail)
+        r = rows["2026-10-06"]
+        self.assertEqual(r["harvested_pct"], 0.0)
+        self.assertEqual(r["suspected_harvest_pct"], 40.0)
+        self.assertEqual(r["harvested_or_suspected_pct"], 40.0)
+        self.assertEqual(r["suspected_pixel_count"], 4)
+        self.assertEqual(r["residue_pixel_count"], 4)
+        self.assertEqual(r["residue_harvested_pct"], 0.0)
+        self.assertIn("suspected_harvest", r["confidence_reasons"])
+        self.assertEqual(rows["2026-09-15"]["harvested_or_suspected_pct"], 0.0)
+
+    def test_suspected_promoted_when_later_bare(self) -> None:
+        tail = [
+            ("2026-10-01", _mixed(4, 0, 6)),
+            ("2026-10-06", _mixed(4, 0, 6)),
+            ("2026-10-20", [SOIL] * 10),
+            ("2026-10-25", [SOIL] * 10),
+        ]
+        rows = self._run(tail)
+        self.assertEqual(rows["2026-10-06"]["harvested_pct"], 0.0)
+        self.assertEqual(rows["2026-10-06"]["suspected_harvest_pct"], 40.0)
+        r = rows["2026-10-20"]
+        self.assertEqual(r["harvested_pct"], 100.0)
+        self.assertEqual(r["suspected_harvest_pct"], 0.0)
+        self.assertEqual(r["residue_harvested_pct"], 40.0)
+        self.assertIn("promoted_bare", r["confidence_reasons"])
+
+    def test_suspected_promoted_by_abrupt_change_when_enabled(self) -> None:
+        tail = [
+            ("2026-09-28", [CANOPY] * 10),
+            ("2026-10-01", _mixed(4, 3, 3)),
+            ("2026-10-06", _mixed(4, 3, 3)),
+        ]
+        self.assertEqual(self._run(tail)["2026-10-01"]["harvested_pct"], 0.0)
+        thr = THR.with_overrides({"residue_abrupt_drop": 0.3})
+        r = self._run(tail, thresholds=thr)["2026-10-01"]
+        self.assertEqual(r["harvested_pct"], 40.0)
+        self.assertEqual(r["suspected_harvest_pct"], 0.0)
+        self.assertIn("promoted_abrupt", r["confidence_reasons"])
+        # 渐进黄熟（12 天内绿度无骤降）不晋升。
+        r = self._run(tail[1:], thresholds=thr)["2026-10-01"]
+        self.assertEqual(r["harvested_pct"], 0.0)
+        self.assertEqual(r["suspected_harvest_pct"], 40.0)
+
+    def test_suspected_promoted_by_s1_harvest_signal(self) -> None:
+        tail = [
+            (d, _mixed(6, 2, 2)) for d in ("2026-10-01", "2026-10-06", "2026-10-11")
+        ]
+        s1 = [
+            _s1("2026-06-25", -14, -9),
+            _s1("2026-07-15", -14, -9),
+            _s1("2026-08-15", -14, -9),
+        ]
+        self.assertEqual(
+            self._run(tail, s1_scenes=s1)["2026-10-06"]["harvested_pct"], 0.0
+        )
+        rows = self._run(tail, s1_scenes=[*s1, _s1("2026-10-08", -17, -9)])
+        self.assertEqual(rows["2026-10-01"]["harvested_pct"], 0.0)
+        r = rows["2026-10-06"]
+        self.assertEqual(r["harvested_pct"], 60.0)
+        self.assertEqual(r["suspected_harvest_pct"], 0.0)
+        self.assertIn("promoted_s1", r["confidence_reasons"])
+        self.assertEqual(rows["2026-10-11"]["harvested_pct"], 60.0)
+
+    def test_regreen_after_residue_like_date_is_not_counted(self) -> None:
+        tail = [
+            ("2026-10-01", [RESIDUE] * 10),
+            ("2026-10-06", [CANOPY] * 10),
+            ("2026-10-11", [CANOPY] * 10),
+        ]
+        rows = self._run(tail)
+        # 10-01 单期凹陷被异常日过滤或判为未确认；回绿后两档均为 0。
+        self.assertEqual(rows["2026-10-06"]["harvested_or_suspected_pct"], 0.0)
+        self.assertTrue(
+            all(r["harvested_or_suspected_pct"] == 0 for r in rows.values())
+        )
+
+    def test_latest_residue_counts_as_suspected(self) -> None:
+        tail = [("2026-10-01", [SENESCENT] * 10), ("2026-10-06", _mixed(5, 0, 5))]
+        r = self._run(tail)["2026-10-06"]
+        self.assertEqual(r["harvested_pct"], 0.0)
+        self.assertEqual(r["suspected_harvest_pct"], 50.0)
+
+    def test_not_before_peak_and_not_for_uncalibrated_products(self) -> None:
+        # 返青期出现“干亮”像元（峰值之前）不计。
+        scenes = _residue_season([("2026-10-01", [SENESCENT] * 10)])
+        scenes.insert(2, _v5_scene("2026-06-05", [RESIDUE] * 10))
+        scenes.insert(3, _v5_scene("2026-06-10", [RESIDUE] * 10))
+        rows = compute_harvest_series(scenes, thresholds=THR, adaptive=False)
+        self.assertTrue(all(r["harvested_or_suspected_pct"] == 0 for r in rows))
+        # 无算法版本（旧产品）或重复扣偏移的 v3/v4 产品不用留茬判据。
+        tail = [(d, _mixed(4, 3, 3)) for d in ("2026-10-01", "2026-10-06")]
+        for version in (None, "stac-optical-lonlat-v4"):
+            scenes = _residue_season(tail)
+            for sc in scenes:
+                sc["algorithm_version"] = version
+                if version:
+                    sc["stac_item_id"] = "S2A_50SLJ_20260103_0_L2A"
+            rows = compute_harvest_series(scenes, thresholds=THR, adaptive=False)
+            self.assertTrue(all(r["residue_pixel_count"] == 0 for r in rows), version)
+            self.assertTrue(all(r["suspected_harvest_pct"] == 0 for r in rows))
+
+    def test_disable_and_tune_via_env_and_profile(self) -> None:
+        tail = [
+            (d, _mixed(4, 3, 3)) for d in ("2026-10-01", "2026-10-06", "2026-10-11")
+        ]
+        with patch.dict("os.environ", {"HARVEST_PROGRESS_RESIDUE_ENABLED": "0"}):
+            off = HarvestProgressThresholds.from_env()
+        self.assertFalse(off.residue_enabled)
+        r = self._run(tail, thresholds=off)["2026-10-06"]
+        self.assertEqual(r["harvested_or_suspected_pct"], 0.0)
+        strict = THR.with_overrides({"residue_red_min": 0.2})
+        self.assertEqual(strict.residue_red_min, 0.2)
+        r = self._run(tail, thresholds=strict)["2026-10-06"]
+        self.assertEqual(r["harvested_or_suspected_pct"], 0.0)
+        with patch.dict(
+            "os.environ",
+            {
+                "HARVEST_PROGRESS_RESIDUE_PEAK_FRAC": "5",
+                "HARVEST_PROGRESS_RESIDUE_NDMI_MAX": "-0.05",
+                "HARVEST_PROGRESS_RESIDUE_RED_MIN": "0.1",
+                "HARVEST_PROGRESS_RESIDUE_ABRUPT_DROP": "0.3",
+                "HARVEST_PROGRESS_RESIDUE_ABRUPT_DAYS": "100",
+            },
+        ):
+            t = HarvestProgressThresholds.from_env()
+        self.assertEqual(t.residue_peak_frac, 0.9)
+        self.assertEqual(t.residue_ndmi_max, -0.05)
+        self.assertEqual(t.residue_red_min, 0.1)
+        self.assertEqual(t.residue_abrupt_drop, 0.3)
+        self.assertEqual(t.residue_abrupt_days, 40)
+        self.assertEqual(THR.residue_abrupt_drop, 0.0)
+
+    def test_random_mixture_both_tiers_monotonic(self) -> None:
+        rnd = random.Random(7)
+        states = (SENESCENT, FROSTED, RESIDUE, SOIL, CANOPY)
+        for abrupt in (0.0, 0.3):
+            tail = [
+                (
+                    (date(2026, 9, 20) + timedelta(days=5 * i)).isoformat(),
+                    [rnd.choice(states) for _ in range(30)],
+                )
+                for i in range(10)
+            ]
+            rows = compute_harvest_series(
+                _residue_season(tail, n=30),
+                thresholds=THR.with_overrides({"residue_abrupt_drop": abrupt}),
+                adaptive=False,
+            )
+            _assert_monotonic_within_seasons(self, rows)
+            prev = 0.0
+            for r in rows:
+                self.assertGreaterEqual(r["suspected_harvest_pct"], 0.0)
+                self.assertAlmostEqual(
+                    r["harvested_or_suspected_pct"],
+                    r["harvested_pct"] + r["suspected_harvest_pct"],
+                    places=1,
+                )
+                self.assertLessEqual(r["harvested_or_suspected_pct"], 100.0)
+                if r["season_start"]:
+                    self.assertGreaterEqual(r["harvested_or_suspected_pct"], prev)
+                    prev = r["harvested_or_suspected_pct"]
+            daily = interpolate_daily(rows)
+            prev_h = prev_c = 0.0
+            for r in daily:
+                if not r["season_start"] or r["status"] == "off_season":
+                    continue
+                self.assertGreaterEqual(r["harvested_pct"], prev_h)
+                self.assertGreaterEqual(r["harvested_or_suspected_pct"], prev_c)
+                self.assertGreaterEqual(
+                    r["harvested_or_suspected_pct"], r["harvested_pct"]
+                )
+                prev_h, prev_c = r["harvested_pct"], r["harvested_or_suspected_pct"]
 
 
 class ThresholdSourceTests(unittest.TestCase):
@@ -686,9 +930,25 @@ class HarvestProgressEndpointTests(unittest.TestCase):
         self.assertEqual(out.source, "stored")
         self.assertTrue(out.heuristic)
         self.assertEqual(out.parcel_area_mu, 30.0)
-        self.assertEqual(out.method_version, "s2s1_season_monotonic_v3")
+        self.assertEqual(out.method_version, "s2s1_residue_monotonic_v4")
         self.assertEqual(str(out.items[0].season_start), "2026-06-25")
         self.assertFalse(out.items[0].confirmed)
+
+    def test_suspected_only_row_is_returned_and_exposed(self) -> None:
+        row = {
+            **self.ROWS[0],
+            "date": "2026-09-10",
+            "suspected_harvest_pct": 35.0,
+            "harvested_or_suspected_pct": 35.0,
+            "confidence_reasons": ["suspected_harvest"],
+        }
+        out, _ = self._call([self.ROWS[0], row, self.ROWS[1]], include_zero=False)
+        self.assertEqual([str(i.date) for i in out.items], ["2026-09-10", "2026-09-20"])
+        item = out.items[0]
+        self.assertEqual(item.harvested_pct, 0.0)
+        self.assertEqual(item.suspected_harvest_pct, 35.0)
+        self.assertEqual(item.harvested_or_suspected_pct, 35.0)
+        self.assertIsNone(out.items[1].suspected_harvest_pct)
 
     def test_include_zero_and_live_fallback_enqueues(self) -> None:
         out, enq = self._call(self.ROWS, include_zero=True, stored=False)

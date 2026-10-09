@@ -131,7 +131,8 @@ _UPSERT_ROW = text(
         season_start, vegetation_index, confirmed, official, params,
         confidence, confidence_level, confidence_reasons, confirmed_by, gap_days,
         s1_date, s1_delta_vh_db, s1_delta_ratio_db, s1_agreement, threshold_source,
-        updated_at
+        residue_harvested_pct, residue_pixel_count, suspected_harvest_pct,
+        harvested_or_suspected_pct, suspected_pixel_count, updated_at
     ) VALUES (
         :land_id, :obs_date, :sensor, :method_version, :scene_id, :status,
         :harvested_pct, :newly_harvested_pct, :harvested_area_mu, :parcel_area_mu,
@@ -141,7 +142,9 @@ _UPSERT_ROW = text(
         CAST(:params AS jsonb),
         :confidence, :confidence_level, CAST(:confidence_reasons AS jsonb),
         :confirmed_by, :gap_days, :s1_date, :s1_delta_vh_db, :s1_delta_ratio_db,
-        :s1_agreement, :threshold_source, now()
+        :s1_agreement, :threshold_source, :residue_harvested_pct,
+        :residue_pixel_count, :suspected_harvest_pct,
+        :harvested_or_suspected_pct, :suspected_pixel_count, now()
     )
     ON CONFLICT (land_id, obs_date, sensor, method_version) DO UPDATE SET
         scene_id = EXCLUDED.scene_id,
@@ -174,6 +177,11 @@ _UPSERT_ROW = text(
         s1_delta_ratio_db = EXCLUDED.s1_delta_ratio_db,
         s1_agreement = EXCLUDED.s1_agreement,
         threshold_source = EXCLUDED.threshold_source,
+        residue_harvested_pct = EXCLUDED.residue_harvested_pct,
+        residue_pixel_count = EXCLUDED.residue_pixel_count,
+        suspected_harvest_pct = EXCLUDED.suspected_harvest_pct,
+        harvested_or_suspected_pct = EXCLUDED.harvested_or_suspected_pct,
+        suspected_pixel_count = EXCLUDED.suspected_pixel_count,
         updated_at = now()
     """
 )
@@ -365,6 +373,11 @@ async def recompute_land(
                 "s1_delta_ratio_db": row.get("s1_delta_ratio_db"),
                 "s1_agreement": row.get("s1_agreement"),
                 "threshold_source": row.get("threshold_source"),
+                "residue_harvested_pct": row.get("residue_harvested_pct"),
+                "residue_pixel_count": row.get("residue_pixel_count"),
+                "suspected_harvest_pct": row.get("suspected_harvest_pct"),
+                "harvested_or_suspected_pct": row.get("harvested_or_suspected_pct"),
+                "suspected_pixel_count": row.get("suspected_pixel_count"),
             },
         )
     return len(rows)
@@ -377,7 +390,8 @@ _LIST_STORED = text(
            peak_greenness, peak_date, season_start, vegetation_index, confirmed,
            official, confidence, confidence_level, confidence_reasons, confirmed_by,
            gap_days, s1_date, s1_delta_vh_db, s1_delta_ratio_db, s1_agreement,
-           threshold_source
+           threshold_source, residue_harvested_pct, suspected_harvest_pct,
+           harvested_or_suspected_pct
     FROM agric_satellite.parcel_harvest_progress
     WHERE land_id = :land_id AND sensor = :sensor AND method_version = :method_version
       AND obs_date >= :date_from AND obs_date <= :date_to
@@ -435,6 +449,9 @@ async def list_stored(
                 "s1_delta_ratio_db": _num(d.get("s1_delta_ratio_db")),
                 "s1_agreement": d.get("s1_agreement"),
                 "threshold_source": d.get("threshold_source"),
+                "residue_harvested_pct": _num(d.get("residue_harvested_pct")),
+                "suspected_harvest_pct": _num(d.get("suspected_harvest_pct")),
+                "harvested_or_suspected_pct": _num(d.get("harvested_or_suspected_pct")),
             }
         )
     return out

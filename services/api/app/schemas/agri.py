@@ -412,7 +412,8 @@ class HarvestProgressItem(BaseModel):
         default_factory=list,
         description=(
             "原因码：low_valid_pct、few_pixels、long_gap、small_margin、unconfirmed、"
-            "s1_confirmed、s1_agree、s1_disagree、interpolated"
+            "s1_confirmed、s1_agree、s1_disagree、residue_signature、suspected_harvest、"
+            "promoted_bare、promoted_abrupt、promoted_s1、interpolated"
         ),
     )
     confirmed_by: Literal["s2", "s1"] | None = Field(
@@ -429,6 +430,24 @@ class HarvestProgressItem(BaseModel):
     s1_agreement: Literal["agree", "disagree", "ambiguous"] | None = None
     threshold_source: str | None = Field(
         None, description="阈值来源：profile:<键> | adaptive | default"
+    )
+    suspected_harvest_pct: float | None = Field(
+        None,
+        description=(
+            "疑似收获占比 0–100：峰值后呈秸秆残茬样（绿度≤峰值约一半、NDMI≤0、亮度抬升、"
+            "下一期不回绿），但与枯熟未收的站秆难以区分；后续确认后转入 harvested_pct。"
+            "不含在 harvested_pct 内；旧版本结果为空"
+        ),
+    )
+    harvested_or_suspected_pct: float | None = Field(
+        None,
+        description="已收获 + 疑似收获，0–100，季内单调不减；旧版本结果为空",
+    )
+    residue_harvested_pct: float | None = Field(
+        None,
+        description=(
+            "harvested_pct 中先经留茬判据检出、后被确认（裸土级/突变/S1）晋升的部分"
+        ),
     )
     interpolated: bool = Field(False, description="true 表示按日插值的展示点，非真实观测")
 

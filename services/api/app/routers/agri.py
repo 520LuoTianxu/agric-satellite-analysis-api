@@ -1124,7 +1124,9 @@ async def get_harvest_progress(
     date_to: date | None = Query(None, alias="to", description="默认今天"),
     include_zero: bool = Query(
         False,
-        description="是否返回已收获占比为 0 的观测日（季外与未开始收获，默认隐藏）",
+        description=(
+            "是否返回已收获与疑似收获占比均为 0 的观测日（季外与未开始收获，默认隐藏）"
+        ),
     ),
     interpolate: Literal["none", "daily"] = Query(
         "none",
@@ -1179,7 +1181,9 @@ async def get_harvest_progress(
     items = [
         HarvestProgressItem.model_validate(r)
         for r in rows
-        if include_zero or float(r.get("harvested_pct") or 0) > 0
+        if include_zero
+        or float(r.get("harvested_or_suspected_pct") or r.get("harvested_pct") or 0)
+        > 0
     ]
     threshold_source = next(
         (
