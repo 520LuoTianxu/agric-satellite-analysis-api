@@ -367,3 +367,36 @@ class NdviDayGradeSharesOut(BaseModel):
     land_id: str
     items: list[NdviDayGradeShareItem]
     rule_zh: str = "红<0.25 / 橙0.25–0.35 / 黄0.35–0.50 / 绿≥0.50"
+
+
+class HarvestProgressItem(BaseModel):
+    """一个真实观测日的已收获面积占比（无插值）。"""
+
+    date: date
+    sensor: str = "S2"
+    harvested_pct: float = Field(description="已收获像元占有效像元百分比 0–100")
+    newly_harvested_pct: float = Field(description="较上一有效观测日新增的百分点，不为负")
+    harvested_area_mu: float | None = None
+    status: str = Field(
+        description="no_growth | growing | not_harvested | harvesting | harvested"
+    )
+    valid_pct: float = Field(description="无云有效像元占比")
+    mean_ndvi: float | None = None
+    peak_ndvi: float | None = None
+    peak_date: date | None = None
+    scene_id: str | None = None
+    official: bool = True
+
+
+class HarvestProgressOut(BaseModel):
+    land_id: str
+    date_from: date
+    date_to: date
+    include_zero: bool
+    parcel_area_mu: float | None = None
+    method_version: str
+    heuristic: bool = True
+    rule_zh: str
+    source: Literal["stored", "live"] = "stored"
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    items: list[HarvestProgressItem] = Field(default_factory=list)

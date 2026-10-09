@@ -27,6 +27,8 @@ from app.schemas.agri import (
     AgriStatsOut,
     AgriTableCount,
     HarvestDetectOut,
+    HarvestProgressItem,
+    HarvestProgressOut,
     LandParcelOut,
     LandScenesSummaryOut,
     NdviDayGradeShareItem,
@@ -1107,6 +1109,78 @@ async def list_ndvi_day_grade_shares(
         land_id=land_id,
         items=items,
         rule_zh=NDVI_DAY_GRADE_RULE_ZH,
+    )
+
+
+@router.get(
+    "/lands/{land_id}/harvest-progress",
+    response_model=HarvestProgressOut,
+)
+async def get_harvest_progress(
+    land_id: str,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    date_from: date | None = Query(None, alias="from", description="默认当年1月1日"),
+    date_to: date | None = Query(None, alias="to", description="默认今天"),
+    include_zero: bool = Query(
+        False, description="是否返回已收获占比为 0 的观测日（默认隐藏）"
+    ),
+):
+    """按观测日期返回地块已收获面积占比及较上期新增（首版 NDVI 启发式估算）。
+
+    优先读 ``parcel_harvest_progress`` 落库结果；区间内尚无落库记录时现场计算
+    并加入重算队列，后续请求即可直接读表。
+    """
+    await _agri_ready(db)
+    from app.core.harvest_progress import (
+        HARVEST_PROGRESS_METHOD_VERSION,
+        HarvestProgressThresholds,
+    )
+    from app.services import harvest_progress as hp
+
+    exists, area_mu = await hp.load_land_area_mu(db, land_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Land parcel not found")
+    date_to = date_to or date.today()
+    date_from = date_from or date(date_to.year, 1, 1)
+    if date_from > date_to:
+        raise HTTPException(status_code=422, detail="from 不能晚于 to")
+    if (date_to - date_from).days > 731:
+        raise HTTPException(status_code=422, detail="日期区间最长 2 年")
+
+    thr = HarvestProgressThresholds.from_env()
+    source = "stored"
+    rows = await hp.list_stored(db, land_id, date_from, date_to)
+    if not rows:
+        source = "live"
+        rows = await hp.compute_land_series(
+            db, land_id, date_from, date_to, area_mu=area_mu, thresholds=thr
+        )
+        if rows and hp.harvest_progress_enabled():
+            try:
+                await hp.enqueue_lands(db, [land_id], date_from)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("harvest_progress_enqueue_failed land_id=%s", land_id)
+
+    items = [
+        HarvestProgressItem.model_validate(r)
+        for r in rows
+        if include_zero or float(r.get("harvested_pct") or 0) > 0
+    ]
+    return HarvestProgressOut(
+        land_id=land_id,
+        date_from=date_from,
+        date_to=date_to,
+        include_zero=include_zero,
+        parcel_area_mu=round(area_mu, 2) if area_mu is not None else None,
+        method_version=HARVEST_PROGRESS_METHOD_VERSION,
+        heuristic=True,
+        rule_zh=thr.rule_zh(),
+        source=source,
+        thresholds=thr.to_dict(),
+        items=items,
     )
 
 

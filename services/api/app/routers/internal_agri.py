@@ -318,3 +318,58 @@ async def land_scenes_summary(
             )
         )
     return AgriScenesSummaryOut(land_id=land_id, total=total, sensors=sensors)
+
+
+class HarvestProgressBackfillIn(BaseModel):
+    """收获占比补算：按地块列表或全部地块入队，由 API 后台 outbox 计算。"""
+
+    land_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list, max_length=5000
+    )
+    all_lands: bool = False
+    date_from: date | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "HarvestProgressBackfillIn":
+        if not self.land_ids and not self.all_lands:
+            raise ValueError("land_ids 或 all_lands 至少指定一个")
+        return self
+
+
+_ENQUEUE_ALL_HARVEST = text(
+    """
+    INSERT INTO agric_satellite.parcel_harvest_progress_outbox
+        (land_id, date_from, status, attempts, available_at, updated_at)
+    SELECT land_id, :date_from, 'pending', 0, now(), now()
+    FROM agric_satellite.land_parcels
+    ON CONFLICT (land_id) DO UPDATE SET
+        date_from = CASE
+            WHEN parcel_harvest_progress_outbox.status = 'completed'
+                THEN EXCLUDED.date_from
+            ELSE LEAST(parcel_harvest_progress_outbox.date_from, EXCLUDED.date_from)
+        END,
+        status = 'pending', attempts = 0, lease_owner = NULL, lease_until = NULL,
+        last_error = NULL, available_at = now(), completed_at = NULL, updated_at = now()
+    """
+)
+
+
+@router.post("/harvest-progress/backfill")
+async def backfill_harvest_progress(
+    body: HarvestProgressBackfillIn,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    """把历史日期的收获占比重算放入 outbox；接口只入队，立即返回。"""
+    from datetime import timedelta
+
+    from app.services.harvest_progress import DEFAULT_RECENT_DAYS, enqueue_lands
+
+    start = body.date_from or (date.today() - timedelta(days=DEFAULT_RECENT_DAYS))
+    if body.all_lands:
+        result = await db.execute(_ENQUEUE_ALL_HARVEST, {"date_from": start})
+        enqueued = int(result.rowcount or 0)
+    else:
+        enqueued = await enqueue_lands(db, body.land_ids, start, delay_seconds=0)
+    await db.commit()
+    return {"enqueued": enqueued, "date_from": start.isoformat()}
