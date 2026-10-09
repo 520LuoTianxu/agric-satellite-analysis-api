@@ -235,5 +235,59 @@ class LandAssessmentPdfSmoke(unittest.TestCase):
             self.assertIn("程序综合分不受影响", text)
 
 
+    def test_cover_page_first_and_unnumbered(self) -> None:
+        from app.reports.land_assessment.pdf_render import render_pdf
+
+        field = {
+            "name": "封面测试地块",
+            "land_id": "abcd1234-0000-0000-0000-000000000000",
+            "area_ha": 2.0,
+            "crop_type": "corn",
+            "location": "黑龙江省 · 绥化市 · 海伦市",
+            "org_name": "乡合农服示范基地",
+            "center_lon": 126.9312,
+            "center_lat": 47.4605,
+        }
+        common = dict(
+            field=field,
+            scorecard={
+                "overall": {"score": 76.5, "light": "绿", "grade": "较好"},
+                "dimensions": [],
+            },
+            rs={},
+            risk={"period": "2025-04-01 — 2026-09-30"},
+            soil={},
+            weather_summary={},
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            with_cover = PdfReader(
+                render_pdf(out_path=Path(folder) / "c.pdf", cover=True, **common)
+            )
+            cover_text = with_cover.pages[0].extract_text() or ""
+            for needle in (
+                "封面测试地块",
+                "乡合农服示范基地",
+                "海伦市",
+                "126.93120",
+                "30.0 亩",
+                "76.5 分",
+                "2025-04-01",
+                "LA-",
+            ):
+                self.assertIn(needle, cover_text)
+            self.assertNotIn("第 1 页", cover_text)
+            self.assertIn("第 1 页", with_cover.pages[1].extract_text() or "")
+            self.assertEqual(len(with_cover.outline), 10)
+
+            no_cover = PdfReader(
+                render_pdf(out_path=Path(folder) / "n.pdf", cover=False, **common)
+            )
+            self.assertEqual(len(with_cover.pages), len(no_cover.pages) + 1)
+            self.assertIn("第 1 页", no_cover.pages[0].extract_text() or "")
+            with patch.dict("os.environ", {"REPORT_COVER_ENABLED": "false"}):
+                env_off = PdfReader(render_pdf(out_path=Path(folder) / "e.pdf", **common))
+            self.assertEqual(len(env_off.pages), len(no_cover.pages))
+
+
 if __name__ == "__main__":
     unittest.main()

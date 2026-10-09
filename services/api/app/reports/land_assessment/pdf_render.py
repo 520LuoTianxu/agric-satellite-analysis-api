@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,7 +33,7 @@ from reportlab.platypus import (
 from reportlab.platypus.tableofcontents import TableOfContents
 
 from app.core.crops import crop_name_zh
-from app.reports.land_assessment.paths import FONT_PATH
+from app.reports.land_assessment.paths import COVER_IMAGE_PATH, FONT_PATH
 from app.reports.land_assessment.soil_labels import (
     AWC_LABEL_ZH,
     soil_drainage_zh,
@@ -53,6 +55,18 @@ ZEBRA = "#F5F8F6"
 CONTENT_W = 168 * mm
 
 CST = timezone(timedelta(hours=8))
+
+logger = logging.getLogger(__name__)
+
+# 封面开关：默认开启；REPORT_COVER_ENABLED=0/false/no/off 时退回无封面排版。
+COVER_ENV = "REPORT_COVER_ENABLED"
+# 封面底图中部留白区（标题下划线以下、页脚以上），单位均为 PDF 坐标。
+COVER_TEXT_LEFT = 20 * mm
+COVER_TEXT_TOP = 297 * mm - 112 * mm
+COVER_NAME_W = 150 * mm
+COVER_LABEL_W = 24 * mm
+COVER_VALUE_W = 88 * mm
+COVER_TABLE_FLOOR = 52 * mm
 
 DIM_ORDER = ("crop", "soil", "vigor", "weather", "wet_safety", "drought_safety")
 DIM_TITLE = {
@@ -291,6 +305,137 @@ def _ai_failed(ai: dict[str, Any] | None) -> bool:
     return False
 
 
+def cover_enabled(value: bool | None = None) -> bool:
+    """显式参数优先；否则读取环境变量，未配置时默认带封面。"""
+    if value is not None:
+        return bool(value)
+    raw = os.getenv(COVER_ENV, "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _cover_coords(field: dict[str, Any]) -> str | None:
+    lon, lat = field.get("center_lon"), field.get("center_lat")
+    try:
+        lon_f, lat_f = float(lon), float(lat)
+    except (TypeError, ValueError):
+        return None
+    if not (-180 <= lon_f <= 180 and -90 <= lat_f <= 90):
+        return None
+    ew = "E" if lon_f >= 0 else "W"
+    ns = "N" if lat_f >= 0 else "S"
+    return f"{abs(lon_f):.5f}°{ew}，{abs(lat_f):.5f}°{ns}"
+
+
+def cover_rows(
+    field: dict[str, Any],
+    overall: dict[str, Any],
+    risk: dict[str, Any],
+    *,
+    crop_label: str,
+    area_ha: float,
+    area_mu: float,
+    report_no: str,
+    generated: datetime,
+) -> list[tuple[str, str]]:
+    """封面信息行；没有可靠来源的字段直接省略，不用占位符凑数。"""
+    rows: list[tuple[str, str]] = []
+    orgs: list[str] = []
+    for key in ("org_name", "group_name"):
+        val = str(field.get(key) or "").strip()
+        if val and val not in orgs:
+            orgs.append(val)
+    if orgs:
+        rows.append(("所属单位", " · ".join(orgs)))
+    location = str(field.get("location") or "").strip()
+    if location and location not in {"—", str(field.get("name") or "")}:
+        rows.append(("所在区域", location))
+    coords = _cover_coords(field)
+    if coords:
+        rows.append(("中心坐标", coords))
+    if area_ha > 0:
+        rows.append(("地块面积", f"约 {area_mu} 亩（{round(area_ha, 2)} 公顷）"))
+    if crop_label and crop_label not in {"作物", "作物未登记"}:
+        rows.append(("拟种作物", crop_label))
+    period = str(risk.get("period") or "").strip()
+    if period:
+        rows.append(("评估时段", period))
+    score = overall.get("score")
+    if score not in (None, ""):
+        light = overall.get("light")
+        parts = [f"{score} 分"]
+        if overall.get("grade"):
+            parts.append(str(overall["grade"]))
+        if light in LIGHT_WORD:
+            parts.append(LIGHT_WORD[light])
+        rows.append(("综合评分", " · ".join(parts)))
+    if report_no and report_no != "—":
+        rows.append(("报告编号", report_no))
+    rows.append(("生成日期", generated.strftime("%Y年%m月%d日")))
+    return rows
+
+
+def _draw_cover(c, field_name: str, rows: list[tuple[str, str]]) -> None:
+    """满版绘制封面底图，并在中部留白区叠加地块信息。"""
+    page_w, page_h = A4
+    c.drawImage(
+        str(COVER_IMAGE_PATH), 0, 0, width=page_w, height=page_h, preserveAspectRatio=False
+    )
+    name_style = ParagraphStyle(
+        "cover_name",
+        fontName="CNB",
+        fontSize=19,
+        leading=26,
+        textColor=HexColor(PRIMARY),
+        wordWrap="CJK",
+    )
+    label_style = ParagraphStyle(
+        "cover_label",
+        fontName="CNB",
+        fontSize=10,
+        leading=15,
+        textColor=HexColor(MUTED),
+        wordWrap="CJK",
+    )
+    value_style = ParagraphStyle(
+        "cover_value",
+        fontName="CN",
+        fontSize=10.5,
+        leading=15,
+        textColor=HexColor(INK),
+        wordWrap="CJK",
+    )
+    y = COVER_TEXT_TOP
+    name = Paragraph(_esc(field_name), name_style)
+    _, h = name.wrap(COVER_NAME_W, page_h)
+    name.drawOn(c, COVER_TEXT_LEFT, y - h)
+    y -= h + 9 * mm
+    if not rows:
+        return
+    table = Table(
+        [[Paragraph(_esc(k), label_style), Paragraph(_esc(v), value_style)] for k, v in rows],
+        colWidths=[COVER_LABEL_W, COVER_VALUE_W],
+        hAlign="LEFT",
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
+                ("LINEABOVE", (0, 0), (-1, 0), 0.9, HexColor(PRIMARY)),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.4, HexColor(RULE)),
+                ("LINEBELOW", (0, -1), (-1, -1), 0.9, HexColor(PRIMARY)),
+            ]
+        )
+    )
+    _, th = table.wrap(COVER_LABEL_W + COVER_VALUE_W, page_h)
+    # 表格底边不低于页脚上方安全线，避免与底图页脚文字重叠。
+    top = max(y, COVER_TABLE_FLOOR + th)
+    table.drawOn(c, COVER_TEXT_LEFT, top - th)
+
+
 def _fmt(value: Any, unit: str = "", default: str = "—") -> str:
     if value is None or value == "":
         return default
@@ -299,6 +444,9 @@ def _fmt(value: Any, unit: str = "", default: str = "—") -> str:
 
 class AssessmentDocTemplate(SimpleDocTemplate):
     """通过多轮排版回填真实目录页码，避免篇幅变化后目录失准。"""
+
+    # 封面不计页码：目录与页脚显示的页码均扣除封面页数。
+    page_offset = 0
 
     def afterFlowable(self, flowable):
         title = getattr(flowable, "chapter_title", None)
@@ -318,7 +466,7 @@ class AssessmentDocTemplate(SimpleDocTemplate):
             label = (
                 f"{_esc(title)}<br/><font size='8.5' color='{MUTED}'>{_esc(blurb)}</font>"
             )
-            self.notify("TOCEntry", (0, label, self.page, key))
+            self.notify("TOCEntry", (0, label, self.page - self.page_offset, key))
 
 
 def render_pdf(
@@ -335,8 +483,12 @@ def render_pdf(
     analysis: dict[str, Any] | None = None,
     ai: dict[str, Any] | None = None,
     site_admission: dict[str, Any] | None = None,
+    cover: bool | None = None,
 ) -> Path:
-    """完整渲染选地报告，按章节自然分页，不通过删减正文限制页数。"""
+    """完整渲染选地报告，按章节自然分页，不通过删减正文限制页数。
+
+    ``cover`` 为 None 时由环境变量 REPORT_COVER_ENABLED 决定（默认开启）。
+    """
     _register_fonts()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,6 +519,25 @@ def render_pdf(
     )
     ai_fail = _ai_failed(ai)
     counters = {"fig": 0, "tbl": 0}
+    with_cover = cover_enabled(cover)
+    if with_cover and not COVER_IMAGE_PATH.exists():
+        logger.warning("land assessment cover image missing: %s", COVER_IMAGE_PATH)
+        with_cover = False
+    page_offset = 1 if with_cover else 0
+    cover_info = (
+        cover_rows(
+            field,
+            ov,
+            risk,
+            crop_label=crop_label,
+            area_ha=area_ha,
+            area_mu=area_mu,
+            report_no=report_no,
+            generated=now,
+        )
+        if with_cover
+        else []
+    )
 
     def cell(text, style="tbl_c"):
         return Paragraph(_esc(text), styles[style])
@@ -518,9 +689,14 @@ def render_pdf(
         return [KeepTogether(block)]
 
     def on_page(c, doc):
+        if with_cover and doc.page == 1:
+            c.saveState()
+            _draw_cover(c, field_name, cover_info)
+            c.restoreState()
+            return
         c.saveState()
         left, right, top = 21 * mm, A4[0] - 21 * mm, A4[1]
-        if doc.page == 1:
+        if doc.page == 1 + page_offset:
             c.setFillColor(HexColor(PRIMARY))
             c.rect(0, top - 5 * mm, A4[0], 5 * mm, fill=1, stroke=0)
         else:
@@ -539,7 +715,7 @@ def render_pdf(
         c.drawString(
             left, 7.5 * mm, f"{title_suffix} · 评分由程序计算，文字解读由 AI 辅助生成，仅供参考"
         )
-        c.drawRightString(right, 7.5 * mm, f"第 {doc.page} 页")
+        c.drawRightString(right, 7.5 * mm, f"第 {doc.page - page_offset} 页")
         c.restoreState()
 
     overall_ai = ai.get("overall") or {}
@@ -554,6 +730,9 @@ def render_pdf(
     biz_ai = ai.get("business") or {}
 
     story: list = []
+    if with_cover:
+        # 第 1 页只承载封面底图（由 on_page 绘制），正文从第 2 页开始。
+        story += [Spacer(1, 1), PageBreak()]
 
     # ── 封面摘要 + 一、综合评价 ──
     story.append(Spacer(1, 4 * mm))
@@ -1247,5 +1426,6 @@ def render_pdf(
         title=f"{field_name}地块遥感选地评估报告",
         author="乡合农服",
     )
+    doc.page_offset = page_offset
     doc.multiBuild(story, onFirstPage=on_page, onLaterPages=on_page)
     return out_path

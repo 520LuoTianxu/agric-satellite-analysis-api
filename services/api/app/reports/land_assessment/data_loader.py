@@ -37,6 +37,13 @@ from app.models.tables import (
 )
 
 
+def _bbox_center(lo: Any, hi: Any) -> float | None:
+    try:
+        return round((float(lo) + float(hi)) / 2, 6)
+    except (TypeError, ValueError):
+        return None
+
+
 def _location_from_land(land: LandParcel) -> str:
     """Build the display location from canonical parcel columns.
 
@@ -939,6 +946,11 @@ def load_land_bundle(
             "area_ha": area_ha,
             "tags": land.tags_json or [],
             "location": _location_from_land(land),
+            "org_name": land.org_name,
+            "group_name": land.group_name,
+            # 中心坐标取边界外包框中点，仅用于报告封面展示。
+            "center_lon": _bbox_center(land.min_lon, land.max_lon),
+            "center_lat": _bbox_center(land.min_lat, land.max_lat),
             "boundary": boundary,
             "phenology": phenology,
             "crop_label": crop_label,
@@ -1014,6 +1026,10 @@ def load_bundle_from_dir(data_dir: Path) -> dict[str, Any]:
             "area_ha": area_ha,
             "tags": field.get("tags") or [],
             "location": field.get("location") or field.get("name") or "—",
+            "org_name": field.get("org_name"),
+            "group_name": field.get("group_name"),
+            "center_lon": field.get("center_lon"),
+            "center_lat": field.get("center_lat"),
             "boundary": field.get("boundary")
             or "测绘 WGS 坐标（档案地块，不是手画框）",
             "crop_label": crop_name_zh(field.get("crop_type"))
