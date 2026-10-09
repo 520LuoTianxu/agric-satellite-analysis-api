@@ -948,8 +948,13 @@ def compute_harvest_series(
     region_code: str | None = None,
     profiles: dict[str, dict[str, Any]] | None = None,
     adaptive: bool = True,
+    pixel_states: bool = False,
 ) -> list[dict[str, Any]]:
     """计算每个有效观测日的已收获占比序列（按日期升序）。
+
+    ``pixel_states=True`` 时每行另带逐像元状态：``pixel_keys``（全序列共享的
+    (lon, lat) 列表，按纬度降序、经度升序）与 ``pixel_states``（与键一一对应的
+    字符串，见 :data:`PIXEL_STATE_CHARS`）。
 
     ``scenes`` 每项需含 ``date``、``pixels``（lonlat_v1 像元列表），可选
     ``scene_id``、``official``、``source``、``algorithm_version``、``stac_item_id``。
@@ -1066,6 +1071,7 @@ def compute_harvest_series(
             residue_at[k] = set(residue)
             promoted_by_at[k] = promoted_by
 
+    pixel_keys = _pixel_keys(days) if pixel_states else None
     out: list[dict[str, Any]] = []
     prev_pct: float | None = None
     prev_season: _Season | None = None
@@ -1225,9 +1231,80 @@ def compute_harvest_series(
                 "interpolated": False,
             }
         )
+        if pixel_keys is not None:
+            out[-1]["pixel_keys"] = pixel_keys
+            out[-1]["pixel_states"] = _encode_pixel_states(
+                pixel_keys, obs, season, done | pend, susp
+            )
         if season is not None:
             prev_pct, prev_season = pct, season
     return out
+
+
+# ── 逐像元状态 ──────────────────────────────────────────────────────
+# 0=未收获、1=疑似收获、2=已收获（含待确认）、255=无数据。
+# 无数据：季外、非作物像元、本期云/无效且此前未计入收获或疑似（已计入的像元粘滞，
+# 即使本期有云仍保留 1/2）。季内非无数据的值单调不减。
+PIXEL_STATE_UNHARVESTED = 0
+PIXEL_STATE_SUSPECTED = 1
+PIXEL_STATE_HARVESTED = 2
+PIXEL_STATE_NODATA = 255
+# 存储编码：每像元一个字符。
+PIXEL_STATE_CHARS = {"0": 0, "1": 1, "2": 2, ".": PIXEL_STATE_NODATA}
+
+
+def _pixel_keys(days: list[_Obs]) -> list[tuple[float, float]]:
+    keys = {
+        key
+        for obs in days
+        for key in obs.values
+        if isinstance(key, tuple)
+        and len(key) == 2
+        and all(isinstance(v, float) for v in key)
+    }
+    return sorted(keys, key=lambda kv: (-kv[1], kv[0]))
+
+
+def _encode_pixel_states(
+    keys: list[tuple[float, float]],
+    obs: _Obs,
+    season: "_Season | None",
+    harvested: set,
+    suspected: set,
+) -> str:
+    if season is None:
+        return "." * len(keys)
+    crop = season.crop
+    valid = obs.values
+    chars = []
+    for key in keys:
+        if key not in crop:
+            chars.append(".")
+        elif key in harvested:
+            chars.append("2")
+        elif key in suspected:
+            chars.append("1")
+        elif key in valid:
+            chars.append("0")
+        else:
+            chars.append(".")
+    return "".join(chars)
+
+
+def decode_pixel_states(codes: str | None, count: int | None = None) -> list[int]:
+    """把存储的状态字符串解码为整数列表；为空时按 ``count`` 返回全无数据。"""
+    if not codes:
+        return [PIXEL_STATE_NODATA] * (count or 0)
+    return [PIXEL_STATE_CHARS.get(ch, PIXEL_STATE_NODATA) for ch in codes]
+
+
+def pixel_state_counts(states: list[int]) -> dict[str, int]:
+    return {
+        "unharvested": sum(1 for v in states if v == PIXEL_STATE_UNHARVESTED),
+        "suspected": sum(1 for v in states if v == PIXEL_STATE_SUSPECTED),
+        "harvested": sum(1 for v in states if v == PIXEL_STATE_HARVESTED),
+        "nodata": sum(1 for v in states if v == PIXEL_STATE_NODATA),
+    }
 
 
 def interpolate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

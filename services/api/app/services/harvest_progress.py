@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -114,6 +115,27 @@ _DELETE_RANGE = text(
     """
 )
 
+_UPSERT_PIXEL_SET = text(
+    """
+    INSERT INTO agric_satellite.parcel_harvest_pixel_sets
+        (land_id, set_hash, pixel_count, pixels)
+    VALUES (:land_id, :set_hash, :pixel_count, CAST(:pixels AS jsonb))
+    ON CONFLICT (land_id, set_hash) DO NOTHING
+    """
+)
+
+# 删除不再被任何结果行引用的坐标集合（重算后网格变化时清理旧集合）。
+_DELETE_ORPHAN_PIXEL_SETS = text(
+    """
+    DELETE FROM agric_satellite.parcel_harvest_pixel_sets s
+    WHERE s.land_id = :land_id
+      AND NOT EXISTS (
+          SELECT 1 FROM agric_satellite.parcel_harvest_progress p
+          WHERE p.land_id = s.land_id AND p.pixel_set_hash = s.set_hash
+      )
+    """
+)
+
 _DELETE_OLD_VERSIONS = text(
     """
     DELETE FROM agric_satellite.parcel_harvest_progress
@@ -132,7 +154,8 @@ _UPSERT_ROW = text(
         confidence, confidence_level, confidence_reasons, confirmed_by, gap_days,
         s1_date, s1_delta_vh_db, s1_delta_ratio_db, s1_agreement, threshold_source,
         residue_harvested_pct, residue_pixel_count, suspected_harvest_pct,
-        harvested_or_suspected_pct, suspected_pixel_count, updated_at
+        harvested_or_suspected_pct, suspected_pixel_count, pixel_set_hash,
+        pixel_states, updated_at
     ) VALUES (
         :land_id, :obs_date, :sensor, :method_version, :scene_id, :status,
         :harvested_pct, :newly_harvested_pct, :harvested_area_mu, :parcel_area_mu,
@@ -144,7 +167,8 @@ _UPSERT_ROW = text(
         :confirmed_by, :gap_days, :s1_date, :s1_delta_vh_db, :s1_delta_ratio_db,
         :s1_agreement, :threshold_source, :residue_harvested_pct,
         :residue_pixel_count, :suspected_harvest_pct,
-        :harvested_or_suspected_pct, :suspected_pixel_count, now()
+        :harvested_or_suspected_pct, :suspected_pixel_count, :pixel_set_hash,
+        :pixel_states, now()
     )
     ON CONFLICT (land_id, obs_date, sensor, method_version) DO UPDATE SET
         scene_id = EXCLUDED.scene_id,
@@ -182,6 +206,8 @@ _UPSERT_ROW = text(
         suspected_harvest_pct = EXCLUDED.suspected_harvest_pct,
         harvested_or_suspected_pct = EXCLUDED.harvested_or_suspected_pct,
         suspected_pixel_count = EXCLUDED.suspected_pixel_count,
+        pixel_set_hash = EXCLUDED.pixel_set_hash,
+        pixel_states = EXCLUDED.pixel_states,
         updated_at = now()
     """
 )
@@ -273,6 +299,7 @@ async def compute_land_series(
     area_mu: float | None = None,
     thresholds: HarvestProgressThresholds | None = None,
     land_info: dict[str, Any] | None = None,
+    pixel_states: bool = False,
 ) -> list[dict[str, Any]]:
     """计算 [date_from, date_to] 内的序列。
 
@@ -297,6 +324,7 @@ async def compute_land_series(
         s1_scenes=s1_scenes,
         crop_type=land_info.get("crop_type"),
         region_code=land_info.get("province_code"),
+        pixel_states=pixel_states,
     )
     lo, hi = date_from.isoformat(), date_to.isoformat()
     return [row for row in series if lo <= row["date"] <= hi]
@@ -320,7 +348,13 @@ async def recompute_land(
     if info is None:
         return 0
     rows = await compute_land_series(
-        db, land_id, date_from, date_to, thresholds=thr, land_info=info
+        db,
+        land_id,
+        date_from,
+        date_to,
+        thresholds=thr,
+        land_info=info,
+        pixel_states=True,
     )
     base = {
         "land_id": land_id,
@@ -333,7 +367,24 @@ async def recompute_land(
         _DELETE_RANGE, {**base, "date_from": date_from, "date_to": date_to}
     )
     await db.execute(_DELETE_OLD_VERSIONS, base)
+    set_hashes: dict[int, str] = {}
     for row in rows:
+        set_hash = None
+        keys = row.get("pixel_keys")
+        if keys:
+            set_hash = set_hashes.get(id(keys))
+            if set_hash is None:
+                set_hash, pixels_json = pixel_set_payload(keys)
+                set_hashes[id(keys)] = set_hash
+                await db.execute(
+                    _UPSERT_PIXEL_SET,
+                    {
+                        "land_id": land_id,
+                        "set_hash": set_hash,
+                        "pixel_count": len(keys),
+                        "pixels": pixels_json,
+                    },
+                )
         params_json = json.dumps(
             {**thr.to_dict(), **(row.get("thresholds") or {})},
             separators=(",", ":"),
@@ -378,9 +429,118 @@ async def recompute_land(
                 "suspected_harvest_pct": row.get("suspected_harvest_pct"),
                 "harvested_or_suspected_pct": row.get("harvested_or_suspected_pct"),
                 "suspected_pixel_count": row.get("suspected_pixel_count"),
+                "pixel_set_hash": set_hash,
+                "pixel_states": row.get("pixel_states") if set_hash else None,
             },
         )
+    await db.execute(_DELETE_ORPHAN_PIXEL_SETS, {"land_id": land_id})
     return len(rows)
+
+
+def pixel_set_payload(keys: list[tuple[float, float]]) -> tuple[str, str]:
+    """像元坐标集合的存储 JSON 与内容哈希（同一网格重复重算时复用同一行）。"""
+    payload = json.dumps(
+        {
+            "format": "lonlat_index_v1",
+            "lon": [round(k[0], 6) for k in keys],
+            "lat": [round(k[1], 6) for k in keys],
+        },
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode()).hexdigest()[:20], payload
+
+
+_LOAD_PIXEL_ROW = text(
+    """
+    SELECT p.obs_date, p.status, p.scene_id, p.harvested_pct, p.suspected_harvest_pct,
+           p.harvested_or_suspected_pct, p.crop_pixel_count, p.valid_pct,
+           p.season_start, p.pixel_states, s.pixels
+    FROM agric_satellite.parcel_harvest_progress p
+    JOIN agric_satellite.parcel_harvest_pixel_sets s
+      ON s.land_id = p.land_id AND s.set_hash = p.pixel_set_hash
+    WHERE p.land_id = :land_id AND p.sensor = :sensor
+      AND p.method_version = :method_version
+      AND p.obs_date <= :on_date
+    ORDER BY p.obs_date DESC
+    LIMIT 1
+    """
+)
+
+
+async def load_stored_pixel_states(
+    db: AsyncSession, land_id: str, on_date: date
+) -> dict[str, Any] | None:
+    """读取 ``on_date`` 当天或之前最近一期已存储的逐像元状态；无则 None。"""
+    row = (
+        await db.execute(
+            _LOAD_PIXEL_ROW,
+            {
+                "land_id": land_id,
+                "sensor": SENSOR,
+                "method_version": HARVEST_PROGRESS_METHOD_VERSION,
+                "on_date": on_date,
+            },
+        )
+    ).first()
+    if row is None:
+        return None
+    d = dict(row._mapping)
+    pixels = _jsonish(d.get("pixels")) or {}
+    lon, lat = pixels.get("lon") or [], pixels.get("lat") or []
+    if len(lon) != len(lat):
+        return None
+    return {
+        "date": d["obs_date"].isoformat(),
+        "status": d.get("status"),
+        "scene_id": d.get("scene_id"),
+        "harvested_pct": _num(d.get("harvested_pct"), 1),
+        "suspected_harvest_pct": _num(d.get("suspected_harvest_pct"), 1),
+        "harvested_or_suspected_pct": _num(d.get("harvested_or_suspected_pct"), 1),
+        "crop_pixel_count": d.get("crop_pixel_count"),
+        "valid_pct": _num(d.get("valid_pct"), 1),
+        "season_start": d["season_start"].isoformat()
+        if d.get("season_start")
+        else None,
+        "pixel_keys": list(zip(lon, lat)),
+        "pixel_states": d.get("pixel_states"),
+        "source": "stored",
+    }
+
+
+async def compute_live_pixel_states(
+    db: AsyncSession, land_id: str, on_date: date
+) -> dict[str, Any] | None:
+    """无存储结果时现场计算（只读，不入队、不写库）。"""
+    rows = await compute_land_series(
+        db,
+        land_id,
+        on_date - timedelta(days=SEASON_CONTEXT_DAYS),
+        on_date,
+        pixel_states=True,
+    )
+    rows = [r for r in rows if r.get("pixel_keys")]
+    if not rows:
+        return None
+    r = rows[-1]
+    return {
+        **{
+            k: r.get(k)
+            for k in (
+                "date",
+                "status",
+                "scene_id",
+                "harvested_pct",
+                "suspected_harvest_pct",
+                "harvested_or_suspected_pct",
+                "crop_pixel_count",
+                "valid_pct",
+                "season_start",
+                "pixel_keys",
+                "pixel_states",
+            )
+        },
+        "source": "live",
+    }
 
 
 _LIST_STORED = text(
