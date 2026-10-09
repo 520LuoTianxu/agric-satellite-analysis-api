@@ -94,6 +94,18 @@ async def lifespan(app: FastAPI):
             run_satellite_batch_dispatch_outbox(),
             name="satellite-batch-dispatch-outbox",
         )
+    app.state.harvest_progress_outbox_task = None
+    from app.services.harvest_progress import (
+        harvest_progress_enabled,
+        run_harvest_progress_outbox,
+    )
+
+    if harvest_progress_enabled():
+        # 新影像入库后的收获占比重算在API本机完成，与下载机隔离。
+        app.state.harvest_progress_outbox_task = asyncio.create_task(
+            run_harvest_progress_outbox(),
+            name="harvest-progress-outbox",
+        )
     # API 进程负责从 Redis 消费下载结果，下载机只做 HTTP 入队，不参与数据库写入。
     scene_result_consumer = asyncio.create_task(
         consume_cached_scene_results(app.state.redis_client)
@@ -117,6 +129,12 @@ async def lifespan(app: FastAPI):
         if app.state.satellite_batch_dispatch_outbox_task is not None:
             await asyncio.gather(
                 app.state.satellite_batch_dispatch_outbox_task,
+                return_exceptions=True,
+            )
+        if app.state.harvest_progress_outbox_task is not None:
+            app.state.harvest_progress_outbox_task.cancel()
+            await asyncio.gather(
+                app.state.harvest_progress_outbox_task,
                 return_exceptions=True,
             )
         scene_result_consumer.cancel()

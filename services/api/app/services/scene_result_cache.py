@@ -418,6 +418,19 @@ async def consume_cached_scene_results(redis_client: Any | None = None) -> None:
                             result_id=result_id,
                             error=str(alert_exc),
                         )
+                    # 收获占比只入队不计算，outbox 后台合并重算，不拖慢结果消费。
+                    from app.services.harvest_progress import (
+                        enqueue_from_scene_result,
+                    )
+
+                    try:
+                        await enqueue_from_scene_result(envelope, stats)
+                    except Exception as harvest_exc:
+                        logger.exception(
+                            "harvest_progress_enqueue_failed",
+                            result_id=result_id,
+                            error=str(harvest_exc),
+                        )
 
                 if permanent_rejections:
                     await _dead_letter_result(
