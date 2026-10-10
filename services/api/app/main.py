@@ -18,6 +18,7 @@ from app.core.rate_limit import limiter
 from app.middleware.trace import TraceIdMiddleware
 from app.routers import (
     agri,
+    harvest_report,
     alerts,
     assessment,
     season_growth,
@@ -198,6 +199,7 @@ app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])
 app.include_router(agri.router, prefix=PREFIX)  # agri-first: 项目区/地块/S1·S2
+app.include_router(harvest_report.router, prefix=PREFIX)  # 全部地块收获报表
 app.include_router(monitoring.router, prefix=PREFIX, tags=["monitoring"])
 app.include_router(jobs.router, prefix=PREFIX, tags=["jobs"])
 app.include_router(alerts.router, prefix=PREFIX, tags=["alerts"])
