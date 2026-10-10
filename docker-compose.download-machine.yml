@@ -157,6 +157,8 @@ services:
       WORK_CLAIM_INTERVAL_SEC: ${WORK_CLAIM_INTERVAL_SEC:-4}
       # 本机积压（各队列就绪+unacked）≥ 该值时暂停领取，低于后自动恢复；0 = 不限制
       WORK_CLAIM_MAX_LOCAL_BACKLOG: ${WORK_CLAIM_MAX_LOCAL_BACKLOG:-100}
+      # 暂停领取期间向生产上报存活的间隔（秒）
+      WORK_CLAIM_PAUSED_HEARTBEAT_SEC: ${WORK_CLAIM_PAUSED_HEARTBEAT_SEC:-30}
       # 上报本机各 Celery ready 队列的待处理数量。
       CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-cpu_compute}
       CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-satellite_download,cpu_compute,ingest,decloud,storage}

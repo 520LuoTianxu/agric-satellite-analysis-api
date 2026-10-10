@@ -278,6 +278,50 @@ def claim_batch(
     return list(response.json().get("items") or [])
 
 
+# 旧版 API 没有 /worker-heartbeat 时的兜底：用一个不存在的任务类型调用 claim，
+# 服务端按类型过滤后不会返回任何任务，但仍会刷新下载机心跳。
+HEARTBEAT_ONLY_TYPE = "__heartbeat_only__"
+_heartbeat_endpoint_missing = False
+
+
+def paused_heartbeat_interval_sec() -> float:
+    try:
+        return max(1.0, float(_env("WORK_CLAIM_PAUSED_HEARTBEAT_SEC", "30")))
+    except ValueError:
+        return 30.0
+
+
+def worker_heartbeat(client: httpx.Client) -> str:
+    """暂停领取期间向生产上报存活（不领取任务）。返回所用方式：endpoint / claim_fallback。"""
+    global _heartbeat_endpoint_missing
+    depths = queue_depths()
+    body = {
+        "worker_name": worker_name(),
+        "worker_id": worker_id(),
+        "types": list(claim_types()),
+        "limit": 1,
+        "interval_seconds": claim_interval_sec(),
+        "queue_name": queue_name(),
+        "pending_queue_count": sum(depths.values()) if depths is not None else None,
+        "queue_depths": depths or {},
+    }
+    if not _heartbeat_endpoint_missing:
+        response = client.post("/v1/internal/work/worker-heartbeat", json=body)
+        if response.status_code not in (404, 405):
+            response.raise_for_status()
+            return "endpoint"
+        _heartbeat_endpoint_missing = True
+        logger.info("worker_heartbeat endpoint missing; using zero-match claim")
+    body["types"] = [HEARTBEAT_ONLY_TYPE]
+    response = client.post("/v1/internal/work/claim", json=body)
+    response.raise_for_status()
+    items = list(response.json().get("items") or [])
+    if items:  # 理论上不可能；绝不静默吞掉任务
+        logger.error("heartbeat claim unexpectedly returned %d items", len(items))
+        raise RuntimeError("heartbeat-only claim returned work items")
+    return "claim_fallback"
+
+
 def complete(client: httpx.Client, work_id: str, result: dict[str, Any]) -> None:
     response = client.post(
         f"/v1/internal/work/{work_id}/complete",
@@ -646,6 +690,7 @@ def run_forever() -> None:
     )
     with _client() as client:
         paused_logged = False
+        last_paused_hb = float("-inf")
         while True:
             try:
                 paused, backlog, cap = claim_paused_for_backlog()
@@ -655,6 +700,18 @@ def run_forever() -> None:
                             "work_claim_paused local_backlog=%s cap=%s", backlog, cap
                         )
                         paused_logged = True
+                    now = time.monotonic()
+                    if now - last_paused_hb >= paused_heartbeat_interval_sec():
+                        last_paused_hb = now
+                        try:
+                            how = worker_heartbeat(client)
+                            logger.info(
+                                "work_claim_paused_heartbeat ok via=%s local_backlog=%s",
+                                how,
+                                backlog,
+                            )
+                        except Exception as exc:
+                            logger.warning("work_claim_paused_heartbeat failed: %s", exc)
                     time.sleep(claim_interval_sec())
                     continue
                 if paused_logged:
@@ -676,6 +733,9 @@ def run_forever() -> None:
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
     "DEFAULT_MAX_LOCAL_BACKLOG",
+    "HEARTBEAT_ONLY_TYPE",
+    "paused_heartbeat_interval_sec",
+    "worker_heartbeat",
     "claim_paused_for_backlog",
     "local_backlog",
     "max_local_backlog",

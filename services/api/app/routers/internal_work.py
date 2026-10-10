@@ -121,6 +121,38 @@ async def claim_work(
     return ClaimResponse(items=[_to_out(i) for i in items])
 
 
+class WorkerHeartbeatResponse(BaseModel):
+    ok: bool = True
+    worker_name: str
+
+
+@router.post("/worker-heartbeat", response_model=WorkerHeartbeatResponse)
+async def worker_heartbeat(
+    body: ClaimRequest,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """下载机存活心跳：只更新 DownloadWorker（last_claim_at/队列深度），不领取任何任务。
+
+    下载机因本机积压上限暂停领取时调用，管理员仍能区分“忙碌暂停”与“掉线”。
+    """
+    machine_name = body.worker_name or body.worker_id
+    if not machine_name:
+        raise HTTPException(status_code=422, detail="worker_name is required")
+    await wi.touch_download_worker(
+        db,
+        worker_id=machine_name,
+        claim_types=body.types,
+        poll_interval_seconds=body.interval_seconds,
+        claim_count=0,
+        queue_name=body.queue_name,
+        pending_queue_count=body.pending_queue_count,
+        queue_depths=body.queue_depths,
+    )
+    await db.commit()
+    return WorkerHeartbeatResponse(worker_name=machine_name)
+
+
 @router.post("/{work_id}/heartbeat", response_model=WorkItemOut)
 async def heartbeat(
     work_id: uuid.UUID,
