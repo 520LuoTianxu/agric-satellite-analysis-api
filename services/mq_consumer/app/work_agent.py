@@ -166,6 +166,56 @@ def pending_queue_count() -> int | None:
     return sum(depths.values()) if depths is not None else None
 
 
+DEFAULT_MAX_LOCAL_BACKLOG = 100
+
+
+def max_local_backlog() -> int:
+    """WORK_CLAIM_MAX_LOCAL_BACKLOG：本机积压（就绪+在途）达到该值即暂停领取；0 表示不限制。"""
+    raw = _env("WORK_CLAIM_MAX_LOCAL_BACKLOG", str(DEFAULT_MAX_LOCAL_BACKLOG))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_MAX_LOCAL_BACKLOG
+
+
+def local_backlog() -> int | None:
+    """本机 Celery 积压：各队列就绪消息（含优先级子队列）+ 已投递未确认（unacked，含 ETA/在途）。
+
+    读取失败返回 None（调用方按不限流处理，保持原有领取行为）。
+    """
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            _env("REDIS_URL", "redis://127.0.0.1:6379/0"),
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+        )
+        try:
+            total = 0
+            for name in queue_names():
+                keys = {name}
+                # Celery Redis 优先级队列以 "<queue>\x06\x16<n>" 形式另存为 list
+                for key in client.scan_iter(match=f"{name}\x06\x16*", count=100):
+                    keys.add(key.decode() if isinstance(key, bytes) else key)
+                total += sum(int(client.llen(k)) for k in keys)
+            total += int(client.hlen("unacked"))
+            return total
+        finally:
+            client.close()
+    except Exception as exc:
+        logger.warning("claim_backlog_probe_failed error=%s", exc)
+        return None
+
+
+def claim_paused_for_backlog() -> tuple[bool, int | None, int]:
+    cap = max_local_backlog()
+    if cap <= 0:
+        return False, None, cap
+    backlog = local_backlog()
+    return backlog is not None and backlog >= cap, backlog, cap
+
+
 def lease_seconds() -> int:
     try:
         return max(30, int(_env("WORK_LEASE_SECONDS", "600")))
@@ -595,8 +645,23 @@ def run_forever() -> None:
         claim_types(),
     )
     with _client() as client:
+        paused_logged = False
         while True:
             try:
+                paused, backlog, cap = claim_paused_for_backlog()
+                if paused:
+                    if not paused_logged:
+                        logger.info(
+                            "work_claim_paused local_backlog=%s cap=%s", backlog, cap
+                        )
+                        paused_logged = True
+                    time.sleep(claim_interval_sec())
+                    continue
+                if paused_logged:
+                    logger.info(
+                        "work_claim_resumed local_backlog=%s cap=%s", backlog, cap
+                    )
+                    paused_logged = False
                 items = claim_batch(client, limit=1)
                 if not items:
                     time.sleep(claim_interval_sec())
@@ -610,6 +675,10 @@ def run_forever() -> None:
 
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
+    "DEFAULT_MAX_LOCAL_BACKLOG",
+    "claim_paused_for_backlog",
+    "local_backlog",
+    "max_local_backlog",
     "MAX_WORK_ITEM_ATTEMPTS",
     "ADMIN_TASK_NAMES",
     "DEFAULT_TYPES",
