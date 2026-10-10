@@ -178,8 +178,37 @@ def max_local_backlog() -> int:
         return DEFAULT_MAX_LOCAL_BACKLOG
 
 
+def backlog_queue_names() -> list[str]:
+    """WORK_CLAIM_BACKLOG_QUEUES：领取上限只统计这些队列（默认仅 satellite_download）。
+
+    与 CELERY_QUEUE_NAMES（上报队列深度用）分开配置，decloud 等下游队列不再阻塞领取。
+    """
+    raw = _env("WORK_CLAIM_BACKLOG_QUEUES", "satellite_download")
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    return names or ["satellite_download"]
+
+
+def _unacked_queue(raw: Any) -> str | None:
+    """解析 Celery Redis transport 的 unacked 值 [payload, exchange, routing_key]，返回 routing_key。"""
+    try:
+        value = json.loads(raw)
+        if isinstance(value, list) and len(value) >= 3:
+            routing_key = value[2]
+            if isinstance(routing_key, bytes):
+                routing_key = routing_key.decode()
+            if isinstance(routing_key, str) and routing_key:
+                return routing_key
+            payload = value[0] if isinstance(value[0], dict) else {}
+            delivery = (payload.get("properties") or {}).get("delivery_info") or {}
+            return delivery.get("routing_key") or None
+    except Exception:
+        return None
+    return None
+
+
 def local_backlog() -> int | None:
-    """本机 Celery 积压：各队列就绪消息（含优先级子队列）+ 已投递未确认（unacked，含 ETA/在途）。
+    """领取上限用的本机积压：WORK_CLAIM_BACKLOG_QUEUES 中各队列就绪消息（含优先级子队列）
+    + 路由到这些队列的 unacked（已投递未确认，含 ETA/在途）。无法解析的 unacked 条目跳过。
 
     读取失败返回 None（调用方按不限流处理，保持原有领取行为）。
     """
@@ -192,14 +221,17 @@ def local_backlog() -> int | None:
             socket_connect_timeout=2.0,
         )
         try:
+            wanted = set(backlog_queue_names())
             total = 0
-            for name in queue_names():
+            for name in wanted:
                 keys = {name}
                 # Celery Redis 优先级队列以 "<queue>\x06\x16<n>" 形式另存为 list
                 for key in client.scan_iter(match=f"{name}\x06\x16*", count=100):
                     keys.add(key.decode() if isinstance(key, bytes) else key)
                 total += sum(int(client.llen(k)) for k in keys)
-            total += int(client.hlen("unacked"))
+            for raw in client.hvals("unacked"):
+                if _unacked_queue(raw) in wanted:
+                    total += 1
             return total
         finally:
             client.close()
@@ -733,6 +765,7 @@ def run_forever() -> None:
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
     "DEFAULT_MAX_LOCAL_BACKLOG",
+    "backlog_queue_names",
     "HEARTBEAT_ONLY_TYPE",
     "paused_heartbeat_interval_sec",
     "worker_heartbeat",

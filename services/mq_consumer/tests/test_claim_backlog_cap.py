@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import types
@@ -23,9 +24,9 @@ class _FakeRedis:
     def llen(self, key):
         return self.lists.get(key, 0)
 
-    def hlen(self, key):
+    def hvals(self, key):
         assert key == "unacked"
-        return self.unacked
+        return list(self.unacked)
 
     def close(self):
         pass
@@ -49,23 +50,57 @@ class MaxLocalBacklogEnvTests(unittest.TestCase):
 
 
 class LocalBacklogTests(unittest.TestCase):
-    def test_counts_ready_priority_subqueues_and_unacked(self):
+    @staticmethod
+    def _unacked(*routing_keys):
+        return [json.dumps([{"body": "x"}, "", rk]).encode() for rk in routing_keys]
+
+    def test_default_counts_only_satellite_download(self):
         fake = _FakeRedis(
             {
                 "satellite_download": 30,
                 "satellite_download\x06\x163": 5,
                 "cpu_compute": 2,
-                "other_queue": 999,  # 未配置的队列不计入
+                "decloud": 50,
+                "decloud\x06\x169": 400,
             },
-            unacked=7,
+            unacked=self._unacked("satellite_download", "satellite_download", "decloud")
+            + [b"not-json", json.dumps({"x": 1}).encode()],  # 无法解析 → 跳过
+        )
+        env = {"CELERY_QUEUE_NAMES": "satellite_download,cpu_compute,decloud"}
+        with (
+            patch.dict(sys.modules, {"redis": _redis_module(fake)}),
+            patch.dict(os.environ, env),
+        ):
+            os.environ.pop("WORK_CLAIM_BACKLOG_QUEUES", None)
+            self.assertEqual(wa.local_backlog(), 30 + 5 + 2)
+
+    def test_configured_backlog_queues(self):
+        fake = _FakeRedis(
+            {"satellite_download": 3, "ingest": 4, "decloud": 400},
+            unacked=self._unacked("ingest", "decloud", "satellite_download"),
         )
         with (
             patch.dict(sys.modules, {"redis": _redis_module(fake)}),
             patch.dict(
-                os.environ, {"CELERY_QUEUE_NAMES": "satellite_download,cpu_compute"}
+                os.environ, {"WORK_CLAIM_BACKLOG_QUEUES": "satellite_download, ingest"}
             ),
         ):
-            self.assertEqual(wa.local_backlog(), 30 + 5 + 2 + 7)
+            self.assertEqual(wa.local_backlog(), 3 + 4 + 2)
+
+    def test_backlog_queue_names_env(self):
+        with patch.dict(os.environ, {"WORK_CLAIM_BACKLOG_QUEUES": " , "}):
+            self.assertEqual(wa.backlog_queue_names(), ["satellite_download"])
+        with patch.dict(os.environ, {"WORK_CLAIM_BACKLOG_QUEUES": "a,b"}):
+            self.assertEqual(wa.backlog_queue_names(), ["a", "b"])
+
+    def test_unacked_parsing(self):
+        self.assertEqual(
+            wa._unacked_queue('[{}, "", "satellite_download"]'), "satellite_download"
+        )
+        payload = {"properties": {"delivery_info": {"routing_key": "decloud"}}}
+        self.assertEqual(wa._unacked_queue(json.dumps([payload, "", ""])), "decloud")
+        self.assertIsNone(wa._unacked_queue(b"\xff garbage"))
+        self.assertIsNone(wa._unacked_queue("[1]"))
 
     def test_probe_failure_returns_none(self):
         mod = types.ModuleType("redis")
