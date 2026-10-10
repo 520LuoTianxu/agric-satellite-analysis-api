@@ -1172,6 +1172,12 @@ async def get_harvest_progress(
 
     优先读 ``parcel_harvest_progress`` 落库结果；区间内尚无落库记录时现场计算
     并加入重算队列，后续请求即可直接读表。每期带置信度（0–1、等级、原因码）。
+
+    只有合计占比（已收获+疑似）大于 ``HARVEST_PROGRESS_MIN_SAVE_PCT``（默认 3%）
+    的观测日落库。区间已计算但没有任何行达到门槛时（见已计算区间标记），
+    返回 ``source=stored`` 的空列表，不再现场计算、不重复入队。
+    ``include_zero`` 只作用于实际返回的行：读库时低于门槛的观测日本就不存在，
+    因此 include_zero=true 也不会补出这些日期；现场计算结果仍按原规则返回。
     """
     await _agri_ready(db)
     from app.core.harvest_progress import (
@@ -1194,7 +1200,10 @@ async def get_harvest_progress(
     thr = HarvestProgressThresholds.from_env()
     source = "stored"
     rows = await hp.list_stored(db, land_id, date_from, date_to)
-    if not rows:
+    if not rows and await hp.range_computed(db, land_id, date_from, date_to):
+        # 已计算过但全部低于落库门槛：不是“从未计算”，不触发现场计算与入队。
+        pass
+    elif not rows:
         source = "live"
         rows = await hp.compute_land_series(
             db, land_id, date_from, date_to, area_mu=area_mu, thresholds=thr
@@ -1258,6 +1267,10 @@ async def get_harvest_pixels(
 
     与 NDVI 像元一样返回 ``pixels_lonlat``（lon/lat 点集）。优先读落库结果；
     尚未落库（未执行迁移或未补算）时现场计算，只读、不入队。
+
+    低于落库门槛的观测日没有存储行：若所请求日期之前最近一期观测晚于最近的
+    落库行，说明该期未落库（低于门槛或尚未计算），改为现场计算，避免错误地
+    返回更早（甚至上一季）的存储状态。
     """
     await _agri_ready(db)
     from app.core.harvest_progress import (
@@ -1278,6 +1291,16 @@ async def get_harvest_pixels(
         # 迁移未执行（无表/列）等：回滚后现场计算。
         await db.rollback()
         logger.warning("harvest_pixels_stored_unavailable land_id=%s", land_id)
+    if data is not None and str(data["date"]) < requested.isoformat():
+        try:
+            latest = await hp.latest_obs_date(db, land_id, requested)
+        except Exception:
+            await db.rollback()
+            logger.warning("harvest_pixels_latest_obs_failed land_id=%s", land_id)
+            latest = None
+        if latest is not None and latest.isoformat() > str(data["date"]):
+            # 最近一期观测未落库（低于门槛或尚未计算）：现场计算该期。
+            data = None
     if data is None:
         data = await hp.compute_live_pixel_states(db, land_id, requested)
     if data is None:

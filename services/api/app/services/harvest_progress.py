@@ -52,6 +52,43 @@ def harvest_progress_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+DEFAULT_MIN_SAVE_PCT = 3.0
+
+
+def min_save_pct() -> float:
+    """落库门槛（%）：只保存已收获+疑似收获合计占比 **大于** 该值的观测日。
+
+    ``HARVEST_PROGRESS_MIN_SAVE_PCT``，默认 3；设为 0 时恢复为全部保存
+    （0 本身仍按 ``> 0`` 判断，即合计为 0 的观测日不存）。负数或非法值按默认值处理。
+    """
+    raw = os.getenv("HARVEST_PROGRESS_MIN_SAVE_PCT", "").strip()
+    if not raw:
+        return DEFAULT_MIN_SAVE_PCT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MIN_SAVE_PCT
+    if value != value or value < 0:  # NaN / 负数
+        return DEFAULT_MIN_SAVE_PCT
+    return min(value, 100.0)
+
+
+def row_save_pct(row: dict[str, Any]) -> float:
+    """落库门槛使用的占比：合计（已收获+疑似）优先，旧结果退回已收获占比。"""
+    combined = row.get("harvested_or_suspected_pct")
+    if combined is None:
+        combined = row.get("harvested_pct")
+    try:
+        return float(combined or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def should_persist_row(row: dict[str, Any], threshold: float | None = None) -> bool:
+    thr = min_save_pct() if threshold is None else threshold
+    return row_save_pct(row) > thr
+
+
 def _jsonish(value: Any) -> Any:
     if isinstance(value, str):
         try:
@@ -140,6 +177,63 @@ _DELETE_OLD_VERSIONS = text(
     """
     DELETE FROM agric_satellite.parcel_harvest_progress
     WHERE land_id = :land_id AND sensor = :sensor AND method_version <> :method_version
+    """
+)
+
+# 已计算区间标记：门槛过滤后“没有落库行”可能是“全部低于门槛”，也可能是“从未计算”。
+# 读接口据此区分，避免对全季低于门槛的地块每次请求都现场计算并重复入队。
+_UPSERT_COVERAGE = text(
+    """
+    INSERT INTO agric_satellite.parcel_harvest_progress_coverage (
+        land_id, sensor, method_version, computed_from, computed_to,
+        min_save_pct, computed_rows, saved_rows, updated_at
+    ) VALUES (
+        :land_id, :sensor, :method_version, :date_from, :date_to,
+        :min_save_pct, :computed_rows, :saved_rows, now()
+    )
+    ON CONFLICT (land_id, sensor, method_version) DO UPDATE SET
+        computed_from = CASE
+            WHEN parcel_harvest_progress_coverage.min_save_pct = EXCLUDED.min_save_pct
+             AND parcel_harvest_progress_coverage.computed_to
+                 >= EXCLUDED.computed_from - 1
+             AND parcel_harvest_progress_coverage.computed_from
+                 <= EXCLUDED.computed_to + 1
+            THEN LEAST(parcel_harvest_progress_coverage.computed_from,
+                       EXCLUDED.computed_from)
+            ELSE EXCLUDED.computed_from END,
+        computed_to = CASE
+            WHEN parcel_harvest_progress_coverage.min_save_pct = EXCLUDED.min_save_pct
+             AND parcel_harvest_progress_coverage.computed_to
+                 >= EXCLUDED.computed_from - 1
+             AND parcel_harvest_progress_coverage.computed_from
+                 <= EXCLUDED.computed_to + 1
+            THEN GREATEST(parcel_harvest_progress_coverage.computed_to,
+                          EXCLUDED.computed_to)
+            ELSE EXCLUDED.computed_to END,
+        min_save_pct = EXCLUDED.min_save_pct,
+        computed_rows = EXCLUDED.computed_rows,
+        saved_rows = EXCLUDED.saved_rows,
+        updated_at = now()
+    """
+)
+
+_LOAD_COVERAGE = text(
+    """
+    SELECT computed_from, computed_to, min_save_pct
+    FROM agric_satellite.parcel_harvest_progress_coverage
+    WHERE land_id = :land_id AND sensor = :sensor AND method_version = :method_version
+    """
+)
+
+# 某日当天或之前最近一期可参与计算的 S2 观测日（只读元数据，不取像元）。
+_LATEST_OBS_DATE = text(
+    """
+    SELECT max(date) AS obs_date
+    FROM agric_satellite.parcel_scene_products
+    WHERE land_id = :land_id
+      AND sensor = 'S2'
+      AND date <= :on_date
+      AND pixel_data->>'format' = 'lonlat_v1'
     """
 )
 
@@ -338,8 +432,14 @@ async def recompute_land(
     *,
     thresholds: HarvestProgressThresholds | None = None,
 ) -> int:
-    """幂等重算并覆盖写入一个地块的区间结果；返回写入行数（不提交事务）。"""
+    """幂等重算并覆盖写入一个地块的区间结果；返回写入行数（不提交事务）。
+
+    计算仍使用区间及季内上下文的全部观测（单调逻辑不变），只是落库时过滤：
+    合计占比不超过 :func:`min_save_pct` 的观测日不写入（含逐像元状态）。
+    区间内旧行先整体删除，再写入通过门槛的行，并记录已计算区间标记。
+    """
     thr = thresholds or HarvestProgressThresholds.from_env()
+    save_threshold = min_save_pct()
     date_to = date_to or date.today()
     date_from = date_from or (date_to - timedelta(days=DEFAULT_RECENT_DAYS))
     # 新观测会改写之前若干期：确认候选像元、判定凹陷日、返青切季，都需回头重写。
@@ -368,7 +468,8 @@ async def recompute_land(
     )
     await db.execute(_DELETE_OLD_VERSIONS, base)
     set_hashes: dict[int, str] = {}
-    for row in rows:
+    saved = [row for row in rows if should_persist_row(row, save_threshold)]
+    for row in saved:
         set_hash = None
         keys = row.get("pixel_keys")
         if keys:
@@ -434,7 +535,109 @@ async def recompute_land(
             },
         )
     await db.execute(_DELETE_ORPHAN_PIXEL_SETS, {"land_id": land_id})
-    return len(rows)
+    await _record_coverage(
+        db,
+        {
+            **base,
+            "date_from": date_from,
+            "date_to": date_to,
+            "min_save_pct": save_threshold,
+            "computed_rows": len(rows),
+            "saved_rows": len(saved),
+        },
+    )
+    return len(saved)
+
+
+async def _record_coverage(db: AsyncSession, params: dict[str, Any]) -> None:
+    """写入已计算区间标记；迁移未执行（无表）时只告警，不影响结果写入。"""
+    try:
+        async with db.begin_nested():
+            await db.execute(_UPSERT_COVERAGE, params)
+    except Exception as exc:
+        logger.warning(
+            "harvest_progress_coverage_unavailable",
+            land_id=params.get("land_id"),
+            error=str(exc)[:200],
+        )
+
+
+async def load_coverage(db: AsyncSession, land_id: str) -> dict[str, Any] | None:
+    """已计算区间标记 ``{computed_from, computed_to, min_save_pct}``；无记录或无表时 None。"""
+    try:
+        async with db.begin_nested():
+            row = (
+                await db.execute(
+                    _LOAD_COVERAGE,
+                    {
+                        "land_id": land_id,
+                        "sensor": SENSOR,
+                        "method_version": HARVEST_PROGRESS_METHOD_VERSION,
+                    },
+                )
+            ).first()
+    except Exception as exc:
+        logger.warning(
+            "harvest_progress_coverage_unavailable",
+            land_id=land_id,
+            error=str(exc)[:200],
+        )
+        return None
+    if row is None:
+        return None
+    d = dict(row._mapping)
+    if not isinstance(d.get("computed_from"), date) or not isinstance(
+        d.get("computed_to"), date
+    ):
+        return None
+    return {
+        "computed_from": d["computed_from"],
+        "computed_to": d["computed_to"],
+        "min_save_pct": float(d["min_save_pct"])
+        if d.get("min_save_pct") is not None
+        else None,
+    }
+
+
+def coverage_includes(
+    coverage: dict[str, Any] | None, date_from: date, date_to: date
+) -> bool:
+    """标记区间完整覆盖 [date_from, date_to]（区间晚于今天的部分视为已覆盖到今天）。"""
+    if not coverage:
+        return False
+    hi = min(date_to, date.today())
+    return coverage["computed_from"] <= date_from and coverage["computed_to"] >= hi
+
+
+async def range_computed(
+    db: AsyncSession, land_id: str, date_from: date, date_to: date
+) -> bool:
+    """[date_from, date_to] 是否已按当前算法版本计算过（即使没有任何行通过落库门槛）。
+
+    标记止于上次计算日；其后若没有新的 S2 观测（新影像入库会自动入队重算），
+    同样视为已覆盖。迁移未执行或查询失败时返回 False（退回原有现场计算逻辑）。
+    """
+    coverage = await load_coverage(db, land_id)
+    if not coverage or coverage["computed_from"] > date_from:
+        return False
+    if coverage_includes(coverage, date_from, date_to):
+        return True
+    try:
+        latest = await latest_obs_date(db, land_id, min(date_to, date.today()))
+    except Exception as exc:
+        logger.warning(
+            "harvest_progress_latest_obs_failed", land_id=land_id, error=str(exc)[:200]
+        )
+        return False
+    return latest is None or latest <= coverage["computed_to"]
+
+
+async def latest_obs_date(db: AsyncSession, land_id: str, on_date: date) -> date | None:
+    row = (
+        await db.execute(_LATEST_OBS_DATE, {"land_id": land_id, "on_date": on_date})
+    ).first()
+    value = row._mapping.get("obs_date") if row is not None else None
+    return value if isinstance(value, date) else None
 
 
 def pixel_set_payload(keys: list[tuple[float, float]]) -> tuple[str, str]:
@@ -885,11 +1088,16 @@ if __name__ == "__main__":
 
 __all__ = [
     "compute_land_series",
+    "coverage_includes",
     "enqueue_from_scene_result",
     "enqueue_lands",
     "harvest_progress_enabled",
     "harvest_target_from_scene_result",
+    "latest_obs_date",
     "list_stored",
+    "load_coverage",
+    "range_computed",
+    "min_save_pct",
     "recompute_land",
     "run_harvest_progress_outbox",
 ]
