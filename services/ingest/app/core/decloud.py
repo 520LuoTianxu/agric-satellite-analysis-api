@@ -266,11 +266,17 @@ def filter_scenes_outside_season_high_cloud(
     *,
     season_months: tuple[int, ...] | list[int] | None = None,
     cloud_skip_pct: float | None = None,
+    parcel_clear_pct: float | None = None,
+    parcel_clear_keep_pct: float | None = None,
 ) -> tuple[list[dict], int]:
     """Drop out-of-season scenes with STAC cloud > threshold (default 30%).
 
     In-season scenes are kept regardless of cloud (decloud path needs them).
     Out-of-season clear/low-cloud scenes stay for winter baseline / NDVI.
+    An out-of-season high-cloud scene is still kept when the caller supplies a
+    pre-download parcel clear % (SCL 4–7) that is **above**
+    ``parcel_clear_keep_pct`` — scene-wide cloud says little about one parcel.
+    ``None`` for either value keeps the original behaviour.
     Returns ``(kept_scenes, skipped_count)``.
     """
     lo = DEFAULT_CLOUD_MIN_PCT if cloud_skip_pct is None else float(cloud_skip_pct)
@@ -290,6 +296,13 @@ def filter_scenes_outside_season_high_cloud(
         except (TypeError, ValueError):
             cloud_f = None
         if cloud_f is not None and cloud_f > lo:
+            if (
+                parcel_clear_pct is not None
+                and parcel_clear_keep_pct is not None
+                and float(parcel_clear_pct) > float(parcel_clear_keep_pct)
+            ):
+                kept.append(sc)
+                continue
             skipped += 1
             continue
         kept.append(sc)

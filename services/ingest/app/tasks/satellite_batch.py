@@ -40,6 +40,7 @@ from app.core.decloud import (
     filter_scenes_outside_season_high_cloud,
     normalize_season_months,
 )
+from app.core.s2_parcel_clear import parcel_clear_keep_pct, probe_parcel_clear
 from app.core.processing_window import (
     build_complete_processing_window,
     resolve_processing_window_km,
@@ -449,8 +450,75 @@ def select_complete_processing_lands(
     return selected, processing_geom
 
 
+def _scene_land_candidates(scene, lands):
+    """季节/高云筛选之前的候选地块：目标日期、同日已有结果、景覆盖范围。"""
+    footprint = shape(scene["geometry"]) if scene.get("geometry") else None
+    out = []
+    for land in lands:
+        target_dates = land.get("target_dates")
+        if target_dates is not None:
+            target_land_ids = scene.get("target_land_ids")
+            land_id = str(land["meta"]["land_id"])
+            if target_land_ids is not None:
+                if land_id not in target_land_ids:
+                    continue
+            elif scene["date"] not in target_dates:
+                continue
+        elif scene["date"] in land["existing"]:
+            continue
+        if footprint is not None and not footprint.covers(land["geom"]):
+            continue
+        out.append(land)
+    return out
+
+
+def _prefetch_parcel_clear(scene, lands, sensor) -> None:
+    """下载前为“季外且整景高云”的候选地块读取一次 SCL 窗口，结果缓存在景上。
+
+    在状态锁外执行（含网络 IO）；``_scene_lands`` 只读缓存。只有原规则会丢弃的
+    地块才参与读取，季内或低云景零额外开销。失败时缓存为空 → 退回原规则。
+    """
+    if sensor != "S2" or "_parcel_clear" in scene:
+        return
+    keep = parcel_clear_keep_pct()
+    if keep is None:
+        return
+    pending = {}
+    for land in _scene_land_candidates(scene, lands):
+        kept, _ = filter_scenes_outside_season_high_cloud(
+            [scene], season_months=land["season_months"]
+        )
+        if not kept:
+            pending[str(land["meta"]["land_id"])] = land["geom"]
+    if not pending:
+        return
+    scl_href = (scene.get("band_hrefs") or {}).get("SCL")
+    started = time.monotonic()
+    result = probe_parcel_clear(scl_href, pending)
+    scene["_parcel_clear"] = result
+    logger.info(
+        "s2_parcel_clear_probe",
+        scene_id=scene.get("id"),
+        date=str(scene.get("date"))[:10],
+        scene_cloud=scene.get("cloud_cover"),
+        lands=len(pending),
+        kept=sorted(k for k, v in result.items() if v is not None and v > keep),
+        clear={k: v for k, v in result.items()},
+        keep_pct=keep,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+def _parcel_clear_for(scene, land) -> float | None:
+    cache = scene.get("_parcel_clear") or {}
+    return cache.get(str(land["meta"]["land_id"]))
+
+
 def _scene_lands(scene, lands, sensor):
-    """筛出无同日结果且被场景完整覆盖的地块，并对 S2 附加季节/高云筛选。"""
+    """筛出无同日结果且被场景完整覆盖的地块，并对 S2 附加季节/高云筛选。
+
+    季外高云景若下载前 SCL 预判地块晴空 > ``S2_PARCEL_CLEAR_KEEP_PCT``，按地块保留。
+    """
     footprint = shape(scene["geometry"]) if scene.get("geometry") else None
     selected = []
     for land in lands:
@@ -470,7 +538,10 @@ def _scene_lands(scene, lands, sensor):
             continue
         if sensor == "S2":
             filtered, _ = filter_scenes_outside_season_high_cloud(
-                [scene], season_months=land["season_months"]
+                [scene],
+                season_months=land["season_months"],
+                parcel_clear_pct=_parcel_clear_for(scene, land),
+                parcel_clear_keep_pct=parcel_clear_keep_pct(),
             )
             if not filtered:
                 continue
@@ -1062,6 +1133,17 @@ def _process_one_batch_scene(
             )
 
     scene_date = scene["date"]
+
+    # 季外高云景的地块晴空预判含网络读取，必须在状态锁外完成。
+    try:
+        _prefetch_parcel_clear(scene, selected_lands, sensor)
+    except Exception as exc:
+        logger.warning(
+            "s2_parcel_clear_prefetch_failed",
+            job_id=job_id,
+            scene_id=scene.get("id"),
+            error=str(exc)[:300],
+        )
 
     with state_lock:
         if abandon_event.is_set():
