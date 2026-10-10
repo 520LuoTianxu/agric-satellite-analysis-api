@@ -397,14 +397,37 @@ def _attach_scene_media_urls(d: dict[str, Any], media: dict[str, Any] | None) ->
         d["rgb_url"] = signed
 
 
-def _build_scene_product_items(rows: list[Any], *, include_pixels: bool) -> list[SceneProductOut]:
-    """构造场景响应；像元模式会访问 OSS，必须由异步路由放入线程池执行。"""
+def _build_scene_product_items(
+    rows: list[Any], *, include_pixels: bool, include_media: bool = False
+) -> list[SceneProductOut]:
+    """构造场景响应；像元模式会访问 OSS，必须由异步路由放入线程池执行。
+
+    include_media=True 且 include_pixels=False 时只返回预览图地址：优先读数据库列，
+    仅当数据库中没有任何预览字段时才回退读取旧 OSS JSON（受读取预算约束），不解析像元。
+    """
     items: list[SceneProductOut] = []
     total_pixels = 0
-    oss_read_budget = _SceneOssReadBudget() if include_pixels else None
+    oss_read_budget = _SceneOssReadBudget() if (include_pixels or include_media) else None
     for row in rows:
         data = _row_to_dict(row)
         if not include_pixels:
+            if include_media:
+                data.pop("pixel_data", None)
+                data.pop("pixels_lonlat", None)
+                data.pop("pixels_source", None)
+                has_db_media = bool(
+                    data.get("rgb_url") or data.get("large_rgb_url") or data.get("rgb_oss_key")
+                )
+                media = (
+                    None
+                    if has_db_media
+                    else _load_oss_scene_media(
+                        data.get("json_oss_key"), read_budget=oss_read_budget
+                    )
+                )
+                _attach_scene_media_urls(data, media)
+                items.append(SceneProductOut.model_validate(data))
+                continue
             for field in (
                 "pixel_data",
                 "pixels_lonlat",
@@ -575,6 +598,16 @@ async def list_land_scenes(
             "Pixel pages are capped at 50 scenes and a bounded pixel/JSON budget."
         ),
     ),
+    include_media: int = Query(
+        0,
+        ge=0,
+        le=1,
+        description=(
+            "If 1 (with include_pixels=0), return only preview URLs rgb_url/large_rgb_url. "
+            "Read from DB columns; legacy OSS JSON is read only when the DB has no preview fields. "
+            "No pixel payload is loaded."
+        ),
+    ),
     order: Literal["asc", "desc"] = Query(
         "asc",
         description=(
@@ -737,20 +770,26 @@ async def list_land_scenes(
             ) from exc
         return Response(content=serialized, media_type="application/json")
     else:
-        items = _build_scene_product_items(rows, include_pixels=False)
+        if include_media:
+            items = await run_in_threadpool(
+                _build_scene_product_items, rows, include_pixels=False, include_media=True
+            )
+        else:
+            items = _build_scene_product_items(rows, include_pixels=False)
+    exclude_fields = {
+        "pixel_data",
+        "pixels_lonlat",
+        "heatmap_url",
+        "s2_heatmap_url",
+        "pixels_source",
+    }
+    if not include_media:
+        exclude_fields |= {"rgb_url", "large_rgb_url"}
     return {
         "items": [
             i.model_dump(
                 exclude_none=False,
-                exclude={
-                    "pixel_data",
-                    "pixels_lonlat",
-                    "rgb_url",
-                    "large_rgb_url",
-                    "heatmap_url",
-                    "s2_heatmap_url",
-                    "pixels_source",
-                },
+                exclude=exclude_fields,
             )
             for i in items
         ],
