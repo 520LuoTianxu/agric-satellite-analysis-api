@@ -402,12 +402,12 @@ def _build_scene_product_items(
 ) -> list[SceneProductOut]:
     """构造场景响应；像元模式会访问 OSS，必须由异步路由放入线程池执行。
 
-    include_media=True 且 include_pixels=False 时只返回预览图地址：优先读数据库列，
-    仅当数据库中没有任何预览字段时才回退读取旧 OSS JSON（受读取预算约束），不解析像元。
+    include_media=True 且 include_pixels=False 时只返回预览图地址，且只读数据库列；
+    不再回退读取旧 OSS JSON，不解析像元。
     """
     items: list[SceneProductOut] = []
     total_pixels = 0
-    oss_read_budget = _SceneOssReadBudget() if (include_pixels or include_media) else None
+    oss_read_budget = _SceneOssReadBudget() if include_pixels else None
     for row in rows:
         data = _row_to_dict(row)
         if not include_pixels:
@@ -415,17 +415,9 @@ def _build_scene_product_items(
                 data.pop("pixel_data", None)
                 data.pop("pixels_lonlat", None)
                 data.pop("pixels_source", None)
-                has_db_media = bool(
-                    data.get("rgb_url") or data.get("large_rgb_url") or data.get("rgb_oss_key")
-                )
-                media = (
-                    None
-                    if has_db_media
-                    else _load_oss_scene_media(
-                        data.get("json_oss_key"), read_budget=oss_read_budget
-                    )
-                )
-                _attach_scene_media_urls(data, media)
+                # 只读数据库预览列，不再回退下载旧 OSS JSON：历史去云产品的 JSON 内不含预览地址，
+                # 回退只会整份下载像元对象而拿不到任何 URL。
+                _attach_scene_media_urls(data, None)
                 items.append(SceneProductOut.model_validate(data))
                 continue
             for field in (
@@ -604,7 +596,7 @@ async def list_land_scenes(
         le=1,
         description=(
             "If 1 (with include_pixels=0), return only preview URLs rgb_url/large_rgb_url. "
-            "Read from DB columns; legacy OSS JSON is read only when the DB has no preview fields. "
+            "Read from DB columns only; legacy OSS JSON is not read, so products without DB preview fields return null. "
             "No pixel payload is loaded."
         ),
     ),
