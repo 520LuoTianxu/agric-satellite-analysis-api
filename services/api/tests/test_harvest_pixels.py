@@ -229,3 +229,51 @@ class HarvestPixelsEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarvestMemoryBudgetTests(unittest.IsolatedAsyncioTestCase):
+    def test_stride(self):
+        from app.services import harvest_progress as hp
+
+        self.assertEqual(hp.pixel_sample_stride(100, budget=1000), 1)
+        self.assertEqual(hp.pixel_sample_stride(4_800_000, budget=250_000), 20)
+
+    def test_keep_pixel_is_deterministic_across_scenes(self):
+        from app.services import harvest_progress as hp
+
+        pixels = [{"lon": 115 + i * 1e-4, "lat": 38.9 + (i % 7) * 1e-4} for i in range(5000)]
+        a = [p for p in pixels if hp._keep_pixel(p, 5)]
+        b = [dict(p) for p in pixels if hp._keep_pixel(dict(p), 5)]
+        self.assertEqual(a, b)
+        self.assertTrue(700 < len(a) < 1300)
+        self.assertEqual(len([p for p in pixels if hp._keep_pixel(p, 1)]), 5000)
+
+    async def test_load_scene_inputs_slims_and_samples(self):
+        import json as _json
+        from datetime import date as _date
+        from types import SimpleNamespace as _NS
+        from unittest.mock import AsyncMock as _AM, MagicMock as _MM
+
+        from app.services import harvest_progress as hp
+
+        px = [
+            {"lon": 115 + i * 1e-4, "lat": 38.9, "NDVI": 0.5, "clear": 1, "B02": 0.1, "B12": 0.2}
+            for i in range(1000)
+        ]
+        row = _NS(_mapping={
+            "date": _date(2026, 9, 1), "scene_id": "s1", "pixels": _json.dumps(px),
+            "algorithm_version": "v2", "stac_item_id": None, "source": "aws",
+            "decloud_quality": None, "parcel_cloud_cover_pct": 0, "cloud_cover": 0,
+            "cloud_cover_over_30": False, "parcel_cloud_source": None,
+        })
+        result = _MM()
+        result.fetchall.return_value = [row]
+        db = _MM()
+        db.execute = _AM(return_value=result)
+        full = await hp.load_scene_inputs(db, "L1", _date(2026, 1, 1), _date(2026, 10, 1))
+        self.assertEqual(len(full[0]["pixels"]), 1000)
+        self.assertEqual(set(full[0]["pixels"][0]), {"lon", "lat", "NDVI", "clear"})
+        sampled = await hp.load_scene_inputs(
+            db, "L1", _date(2026, 1, 1), _date(2026, 10, 1), stride=4
+        )
+        self.assertLess(len(sampled[0]["pixels"]), 400)

@@ -109,7 +109,7 @@ class AdminOpsExecutionTests(IsolatedAsyncioTestCase):
                 _FakeResult(rows=[("partial", 1)]),
                 _FakeResult(rows=[("failed", 1)]),
                 _FakeResult(items=[parent]),
-                _FakeResult(rows=[(parent_id, 2, 2, 1, 1, 0, now, "child failed")]),
+                _FakeResult(rows=[(parent_id, 2, 2, 1, 1, 0, now, "child failed", now, now, 0)]),
                 _FakeResult(rows=[(parent_id, 2, 1, 1, 1, 0, 0, now, None)]),
                 _FakeResult(items=[]),
                 _FakeResult(items=[parent_id]),
@@ -308,3 +308,53 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+class ExecutionSummaryLightweightTests(IsolatedAsyncioTestCase):
+    def test_summary_root_job_uses_projected_columns_only(self):
+        from app.routers.admin_ops import (
+            _is_aggregated_parent_job,
+            _summary_root_job,
+        )
+
+        now = datetime.now(timezone.utc)
+        job_id = uuid.uuid4()
+
+        class _Row:
+            _mapping = {
+                "id": job_id, "land_id": None, "type": "backfill",
+                "status": "running", "parent_job_id": None,
+                "progress_json": {"stage": "queued"}, "error": None,
+                "created_at": now, "started_at": None, "finished_at": None,
+                "params_sentinel": "true", "declared_job_count": 169,
+            }
+
+        root = _summary_root_job(_Row())
+        # 不携带 land_ids / job_ids 大数组，只保留 sentinel 标记和声明子任务数。
+        self.assertEqual(root.params_json, {"sentinel": True})
+        self.assertEqual(root.declared_job_count, 169)
+        self.assertTrue(_is_aggregated_parent_job(root))
+
+        _Row._mapping = {**_Row._mapping, "params_sentinel": "false"}
+        self.assertEqual(_summary_root_job(_Row()).params_json, {})
+
+    def test_summary_queries_do_not_select_full_json_columns(self):
+        from sqlalchemy import select
+        from sqlalchemy.dialects import postgresql
+
+        from app.models.tables import Job, WorkItem
+        from app.routers import admin_ops as a
+
+        root_sql = str(
+            select(*a._ROOT_SUMMARY_COLUMNS, a._ROOT_SENTINEL, a._ROOT_DECLARED_JOB_COUNT)
+            .where(Job.parent_job_id.is_(None))
+            .compile(dialect=postgresql.dialect())
+        )
+        self.assertNotIn("jobs.params_json AS", root_sql)
+        orphan_sql = str(
+            select(*a._ORPHAN_SUMMARY_COLUMNS, a._slim_work_item_payload_expr())
+            .where(WorkItem.parent_job_id.is_(None))
+            .compile(dialect=postgresql.dialect())
+        )
+        self.assertNotIn("work_items.payload_json AS", orphan_sql)
+        self.assertIn("jsonb_build_object", orphan_sql)

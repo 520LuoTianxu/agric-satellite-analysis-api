@@ -206,7 +206,12 @@ def enqueue_work_item_sync(
         session.close()
 
 
-async def reaper_expired_leases(db: AsyncSession) -> int:
+# 每次 claim 前顺带回收过期租约；单次最多处理这么多行，避免大量租约同时过期
+# （如某台下载机掉线带走数百任务）时，每 4~5s 的 claim 都把数百行完整 payload 读进 API。
+REAPER_BATCH_LIMIT = 200
+
+
+async def reaper_expired_leases(db: AsyncSession, *, limit: int = REAPER_BATCH_LIMIT) -> int:
     """Return expired leases to pending; exhaust the third claim as failed."""
     now = datetime.now(timezone.utc)
     result = await db.execute(
@@ -216,6 +221,8 @@ async def reaper_expired_leases(db: AsyncSession) -> int:
             WorkItem.lease_until.is_not(None),
             WorkItem.lease_until < now,
         )
+        .order_by(WorkItem.lease_until.asc())
+        .limit(max(1, int(limit)))
         .with_for_update(skip_locked=True)
     )
     items = list(result.scalars().all())

@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import socket
 import uuid
@@ -45,6 +46,63 @@ OUTBOX_CLAIM_LIMIT = 10
 OUTBOX_LEASE_SECONDS = 600
 # 同一地块一天内常有多景/多次回执，短暂延迟合并成一次重算。
 OUTBOX_DEBOUNCE_SECONDS = 30
+
+
+# 内存预算：一次重算读入的“景 × 像元”总数上限。整季上下文最长约两年（~150 景），
+# 大地块（数万像元）若全量展开成 Python dict 会占用数 GB，直接把 1G 的 API 容器
+# OOM（2026-10 生产补数期间的 503）。超过预算时按坐标哈希做确定性抽样，
+# 收获占比是比例量，抽样后口径不变；同一坐标在所有景中要么全保留要么全丢弃。
+DEFAULT_MAX_PIXEL_OBSERVATIONS = 250_000
+# 收获算法用到的像元字段；其余波段读入后立即丢弃，避免逐景保留整份像元 dict。
+_S2_PIXEL_KEYS = frozenset({"lon", "lat", "clear", "NDVI", "EVI", "MNDWI", "NDMI"})
+_S2_PIXEL_KEYS_ANY_CASE = _S2_PIXEL_KEYS | {k.lower() for k in _S2_PIXEL_KEYS}
+_S1_PIXEL_KEYS_ANY_CASE = frozenset({"lon", "lat", "VH_db", "VV_db", "vh_db", "vv_db"})
+
+
+def max_pixel_observations() -> int:
+    raw = os.getenv("HARVEST_MAX_PIXEL_OBSERVATIONS", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_MAX_PIXEL_OBSERVATIONS
+    except ValueError:
+        value = DEFAULT_MAX_PIXEL_OBSERVATIONS
+    return max(10_000, value)
+
+
+def pixel_sample_stride(total_pixel_observations: int, budget: int | None = None) -> int:
+    """返回抽样步长：1 表示不抽样，k 表示约保留 1/k 的坐标。"""
+    budget = budget or max_pixel_observations()
+    if total_pixel_observations <= budget:
+        return 1
+    return int(math.ceil(total_pixel_observations / budget))
+
+
+def _keep_pixel(pixel: dict[str, Any], stride: int) -> bool:
+    if stride <= 1:
+        return True
+    try:
+        lon = int(round(float(pixel.get("lon")) * 1e6))
+        lat = int(round(float(pixel.get("lat")) * 1e6))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # 32 位整数混洗哈希，跨进程稳定（不用 Python hash() 的随机种子）；
+    # 规则网格坐标步长固定，必须充分混洗，否则取模会整列偏向。
+    h = (lon * 0x9E3779B1 + lat * 0x85EBCA77) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 0x2C1B3C6D) & 0xFFFFFFFF
+    h ^= h >> 12
+    h = (h * 0x297A2D39) & 0xFFFFFFFF
+    h ^= h >> 15
+    return h % stride == 0
+
+
+def _slim_pixels(
+    pixels: list[Any], keys: frozenset[str], stride: int
+) -> list[dict[str, Any]]:
+    return [
+        {k: v for k, v in p.items() if k in keys}
+        for p in pixels
+        if isinstance(p, dict) and _keep_pixel(p, stride)
+    ]
 
 
 def harvest_progress_enabled() -> bool:
@@ -119,6 +177,22 @@ _LOAD_S1 = text(
       AND pixel_data->>'format' = 'lonlat_v1'
       AND jsonb_typeof(pixel_data->'pixels') = 'array'
     ORDER BY date ASC, scene_id ASC
+    """
+)
+
+# 先只统计景数与最大像元数，用于决定抽样步长（不传输像元数组）。
+_COUNT_INPUTS = text(
+    """
+    SELECT sensor,
+           count(*) AS scenes,
+           COALESCE(max(jsonb_array_length(pixel_data->'pixels')), 0) AS max_pixels
+    FROM agric_satellite.parcel_scene_products
+    WHERE land_id = :land_id
+      AND sensor IN ('S1', 'S2')
+      AND date >= :date_from AND date <= :date_to
+      AND pixel_data->>'format' = 'lonlat_v1'
+      AND jsonb_typeof(pixel_data->'pixels') = 'array'
+    GROUP BY sensor
     """
 )
 
@@ -330,43 +404,85 @@ async def load_land_area_mu(
     return True, info["area_mu"]
 
 
-async def load_s1_inputs(
+async def _iter_rows(db: AsyncSession, statement: Any, params: dict[str, Any]):
+    """逐行读取：真实 AsyncSession 走服务端游标，单测替身退回 execute()。"""
+    stream = getattr(db, "stream", None)
+    if stream is not None and isinstance(db, AsyncSession):
+        result = await stream(statement, params)
+        async for row in result:
+            yield row
+        return
+    for row in (await db.execute(statement, params)).fetchall():
+        yield row
+
+
+async def input_sample_stride(
     db: AsyncSession, land_id: str, date_from: date, date_to: date
-) -> list[dict[str, Any]]:
+) -> tuple[int, int]:
+    """按“景数 × 最大像元数”估算本次重算的内存规模，返回 (步长, 估算像元观测数)。"""
     rows = (
         await db.execute(
-            _LOAD_S1, {"land_id": land_id, "date_from": date_from, "date_to": date_to}
+            _COUNT_INPUTS,
+            {"land_id": land_id, "date_from": date_from, "date_to": date_to},
         )
     ).fetchall()
-    out: list[dict[str, Any]] = []
+    total = 0
     for r in rows:
+        m = r._mapping
+        total += int(m.get("scenes") or 0) * int(m.get("max_pixels") or 0)
+    return pixel_sample_stride(total), total
+
+
+async def load_s1_inputs(
+    db: AsyncSession,
+    land_id: str,
+    date_from: date,
+    date_to: date,
+    *,
+    stride: int = 1,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    async for r in _iter_rows(
+        db, _LOAD_S1, {"land_id": land_id, "date_from": date_from, "date_to": date_to}
+    ):
         d = dict(r._mapping)
-        pixels = _jsonish(d.get("pixels"))
+        pixels = _jsonish(d.pop("pixels", None))
         if isinstance(pixels, list) and pixels:
-            out.append({**d, "pixels": pixels})
+            slim = _slim_pixels(pixels, _S1_PIXEL_KEYS_ANY_CASE, stride)
+            del pixels
+            if slim:
+                out.append({**d, "pixels": slim})
     return out
 
 
 async def load_scene_inputs(
-    db: AsyncSession, land_id: str, date_from: date, date_to: date
+    db: AsyncSession,
+    land_id: str,
+    date_from: date,
+    date_to: date,
+    *,
+    stride: int = 1,
 ) -> list[dict[str, Any]]:
-    rows = (
-        await db.execute(
-            _LOAD_SCENES,
-            {"land_id": land_id, "date_from": date_from, "date_to": date_to},
-        )
-    ).fetchall()
     scenes: list[dict[str, Any]] = []
-    for r in rows:
+    async for r in _iter_rows(
+        db,
+        _LOAD_SCENES,
+        {"land_id": land_id, "date_from": date_from, "date_to": date_to},
+    ):
         d = dict(r._mapping)
-        pixels = _jsonish(d.get("pixels"))
+        pixels = _jsonish(d.pop("pixels", None))
         if not isinstance(pixels, list) or not pixels:
+            continue
+        # 逐景解析后立即裁剪：原始 JSON 字符串和全波段 dict 不会跨景累积。
+        slim = _slim_pixels(pixels, _S2_PIXEL_KEYS_ANY_CASE, stride)
+        del pixels
+        if not slim:
             continue
         scenes.append(
             {
                 "date": d.get("date"),
                 "scene_id": d.get("scene_id"),
-                "pixels": pixels,
+                "pixels": slim,
                 "source": d.get("source"),
                 "algorithm_version": d.get("algorithm_version"),
                 "stac_item_id": d.get("stac_item_id"),
@@ -409,8 +525,17 @@ async def compute_land_series(
         date_from - timedelta(days=SEASON_CONTEXT_DAYS),
         date_to - timedelta(days=ADAPTIVE_HISTORY_DAYS),
     )
-    scenes = await load_scene_inputs(db, land_id, context_from, date_to)
-    s1_scenes = await load_s1_inputs(db, land_id, context_from, date_to)
+    stride, estimated = await input_sample_stride(db, land_id, context_from, date_to)
+    if stride > 1:
+        logger.warning(
+            "harvest_progress_pixel_sampled",
+            land_id=land_id,
+            stride=stride,
+            estimated_pixel_observations=estimated,
+            budget=max_pixel_observations(),
+        )
+    scenes = await load_scene_inputs(db, land_id, context_from, date_to, stride=stride)
+    s1_scenes = await load_s1_inputs(db, land_id, context_from, date_to, stride=stride)
     series = compute_harvest_series(
         scenes,
         parcel_area_mu=area_mu,
@@ -420,8 +545,14 @@ async def compute_land_series(
         region_code=land_info.get("province_code"),
         pixel_states=pixel_states,
     )
+    del scenes, s1_scenes
     lo, hi = date_from.isoformat(), date_to.isoformat()
-    return [row for row in series if lo <= row["date"] <= hi]
+    out = [row for row in series if lo <= row["date"] <= hi]
+    if stride > 1:
+        for row in out:
+            # 记录抽样步长，像元计数字段此时是抽样后的数量。
+            row["thresholds"] = {**(row.get("thresholds") or {}), "pixel_sample_stride": stride}
+    return out
 
 
 async def recompute_land(

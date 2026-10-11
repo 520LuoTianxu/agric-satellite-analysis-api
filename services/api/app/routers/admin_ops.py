@@ -12,7 +12,9 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
-from sqlalchemy import String, and_, cast, exists, func, or_, select
+from types import SimpleNamespace
+
+from sqlalchemy import String, and_, cast, exists, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -1017,6 +1019,108 @@ def _all_job_tree_cte():
     )
 
 
+# ── /execution 列表页的轻量读取 ─────────────────────────────────────────────
+# 列表每分钟会被补数驱动/管理页轮询。根 Job 的 params_json 里有上千地块、上百子
+# job_ids；孤儿 WorkItem 的 payload_json 带处理边界等大字段。全量读入 ORM 会随表
+# 增长线性吃内存（2026-10 补数 3784 子任务期间 API 1G 容器 OOM 的诱因之一）。
+# 这里只在数据库里取出分组逻辑真正需要的少量 JSON 键。
+_ROOT_SUMMARY_COLUMNS = tuple(
+    column.label(column.key)
+    for column in (
+        Job.id,
+        Job.land_id,
+        Job.type,
+        Job.status,
+        Job.parent_job_id,
+        Job.progress_json,
+        Job.error,
+        Job.created_at,
+        Job.started_at,
+        Job.finished_at,
+    )
+)
+_ROOT_SENTINEL = Job.params_json["sentinel"].as_string().label("params_sentinel")
+# 与 _declared_job_ids 一致：去重、仅合法 UUID、排除自身。
+_ROOT_DECLARED_JOB_COUNT = literal_column(
+    "(SELECT count(DISTINCT lower(e)) FROM jsonb_array_elements_text("
+    "CASE WHEN jsonb_typeof(jobs.params_json->'job_ids') = 'array' "
+    "THEN jobs.params_json->'job_ids' ELSE '[]'::jsonb END) AS e "
+    "WHERE e ~* '^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$' "
+    "AND lower(e) <> jobs.id::text)"
+).label("declared_job_count")
+
+
+def _summary_root_job(row: Any) -> Any:
+    """把聚合查询的行转成分组逻辑所需的只读对象（不挂 Session，不会被 flush）。"""
+    if hasattr(row, "params_json"):
+        # 单元测试替身/旧调用方直接给完整对象。
+        return row
+    mapping = row._mapping
+    sentinel = mapping.get("params_sentinel")
+    params: dict[str, Any] = {}
+    if sentinel is not None and str(sentinel).strip().lower() not in {
+        "", "false", "0", "null",
+    }:
+        params["sentinel"] = True
+    values = {
+        key: mapping.get(key)
+        for key in (
+            "id", "land_id", "type", "status", "parent_job_id", "progress_json",
+            "error", "created_at", "started_at", "finished_at",
+        )
+    }
+    return SimpleNamespace(
+        **values,
+        params_json=params,
+        declared_job_count=int(mapping.get("declared_job_count") or 0),
+    )
+
+
+def _slim_work_item_payload_expr():
+    payload = WorkItem.payload_json
+    extras = payload["extras"]
+    return func.jsonb_build_object(
+        "land_id", payload["land_id"],
+        "job_id", payload["job_id"],
+        "parent_job_id", payload["parent_job_id"],
+        "followup_assessment", func.jsonb_build_object(
+            "job_id", payload["followup_assessment"]["job_id"],
+            "parent_job_id", payload["followup_assessment"]["parent_job_id"],
+        ),
+        "followup_season_growth", func.jsonb_build_object(
+            "job_id", payload["followup_season_growth"]["job_id"],
+            "parent_job_id", payload["followup_season_growth"]["parent_job_id"],
+        ),
+        "extras", func.jsonb_build_object(
+            "job_id", extras["job_id"],
+            "parent_job_id", extras["parent_job_id"],
+            "sentinel_job_id", extras["sentinel_job_id"],
+            "bridge_job_id", extras["bridge_job_id"],
+            "followup_assessment", func.jsonb_build_object(
+                "job_id", extras["followup_assessment"]["job_id"],
+                "parent_job_id", extras["followup_assessment"]["parent_job_id"],
+            ),
+            "followup_season_growth", func.jsonb_build_object(
+                "job_id", extras["followup_season_growth"]["job_id"],
+                "parent_job_id", extras["followup_season_growth"]["parent_job_id"],
+            ),
+        ),
+    ).label("payload_json")
+
+
+_ORPHAN_SUMMARY_COLUMNS = tuple(
+    column.label(column.key)
+    for column in _WORK_ITEM_MONITOR_COLUMNS
+    if column.key != "payload_json"
+)
+
+
+def _summary_work_item(row: Any) -> Any:
+    if hasattr(row, "payload_json") and not hasattr(row, "_mapping"):
+        return row
+    return SimpleNamespace(**dict(row._mapping))
+
+
 def _declared_job_ids(job: Job) -> set[uuid.UUID]:
     params = _json_dict(job.params_json)
     declared_ids = params.get("job_ids")
@@ -1034,13 +1138,16 @@ async def _load_execution_group_summaries(
 ) -> list[_ExecutionGroup]:
     """用数据库聚合生成列表页分组，避免把所有子 Job/WorkItem 拉到 Python。"""
     tree = _all_job_tree_cte()
-    root_jobs = (
-        await db.execute(
-            select(Job)
-            .options(load_only(*_JOB_MONITOR_COLUMNS))
-            .where(Job.parent_job_id.is_(None))
-        )
-    ).scalars().all()
+    root_jobs = [
+        _summary_root_job(row)
+        for row in (
+            await db.execute(
+                select(
+                    *_ROOT_SUMMARY_COLUMNS, _ROOT_SENTINEL, _ROOT_DECLARED_JOB_COUNT
+                ).where(Job.parent_job_id.is_(None))
+            )
+        ).all()
+    ]
 
     job_rows = (
         await db.execute(
@@ -1151,7 +1258,12 @@ async def _load_execution_group_summaries(
         job_row = jobs_by_root.get(root.id)
         item_row = work_items_by_root.get(root.id)
         job_count = int(_row_value(job_row, "job_count", 1) or 0) if job_row else 0
-        expected_count = len(_declared_job_ids(root))
+        declared_count = getattr(root, "declared_job_count", None)
+        expected_count = (
+            int(declared_count)
+            if declared_count is not None
+            else len(_declared_job_ids(root))
+        )
         missing = max(0, expected_count - job_count)
         effective_item_count = (
             int(_row_value(item_row, "effective_work_item_count", 2) or 0)
@@ -1248,20 +1360,32 @@ async def _load_execution_group_summaries(
         )
 
     # 没有父 Job 的 WorkItem 仍作为独立一级节点展示，避免孤儿任务被静默隐藏。
-    orphan_items = (
-        await db.execute(
-            select(WorkItem)
-            .options(load_only(*_WORK_ITEM_MONITOR_COLUMNS))
-            .where(WorkItem.parent_job_id.is_(None))
-        )
-    ).scalars().all()
+    orphan_items = [
+        _summary_work_item(row)
+        for row in (
+            await db.execute(
+                select(*_ORPHAN_SUMMARY_COLUMNS, _slim_work_item_payload_expr())
+                .where(WorkItem.parent_job_id.is_(None))
+            )
+        ).all()
+    ]
     # 历史 followup WorkItem 可能没有填 parent_job_id，但已经会被上面的
     # JSON 关联归入已有 Job 组；从孤儿列表中排除它们，避免页面出现重复组。
-    all_job_ids = set((await db.execute(select(Job.id))).scalars().all())
-    unlinked_items: list[WorkItem] = []
+    # 只核对候选父 ID 是否存在，不再把整张 jobs 表的 ID 读进内存。
+    candidate_ids = {
+        parent_id
+        for item in orphan_items
+        if (parent_id := _work_item_parent_id(item)) is not None
+    }
+    existing_job_ids = set(
+        (
+            await db.execute(select(Job.id).where(Job.id.in_(list(candidate_ids))))
+        ).scalars().all()
+    )
+    unlinked_items: list[Any] = []
     for item in orphan_items:
         parent_id = _work_item_parent_id(item)
-        if parent_id is None or parent_id not in all_job_ids:
+        if parent_id is None or parent_id not in existing_job_ids:
             unlinked_items.append(item)
     groups.extend(_build_execution_groups([], unlinked_items))
     return groups
