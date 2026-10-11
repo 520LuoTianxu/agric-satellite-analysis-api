@@ -259,3 +259,27 @@ class ClaimAgentGuardTests(unittest.TestCase):
             "weather_backfill", task_id="tid-2", extras={}
         )
         self.assertEqual(key2, "weather_backfill:tid-2")
+
+
+class ReaperBatchLimitTests(unittest.TestCase):
+    def test_reaper_statement_is_bounded(self) -> None:
+        captured: list[Any] = []
+
+        class _Result:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return []
+
+        class _Db:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return _Result()
+
+            async def flush(self):
+                return None
+
+        n = asyncio.run(wi.reaper_expired_leases(_Db(), limit=7))
+        self.assertEqual(n, 0)
+        self.assertEqual(captured[0]._limit_clause.value, 7)
