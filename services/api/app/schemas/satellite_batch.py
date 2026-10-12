@@ -155,6 +155,9 @@ class SatelliteHistoryBackfillRequest(BaseModel):
         default_factory=lambda: ["S1", "S2"], min_length=1, max_length=2
     )
     force: bool = False
+    # 只重下“已入库但 S2 algorithm_version 不是当前版本”的旧网格景；当前版本的景仍按
+    # 已有日期跳过。与 force 互斥（force 已经是全部重下）。
+    redownload_stale_versions: bool = False
 
     @field_validator("land_ids", mode="before")
     @classmethod

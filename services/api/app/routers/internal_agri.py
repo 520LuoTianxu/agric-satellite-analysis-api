@@ -40,6 +40,8 @@ class SatelliteBatchInputsRequest(BaseModel):
     include_existing_dates: bool = True
     date_from: date | None = None
     date_to: date | None = None
+    # 设置后只把该算法版本的景算作“已有日期”，其它版本（旧网格）的日期会被重下。
+    existing_algorithm_version: str | None = Field(default=None, max_length=64)
 
     @field_validator("land_ids", mode="before")
     @classmethod
@@ -139,6 +141,9 @@ async def satellite_batch_inputs(
         if body.date_from is not None and body.date_to is not None:
             date_filter = "AND date >= :date_from AND date <= :date_to"
             date_params.update({"date_from": body.date_from, "date_to": body.date_to})
+        if body.existing_algorithm_version:
+            date_filter += " AND pixel_data->>'algorithm_version' = :existing_algorithm_version"
+            date_params["existing_algorithm_version"] = body.existing_algorithm_version
         date_query = text(
             f"""
             SELECT DISTINCT land_id, date

@@ -531,8 +531,12 @@ def agri_satellite_batch_inputs(
     date_to: str | None = None,
     client: httpx.Client | None = None,
     timeout: float = 60.0,
+    existing_algorithm_version: str | None = None,
 ) -> list[dict[str, Any]]:
-    """批量读取遥感批任务所需地块元数据及已存在日期。"""
+    """批量读取遥感批任务所需地块元数据及已存在日期。
+
+    ``existing_algorithm_version`` 非空时只返回该算法版本的已有日期（旧版本景将被重下）。
+    """
     if (date_from is None) != (date_to is None):
         raise ValueError("date_from and date_to must be provided together")
     body = {
@@ -543,6 +547,8 @@ def agri_satellite_batch_inputs(
     # 日期边界成对传输；旧调用不传时仍按兼容契约读取全部历史日期。
     if date_from is not None and date_to is not None:
         body.update({"date_from": date_from, "date_to": date_to})
+    if existing_algorithm_version:
+        body["existing_algorithm_version"] = str(existing_algorithm_version)
 
     def _do(c: httpx.Client) -> list[dict[str, Any]]:
         r = c.post("/v1/internal/agri/satellite-batch/inputs", json=body)
