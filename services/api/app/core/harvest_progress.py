@@ -531,7 +531,9 @@ def _residue_signature(
 
 
 def _daily_observations(
-    scenes: Iterable[dict[str, Any]], thr: HarvestProgressThresholds
+    scenes: Iterable[dict[str, Any]],
+    thr: HarvestProgressThresholds,
+    grid_stats: dict[str, Any] | None = None,
 ) -> list[_Obs]:
     best: dict[date, _Obs] = {}
     for s in scenes or []:
@@ -547,7 +549,12 @@ def _daily_observations(
         ):
             best[obs.day] = obs
     days = [best[d] for d in sorted(best)]
-    _align_grids(days)
+    stats = _remap_grid_changes(days)
+    if stats is None:
+        # 未检测到换网格：保持原有对齐逻辑，结果与修复前逐位一致。
+        _align_grids(days)
+    elif grid_stats is not None:
+        grid_stats.update(stats)
     return _drop_dips(days, thr)
 
 
@@ -596,17 +603,104 @@ def _align_grids(days: list[_Obs]) -> None:
             }
 
 
+# 换网格检测与重映射：同一物理网格的两景像元键几乎全部重合（仅云掩膜差异），
+# 换了产品网格（如旧经纬度网格 → v5 UTM 网格）时重合率接近 0。
+GRID_CHANGE_MAX_OVERLAP = 0.5
+DEFAULT_GRID_REMAP_MAX_M = 7.0  # 约半个 10m 像元对角线
+
+
+def grid_remap_max_m() -> float:
+    v = _env_float("HARVEST_GRID_REMAP_MAX_M", DEFAULT_GRID_REMAP_MAX_M)
+    return v if v > 0 else DEFAULT_GRID_REMAP_MAX_M
+
+
+def _grid_overlap(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    small, big = (a, b) if len(a) <= len(b) else (b, a)
+    return sum(1 for k in small if k in big) / len(small)
+
+
+def _remap_grid_changes(days: list[_Obs]) -> dict[str, Any] | None:
+    """检测本序列内是否换过像元网格；换过则以最新一景所在网格为目标重映射。
+
+    按像元键重合率把各景聚成物理网格（重合率 < ``GRID_CHANGE_MAX_OVERLAP`` 视为
+    不同网格）。只有一个网格时返回 None，调用方走原有 ``_align_grids``，行为不变。
+    多个网格时：目标网格 = 最新一景所在网格的像元键并集；对每个目标像元，在其他
+    网格的每一景里取距离 ≤ ``HARVEST_GRID_REMAP_MAX_M``（默认 7m）的最近像元值
+    （目标驱动，保证每个目标像元都能继承旧网格历史，不会因多对一合并而缺失）。
+    """
+    if len(days) < 2 or not all(
+        all(isinstance(v, float) for v in k) for d in days for k in d.values
+    ):
+        return None
+    grids: list[tuple[set, list[int]]] = []
+    for i, obs in enumerate(days):
+        keys = set(obs.values)
+        for union, members in grids:
+            if _grid_overlap(keys, union) >= GRID_CHANGE_MAX_OVERLAP:
+                union |= keys
+                members.append(i)
+                break
+        else:
+            grids.append((keys, [i]))
+    if len(grids) < 2:
+        return None
+    last = len(days) - 1
+    target_keys, target_members = next(g for g in grids if last in g[1])
+    max_m = grid_remap_max_m()
+    targets = sorted(target_keys)
+    mapped_total = 0
+    tried_total = 0
+    remapped_days = 0
+    for union, members in grids:
+        if members is target_members:
+            continue
+        buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for lon, lat in union:
+            buckets.setdefault(_bucket(lon, lat), []).append((lon, lat))
+        # 目标像元 → 源网格最近像元（每个源网格只算一次，各景复用）。
+        src_of: dict[tuple[float, float], tuple[float, float]] = {}
+        for t in targets:
+            src = _nearest(t, buckets, max_m)
+            if src is not None:
+                src_of[t] = src
+        mapped_total += len(src_of)
+        tried_total += len(targets)
+        del buckets
+        for i in members:
+            obs = days[i]
+            vals, aux = obs.values, obs.aux
+            obs.values = {t: vals[s] for t, s in src_of.items() if s in vals}
+            obs.aux = {t: aux[s] for t, s in src_of.items() if s in aux}
+            if obs.values:
+                obs.median_green = statistics.median(obs.values.values())
+            remapped_days += 1
+    return {
+        "grid_remapped": True,
+        "grid_count": len(grids),
+        "grid_remap_days": remapped_days,
+        "grid_remap_max_m": max_m,
+        "grid_remap_target_pixels": len(targets),
+        "grid_remap_match_pct": round(100.0 * mapped_total / tried_total, 1)
+        if tried_total
+        else None,
+    }
+
+
 def _bucket(lon: float, lat: float) -> tuple[int, int]:
     return (math.floor(lon / _SNAP_CELL_DEG), math.floor(lat / _SNAP_CELL_DEG))
 
 
 def _nearest(
-    key: tuple[float, float], buckets: dict[tuple[int, int], list[tuple[float, float]]]
+    key: tuple[float, float],
+    buckets: dict[tuple[int, int], list[tuple[float, float]]],
+    max_m: float = _SNAP_MAX_M,
 ) -> tuple[float, float] | None:
     lon, lat = key
     bx, by = _bucket(lon, lat)
     kx = 111_320.0 * math.cos(math.radians(lat))
-    best, best_d = None, _SNAP_MAX_M
+    best, best_d = None, max_m
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
             for rlon, rlat in buckets.get((bx + dx, by + dy), ()):
@@ -963,7 +1057,8 @@ def compute_harvest_series(
     0% 返回。
     """
     base = thresholds or HarvestProgressThresholds.from_env()
-    days = _daily_observations(scenes, base)
+    grid_stats: dict[str, Any] = {}
+    days = _daily_observations(scenes, base, grid_stats)
     thr, threshold_source, threshold_stats = resolve_thresholds(
         days,
         base,
@@ -1227,6 +1322,7 @@ def compute_harvest_series(
                     "confirm_green": thr.confirm_green,
                     "peak_drop": thr.peak_drop,
                     **({"adaptive": threshold_stats} if threshold_stats else {}),
+                    **grid_stats,
                 },
                 "interpolated": False,
             }

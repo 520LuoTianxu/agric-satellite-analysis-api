@@ -333,6 +333,28 @@ class SharedWindowTests(unittest.TestCase):
         self.assertTrue(batch_inputs.call_args_list[0].kwargs["include_existing_dates"])
         self.assertFalse(batch_inputs.call_args_list[1].kwargs["include_existing_dates"])
 
+    def test_existing_algorithm_version_forwarded_for_s2_only(self):
+        with (
+            patch.object(batch, "internal_client", return_value=nullcontext(object())),
+            patch.object(
+                batch,
+                "agri_satellite_batch_inputs",
+                side_effect=lambda **kwargs: [
+                    {**remote_land(land_id), "existing_dates": []}
+                    for land_id in kwargs["land_ids"]
+                ],
+            ) as batch_inputs,
+        ):
+            batch._load_lands(["A"], "S2", False, existing_algorithm_version="v5")
+            batch._load_lands(["A"], "S1", False, existing_algorithm_version="v5")
+            batch._load_lands(["A"], "S2", True, existing_algorithm_version="v5")
+            batch._load_lands(["A"], "S2", False)
+        calls = [c.kwargs for c in batch_inputs.call_args_list]
+        self.assertEqual(calls[0].get("existing_algorithm_version"), "v5")
+        self.assertNotIn("existing_algorithm_version", calls[1])
+        self.assertNotIn("existing_algorithm_version", calls[2])
+        self.assertNotIn("existing_algorithm_version", calls[3])
+
     def test_failed_scene_is_reported_as_failed(self):
         job = {
             "status": "pending",

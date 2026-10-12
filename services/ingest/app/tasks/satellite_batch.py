@@ -302,6 +302,7 @@ def _load_lands(
     date_from: date | None = None,
     date_to: date | None = None,
     target_dates_by_land: dict[str, list[str]] | None = None,
+    existing_algorithm_version: str | None = None,
 ):
     """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
     land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
@@ -320,6 +321,12 @@ def _load_lands(
                 date_from=date_from.isoformat() if date_from is not None else None,
                 date_to=date_to.isoformat() if date_to is not None else None,
                 client=client,
+                # 只重下旧算法版本（旧网格）景：仅 S2 生效，S1 版本体系不同。
+                **(
+                    {"existing_algorithm_version": existing_algorithm_version}
+                    if existing_algorithm_version and sensor == "S2" and not force
+                    else {}
+                ),
             )
             remote_by_id = {
                 str(item.get("land_id")): item
@@ -1463,6 +1470,7 @@ def process_satellite_batch(
             date_from=d0,
             date_to=d1,
             target_dates_by_land=target_dates_by_land,
+            existing_algorithm_version=params.get("existing_algorithm_version"),
         )
         if not lands:
             patch_job(

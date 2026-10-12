@@ -19,6 +19,9 @@ from app.services.satellite_batch import (  # noqa: F401
 )
 
 DEFAULT_HISTORY_YEARS = 5
+# 当前光学产品算法版本；须与 ingest/app/tasks/agri_lonlat.py 的
+# AGRI_OPTICAL_ALGORITHM_VERSION 保持一致（有测试校验）。
+CURRENT_S2_ALGORITHM_VERSION = "stac-optical-lonlat-v5"
 
 
 def default_history_window(
@@ -44,6 +47,7 @@ async def backfill_satellite_history(
     sensors: Sequence[str] = ("S1", "S2"),
     force: bool = False,
     parent_job_id: uuid.UUID | None = None,
+    redownload_stale_versions: bool = False,
 ) -> dict[str, Any]:
     """下发历史 S1/S2 回填；共享范围只在 Job 参数中暂存，不写 OSS 或分组表。"""
     from app.core.database import async_session
@@ -53,6 +57,14 @@ async def backfill_satellite_history(
         date_to = date_to or default_to
     if date_from > date_to:
         raise ValueError("date_from must be no later than date_to")
+    if redownload_stale_versions and force:
+        raise ValueError("redownload_stale_versions 与 force 不能同时使用")
+    # 下载机据此只把“当前算法版本”的景算作已有日期，旧版本（旧网格）景会被重下。
+    extra_params = (
+        {"existing_algorithm_version": CURRENT_S2_ALGORITHM_VERSION}
+        if redownload_stale_versions
+        else None
+    )
 
     requested = list(dict.fromkeys(str(value).strip() for value in (land_ids or ()) if str(value).strip()))
     execution_id = parent_job_id or uuid.uuid4()
@@ -87,6 +99,7 @@ async def backfill_satellite_history(
             force=force,
             parent_job_id=execution_id,
             chunk_days=settings.index_backfill_chunk_days,
+            extra_params=extra_params,
         )
         found_ids = {str(land.land_id) for land in lands}
         missing_land_ids = [land_id for land_id in requested if land_id not in found_ids]
@@ -108,6 +121,7 @@ async def backfill_satellite_history(
                 "date_to": date_to.isoformat(),
                 "sensors": list(sensors),
                 "force": force,
+                "redownload_stale_versions": redownload_stale_versions,
                 "grouping_algorithm": "dynamic-window-greedy-10km-v1",
             },
         )

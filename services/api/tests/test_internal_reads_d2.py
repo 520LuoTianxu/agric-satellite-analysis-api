@@ -141,3 +141,51 @@ def test_job_patch_merges_progress_steps() -> None:
     assert "scene_search" in job.progress_json["steps"]
     assert "download" in job.progress_json["steps"]
     assert out.status == "running"
+
+
+def test_satellite_batch_inputs_existing_algorithm_version_filters_stale() -> None:
+    land_result = MagicMock()
+    land_result.mappings.return_value.all.return_value = [
+        {
+            "land_id": "L1",
+            "base_id": None,
+            "land_area_mu": 1.0,
+            "tile_id": "t",
+            "land_name": "L1",
+            "boundary_geojson": {"type": "Polygon", "coordinates": []},
+            "crop_type": None,
+            "season": None,
+        }
+    ]
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[land_result, [("L1", date(2026, 10, 1))]])
+    body = agri_mod.SatelliteBatchInputsRequest(
+        land_ids=["L1"],
+        sensor="S2",
+        date_from=date(2026, 8, 1),
+        date_to=date(2026, 10, 12),
+        existing_algorithm_version="stac-optical-lonlat-v5",
+    )
+    out = asyncio.run(agri_mod.satellite_batch_inputs(body, None, db))
+    stmt, params = db.execute.await_args_list[1].args
+    assert "pixel_data->>'algorithm_version' = :existing_algorithm_version" in str(stmt)
+    assert params["existing_algorithm_version"] == "stac-optical-lonlat-v5"
+    assert out.items[0].existing_dates == [date(2026, 10, 1)]
+
+
+def test_satellite_batch_inputs_default_has_no_version_filter() -> None:
+    land_result = MagicMock()
+    land_result.mappings.return_value.all.return_value = [
+        {
+            "land_id": "L1", "base_id": None, "land_area_mu": 1.0, "tile_id": "t",
+            "land_name": "L1", "boundary_geojson": {"type": "Polygon", "coordinates": []},
+            "crop_type": None, "season": None,
+        }
+    ]
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[land_result, []])
+    body = agri_mod.SatelliteBatchInputsRequest(land_ids=["L1"], sensor="S2")
+    asyncio.run(agri_mod.satellite_batch_inputs(body, None, db))
+    stmt, params = db.execute.await_args_list[1].args
+    assert "existing_algorithm_version" not in str(stmt)
+    assert "existing_algorithm_version" not in params

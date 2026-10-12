@@ -42,6 +42,7 @@ async def history_backfill(
             years=body.years,
             sensors=body.sensors,
             force=body.force,
+            redownload_stale_versions=body.redownload_stale_versions,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
