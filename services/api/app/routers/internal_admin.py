@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import AdminTaskRun
 
@@ -109,7 +110,22 @@ async def update_task_status(
         and run.celery_task_id
         and run.celery_task_id != body.celery_task_id
     ):
-        raise HTTPException(status_code=409, detail="celery task id mismatch")
+        # 旧/重投递的 Celery 任务回报不覆盖当前运行记录；返回 200 让调用方停止重试，
+        # 不再以 409 制造重试风暴，也不修改任何数据。
+        logger.warning(
+            "admin_task_status_stale_report_ignored",
+            run_id=str(run_id),
+            current_celery_task_id=run.celery_task_id,
+            reported_celery_task_id=body.celery_task_id,
+            reported_status=body.status,
+        )
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "celery task id mismatch",
+            "run_id": str(run.id),
+            "status": run.status,
+        }
     if body.celery_task_id:
         run.celery_task_id = body.celery_task_id
     run.status = body.status

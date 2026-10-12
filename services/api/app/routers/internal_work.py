@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Annotated, Any
@@ -11,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import async_session, get_db
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import WorkItem
 from app.services import work_items as wi
@@ -89,11 +90,46 @@ def _to_out(item: WorkItem) -> WorkItemOut:
     return WorkItemOut.model_validate(item)
 
 
+_claim_semaphore: asyncio.Semaphore | None = None
+
+
+def _claim_slots() -> asyncio.Semaphore:
+    global _claim_semaphore
+    if _claim_semaphore is None:
+        _claim_semaphore = asyncio.Semaphore(max(1, int(settings.work_claim_max_concurrency)))
+    return _claim_semaphore
+
+
 @router.post("/claim", response_model=ClaimResponse)
 async def claim_work(
     body: ClaimRequest,
     _: InternalAuth,
-    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """限制并发 claim：多台下载机同时重连时排队至多数秒，超时快速 503 让其稍后重试，
+    不再把连接池（与 /health 共用）占满。DB 会话只在拿到名额后才创建。"""
+    slots = _claim_slots()
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=settings.work_claim_wait_seconds)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="claim busy, retry later",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        async with async_session() as db:
+            try:
+                return await _claim_work(body, db)
+            except Exception:
+                await db.rollback()
+                raise
+    finally:
+        slots.release()
+
+
+async def _claim_work(
+    body: ClaimRequest,
+    db: AsyncSession,
 ):
     machine_name = body.worker_name or body.worker_id
     # Pydantic validator 已保证二者至少有一个；保留显式分支便于类型检查与审计。

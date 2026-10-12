@@ -27,4 +27,5 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
 USER appuser
 
 # 镜像不包含数据库迁移工具。容器启动只运行 API；结构变更用 scripts/*.sql 在容器外执行。
+EXPOSE 8081
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

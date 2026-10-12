@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     database_url_sync: str = ""
     # 数据库只保留 agric_satellite；应用表、扩展和 Alembic 版本表均在此 schema。
     database_schema: str = "agric_satellite"
+    # 连接池：/health、claim、后台循环共用；用尽时请求排队 pool_timeout 秒。
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: float = 10.0
+    # 服务端超时（毫秒，0=不限制）：防止行锁等待/卡住的事务长期占用连接拖垮单进程 API。
+    db_lock_timeout_ms: int = 10_000
+    db_idle_in_transaction_timeout_ms: int = 120_000
+    db_statement_timeout_ms: int = 0
+    # 同时处理的 claim 请求上限；超过时快速返回 503，避免下载机并发 claim 占满连接池。
+    work_claim_max_concurrency: int = 6
+    work_claim_wait_seconds: float = 3.0
 
     # External agricultural source (API machine only; never passed to download workers).
     mysql_source_enabled: bool = False
