@@ -201,8 +201,13 @@ def _tree_positions(
     identity_index: dict[int, int],
 ) -> list[int]:
     """兼容 Shapely 1/2 的 STRtree 查询结果，统一返回几何位置。"""
+    result = tree.query(query_geometry)
+    dtype = getattr(result, "dtype", None)
+    if dtype is not None and dtype.kind in "iu":
+        # Shapely 2：直接是整数位置数组，跳过逐元素 isinstance(Integral)（ABC 检查很慢）。
+        return result.tolist()
     positions: list[int] = []
-    for value in tree.query(query_geometry):
+    for value in result:
         if isinstance(value, Integral):
             positions.append(int(value))
         else:
@@ -216,10 +221,19 @@ def _approximate_metric_bounds(
     geometry: BaseGeometry, *, origin_x: float, origin_y: float
 ) -> tuple[float, float, float, float]:
     """用局部等距近似换算 bounds；仅用于稀缺度排序，不用于最终边界。"""
+    return _approximate_metric_bounds_from(
+        geometry.bounds, origin_x=origin_x, origin_y=origin_y
+    )
+
+
+def _approximate_metric_bounds_from(
+    bounds: tuple[float, float, float, float], *, origin_x: float, origin_y: float
+) -> tuple[float, float, float, float]:
+    """同上，直接使用预先缓存的 WGS84 bounds（与 geometry.bounds 数值完全相同）。"""
     latitude = math.radians(origin_y)
     meter_per_lon = 111_320.0 * max(abs(math.cos(latitude)), 0.1)
     meter_per_lat = 110_540.0
-    min_x, min_y, max_x, max_y = geometry.bounds
+    min_x, min_y, max_x, max_y = bounds
     return (
         (min_x - origin_x) * meter_per_lon,
         (min_y - origin_y) * meter_per_lat,
@@ -302,6 +316,38 @@ def _candidate_centers(
     return centers[:center_limit]
 
 
+class _GeometryCache:
+    """按地块位置缓存 bounds、质心与粗筛框。
+
+    规划过程中几何不变，但 ``_scarcity_scores`` 每轮都会对同一批邻居反复调用
+    ``geometry.bounds`` / ``centroid`` / ``box``（2 万地块时达千万次 Shapely 调用）。
+    缓存值与直接调用的浮点结果完全相同，因此规划结果不变。
+    """
+
+    def __init__(self, parcels: Sequence[PlannerParcel], side_m: float) -> None:
+        self.side_m = side_m
+        self.position_by_id = {parcel.land_id: index for index, parcel in enumerate(parcels)}
+        self.bounds = [parcel.geometry.bounds for parcel in parcels]
+        self._centroids: dict[int, tuple[float, float]] = {}
+        self._query_boxes: dict[int, BaseGeometry] = {}
+        self._parcels = parcels
+
+    def centroid(self, index: int) -> tuple[float, float]:
+        value = self._centroids.get(index)
+        if value is None:
+            point = self._parcels[index].geometry.centroid
+            value = (point.x, point.y)
+            self._centroids[index] = value
+        return value
+
+    def query_box(self, index: int) -> BaseGeometry:
+        value = self._query_boxes.get(index)
+        if value is None:
+            value = _rough_query_box(self._parcels[index].geometry, self.side_m)
+            self._query_boxes[index] = value
+        return value
+
+
 def _scarcity_scores(
     parcels: Sequence[PlannerParcel],
     *,
@@ -310,6 +356,7 @@ def _scarcity_scores(
     active_parcels: Mapping[str, PlannerParcel] | None = None,
     tree: STRtree | None = None,
     identity_index: dict[int, int] | None = None,
+    cache: _GeometryCache | None = None,
 ) -> dict[str, float]:
     """按可共同覆盖地块数量估算稀缺度。
 
@@ -334,16 +381,29 @@ def _scarcity_scores(
         else {parcel.land_id: parcel for parcel in parcels}
     )
     targets = parcel_by_id.keys() if target_land_ids is None else target_land_ids
+    if cache is None or cache.side_m != side_m:
+        cache = _GeometryCache(parcels, side_m)
     scores: dict[str, float] = {}
+    half_side = side_m / 2
     for land_id in targets:
         parcel = parcel_by_id.get(land_id)
         if parcel is None:
             continue
-        origin = parcel.geometry.centroid
-        local_bounds = _approximate_metric_bounds(
-            parcel.geometry, origin_x=origin.x, origin_y=origin.y
+        position = cache.position_by_id.get(land_id)
+        if position is None or parcels[position] is not parcel:
+            # 调用方传入的活动地块与快照不是同一对象时退回逐个计算。
+            origin = parcel.geometry.centroid
+            origin_x, origin_y = origin.x, origin.y
+            parcel_bounds = parcel.geometry.bounds
+            query_box = _rough_query_box(parcel.geometry, side_m)
+        else:
+            origin_x, origin_y = cache.centroid(position)
+            parcel_bounds = cache.bounds[position]
+            query_box = cache.query_box(position)
+        local_bounds = _approximate_metric_bounds_from(
+            parcel_bounds, origin_x=origin_x, origin_y=origin_y
         )
-        rect = _feasible_center_rect_from_bounds(local_bounds, side_m / 2)
+        rect = _feasible_center_rect_from_bounds(local_bounds, half_side)
         if rect is None:
             scores[parcel.land_id] = 2.0
             continue
@@ -351,17 +411,17 @@ def _scarcity_scores(
         # 只有可能被同一个 10×10km 窗口完整容纳的地块才需要投影。
         nearby_positions = _tree_positions(
             tree,
-            _rough_query_box(parcel.geometry, side_m),
+            query_box,
             identity_index=identity_index if identity_index is not None else {},
         )
         for other_index in nearby_positions:
             other = parcels[other_index]
             if other.land_id == parcel.land_id or other.land_id not in parcel_by_id:
                 continue
-            other_bounds = _approximate_metric_bounds(
-                other.geometry, origin_x=origin.x, origin_y=origin.y
+            other_bounds = _approximate_metric_bounds_from(
+                cache.bounds[other_index], origin_x=origin_x, origin_y=origin_y
             )
-            other_rect = _feasible_center_rect_from_bounds(other_bounds, side_m / 2)
+            other_rect = _feasible_center_rect_from_bounds(other_bounds, half_side)
             if _rect_intersects(rect, other_rect):
                 eligible += 1
         size_ratio = min(
@@ -565,7 +625,6 @@ def plan_virtual_areas(
         return []
 
     remaining = {parcel.land_id: parcel for parcel in parcels}
-    parcels_by_id = {parcel.land_id: parcel for parcel in parcels}
     all_geometries = [parcel.geometry for parcel in parcels]
     # Shapely 2 返回几何索引；保留对象身份映射，同时兼容 Shapely 1。
     index_by_position = {index: parcel.land_id for index, parcel in enumerate(parcels)}
@@ -580,12 +639,14 @@ def plan_virtual_areas(
         if existing_geometries
         else None
     )
+    geometry_cache = _GeometryCache(parcels, window_side_m)
     difficulty = _scarcity_scores(
         parcels,
         side_m=window_side_m,
         active_parcels=remaining,
         tree=tree,
         identity_index=geometry_identity_index,
+        cache=geometry_cache,
     )
     # 初次计算后以最大堆维护全局候选；局部稀缺度变化时只追加新版本，旧版本惰性丢弃。
     anchor_versions = {land_id: 0 for land_id in remaining}
@@ -680,16 +741,12 @@ def plan_virtual_areas(
         # 当前实现使用静态 STRtree，remaining 通过字典过滤。只刷新本轮移除
         # 地块周边的稀缺度，保持“局部重新计算”同时避免每轮扫描全国地块。
         if remaining:
-            removed_geometries = [
-                # best.members 已从 remaining 移除；从标准化快照取几何。
-                parcels_by_id[land_id].geometry
-                for land_id in plan.land_ids
-            ]
             affected_ids: set[str] = set()
-            for removed_geometry in removed_geometries:
+            for removed_id in plan.land_ids:
+                # best.members 已从 remaining 移除；粗筛框来自标准化快照的缓存。
                 for index in _tree_positions(
                     tree,
-                    _rough_query_box(removed_geometry, window_side_m),
+                    geometry_cache.query_box(geometry_cache.position_by_id[removed_id]),
                     identity_index=geometry_identity_index,
                 ):
                     land_id = index_by_position[index]
@@ -702,6 +759,7 @@ def plan_virtual_areas(
                 active_parcels=remaining,
                 tree=tree,
                 identity_index=geometry_identity_index,
+                cache=geometry_cache,
             )
             for land_id, score in refreshed.items():
                 if difficulty.get(land_id) == score:

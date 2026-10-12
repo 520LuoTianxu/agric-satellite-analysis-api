@@ -31,7 +31,7 @@ from app.services.beat_schedule import (
     weekly_date_window,
 )
 from app.services.overview_daily import business_today, finalize_daily, prepare_daily
-from app.services.satellite_batch import satellite_land_geometry
+from app.services.satellite_batch import find_invalid_satellite_lands, satellite_land_geometry  # noqa: F401
 from app.services.satellite_batch import create_satellite_batch_jobs
 
 router = APIRouter(prefix="/internal/schedule", tags=["internal-schedule"])
@@ -167,10 +167,9 @@ async def prepare_weekly_index(
     )
     valid_lands = []
     valid_windows: dict[str, tuple[date, date]] = {}
+    invalid_ids = await find_invalid_satellite_lands(lands)
     for land in lands:
-        try:
-            satellite_land_geometry(land)
-        except ValueError:
+        if str(land.land_id) in invalid_ids:
             continue
         land_id = str(land.land_id)
         valid_lands.append(land)

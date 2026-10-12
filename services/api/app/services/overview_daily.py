@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.models.tables import Job, LandParcel, SatelliteJobProductReceipt
 from app.mq_publish import publish_api_task
 from app.schemas.agri import OverviewStatsOut
-from app.services.satellite_batch import satellite_land_geometry
+from app.services.satellite_batch import find_invalid_satellite_lands, satellite_land_geometry  # noqa: F401
 from app.services.satellite_batch import create_satellite_batch_jobs
 
 WINDOW_DAYS = 60
@@ -332,13 +332,13 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
             .scalars()
             .all()
         )
+        invalid_ids = await find_invalid_satellite_lands(lands)
         valid, invalid = [], []
         for land in lands:
-            try:
-                satellite_land_geometry(land)
-                valid.append(land)
-            except ValueError:
+            if str(land.land_id) in invalid_ids:
                 invalid.append(land.land_id)
+            else:
+                valid.append(land)
         groups, jobs, _ = await create_satellite_batch_jobs(
             db,
             valid,
