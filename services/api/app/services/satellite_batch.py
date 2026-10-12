@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
+from types import SimpleNamespace
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
@@ -37,6 +39,46 @@ def satellite_land_geometry(land: LandParcel):
     ):
         raise ValueError(f"地块{land.land_id}缺少有效的WGS84多边形边界")
     return geom
+
+
+def land_planning_snapshot(land: Any) -> SimpleNamespace:
+    """在协程里提取规划所需的纯数据快照，线程中不再触碰 ORM/AsyncSession。"""
+    return SimpleNamespace(
+        land_id=str(land.land_id),
+        boundary_geojson=land.boundary_geojson,
+        boundary_srid=land.boundary_srid,
+    )
+
+
+def invalid_satellite_land_ids(lands: Sequence[Any]) -> set[str]:
+    """同步校验边界（Shapely CPU 计算），返回无效地块 ID。"""
+    invalid: set[str] = set()
+    for land in lands:
+        try:
+            satellite_land_geometry(land)
+        except ValueError:
+            invalid.add(str(land.land_id))
+    return invalid
+
+
+async def find_invalid_satellite_lands(lands: Sequence[Any]) -> set[str]:
+    """在线程池中校验地块边界，避免大批量 is_valid 计算阻塞事件循环。"""
+    if not lands:
+        return set()
+    snapshots = [land_planning_snapshot(land) for land in lands]
+    return await asyncio.to_thread(invalid_satellite_land_ids, snapshots)
+
+
+async def build_satellite_batch_jobs_async(
+    lands: Sequence[Any], **kwargs: Any
+) -> tuple[list[SatelliteBatchGroup], list[Job]]:
+    """在线程池里执行 10km 窗口规划与 Job 构造（纯 CPU，不访问数据库）。
+
+    生产曾因 overview_daily 在事件循环里同步规划上万地块卡住 36 秒以上，
+    /health 无响应被 k8s 重启。规划结果与同步调用完全一致。
+    """
+    snapshots = [land_planning_snapshot(land) for land in lands]
+    return await asyncio.to_thread(build_satellite_batch_jobs, snapshots, **kwargs)
 
 
 def group_satellite_lands(lands: Sequence[LandParcel]) -> list[SatelliteBatchGroup]:
@@ -232,7 +274,7 @@ async def create_satellite_batch_jobs(
     **kwargs: Any,
 ) -> tuple[list[SatelliteBatchGroup], list[Job], dict[str, Any]]:
     """统一创建空间批任务，并与持久队列/Outbox原子保存派发意图。"""
-    groups, jobs = build_satellite_batch_jobs(lands, **kwargs)
+    groups, jobs = await build_satellite_batch_jobs_async(lands, **kwargs)
     db.add_all(jobs)
     await stage_satellite_batch_dispatches(
         db,

@@ -19,7 +19,12 @@ from app.models.tables import (
     S1Sigma0DispatchOutbox,
     WorkItem,
 )
-from app.services.satellite_batch import build_satellite_batch_jobs, satellite_land_geometry
+from app.services.satellite_batch import (  # noqa: F401
+    build_satellite_batch_jobs,
+    build_satellite_batch_jobs_async,
+    find_invalid_satellite_lands,
+    satellite_land_geometry,
+)
 from app.services.satellite_history import default_history_window
 from app.services.work_items import work_queue_mode
 
@@ -147,11 +152,12 @@ async def run_s1_sigma0_calibration_backfill(
 
         valid_lands: list[LandParcel] = []
         skipped_geometry_land_ids: list[str] = []
+        invalid_ids = await find_invalid_satellite_lands(
+            [land_by_id[land_id] for land_id in targets]
+        )
         for land_id, scene_dates in targets.items():
             land = land_by_id[land_id]
-            try:
-                satellite_land_geometry(land)
-            except ValueError:
+            if str(land.land_id) in invalid_ids:
                 skipped_geometry_land_ids.append(land_id)
                 continue
             if scene_dates:
@@ -186,7 +192,7 @@ async def run_s1_sigma0_calibration_backfill(
         }
         target_from = min(window[0] for window in per_land_windows.values())
         target_to = max(window[1] for window in per_land_windows.values())
-        groups, jobs = build_satellite_batch_jobs(
+        groups, jobs = await build_satellite_batch_jobs_async(
             valid_lands,
             date_from=target_from,
             date_to=target_to,

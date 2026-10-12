@@ -12,7 +12,11 @@ from sqlalchemy.orm import load_only
 
 from app.core.config import settings
 from app.models.tables import Job, LandParcel
-from app.services.satellite_batch import create_satellite_batch_jobs, satellite_land_geometry
+from app.services.satellite_batch import (  # noqa: F401
+    create_satellite_batch_jobs,
+    find_invalid_satellite_lands,
+    satellite_land_geometry,
+)
 
 DEFAULT_HISTORY_YEARS = 5
 
@@ -67,10 +71,9 @@ async def backfill_satellite_history(
 
         valid_lands: list[LandParcel] = []
         skipped_land_ids: list[str] = []
+        invalid_ids = await find_invalid_satellite_lands(lands)
         for land in lands:
-            try:
-                satellite_land_geometry(land)
-            except ValueError:
+            if str(land.land_id) in invalid_ids:
                 skipped_land_ids.append(str(land.land_id))
                 continue
             valid_lands.append(land)
