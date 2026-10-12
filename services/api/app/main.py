@@ -190,6 +190,10 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(TraceIdMiddleware)
+# 必须最后添加：add_middleware 后加的在最外层，/health 不经过上面任何中间件。
+from app.core.health_light import HealthShortCircuitMiddleware, light_health  # noqa: E402
+
+app.add_middleware(HealthShortCircuitMiddleware)
 
 
 # ── Routers ──────────────────────────────────────────────────────────
@@ -251,8 +255,16 @@ def livez():
 
 @app.get("/health", tags=["health"])
 @app.get("/healthz", tags=["health"], include_in_schema=False)
+def health():
+    """轻量探针（同步 def，线程池执行）。正常情况下请求已被最外层中间件拦截，
+    这里是中间件被移除时的兜底，行为一致：不访问 DB/Redis。"""
+    status, payload = light_health()
+    return JSONResponse(payload, status_code=status)
+
+
+@app.get("/health/deep", tags=["health"])
 async def healthz():
-    """Check DB connection and Redis ping; /healthz remains a compatibility alias."""
+    """深度检查：DB 连接与 Redis ping（带超时），供人工排查，不用于探针。"""
     health_started_at = perf_counter()
     errors: list[str] = []
     redis_scheme = settings.redis_url.partition("://")[0] or "<missing>"
