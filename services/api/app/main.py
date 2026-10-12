@@ -1,6 +1,7 @@
 """agric-satellite-analysis API - FastAPI application entry point."""
 
 import asyncio
+import os
 import re
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -55,6 +56,10 @@ from app.routers import (
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
     setup_logging()
+    from app.core.loop_watchdog import watchdog
+
+    _health_port = int(os.getenv("HEALTH_THREAD_PORT", "0") or 0)
+    watchdog.start(port=_health_port or None)
 
     # Create shared httpx client for outbound HTTP (e.g., tile proxy)
     import httpx
@@ -114,6 +119,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await watchdog.stop()
         app.state.api_admin_recovery_task.cancel()
         if app.state.s1_sigma0_dispatch_outbox_task is not None:
             app.state.s1_sigma0_dispatch_outbox_task.cancel()
@@ -235,6 +241,14 @@ def _health_error_message(exc: Exception) -> str:
     return message[:500]
 
 
+@app.get("/livez", tags=["health"], include_in_schema=False)
+def livez():
+    """轻量存活探针：不访问 DB/Redis（同步 def，在线程池执行）。"""
+    from app.core.loop_watchdog import watchdog
+
+    return {"status": "ok", "loop_stall_seconds": round(watchdog.stall_seconds(), 1)}
+
+
 @app.get("/health", tags=["health"])
 @app.get("/healthz", tags=["health"], include_in_schema=False)
 async def healthz():
@@ -256,8 +270,12 @@ async def healthz():
         from sqlalchemy import text
         from app.core.database import engine
 
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        async def _db_ping() -> None:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+
+        # 连接池被业务占满时不能无限排队，否则探针超时导致 Pod 被重启。
+        await asyncio.wait_for(_db_ping(), timeout=3.0)
         logger.info(
             "health_check_database_succeeded",
             duration_ms=round((perf_counter() - database_started_at) * 1000),
@@ -277,8 +295,10 @@ async def healthz():
     logger.info("health_check_redis_started")
     try:
         r = aioredis.from_url(settings.redis_url)
-        await r.ping()
-        await r.aclose()
+        try:
+            await asyncio.wait_for(r.ping(), timeout=2.0)
+        finally:
+            await r.aclose()
         logger.info(
             "health_check_redis_succeeded",
             duration_ms=round((perf_counter() - redis_started_at) * 1000),

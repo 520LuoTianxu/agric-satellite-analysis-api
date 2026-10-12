@@ -105,6 +105,15 @@ def _slim_pixels(
     ]
 
 
+def _parse_slim_pixels(
+    raw: Any, keys: frozenset[str], stride: int
+) -> list[dict[str, Any]]:
+    pixels = _jsonish(raw)
+    if not isinstance(pixels, list) or not pixels:
+        return []
+    return _slim_pixels(pixels, keys, stride)
+
+
 def harvest_progress_enabled() -> bool:
     raw = os.getenv("HARVEST_PROGRESS_ENABLED", "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -446,10 +455,10 @@ async def load_s1_inputs(
         db, _LOAD_S1, {"land_id": land_id, "date_from": date_from, "date_to": date_to}
     ):
         d = dict(r._mapping)
-        pixels = _jsonish(d.pop("pixels", None))
-        if isinstance(pixels, list) and pixels:
-            slim = _slim_pixels(pixels, _S1_PIXEL_KEYS_ANY_CASE, stride)
-            del pixels
+        slim = await asyncio.to_thread(
+            _parse_slim_pixels, d.pop("pixels", None), _S1_PIXEL_KEYS_ANY_CASE, stride
+        )
+        if True:
             if slim:
                 out.append({**d, "pixels": slim})
     return out
@@ -470,12 +479,11 @@ async def load_scene_inputs(
         {"land_id": land_id, "date_from": date_from, "date_to": date_to},
     ):
         d = dict(r._mapping)
-        pixels = _jsonish(d.pop("pixels", None))
-        if not isinstance(pixels, list) or not pixels:
-            continue
-        # 逐景解析后立即裁剪：原始 JSON 字符串和全波段 dict 不会跨景累积。
-        slim = _slim_pixels(pixels, _S2_PIXEL_KEYS_ANY_CASE, stride)
-        del pixels
+        # 逐景解析后立即裁剪：原始 JSON 字符串和全波段 dict 不会跨景累积；
+        # 大 JSON 解析在线程池中进行，不阻塞事件循环。
+        slim = await asyncio.to_thread(
+            _parse_slim_pixels, d.pop("pixels", None), _S2_PIXEL_KEYS_ANY_CASE, stride
+        )
         if not slim:
             continue
         scenes.append(
@@ -536,7 +544,9 @@ async def compute_land_series(
         )
     scenes = await load_scene_inputs(db, land_id, context_from, date_to, stride=stride)
     s1_scenes = await load_s1_inputs(db, land_id, context_from, date_to, stride=stride)
-    series = compute_harvest_series(
+    # 纯 CPU 计算放到线程池，避免大地块重算期间阻塞事件循环（/health、claim 超时）。
+    series = await asyncio.to_thread(
+        compute_harvest_series,
         scenes,
         parcel_area_mu=area_mu,
         thresholds=thr,
