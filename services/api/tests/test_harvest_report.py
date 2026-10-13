@@ -446,5 +446,17 @@ class LoadReportTests(unittest.TestCase):
         self.assertEqual(len(daily), 1)
 
 
+class NoMethodVersionInXlsx(unittest.TestCase):
+    def test_no_algorithm_version_anywhere(self):
+        p, d = hr.build_report(F, [_land("1")], [_row("1", "2026-09-01", 50.0)], [], {}, {}, TODAY)
+        wb = load_workbook(io.BytesIO(build_workbook(p, d, hr.summarize(p), F)))
+        for ws in wb:
+            for row in ws.iter_rows():
+                for c in row:
+                    v = str(c.value or "")
+                    self.assertNotIn("算法版本", v, f"{ws.title}!{c.coordinate}")
+                    self.assertNotIn("residue_monotonic", v, f"{ws.title}!{c.coordinate}")
+
+
 if __name__ == "__main__":
     unittest.main()

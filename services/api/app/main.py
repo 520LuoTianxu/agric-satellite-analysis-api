@@ -146,6 +146,9 @@ async def lifespan(app: FastAPI):
             )
         scene_result_consumer.cancel()
         await asyncio.gather(scene_result_consumer, return_exceptions=True)
+        from app.services.harvest_report_export import shutdown_executor
+
+        shutdown_executor()
         await app.state.redis_client.aclose()
         await app.state.http_client.aclose()
 
