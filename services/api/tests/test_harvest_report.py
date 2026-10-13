@@ -556,3 +556,42 @@ class ListPathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LowMemStyleTests(unittest.TestCase):
+    """xlsxwriter 流式版保留的样式：底色加粗、小计灰色斜体、分档底色、outline、网格线、条件格式。"""
+
+    def test_styles_preserved(self):
+        lands = [
+            _land("1", 100, province_name="吉林省", base_name="租户A", group_name="项目1"),
+            _land("2", 300, province_name="吉林省", base_name="租户A", group_name="项目1"),
+        ]
+        parcels, daily = _build(
+            lands, [_row("1", "2026-09-01", 95), _row("2", "2026-09-01", 20),
+                    _row("2", "2026-09-10", 40)]
+        )
+        wb = load_workbook(io.BytesIO(build_workbook(parcels, daily, hr.summarize(parcels), F)))
+        s = wb["汇总"]
+        prov = s.cell(row=8, column=1)
+        self.assertTrue(prov.font.b)
+        self.assertEqual(prov.fill.fgColor.rgb[-6:], "CFE8D8")
+        sub = s.cell(row=8, column=2)
+        self.assertEqual(sub.value, "小计")
+        self.assertTrue(sub.font.i)
+        self.assertEqual(sub.font.color.rgb[-6:], "6B7280")
+        self.assertEqual(s.cell(row=10, column=1).fill.fgColor.rgb[-6:], "F1F8F3")
+        cols = [c.value for c in s[7]]
+        bcol = cols.index("进度分档") + 1
+        pcol = cols.index("合计%(已收获+疑似)") + 1
+        rows = {s.cell(row=r, column=5).value: r for r in range(11, 13)}
+        self.assertEqual(s.cell(row=rows["1"], column=bcol).fill.fgColor.rgb[-6:], "C2410C")
+        self.assertEqual(s.cell(row=rows["1"], column=pcol).number_format, '0.0"%"')
+        self.assertEqual(s.cell(row=rows["1"], column=pcol).border.left.style, "thin")
+        self.assertEqual(s.row_dimensions[rows["1"]].outline_level, 3)
+        self.assertFalse(s.sheet_view.showGridLines)
+        self.assertEqual(s.column_dimensions["B"].width is not None, True)
+        self.assertGreater(len(s.conditional_formatting), 0)
+        p = wb["透视"]
+        self.assertGreater(len(p.conditional_formatting), 0)
+        self.assertFalse(p.sheet_view.showGridLines)
+        self.assertEqual(wb["说明"]["A1"].value, "生成时间")

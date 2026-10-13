@@ -1,7 +1,7 @@
 """收获报表 Excel 异步导出任务。
 
 - 状态存 Redis（JSON，TTL 24h），多副本共享；文件存对象存储（OSS），任一副本都能下载。
-- 读库在事件循环里走 async IO；openpyxl 生成是纯 CPU，放到独立子进程（spawn，单 worker，
+- 读库在事件循环里走 async IO；Excel 生成（xlsxwriter 流式）是纯 CPU，放到独立子进程（spawn，单 worker，
   每次任务后回收），不占用 API 进程的 GIL，避免拖慢健康检查。
 - 同参数且仍在 pending/running（或 10 分钟内刚完成）的任务直接复用。
 - 运行中定期写心跳；实例被杀导致心跳超时的任务在查询时视为 failed。
@@ -168,12 +168,10 @@ _PICKLE_CHUNK = 2000
 
 def build_to_file(rows, daily, kpi, filters, carry_forward, path) -> int:
     """生成工作簿写到 path，返回字节数。"""
-    from app.services.harvest_report_xlsx import build_workbook
+    from app.services.harvest_report_xlsx import build_workbook_to_path
 
-    content = build_workbook(rows, daily, kpi, filters, None, carry_forward)
-    with open(path, "wb") as fh:
-        fh.write(content)
-    return len(content)
+    # 流式直接写目标文件，不在内存里拼整份字节
+    return build_workbook_to_path(path, rows, daily, kpi, filters, None, carry_forward)
 
 
 def _read_list(fh) -> list:

@@ -1,20 +1,21 @@
-"""收获进度报表 Excel（openpyxl）：汇总 / 逐日明细 / 透视 / 说明 四个工作表。
+"""收获进度报表 Excel（xlsxwriter constant_memory 流式写）：汇总 / 逐日明细 / 透视 / 说明 四个工作表。
 
 前三张表最左侧为 省/租户/项目/地块 四个独立列，并按四级行分组（outline）下钻；
 汇总行只填到本级，下一级列写“小计”。
+
+constant_memory 模式按行顺序流式落盘，每写完一行即释放，内存与行数基本无关
+（openpyxl 全量驻留单元格对象，2 万地块时子进程峰值约 3GB）。因此每行的所有样式
+（进度分档底色、沿用值斜体等）都在写该行时一次确定，不能事后回改单元格。
 """
 
 from __future__ import annotations
 
-import io
-from copy import copy
+import os
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from openpyxl import Workbook
-from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, DataBarRule
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+import xlsxwriter
 
 from app.services.harvest_report import (
     BUCKET_LABELS_ZH,
@@ -26,13 +27,9 @@ from app.services.harvest_report import (
 
 CN_TZ = timezone(timedelta(hours=8))
 
-HEADER_FILL = PatternFill("solid", fgColor="1F6F43")
-HEADER_FONT = Font(bold=True, color="FFFFFF")
-TITLE_FONT = Font(bold=True, size=14)
-KPI_LABEL_FILL = PatternFill("solid", fgColor="E8F3EC")
-CARRY_FONT = Font(italic=True)
-THIN = Side(style="thin", color="D1D5DB")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+HEADER_BG, HEADER_FG = "#1F6F43", "#FFFFFF"
+KPI_LABEL_BG = "#E8F3EC"
+BORDER_COLOR = "#D1D5DB"
 BUCKET_FILLS = {
     "none": "F3F4F6",
     "lt30": "FEF3C7",
@@ -52,12 +49,9 @@ LEVELS: list[tuple[str, str, str]] = [
     ("group_name", "项目", "未分组项目"),
 ]
 LEVEL_FILLS = ["CFE8D8", "E1F1E6", "F1F8F3"]
-LEVEL_FONTS = [
-    Font(bold=True, size=12, color="14532D"),
-    Font(bold=True, size=11, color="166534"),
-    Font(bold=True, size=10, color="15803D"),
-]
-BASE_FONT = Font(name="微软雅黑", size=10)
+# (字号, 颜色)，均加粗
+LEVEL_FONTS = [(12, "14532D"), (11, "166534"), (10, "15803D")]
+BASE_FONT_NAME = "微软雅黑"
 
 # (key, 表头, 列宽, 数字格式)
 SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
@@ -215,103 +209,6 @@ def _agg(parcels: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _header(ws, row: int, cols) -> None:
-    for i, (_k, title, width, _fmt) in enumerate(cols, start=1):
-        c = ws.cell(row=row, column=i, value=title)
-        c.fill, c.font, c.border = HEADER_FILL, HEADER_FONT, BORDER
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.column_dimensions[get_column_letter(i)].width = width
-    ws.row_dimensions[row].height = 32
-
-
-_STYLE_CACHE: dict[tuple, Any] = {}
-
-
-def _apply_style(c, level: int, num_fmt: str | None, align: str | None, subtotal: bool) -> None:
-    """逐格设置 font/fill/border 会触发 openpyxl 样式表哈希（2 万地块时占 70%+ 耗时），
-    这里按样式组合缓存 StyleArray，同组合直接复制，输出与逐项设置完全一致。"""
-    wb_id = id(c.parent.parent)
-    key = (wb_id, level, num_fmt, align, subtotal)
-    cached = _STYLE_CACHE.get(key)
-    if cached is not None:
-        c._style = copy(cached)
-        return
-    group_row = level < 3
-    c.border = BORDER
-    c.font = LEVEL_FONTS[level] if group_row else BASE_FONT
-    if group_row:
-        c.fill = PatternFill("solid", fgColor=LEVEL_FILLS[level])
-    if num_fmt:
-        c.number_format = num_fmt
-    if align:
-        c.alignment = Alignment(horizontal=align, vertical="center")
-    if subtotal:
-        c.font = Font(bold=True, italic=True, size=10, color="6B7280")
-    _STYLE_CACHE[key] = copy(c._style)
-
-
-def _write_row(ws, r: int, cols, rec: dict[str, Any], level: int) -> None:
-    """level 0-2 为汇总行（底色+粗体），3 为明细行；行分组 outline 层级 = level。"""
-    group_row = level < 3
-    for i, (k, _t, _w, fmt) in enumerate(cols, start=1):
-        v = rec.get(k)
-        c = ws.cell(row=r, column=i, value=v)
-        align = None
-        if i <= N_HIER:
-            align = "left"
-        elif isinstance(v, str):
-            align = "center" if k.endswith("_zh") else "left"
-        _apply_style(
-            c,
-            level,
-            fmt if (fmt and v is not None) else None,
-            align,
-            i <= N_HIER and v == "小计",
-        )
-    if level:
-        ws.row_dimensions[r].outline_level = level
-    if group_row:
-        ws.row_dimensions[r].height = 20 - level * 1
-
-
-def _outline_setup(ws) -> None:
-    # 汇总行在明细上方；左侧 1/2/3/4 按钮即可一键折叠到省/租户/项目/地块。
-    ws.sheet_properties.outlinePr.summaryBelow = False
-    ws.sheet_properties.outlinePr.applyStyles = False
-    ws.sheet_view.showGridLines = False
-    ws.sheet_view.zoomScale = 90
-
-
-def _print_setup(ws, title_rows: str) -> None:
-    """打印：横向、按页宽缩放、每页重复表头。"""
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.print_title_rows = title_rows
-
-
-def _col(cols, key: str) -> str:
-    return get_column_letter([c[0] for c in cols].index(key) + 1)
-
-
-def _pct_bars(ws, cols, keys, first: int, last: int) -> None:
-    if last < first:
-        return
-    for key, color in keys:
-        rng = f"{_col(cols, key)}{first}:{_col(cols, key)}{last}"
-        ws.conditional_formatting.add(
-            rng,
-            DataBarRule(
-                start_type="num",
-                start_value=0,
-                end_type="num",
-                end_value=100,
-                color=color,
-            ),
-        )
-
-
 def _filters_text(f: ReportFilters) -> list[tuple[str, str]]:
     return [
         ("日期区间", f"{f.date_from.isoformat()} ~ {f.date_to.isoformat()}"),
@@ -326,226 +223,7 @@ def _filters_text(f: ReportFilters) -> list[tuple[str, str]]:
     ]
 
 
-def build_workbook(
-    parcels: list[dict[str, Any]],
-    daily: list[dict[str, Any]],
-    kpi: dict[str, Any],
-    filters: ReportFilters,
-    generated_at: datetime | None = None,
-    carry_forward: bool = True,
-) -> bytes:
-    gen = (generated_at or datetime.now(CN_TZ)).astimezone(CN_TZ)
-    _STYLE_CACHE.clear()
-    wb = Workbook()
-
-    # ---- Sheet1 汇总 ----
-    ws = wb.active
-    ws.title = "汇总"
-    ws["A1"] = "地块收获进度汇总"
-    ws["A1"].font = TITLE_FONT
-    ws["A2"] = (
-        f"区间 {filters.date_from.isoformat()} ~ {filters.date_to.isoformat()}"
-        f"　生成时间 {gen:%Y-%m-%d %H:%M} (UTC+8)"
-    )
-    ws["A2"].font = Font(color="6B7280")
-    bc = kpi["bucket_counts"]
-    kpis = [
-        ("地块数", kpi["parcel_count"], "0"),
-        ("已计算地块数", kpi["computed_count"], "0"),
-        ("总面积(亩)", kpi["total_area_mu"], MU),
-        ("已收获面积(亩)", kpi["harvested_area_mu"], MU),
-        ("合计收获面积(亩)", kpi["combined_area_mu"], MU),
-        ("平均合计%", kpi["avg_combined_pct"], PCT),
-        ("面积加权合计%", kpi["area_weighted_combined_pct"], PCT),
-    ] + [(BUCKET_LABELS_ZH[b], bc.get(b, 0), "0") for b in BUCKETS]
-    # 两行 KPI：标签行 + 数值行
-    for i, (label, value, fmt) in enumerate(kpis, start=1):
-        lc = ws.cell(row=4, column=i, value=label)
-        lc.fill, lc.font, lc.border = KPI_LABEL_FILL, Font(bold=True, size=9), BORDER
-        lc.alignment = Alignment(horizontal="center", wrap_text=True)
-        vc = ws.cell(row=5, column=i, value=value)
-        vc.font, vc.border, vc.number_format = Font(bold=True, size=12), BORDER, fmt
-        vc.alignment = Alignment(horizontal="center")
-    ws.row_dimensions[4].height = 30
-    hdr = 7
-    _header(ws, hdr, SUMMARY_COLS)
-    _outline_setup(ws)
-    r = hdr + 1
-    for level, path, members in _tree(parcels):
-        rec = {**_hier(path, level), **_agg(members)}
-        _write_row(ws, r, SUMMARY_COLS, rec, level)
-        r += 1
-        if level == 2:
-            for p in members:
-                d = _decorate(p)
-                d.update(_hier(path, 3, p.get("land_name") or p.get("land_id")), land_count=1,
-                         computed_count=0 if p.get("bucket") == "not_computed" else 1)
-                _write_row(ws, r, SUMMARY_COLS, d, 3)
-                fill = BUCKET_FILLS.get(p.get("bucket"))
-                if fill:
-                    cell = ws[f"{_col(SUMMARY_COLS, 'bucket_zh')}{r}"]
-                    cell.fill = PatternFill("solid", fgColor=fill)
-                    if p["bucket"] == "ge90":
-                        cell.font = Font(color="FFFFFF", bold=True)
-                r += 1
-    last = r - 1
-    ws.freeze_panes = ws.cell(row=hdr + 1, column=N_HIER + 1)
-    ws.auto_filter.ref = (
-        f"A{hdr}:{get_column_letter(len(SUMMARY_COLS))}{max(last, hdr)}"
-    )
-    _pct_bars(
-        ws,
-        SUMMARY_COLS,
-        [
-            ("harvested_pct", "C2410C"),
-            ("suspected_pct", "FDBA74"),
-            ("combined_pct", "EA580C"),
-        ],
-        hdr + 1,
-        last,
-    )
-    _print_setup(ws, f"{hdr}:{hdr}")
-
-    # ---- Sheet2 逐日明细 ----
-    ws2 = wb.create_sheet("逐日明细")
-    _header(ws2, 1, DAILY_COLS)
-    _outline_setup(ws2)
-    r = 2
-    for level, path, members in _tree(daily):
-        lands = {m["land_id"] for m in members}
-        rec = {
-            **_hier(path, level),
-            "land_count": len(lands),
-            "record_count": len(members),
-        }
-        _write_row(ws2, r, DAILY_COLS, rec, level)
-        r += 1
-        if level == 2:
-            for m in members:
-                d = _decorate(m)
-                d.update(_hier(path, 3, m.get("land_name") or m.get("land_id")))
-                _write_row(ws2, r, DAILY_COLS, d, 3)
-                r += 1
-    last2 = r - 1
-    ws2.freeze_panes = ws2.cell(row=2, column=N_HIER + 1)
-    ws2.auto_filter.ref = f"A1:{get_column_letter(len(DAILY_COLS))}{max(last2, 1)}"
-    _pct_bars(ws2, DAILY_COLS, [("combined_pct", "EA580C")], 2, last2)
-    _print_setup(ws2, "1:1")
-
-    # ---- Sheet3 透视 ----
-    ws3 = wb.create_sheet("透视")
-    _outline_setup(ws3)
-    dates = sorted({r["date"] for r in daily if r["date"]})
-    fixed = [
-        *[(k, t, w) for k, t, w, _f in SUMMARY_COLS[:N_HIER]],
-        ("land_id", "地块ID", 10),
-        ("area_mu", "面积(亩)", 11),
-    ]
-    for i, (_k, title, width) in enumerate(fixed, start=1):
-        c = ws3.cell(row=1, column=i, value=title)
-        c.fill, c.font, c.border = HEADER_FILL, HEADER_FONT, BORDER
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws3.column_dimensions[get_column_letter(i)].width = width
-    for j, d in enumerate(dates, start=len(fixed) + 1):
-        c = ws3.cell(row=1, column=j, value=d)
-        c.number_format = "mm-dd"
-        c.fill, c.font, c.border = HEADER_FILL, HEADER_FONT, BORDER
-        c.alignment = Alignment(horizontal="center", text_rotation=90)
-        ws3.column_dimensions[get_column_letter(j)].width = 6
-    ws3.row_dimensions[1].height = 48
-    cell_of: dict[tuple[str, date], dict[str, Any]] = {
-        (r["land_id"], r["date"]): r for r in daily if r["date"]
-    }
-    # 先算每块地每日值（含沿用），组行取面积加权
-    values: dict[str, list[tuple[Any, bool]]] = {}
-    for p in parcels:
-        carried: dict[str, Any] | None = None
-        seq: list[tuple[Any, bool]] = []
-        for d in dates:
-            rr = cell_of.get((p["land_id"], d))
-            if rr is not None:
-                carried = rr
-                seq.append((rr["combined_pct"], False))
-            elif (
-                carry_forward
-                and carried is not None
-                and (
-                    p["season_start"] is None
-                    or carried["season_start"] == p["season_start"]
-                )
-            ):
-                seq.append((carried["combined_pct"], True))
-            else:
-                seq.append((None, False))
-        values[p["land_id"]] = seq
-    r = 2
-    for level, path, members in _tree(parcels):
-        area = _agg(members)["area_mu"]
-        row_vals = [
-            _weighted([(m.get("area_mu"), values[m["land_id"]][j][0]) for m in members])
-            for j in range(len(dates))
-        ]
-        rec = {**_hier(path, level), "area_mu": area}
-        for j, v in enumerate(row_vals):
-            rec[f"d{j}"] = v
-        cols = [(k, t, w, MU if k == "area_mu" else None) for k, t, w in fixed] + [
-            (f"d{j}", "", 6, "0") for j in range(len(dates))
-        ]
-        _write_row(ws3, r, cols, rec, level)
-        r += 1
-        if level == 2:
-            for p in members:
-                prec = {
-                    **_hier(path, 3, p.get("land_name") or p["land_id"]),
-                    "land_id": p["land_id"],
-                    "area_mu": p.get("area_mu"),
-                }
-                for j, (v, _c) in enumerate(values[p["land_id"]]):
-                    prec[f"d{j}"] = v
-                _write_row(ws3, r, cols, prec, 3)
-                for j, (v, carried_flag) in enumerate(values[p["land_id"]]):
-                    if carried_flag:
-                        ws3.cell(row=r, column=len(fixed) + 1 + j).font = Font(
-                            name="微软雅黑", size=10, italic=True
-                        )
-                r += 1
-    last3 = r - 1
-    if dates and last3 >= 2:
-        rng = (
-            f"{get_column_letter(len(fixed) + 1)}2:"
-            f"{get_column_letter(len(fixed) + len(dates))}{last3}"
-        )
-        ws3.conditional_formatting.add(
-            rng,
-            ColorScaleRule(
-                start_type="num",
-                start_value=0,
-                start_color="F0FDF4",
-                mid_type="num",
-                mid_value=50,
-                mid_color="FDBA74",
-                end_type="num",
-                end_value=100,
-                end_color="9A3412",
-            ),
-        )
-        # 深色单元格用白字，保证沿用值（斜体）与实测值都可读
-        ws3.conditional_formatting.add(
-            rng,
-            CellIsRule(
-                operator="greaterThanOrEqual", formula=["60"], font=Font(color="FFFFFF")
-            ),
-        )
-    ws3.freeze_panes = ws3.cell(row=2, column=N_HIER + 1)
-    ws3.auto_filter.ref = (
-        f"A1:{get_column_letter(len(fixed) + len(dates))}{max(last3, 1)}"
-    )
-    _print_setup(ws3, "1:1")
-
-    # ---- Sheet4 说明 ----
-    ws4 = wb.create_sheet("说明")
-    ws4.column_dimensions["A"].width = 22
-    ws4.column_dimensions["B"].width = 100
+def _notes(gen: datetime, filters: ReportFilters, kpi: dict[str, Any], carry_forward: bool):
     lines: list[tuple[str, str]] = [
         ("生成时间", f"{gen:%Y-%m-%d %H:%M:%S} (UTC+8)"),
         *_filters_text(filters),
@@ -611,14 +289,342 @@ def build_workbook(
         ("已确认", "否（暂定）表示最近观测尚未被后续观测确认，后续可能修正。"),
         ("区间结果期数", "查询区间内入库观测日数。"),
     ]
-    for i, (k, v) in enumerate(lines, start=1):
-        a, b = ws4.cell(row=i, column=1, value=k), ws4.cell(row=i, column=2, value=v)
-        a.font = Font(bold=True)
-        b.alignment = Alignment(wrap_text=True, vertical="top")
-        if k == "字段":
-            a.fill = b.fill = HEADER_FILL
-            a.font = b.font = HEADER_FONT
+    return lines
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+
+class _Styles:
+    """xlsxwriter Format 缓存：同样式组合只建一个 Format（样式表小、无逐格哈希）。"""
+
+    def __init__(self, wb: xlsxwriter.Workbook):
+        self.wb = wb
+        self._cache: dict[tuple, Any] = {}
+
+    def get(self, **props: Any):
+        key = tuple(sorted(props.items()))
+        f = self._cache.get(key)
+        if f is None:
+            f = self.wb.add_format(props)
+            self._cache[key] = f
+        return f
+
+    def cell(
+        self,
+        level: int,
+        num_fmt: str | None = None,
+        align: str | None = None,
+        subtotal: bool = False,
+        bucket: str | None = None,
+        italic: bool = False,
+    ):
+        """level 0-2 汇总行（底色+粗体），3 明细行；与原 openpyxl 版逐项一致。"""
+        p: dict[str, Any] = {"border": 1, "border_color": BORDER_COLOR}
+        if level < 3:
+            size, color = LEVEL_FONTS[level]
+            p.update(bold=True, font_size=size, font_color="#" + color,
+                     bg_color="#" + LEVEL_FILLS[level], pattern=1)
+        else:
+            p.update(font_name=BASE_FONT_NAME, font_size=10)
+        if num_fmt:
+            p["num_format"] = num_fmt
+        if align:
+            p.update(align=align, valign="vcenter")
+        if subtotal:
+            p.pop("font_name", None)
+            p.update(bold=True, italic=True, font_size=10, font_color="#6B7280")
+        if bucket and bucket in BUCKET_FILLS:
+            p.update(bg_color="#" + BUCKET_FILLS[bucket], pattern=1)
+            if bucket == "ge90":
+                p.pop("font_name", None)
+                p.update(font_color="#FFFFFF", bold=True, font_size=11)
+        if italic:
+            p["italic"] = True
+        return self.get(**p)
+
+    def header(self, rotate: bool = False, num_fmt: str | None = None):
+        p: dict[str, Any] = dict(bold=True, font_color=HEADER_FG, bg_color=HEADER_BG, pattern=1,
+                                 border=1, border_color=BORDER_COLOR, align="center")
+        if rotate:
+            p["rotation"] = 90
+        else:
+            p.update(valign="vcenter", text_wrap=True)
+        if num_fmt:
+            p["num_format"] = num_fmt
+        return self.get(**p)
+
+
+def _write_value(ws, r: int, c: int, v: Any, fmt) -> None:
+    if v is None or v == "":
+        ws.write_blank(r, c, None, fmt)
+    elif isinstance(v, bool):
+        ws.write_boolean(r, c, v, fmt)
+    elif isinstance(v, (datetime, date)):
+        ws.write_datetime(r, c, v, fmt)
+    elif isinstance(v, (int, float)):
+        ws.write_number(r, c, v, fmt)
+    elif isinstance(v, str):
+        ws.write_string(r, c, v, fmt)
+    else:
+        ws.write(r, c, v, fmt)
+
+
+def _setup_sheet(ws, cols_widths: list[int]) -> None:
+    """汇总行在明细上方；左侧 1/2/3/4 按钮一键折叠到省/租户/项目/地块。打印：横向、按页宽缩放。"""
+    for i, w in enumerate(cols_widths):
+        ws.set_column(i, i, w)
+    ws.outline_settings(True, False, True, False)  # visible, symbols_below=False, right, auto_style
+    ws.hide_gridlines(2)
+    ws.set_zoom(90)
+    ws.set_landscape()
+    ws.fit_to_pages(1, 0)
+
+
+def _header(ws, st: _Styles, r: int, cols) -> None:
+    ws.set_row(r, 32)
+    f = st.header()
+    for i, (_k, title, _w, _fmt) in enumerate(cols):
+        ws.write_string(r, i, title, f)
+
+
+def _write_row(ws, st: _Styles, r: int, cols, rec: dict[str, Any], level: int,
+               bucket_col: int | None = None, bucket: str | None = None,
+               italic_cols: set[int] | None = None) -> None:
+    """r 为 0 基行号。level 0-2 汇总行，3 明细行；行分组 outline 层级 = level。"""
+    group_row = level < 3
+    height = 20 - level if group_row else None
+    if level or height:
+        ws.set_row(r, height, None, {"level": level} if level else None)
+    for i, (k, _t, _w, fmt) in enumerate(cols):
+        v = rec.get(k)
+        align = None
+        if i < N_HIER:
+            align = "left"
+        elif isinstance(v, str):
+            align = "center" if k.endswith("_zh") else "left"
+        f = st.cell(
+            level,
+            fmt if (fmt and v is not None) else None,
+            align,
+            i < N_HIER and v == "小计",
+            bucket if i == bucket_col else None,
+            bool(italic_cols and i in italic_cols),
+        )
+        _write_value(ws, r, i, v, f)
+
+
+def _pct_bars(ws, cols, keys, first: int, last: int) -> None:
+    if last < first:
+        return
+    for key, color in keys:
+        c = [x[0] for x in cols].index(key)
+        ws.conditional_format(first, c, last, c, {
+            "type": "data_bar", "min_type": "num", "min_value": 0,
+            "max_type": "num", "max_value": 100, "bar_color": "#" + color,
+        })
+
+
+def build_workbook_to_path(
+    out_path: str,
+    parcels: list[dict[str, Any]],
+    daily: list[dict[str, Any]],
+    kpi: dict[str, Any],
+    filters: ReportFilters,
+    generated_at: datetime | None = None,
+    carry_forward: bool = True,
+) -> int:
+    """流式生成工作簿到 path，返回字节数。同步导出与异步导出共用。"""
+    gen = (generated_at or datetime.now(CN_TZ)).astimezone(CN_TZ)
+    wb = xlsxwriter.Workbook(out_path, {"constant_memory": True, "tmpdir": tempfile.gettempdir()})
+    st = _Styles(wb)
+
+    # ---- Sheet1 汇总 ----（0 基行号：标题 0、副标题 1、KPI 3/4、表头 6）
+    ws = wb.add_worksheet("汇总")
+    _setup_sheet(ws, [w for _k, _t, w, _f in SUMMARY_COLS])
+    ws.write_string(0, 0, "地块收获进度汇总", st.get(bold=True, font_size=14))
+    ws.write_string(
+        1, 0,
+        f"区间 {filters.date_from.isoformat()} ~ {filters.date_to.isoformat()}"
+        f"　生成时间 {gen:%Y-%m-%d %H:%M} (UTC+8)",
+        st.get(font_color="#6B7280"),
+    )
+    bc = kpi["bucket_counts"]
+    kpis = [
+        ("地块数", kpi["parcel_count"], "0"),
+        ("已计算地块数", kpi["computed_count"], "0"),
+        ("总面积(亩)", kpi["total_area_mu"], MU),
+        ("已收获面积(亩)", kpi["harvested_area_mu"], MU),
+        ("合计收获面积(亩)", kpi["combined_area_mu"], MU),
+        ("平均合计%", kpi["avg_combined_pct"], PCT),
+        ("面积加权合计%", kpi["area_weighted_combined_pct"], PCT),
+    ] + [(BUCKET_LABELS_ZH[b], bc.get(b, 0), "0") for b in BUCKETS]
+    bd = {"border": 1, "border_color": BORDER_COLOR}
+    ws.set_row(3, 30)
+    lab = st.get(bg_color=KPI_LABEL_BG, pattern=1, bold=True, font_size=9, align="center",
+                 text_wrap=True, **bd)
+    for i, (label, _v, _f) in enumerate(kpis):
+        ws.write_string(3, i, label, lab)
+    for i, (_l, value, fmt) in enumerate(kpis):
+        _write_value(ws, 4, i, value,
+                     st.get(bold=True, font_size=12, num_format=fmt, align="center", **bd))
+    hdr = 6
+    _header(ws, st, hdr, SUMMARY_COLS)
+    bcol = [c[0] for c in SUMMARY_COLS].index("bucket_zh")
+    r = hdr + 1
+    for level, path, members in _tree(parcels):
+        rec = {**_hier(path, level), **_agg(members)}
+        _write_row(ws, st, r, SUMMARY_COLS, rec, level)
+        r += 1
+        if level == 2:
+            for p in members:
+                d = _decorate(p)
+                d.update(_hier(path, 3, p.get("land_name") or p.get("land_id")), land_count=1,
+                         computed_count=0 if p.get("bucket") == "not_computed" else 1)
+                _write_row(ws, st, r, SUMMARY_COLS, d, 3, bcol, p.get("bucket"))
+                r += 1
+    last = r - 1
+    ws.freeze_panes(hdr + 1, N_HIER)
+    ws.autofilter(hdr, 0, max(last, hdr), len(SUMMARY_COLS) - 1)
+    _pct_bars(ws, SUMMARY_COLS,
+              [("harvested_pct", "C2410C"), ("suspected_pct", "FDBA74"), ("combined_pct", "EA580C")],
+              hdr + 1, last)
+    ws.repeat_rows(hdr)
+
+    # ---- Sheet2 逐日明细 ----
+    ws2 = wb.add_worksheet("逐日明细")
+    _setup_sheet(ws2, [w for _k, _t, w, _f in DAILY_COLS])
+    _header(ws2, st, 0, DAILY_COLS)
+    r = 1
+    for level, path, members in _tree(daily):
+        rec = {
+            **_hier(path, level),
+            "land_count": len({m["land_id"] for m in members}),
+            "record_count": len(members),
+        }
+        _write_row(ws2, st, r, DAILY_COLS, rec, level)
+        r += 1
+        if level == 2:
+            for m in members:
+                d = _decorate(m)
+                d.update(_hier(path, 3, m.get("land_name") or m.get("land_id")))
+                _write_row(ws2, st, r, DAILY_COLS, d, 3)
+                r += 1
+    last2 = r - 1
+    ws2.freeze_panes(1, N_HIER)
+    ws2.autofilter(0, 0, max(last2, 0), len(DAILY_COLS) - 1)
+    _pct_bars(ws2, DAILY_COLS, [("combined_pct", "EA580C")], 1, last2)
+    ws2.repeat_rows(0)
+
+    # ---- Sheet3 透视 ----
+    ws3 = wb.add_worksheet("透视")
+    dates = sorted({x["date"] for x in daily if x["date"]})
+    fixed = [
+        *[(k, t, w) for k, t, w, _f in SUMMARY_COLS[:N_HIER]],
+        ("land_id", "地块ID", 10),
+        ("area_mu", "面积(亩)", 11),
+    ]
+    nf = len(fixed)
+    _setup_sheet(ws3, [w for _k, _t, w in fixed] + [6] * len(dates))
+    ws3.set_row(0, 48)
+    for i, (_k, title, _w) in enumerate(fixed):
+        ws3.write_string(0, i, title, st.header())
+    for j, d in enumerate(dates):
+        ws3.write_datetime(0, nf + j, d, st.header(rotate=True, num_fmt="mm-dd"))
+    cell_of: dict[tuple[str, date], dict[str, Any]] = {
+        (x["land_id"], x["date"]): x for x in daily if x["date"]
+    }
+    values: dict[str, list[tuple[Any, bool]]] = {}
+    for p in parcels:
+        carried: dict[str, Any] | None = None
+        seq: list[tuple[Any, bool]] = []
+        for d in dates:
+            rr = cell_of.get((p["land_id"], d))
+            if rr is not None:
+                carried = rr
+                seq.append((rr["combined_pct"], False))
+            elif (
+                carry_forward
+                and carried is not None
+                and (p["season_start"] is None or carried["season_start"] == p["season_start"])
+            ):
+                seq.append((carried["combined_pct"], True))
+            else:
+                seq.append((None, False))
+        values[p["land_id"]] = seq
+    del cell_of
+    cols = [(k, t, w, MU if k == "area_mu" else None) for k, t, w in fixed] + [
+        (f"d{j}", "", 6, "0") for j in range(len(dates))
+    ]
+    r = 1
+    for level, path, members in _tree(parcels):
+        rec = {**_hier(path, level), "area_mu": _agg(members)["area_mu"]}
+        for j in range(len(dates)):
+            rec[f"d{j}"] = _weighted(
+                [(m.get("area_mu"), values[m["land_id"]][j][0]) for m in members]
+            )
+        _write_row(ws3, st, r, cols, rec, level)
+        r += 1
+        if level == 2:
+            for p in members:
+                seq = values[p["land_id"]]
+                prec = {
+                    **_hier(path, 3, p.get("land_name") or p["land_id"]),
+                    "land_id": p["land_id"],
+                    "area_mu": p.get("area_mu"),
+                }
+                for j, (v, _c) in enumerate(seq):
+                    prec[f"d{j}"] = v
+                ital = {nf + j for j, (_v, c) in enumerate(seq) if c}
+                _write_row(ws3, st, r, cols, prec, 3, italic_cols=ital)
+                r += 1
+    last3 = r - 1
+    if dates and last3 >= 1:
+        ws3.conditional_format(1, nf, last3, nf + len(dates) - 1, {
+            "type": "3_color_scale",
+            "min_type": "num", "min_value": 0, "min_color": "#F0FDF4",
+            "mid_type": "num", "mid_value": 50, "mid_color": "#FDBA74",
+            "max_type": "num", "max_value": 100, "max_color": "#9A3412",
+        })
+        # 深色单元格用白字，保证沿用值（斜体）与实测值都可读
+        ws3.conditional_format(1, nf, last3, nf + len(dates) - 1, {
+            "type": "cell", "criteria": ">=", "value": 60,
+            "format": wb.add_format({"font_color": "#FFFFFF"}),
+        })
+    ws3.freeze_panes(1, N_HIER)
+    ws3.autofilter(0, 0, max(last3, 0), nf + len(dates) - 1)
+    ws3.repeat_rows(0)
+
+    # ---- Sheet4 说明 ----
+    ws4 = wb.add_worksheet("说明")
+    ws4.set_column(0, 0, 22)
+    ws4.set_column(1, 1, 100)
+    fa = st.get(bold=True)
+    fb = st.get(text_wrap=True, valign="top")
+    fh = st.get(bold=True, font_color=HEADER_FG, bg_color=HEADER_BG, pattern=1)
+    for i, (k, v) in enumerate(_notes(gen, filters, kpi, carry_forward)):
+        if k == "字段":
+            ws4.write_string(i, 0, k, fh)
+            ws4.write_string(i, 1, v, fh)
+        else:
+            _write_value(ws4, i, 0, k, fa)
+            _write_value(ws4, i, 1, v, fb)
+
+    wb.close()
+    return os.path.getsize(out_path)
+
+
+def build_workbook(
+    parcels: list[dict[str, Any]],
+    daily: list[dict[str, Any]],
+    kpi: dict[str, Any],
+    filters: ReportFilters,
+    generated_at: datetime | None = None,
+    carry_forward: bool = True,
+) -> bytes:
+    """同步导出用：生成到临时文件后读回字节。"""
+    fd, path = tempfile.mkstemp(prefix="harvest-report-", suffix=".xlsx")
+    os.close(fd)
+    try:
+        build_workbook_to_path(path, parcels, daily, kpi, filters, generated_at, carry_forward)
+        with open(path, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(path)
