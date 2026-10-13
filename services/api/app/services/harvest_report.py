@@ -491,3 +491,151 @@ async def load_report(
         except Exception as exc:  # 覆盖表未建：全部按“无标记”处理
             logger.warning("harvest_report_coverage_unavailable", error=str(exc)[:200])
     return build_report(filters, lands, rows, prev, coverage, latest)
+
+
+# ---------------------------------------------------------------------------
+# 列表（JSON 分页）专用读取路径
+#
+# load_report 为 Excel 逐日明细拉取区间内全部结果行，并按 1000 个 land_id 一批、每批 4 条查询
+# （1.9 万地块约 80 次往返 + 数十万行进 Python）。列表只需要每地块“最新一行 + 其上一行 +
+# 本季首个日期 + 区间行数”，这里在库内用窗口函数一次算完，每类数据只一条查询，
+# 地块筛选以 CTE 形式下推，不再拼超长 IN 列表。
+# ---------------------------------------------------------------------------
+
+_LANDS_CTE = """
+    WITH l AS (
+        SELECT land_id FROM agric_satellite.land_parcels
+        WHERE deleted_at IS NULL
+          AND (CAST(:group_id AS text) IS NULL OR group_id = CAST(:group_id AS text))
+          AND (CAST(:crop AS text) IS NULL OR crop_type = CAST(:crop AS text))
+          AND (CAST(:kw AS text) IS NULL
+               OR land_id = CAST(:kw AS text)
+               OR land_name ILIKE '%' || CAST(:kw AS text) || '%')
+    )
+"""
+
+_P_COLS = ", ".join(f"p.{c.strip()}" for c in _ROW_COLS.split(",") if c.strip())
+_ROW_COL_NAMES = [c.strip() for c in _ROW_COLS.split(",") if c.strip()]
+_PREV_PREFIX = "prev_"
+
+_LIST_LATEST = text(
+    _LANDS_CTE
+    + f"""
+    , base AS (
+        SELECT {_P_COLS}, true AS in_range
+        FROM agric_satellite.parcel_harvest_progress p JOIN l USING (land_id)
+        WHERE p.sensor = :sensor AND p.method_version = :method_version
+          AND p.obs_date >= :date_from AND p.obs_date <= :date_to
+        UNION ALL
+        (SELECT DISTINCT ON (p.land_id) {_P_COLS}, false AS in_range
+         FROM agric_satellite.parcel_harvest_progress p JOIN l USING (land_id)
+         WHERE p.sensor = :sensor AND p.method_version = :method_version
+           AND p.obs_date < :date_from
+         ORDER BY p.land_id, p.obs_date DESC)
+    ), w AS (
+        SELECT b.*,
+               {", ".join(f"lag({c}) OVER win AS {_PREV_PREFIX}{c}" for c in _ROW_COL_NAMES if c != "land_id")},
+               row_number() OVER (PARTITION BY land_id ORDER BY obs_date DESC) AS rn,
+               count(*) FILTER (WHERE in_range) OVER (PARTITION BY land_id) AS obs_count,
+               min(obs_date) FILTER (WHERE in_range)
+                   OVER (PARTITION BY land_id, season_start) AS season_first_date
+        FROM base b
+        WINDOW win AS (PARTITION BY land_id ORDER BY obs_date)
+    )
+    SELECT * FROM w WHERE rn = 1 AND in_range
+    """
+)
+
+_LIST_COVERAGE = text(
+    _LANDS_CTE
+    + """
+    SELECT c.land_id, c.computed_from, c.computed_to, c.min_save_pct
+    FROM agric_satellite.parcel_harvest_progress_coverage c JOIN l USING (land_id)
+    WHERE c.sensor = :sensor AND c.method_version = :method_version
+    """
+)
+
+# 每地块一次索引探测（land_id, date 倒序取第一条 S2），避免 GROUP BY 扫完全部 S2 景行。
+_LIST_LATEST_OBS = text(
+    _LANDS_CTE
+    + """
+    SELECT l.land_id, o.obs_date
+    FROM l CROSS JOIN LATERAL (
+        SELECT s.date AS obs_date
+        FROM agric_satellite.parcel_scene_products s
+        WHERE s.land_id = l.land_id AND s.sensor = 'S2' AND s.date <= :date_to
+        ORDER BY s.date DESC
+        LIMIT 1
+    ) o
+    """
+)
+
+
+def build_parcels_from_latest(
+    filters: ReportFilters,
+    lands: Iterable[dict[str, Any]],
+    latest_rows: Iterable[dict[str, Any]],
+    coverage: dict[str, dict[str, Any]] | None = None,
+    latest_obs: dict[str, date | None] | None = None,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """由“每地块最新一行（含 prev_* 上一行与本季首日/行数）”组装地块列表。
+
+    结果与 ``build_report(...)[0]`` 一致：复用 build_report，只喂最新一行及其上一行，
+    再补回区间行数与本季首个日期。
+    """
+    rows: list[dict[str, Any]] = []
+    prev: list[dict[str, Any]] = []
+    extra: dict[str, tuple[int, date | None]] = {}
+    for r in latest_rows:
+        lid = str(r["land_id"])
+        rows.append({c: r.get(c) for c in _ROW_COL_NAMES})
+        if r.get(_PREV_PREFIX + "obs_date") is not None:
+            p = {c: r.get(_PREV_PREFIX + c) for c in _ROW_COL_NAMES if c != "land_id"}
+            p["land_id"] = lid
+            prev.append(p)
+        extra[lid] = (int(r.get("obs_count") or 1), _d(r.get("season_first_date")))
+    parcels, _ = build_report(filters, lands, rows, prev, coverage, latest_obs, today)
+    for p in parcels:
+        e = extra.get(p["land_id"])
+        if e is not None:
+            p["obs_count"] = e[0]
+            if e[1] is not None:
+                p["first_harvest_date"] = e[1]
+    return parcels
+
+
+async def load_parcels(
+    db: AsyncSession, filters: ReportFilters
+) -> list[dict[str, Any]]:
+    """列表接口用：只读，4 条查询，不拉逐日明细。"""
+    lp = {
+        "group_id": filters.group_id or None,
+        "crop": filters.crop or None,
+        "kw": (filters.keyword or "").strip() or None,
+    }
+    common = {"sensor": SENSOR, "method_version": HARVEST_PROGRESS_METHOD_VERSION}
+    lands = [dict(r._mapping) for r in (await db.execute(_LANDS, lp)).fetchall()]
+    latest_rows = [
+        dict(r._mapping)
+        for r in (
+            await db.execute(
+                _LIST_LATEST,
+                {**lp, **common, "date_from": filters.date_from, "date_to": filters.date_to},
+            )
+        ).fetchall()
+    ]
+    latest = {
+        str(r.land_id): r.obs_date
+        for r in (
+            await db.execute(_LIST_LATEST_OBS, {**lp, "date_to": filters.date_to})
+        ).fetchall()
+    }
+    coverage: dict[str, dict[str, Any]] = {}
+    try:
+        async with db.begin_nested():
+            for r in (await db.execute(_LIST_COVERAGE, {**lp, **common})).fetchall():
+                coverage[str(r.land_id)] = dict(r._mapping)
+    except Exception as exc:  # 覆盖表未建：全部按“无标记”处理
+        logger.warning("harvest_report_coverage_unavailable", error=str(exc)[:200])
+    return build_parcels_from_latest(filters, lands, latest_rows, coverage, latest)

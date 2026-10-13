@@ -337,8 +337,10 @@ class EndpointTests(unittest.TestCase):
 
     def test_json_paginates_filters_and_passes_params(self):
         app, mod = self._client()
-        load = AsyncMock(return_value=self._data())
-        with patch.object(mod.hr, "load_report", load):
+        load = AsyncMock(return_value=self._data()[0])
+        with patch.object(mod.hr, "load_parcels", load), patch.object(
+            mod.hr, "load_report", AsyncMock(side_effect=AssertionError("list must not load daily"))
+        ):
             r = TestClient(app).get(
                 "/v1/agri/harvest-report",
                 params={
@@ -372,7 +374,7 @@ class EndpointTests(unittest.TestCase):
     def test_validation(self):
         app, mod = self._client()
         c = TestClient(app)
-        with patch.object(mod.hr, "load_report", AsyncMock(return_value=([], []))):
+        with patch.object(mod.hr, "load_parcels", AsyncMock(return_value=[])):
             self.assertEqual(
                 c.get("/v1/agri/harvest-report?status=bogus").status_code, 422
             )
@@ -444,6 +446,100 @@ class LoadReportTests(unittest.TestCase):
         self.assertEqual(parcels[0]["combined_pct"], 50.0)
         self.assertEqual(parcels[0]["latest_obs_date"], date(2026, 10, 6))
         self.assertEqual(len(daily), 1)
+
+
+def _latest_rows_like_sql(rows, prev):
+    """模拟 _LIST_LATEST：每地块最新区间行 + prev_* 上一行 + 区间行数 + 本季首日。"""
+    by = {}
+    for r in rows:
+        by.setdefault(r["land_id"], []).append(r)
+    before = {r["land_id"]: r for r in prev}
+    out = []
+    for lid, rs in by.items():
+        rs = sorted(rs, key=lambda r: r["obs_date"])
+        last = rs[-1]
+        p = rs[-2] if len(rs) > 1 else before.get(lid)
+        row = dict(last)
+        for k, v in (p or {}).items():
+            if k != "land_id":
+                row["prev_" + k] = v
+        row["obs_count"] = len(rs)
+        row["season_first_date"] = min(
+            r["obs_date"] for r in rs if r["season_start"] == last["season_start"]
+        )
+        out.append(row)
+    return out
+
+
+class ListPathTests(unittest.TestCase):
+    def test_latest_only_path_matches_full_build(self):
+        lands = [_land("1"), _land("2"), _land("3"), _land("4"), _land("5")]
+        rows = [
+            _row("1", "2026-09-01", 10, 5),
+            _row("1", "2026-09-10", 40, 30),
+            _row("1", "2026-09-20", 70, 60),
+            _row("2", "2026-09-05", 30),  # 只有区间前的上一行
+            _row("4", "2026-08-20", 80, season="2026-03-01"),
+            _row("4", "2026-09-25", 20, season="2026-07-01"),  # 换季
+            _row("5", "2026-09-01", 15, harvested_or_suspected_pct=None),
+        ]
+        prev = [_row("2", "2026-07-20", 12), _row("1", "2026-07-01", 5)]
+        cov = {"3": _cov("2026-08-01", "2026-10-10")}
+        latest = {"1": date(2026, 9, 20), "3": date(2026, 9, 1)}
+        full, _ = _build(lands, rows, prev, cov, latest)
+        fast = hr.build_parcels_from_latest(
+            F, lands, _latest_rows_like_sql(rows, prev), cov, latest, TODAY
+        )
+        self.assertEqual(fast, full)
+
+    def test_load_parcels_uses_four_queries_without_in_lists(self):
+        class _Res:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+        def _r(**kw):
+            m = MagicMock(**kw)
+            m._mapping = kw
+            return m
+
+        calls = []
+
+        async def execute(stmt, params):
+            sql = str(stmt)
+            calls.append(sql)
+            self.assertNotIn("ids", params)
+            if "parcel_harvest_progress_coverage" in sql:
+                raise RuntimeError("relation does not exist")
+            if "parcel_harvest_progress" in sql:
+                r = _row("1", "2026-09-10", 50)
+                r.update(prev_obs_date=date(2026, 9, 1), prev_harvested_pct=20.0,
+                         prev_harvested_or_suspected_pct=20.0,
+                         prev_season_start=date(2026, 5, 1),
+                         obs_count=2, season_first_date=date(2026, 9, 1))
+                return _Res([_r(**r)])
+            if "parcel_scene_products" in sql:
+                return _Res([_r(land_id="1", obs_date=date(2026, 10, 6))])
+            if "FROM agric_satellite.land_parcels" in sql:
+                return _Res([_r(**_land("1"))])
+            raise AssertionError(sql)
+
+        db = MagicMock()
+        db.execute = execute
+        nested = MagicMock()
+        nested.__aenter__ = AsyncMock()
+        nested.__aexit__ = AsyncMock(return_value=False)
+        db.begin_nested = MagicMock(return_value=nested)
+        parcels = asyncio.run(hr.load_parcels(db, F))
+        self.assertEqual(len(calls), 4)
+        p = parcels[0]
+        self.assertEqual(
+            (p["combined_pct"], p["newly_combined_pct"], p["obs_count"],
+             p["first_harvest_date"], p["latest_obs_date"]),
+            (50.0, 30.0, 2, date(2026, 9, 1), date(2026, 10, 6)),
+        )
 
 
 if __name__ == "__main__":
