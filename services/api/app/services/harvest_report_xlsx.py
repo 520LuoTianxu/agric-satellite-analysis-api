@@ -220,6 +220,11 @@ def _filters_text(f: ReportFilters) -> list[tuple[str, str]]:
         ),
         ("最低合计%", "" if f.min_pct is None else f"{f.min_pct:g}"),
         ("关键字", f.keyword or ""),
+        *(
+            [("租户范围", "已排除测试租户")]
+            if getattr(f, "exclude_base_ids", None)
+            else []
+        ),
     ]
 
 

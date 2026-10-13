@@ -63,6 +63,8 @@ def params_of(f: hr.ReportFilters, sort: str, order: str, carry_forward: bool) -
         "sort": sort,
         "order": order,
         "carry_forward": carry_forward,
+        # 计入参数哈希：排除名单变更后不会复用旧文件
+        "exclude_base_ids": list(f.exclude_base_ids),
     }
 
 
@@ -75,6 +77,7 @@ def filters_from(p: dict) -> hr.ReportFilters:
         buckets=list(p.get("status") or []),
         min_pct=p.get("min_pct"),
         keyword=p.get("q"),
+        exclude_base_ids=list(p.get("exclude_base_ids") or []),
     )
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from datetime import date, timedelta
 from typing import Annotated, Any, Literal
 
@@ -126,6 +128,7 @@ async def export_harvest_report(
     order: Literal["asc", "desc"] = Query("desc"),
     carry_forward: bool = Query(True, description="透视表未入库日沿用上一期合计%"),
 ) -> Response:
+    filters = dataclasses.replace(filters, exclude_base_ids=hr.export_exclude_base_ids())
     parcels, daily = await hr.load_report(db, filters)
     rows = hr.sort_parcels(hr.apply_filters(parcels, filters), sort, order)
     keep = {p["land_id"] for p in rows}
@@ -166,6 +169,7 @@ async def create_harvest_export_job(
     carry_forward: bool = Query(True, description="透视表未入库日沿用上一期合计%"),
 ) -> dict[str, Any]:
     """创建导出任务（参数与 export.xlsx 一致，走 query string）；同参数进行中的任务直接复用。"""
+    filters = dataclasses.replace(filters, exclude_base_ids=hr.export_exclude_base_ids())
     params = hx.params_of(filters, sort, order, carry_forward)
     user = getattr(ctx, "user", None)
     job, reused = await hx.create_job(
