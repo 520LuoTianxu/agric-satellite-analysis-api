@@ -31,6 +31,7 @@ from app.core.band_window_cache import (
     window_cache_enabled,
     write_scene_window,
 )
+from app.core.geo import repair_polygon_geometry
 from app.core.config import scene_max_workers, scene_straggler_timeout_sec
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
@@ -353,9 +354,11 @@ def _load_lands(
                     continue
                 if not remote.get("boundary_geojson") or not remote.get("tile_id"):
                     raise RuntimeError(f"地块{land_id}的内部HTTP元数据不完整")
-                geom = shape(remote["boundary_geojson"])
+                # 与 API 侧一致：历史库里的自相交边界先修复，再用于裁剪与像元提取。
+                geom = repair_polygon_geometry(shape(remote["boundary_geojson"]))
                 if (
-                    geom.is_empty
+                    geom is None
+                    or geom.is_empty
                     or not geom.is_valid
                     or geom.geom_type not in {"Polygon", "MultiPolygon"}
                 ):

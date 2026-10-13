@@ -19,7 +19,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
-from app.core.geo import geojson_to_shape
+from app.core.geo import geojson_to_shape, repair_polygon_geometry
 
 VPA10_ALGORITHM_VERSION = "dynamic-window-greedy-10km-v1"
 DEFAULT_WINDOW_SIDE_M = 10_000.0
@@ -94,6 +94,7 @@ def _to_geometry(value: Any) -> BaseGeometry:
         geometry = shape(value)
     else:
         geometry = geojson_to_shape(value)
+    geometry = repair_polygon_geometry(geometry)
     if (
         geometry is None
         or geometry.is_empty

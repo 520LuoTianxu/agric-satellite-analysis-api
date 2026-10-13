@@ -32,6 +32,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     is_excluded_schedule_base_id,
     is_scheduled_land_allowed,
 )
+from app.core.geo import repair_polygon_geometry
 from app.core.config import settings
 from app.core.logging import logger
 from app.models.tables import AuditEvent, Farm, Job, LandParcel
@@ -190,10 +191,13 @@ def parse_wgs_land_path(value: str) -> MultiPolygon:
     if points[0] != points[-1]:
         points.append(points[0])
 
-    polygon = Polygon(points)
-    if polygon.is_empty or polygon.area <= 0 or not polygon.is_valid:
+    # 源库边界常有自相交、重复点，入库前自动修复；修复后为空或零面积才拒绝。
+    repaired = repair_polygon_geometry(Polygon(points))
+    if repaired is None:
         raise ValueError("wgs_land_path is not a valid polygon")
-    return MultiPolygon([polygon])
+    if isinstance(repaired, MultiPolygon):
+        return repaired
+    return MultiPolygon([repaired])
 
 
 def _geometry_values(

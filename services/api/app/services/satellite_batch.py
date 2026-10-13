@@ -12,6 +12,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.geo import geojson_to_shape
+from app.core.geo import repair_polygon_geometry
 from app.models.tables import Job, LandParcel
 from app.schemas.satellite_batch import SatelliteBatchGroup
 from app.services.virtual_area_planner import (
@@ -23,7 +24,8 @@ from app.services.virtual_area_planner import (
 
 def satellite_land_geometry(land: LandParcel):
     """校验一次性遥感任务使用的地块边界，坏数据不进入几何规划。"""
-    geom = geojson_to_shape(land.boundary_geojson)
+    # MySQL 原始边界常见自相交/重复点，先自动修复再校验，修复后为空或零面积才拒绝。
+    geom = repair_polygon_geometry(geojson_to_shape(land.boundary_geojson))
     if (
         land.boundary_srid != 4326
         or geom is None

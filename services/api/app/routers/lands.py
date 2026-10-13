@@ -39,6 +39,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.concurrency import run_in_threadpool
 
 from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
+from app.core.geo import repair_polygon_geometry
 from app.core.config import settings
 from app.core.crops import normalize_crop_key
 from app.core.database import get_db
@@ -105,6 +106,9 @@ _GEOJSON_IMPORT_TEXT_LIMITS = {
 def _geojson_to_multi(geojson: dict[str, Any]) -> MultiPolygon:
     """校验GeoJSON地块边界并统一为MultiPolygon，保证后续投影和掩膜输入合法。"""
     geom = shape(geojson)
+    if geom.geom_type in {"Polygon", "MultiPolygon"} and not geom.is_valid:
+        # 自相交/重复点等常见问题自动修复，修不好再按原逻辑报错。
+        geom = repair_polygon_geometry(geom) or geom
     if geom.geom_type == "Polygon":
         geom = MultiPolygon([geom])
     elif geom.geom_type != "MultiPolygon":
