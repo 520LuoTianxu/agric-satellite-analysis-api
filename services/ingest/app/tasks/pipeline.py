@@ -41,6 +41,7 @@ from app.core.stac_client import open_stac_client
 from app.tasks.indices import IndexDef
 
 from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
+from agric_satellite_analysis_common.scene_time import stac_item_acquired_at
 
 logger = structlog.get_logger()
 _WGS84_GEOD = Geod(ellps="WGS84")
@@ -539,6 +540,7 @@ def search_scenes_for_defs(
                 {
                     "id": item.id,
                     "date": entry["date"],
+                    "acquired_at": stac_item_acquired_at(item),
                     "cloud_cover": entry["cloud"],
                     "band_hrefs": band_hrefs,
                     # 聚合下载需要按景覆盖范围筛选地块，避免写入景外的填充值。

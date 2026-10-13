@@ -833,6 +833,7 @@ CREATE TABLE agric_satellite.parcel_scene_products (
     sensor text NOT NULL,
     scene_id text DEFAULT ''::text NOT NULL,
     land_name text,
+    acquired_at timestamp with time zone,
     cloud_cover double precision,
     cloud_cover_over_30 boolean,
     parcel_cloud_cover_pct double precision,

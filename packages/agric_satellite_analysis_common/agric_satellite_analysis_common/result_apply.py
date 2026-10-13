@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 from agric_satellite_analysis_common.database_sync import SyncSession
+from agric_satellite_analysis_common.scene_time import normalize_acquired_at
 from agric_satellite_analysis_common.settings import settings
 from agric_satellite_analysis_common.storage import ObjectTooLargeError, get_storage
 from sqlalchemy import text
@@ -107,7 +108,7 @@ ON CONFLICT (land_id, date) DO UPDATE SET
 
 UPSERT_SCENE_SQL = """
 INSERT INTO agric_satellite.parcel_scene_products (
-  land_id, tile_id, date, sensor, scene_id, land_name,
+  land_id, tile_id, date, sensor, scene_id, land_name, acquired_at,
   cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
   product_source, decloud_quality, parcel_cloud_source,
   json_oss_key, pixel_count, generated_at_shanghai,
@@ -124,6 +125,7 @@ INSERT INTO agric_satellite.parcel_scene_products (
   pixel_data
 ) VALUES (
   %(land_id)s, %(tile_id)s, %(date)s, %(sensor)s, %(scene_id)s, %(land_name)s,
+  CAST(%(acquired_at)s AS timestamptz),
   %(cloud_cover)s, %(cloud_cover_over_30)s, %(parcel_cloud_cover_pct)s,
   %(product_source)s, %(decloud_quality)s, %(parcel_cloud_source)s,
   %(json_oss_key)s, %(pixel_count)s, %(generated_at_shanghai)s,
@@ -142,6 +144,7 @@ INSERT INTO agric_satellite.parcel_scene_products (
 ON CONFLICT (land_id, date, sensor, scene_id) DO UPDATE SET
   tile_id = EXCLUDED.tile_id,
   land_name = EXCLUDED.land_name,
+  acquired_at = COALESCE(EXCLUDED.acquired_at, agric_satellite.parcel_scene_products.acquired_at),
   cloud_cover = EXCLUDED.cloud_cover,
   cloud_cover_over_30 = EXCLUDED.cloud_cover_over_30,
   parcel_cloud_cover_pct = EXCLUDED.parcel_cloud_cover_pct,
@@ -354,6 +357,8 @@ def apply_parcel_scene_product(
         "sensor": sensor,
         "scene_id": obj["scene_id"],
         "land_name": obj.get("land_name"),
+        # 新字段：老消息没有该键时写 NULL（upsert 时保留已有值），兼容滚动部署期间的旧下载机。
+        "acquired_at": normalize_acquired_at(obj.get("acquired_at")),
         "cloud_cover": obj.get("cloud_cover"),
         "cloud_cover_over_30": obj.get("cloud_cover_over_30"),
         "parcel_cloud_cover_pct": obj.get("parcel_cloud_cover_pct"),

@@ -62,6 +62,13 @@ class SceneProductOut(BaseModel):
     land_id: str
     tile_id: str
     date: date
+    acquired_at: datetime | None = Field(
+        default=None,
+        description=(
+            "影像拍摄时间（STAC properties.datetime，ISO8601 带时区，UTC）。"
+            "历史数据回填为 date 当天 UTC 00:00:00（即北京时间 08:00），不会跨日；去云衍生产品可能为空。"
+        ),
+    )
     sensor: Sensor
     scene_id: str
     land_name: str | None = None
