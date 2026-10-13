@@ -236,30 +236,31 @@ class WorkbookTests(unittest.TestCase):
         wb = self._wb()
         self.assertEqual(wb.sheetnames, ["汇总", "逐日明细", "透视", "说明"])
         s = wb["汇总"]
-        self.assertEqual(s["C7"].value, "地块ID")
+        self.assertEqual([c.value for c in s[7][:5]], ["省", "租户", "项目", "地块", "地块ID"])
         self.assertEqual(s["A5"].value, 3)  # 地块数
-        self.assertEqual(s.freeze_panes, "D8")
+        self.assertEqual(s.freeze_panes, "E8")
         self.assertTrue(s.auto_filter.ref.startswith("A7:"))
         self.assertEqual(s.max_row, 13)  # 省/租户/项目 3 个汇总行 + 3 块地
         self.assertGreater(len(s.conditional_formatting), 0)
         d = wb["逐日明细"]
         self.assertEqual(d.max_row, 7)
-        self.assertEqual(d.freeze_panes, "D2")
+        self.assertEqual(d.freeze_panes, "E2")
+        self.assertEqual(wb["透视"].freeze_panes, "E2")
         self.assertIn("2026-10-10 16:30", wb["说明"]["B1"].value)
 
     def test_pivot_carry_forward(self):
         p = self._wb()["透视"]
         self.assertEqual(
-            [c.value.date() for c in p[1][3:]],
+            [c.value.date() for c in p[1][6:]],
             [date(2026, 9, 1), date(2026, 9, 5), date(2026, 9, 10)],
         )
-        rows = {r[1].value: [c.value for c in r[3:]] for r in p.iter_rows(min_row=5)}
+        rows = {r[4].value: [c.value for c in r[6:]] for r in p.iter_rows(min_row=5)}
         self.assertEqual(rows["1"], [10, 10, 60])  # 09-05 沿用
         self.assertEqual(rows["2"], [None, 30, 30])
         self.assertEqual(rows["3"], [None, None, None])
-        self.assertTrue(p.cell(row=5, column=5).font.i)
+        self.assertTrue(p.cell(row=5, column=8).font.i)
         plain = {
-            r[1].value: [c.value for c in r[3:]]
+            r[4].value: [c.value for c in r[6:]]
             for r in self._wb(carry=False)["透视"].iter_rows(min_row=5)
         }
         self.assertEqual(plain["1"], [10, None, 60])
@@ -279,17 +280,22 @@ class WorkbookTests(unittest.TestCase):
         wb = load_workbook(io.BytesIO(data))
         s = wb["汇总"]
         tree = [
-            (s.cell(row=r, column=1).value, s.cell(row=r, column=2).value,
-             s.row_dimensions[r].outline_level)
+            tuple(s.cell(row=r, column=c).value for c in range(1, 5))
+            + (s.row_dimensions[r].outline_level,)
             for r in range(8, s.max_row + 1)
         ]
         self.assertEqual(
             tree,
             [
-                ("吉林省", "省", 0), ("租户A", "租户", 1), ("项目1", "项目", 2),
-                ("地块1", "地块", 3), ("地块2", "地块", 3),
-                ("辽宁省", "省", 0), ("租户B", "租户", 1), ("项目2", "项目", 2),
-                ("地块3", "地块", 3),
+                ("吉林省", "小计", None, None, 0),
+                ("吉林省", "租户A", "小计", None, 1),
+                ("吉林省", "租户A", "项目1", "小计", 2),
+                ("吉林省", "租户A", "项目1", "地块1", 3),
+                ("吉林省", "租户A", "项目1", "地块2", 3),
+                ("辽宁省", "小计", None, None, 0),
+                ("辽宁省", "租户B", "小计", None, 1),
+                ("辽宁省", "租户B", "项目2", "小计", 2),
+                ("辽宁省", "租户B", "项目2", "地块3", 3),
             ],
         )
         cols = [c.value for c in s[7]]
@@ -300,7 +306,15 @@ class WorkbookTests(unittest.TestCase):
         self.assertFalse(s.sheet_properties.outlinePr.summaryBelow)
         p = wb["透视"]
         self.assertEqual(p.cell(row=2, column=1).value, "吉林省")
-        self.assertEqual(p.cell(row=2, column=4).value, 40.0)
+        self.assertEqual(p.cell(row=2, column=2).value, "小计")
+        self.assertEqual(p.cell(row=2, column=7).value, 40.0)
+        d = wb["逐日明细"]
+        self.assertEqual([d.cell(row=5, column=c).value for c in range(1, 5)],
+                         ["吉林省", "租户A", "项目1", "地块1"])
+        for ws in (s, p, d):
+            self.assertTrue(ws.auto_filter.ref.endswith(f"{ws.max_row}"))
+            self.assertEqual(ws.auto_filter.ref.split(":")[1].rstrip("0123456789"),
+                             ws.cell(row=1, column=ws.max_column).column_letter)
         self.assertEqual(wb["逐日明细"].row_dimensions[5].outline_level, 3)
 
 

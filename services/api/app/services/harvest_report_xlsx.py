@@ -1,6 +1,7 @@
 """收获进度报表 Excel（openpyxl）：汇总 / 逐日明细 / 透视 / 说明 四个工作表。
 
-前三张表按 省 → 租户(base_name) → 项目(group_name) → 地块 四级行分组下钻。
+前三张表最左侧为 省/租户/项目/地块 四个独立列，并按四级行分组（outline）下钻；
+汇总行只填到本级，下一级列写“小计”。
 """
 
 from __future__ import annotations
@@ -59,8 +60,10 @@ BASE_FONT = Font(name="微软雅黑", size=10)
 
 # (key, 表头, 列宽, 数字格式)
 SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
-    ("tree_name", "省 / 租户 / 项目 / 地块", 36, None),
-    ("level_zh", "层级", 7, None),
+    ("province_name", "省", 14, None),
+    ("base_name", "租户", 18, None),
+    ("group_name", "项目", 18, None),
+    ("land_name", "地块", 20, None),
     ("land_id", "地块ID", 12, None),
     ("land_count", "地块数", 8, "#,##0"),
     ("computed_count", "已计算地块", 9, "#,##0"),
@@ -89,8 +92,10 @@ SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
 ]
 
 DAILY_COLS: list[tuple[str, str, int, str | None]] = [
-    ("tree_name", "省 / 租户 / 项目 / 地块", 36, None),
-    ("level_zh", "层级", 7, None),
+    ("province_name", "省", 14, None),
+    ("base_name", "租户", 18, None),
+    ("group_name", "项目", 18, None),
+    ("land_name", "地块", 20, None),
     ("land_id", "地块ID", 10, None),
     ("land_count", "地块数", 8, "#,##0"),
     ("record_count", "记录数", 8, "#,##0"),
@@ -114,6 +119,20 @@ DAILY_COLS: list[tuple[str, str, int, str | None]] = [
     ("method_version", "算法版本", 26, None),
 ]
 LEVEL_ZH = ["省", "租户", "项目", "地块"]
+HIER_KEYS = ["province_name", "base_name", "group_name", "land_name"]
+N_HIER = len(HIER_KEYS)
+
+
+def _hier(path: tuple[str, ...], level: int, land_name: Any = None) -> dict[str, Any]:
+    """层级列取值：明细行四列填满；汇总行只填到本级，下一级写“小计”，其余留空。"""
+    out: dict[str, Any] = {k: None for k in HIER_KEYS}
+    for i, v in enumerate(path[:3]):
+        out[HIER_KEYS[i]] = v
+    if level < 3:
+        out[HIER_KEYS[level + 1]] = "小计"
+    else:
+        out["land_name"] = land_name
+    return out
 
 
 def _decorate(r: dict[str, Any]) -> dict[str, Any]:
@@ -218,8 +237,10 @@ def _write_row(ws, r: int, cols, rec: dict[str, Any], level: int) -> None:
             c.fill = PatternFill("solid", fgColor=LEVEL_FILLS[level])
         if fmt and v is not None:
             c.number_format = fmt
-        if i == 1:
-            c.alignment = Alignment(indent=level * 2, vertical="center")
+        if i <= N_HIER:
+            c.alignment = Alignment(horizontal="left", vertical="center")
+            if v == "小计":
+                c.font = Font(bold=True, italic=True, size=10, color="6B7280")
         elif isinstance(v, str):
             c.alignment = Alignment(horizontal="center" if k.endswith("_zh") else "left", vertical="center")
     if level:
@@ -325,13 +346,13 @@ def build_workbook(
     _outline_setup(ws)
     r = hdr + 1
     for level, path, members in _tree(parcels):
-        rec = {"tree_name": path[-1], "level_zh": LEVEL_ZH[level], **_agg(members)}
+        rec = {**_hier(path, level), **_agg(members)}
         _write_row(ws, r, SUMMARY_COLS, rec, level)
         r += 1
         if level == 2:
             for p in members:
                 d = _decorate(p)
-                d.update(tree_name=p.get("land_name") or p.get("land_id"), level_zh="地块", land_count=1,
+                d.update(_hier(path, 3, p.get("land_name") or p.get("land_id")), land_count=1,
                          computed_count=0 if p.get("bucket") == "not_computed" else 1)
                 _write_row(ws, r, SUMMARY_COLS, d, 3)
                 fill = BUCKET_FILLS.get(p.get("bucket"))
@@ -342,7 +363,7 @@ def build_workbook(
                         cell.font = Font(color="FFFFFF", bold=True)
                 r += 1
     last = r - 1
-    ws.freeze_panes = ws.cell(row=hdr + 1, column=4)
+    ws.freeze_panes = ws.cell(row=hdr + 1, column=N_HIER + 1)
     ws.auto_filter.ref = (
         f"A{hdr}:{get_column_letter(len(SUMMARY_COLS))}{max(last, hdr)}"
     )
@@ -367,8 +388,7 @@ def build_workbook(
     for level, path, members in _tree(daily):
         lands = {m["land_id"] for m in members}
         rec = {
-            "tree_name": path[-1],
-            "level_zh": LEVEL_ZH[level],
+            **_hier(path, level),
             "land_count": len(lands),
             "record_count": len(members),
         }
@@ -377,11 +397,11 @@ def build_workbook(
         if level == 2:
             for m in members:
                 d = _decorate(m)
-                d.update(tree_name=m.get("land_name") or m.get("land_id"), level_zh="地块")
+                d.update(_hier(path, 3, m.get("land_name") or m.get("land_id")))
                 _write_row(ws2, r, DAILY_COLS, d, 3)
                 r += 1
     last2 = r - 1
-    ws2.freeze_panes = "D2"
+    ws2.freeze_panes = ws2.cell(row=2, column=N_HIER + 1)
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(DAILY_COLS))}{max(last2, 1)}"
     _pct_bars(ws2, DAILY_COLS, [("combined_pct", "EA580C")], 2, last2)
     _print_setup(ws2, "1:1")
@@ -391,7 +411,7 @@ def build_workbook(
     _outline_setup(ws3)
     dates = sorted({r["date"] for r in daily if r["date"]})
     fixed = [
-        ("tree_name", "省 / 租户 / 项目 / 地块", 36),
+        *[(k, t, w) for k, t, w, _f in SUMMARY_COLS[:N_HIER]],
         ("land_id", "地块ID", 10),
         ("area_mu", "面积(亩)", 11),
     ]
@@ -439,7 +459,7 @@ def build_workbook(
             _weighted([(m.get("area_mu"), values[m["land_id"]][j][0]) for m in members])
             for j in range(len(dates))
         ]
-        rec = {"tree_name": path[-1], "area_mu": area}
+        rec = {**_hier(path, level), "area_mu": area}
         for j, v in enumerate(row_vals):
             rec[f"d{j}"] = v
         cols = [(k, t, w, MU if k == "area_mu" else None) for k, t, w in fixed] + [
@@ -450,7 +470,7 @@ def build_workbook(
         if level == 2:
             for p in members:
                 prec = {
-                    "tree_name": p.get("land_name") or p["land_id"],
+                    **_hier(path, 3, p.get("land_name") or p["land_id"]),
                     "land_id": p["land_id"],
                     "area_mu": p.get("area_mu"),
                 }
@@ -490,7 +510,7 @@ def build_workbook(
                 operator="greaterThanOrEqual", formula=["60"], font=Font(color="FFFFFF")
             ),
         )
-    ws3.freeze_panes = "D2"
+    ws3.freeze_panes = ws3.cell(row=2, column=N_HIER + 1)
     ws3.auto_filter.ref = (
         f"A1:{get_column_letter(len(fixed) + len(dates))}{max(last3, 1)}"
     )
@@ -533,7 +553,7 @@ def build_workbook(
         ("", ""),
         (
             "下钻",
-            "汇总/逐日明细/透视三张表均按 省 → 租户 → 项目 → 地块 四级分组；"
+            "汇总/逐日明细/透视三张表均按 省 → 租户 → 项目 → 地块 四级分组，省/租户/项目/地块各占一列（明细行四列完整，便于筛选；汇总行只填到本级，下一级写“小计”）；"
             "点击左侧 1/2/3/4 或 +/- 可折叠展开。汇总行的百分比为已计算地块的面积加权值，面积为合计。",
         ),
         ("", ""),
