@@ -54,7 +54,7 @@ _SCENE_OSS_PAGE_LIMIT_BYTES = 16 * 1024 * 1024
 # 质量筛选字段优先读规范标量列，旧产品只写入 JSONB 时再回退，避免前端漏掉去云等级和云量来源。
 # Averages + meta; pixel_data excluded unless include_pixels=1
 _SCENE_COLS = """
-    land_id, tile_id, date, sensor, scene_id, land_name,
+    land_id, tile_id, date, acquired_at, sensor, scene_id, land_name,
     cloud_cover, cloud_cover_over_30, parcel_cloud_cover_pct,
     json_oss_key, pixel_data_url, pixel_count,
     rgb_url, large_rgb_url, rgb_oss_key,

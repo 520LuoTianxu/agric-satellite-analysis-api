@@ -24,6 +24,7 @@ from shapely.geometry import mapping
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 
+from agric_satellite_analysis_common.scene_time import normalize_acquired_at
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
@@ -240,6 +241,7 @@ def publish_optical_lonlat_to_oss_mq(
         "sensor": "S2",
         "scene_id": row["scene_id"],
         "land_name": row["land_name"],
+        "acquired_at": row.get("acquired_at"),
         "cloud_cover": row["cloud_cover"],
         "cloud_cover_over_30": row["cloud_cover_over_30"],
         "parcel_cloud_cover_pct": row["parcel_cloud_cover_pct"],
@@ -499,6 +501,7 @@ def emit_optical_lonlat(
         "date": date_str,
         "scene_id": scene_id,
         "land_name": meta["land_name"],
+        "acquired_at": normalize_acquired_at(scene.get("acquired_at")),
         "cloud_cover": cloud_f,
         "cloud_cover_over_30": cloud_over_30,
         "parcel_cloud_cover_pct": parcel_out,

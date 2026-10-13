@@ -97,6 +97,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
 )
 from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
 from agric_satellite_analysis_common.date_chunks import split_inclusive_date_range
+from agric_satellite_analysis_common.scene_time import normalize_acquired_at
 logger = structlog.get_logger()
 
 STAC_S1_COLLECTION = S1_STAC_COLLECTION
@@ -1086,6 +1087,7 @@ def _upsert_agri_s1(
         "sensor": "S1",
         "scene_id": scene_id,
         "land_name": meta["land_name"],
+        "acquired_at": normalize_acquired_at(scene.get("acquisition_datetime")),
         "cloud_cover": None,
         "cloud_cover_over_30": None,
         "parcel_cloud_cover_pct": None,

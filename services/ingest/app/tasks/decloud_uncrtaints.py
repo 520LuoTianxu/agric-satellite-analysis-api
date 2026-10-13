@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import structlog
+from agric_satellite_analysis_common.scene_time import stac_item_acquired_at
 from shapely.geometry import mapping
 from sqlalchemy import text
 
@@ -457,6 +458,7 @@ def _search_s2_l2a_windows(
             by_date[item_date] = {
                 "id": item.id,
                 "date": item_date,
+                "acquired_at": stac_item_acquired_at(item),
                 "cloud_cover": cloud,
                 "band_hrefs": hrefs,
                 "band_radiometry": band_radiometry,
