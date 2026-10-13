@@ -101,7 +101,7 @@ async def get_harvest_report(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ) -> HarvestReportOut:
-    parcels, _daily = await hr.load_report(db, filters)
+    parcels = await hr.load_parcels(db, filters)  # 列表不需要逐日明细
     rows = hr.sort_parcels(hr.apply_filters(parcels, filters), sort, order)
     start = (page - 1) * page_size
     return HarvestReportOut(
