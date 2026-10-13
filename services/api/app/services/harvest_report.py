@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Iterable
@@ -67,6 +68,20 @@ SORT_FIELDS = (
 )
 
 
+DEFAULT_EXPORT_EXCLUDE_BASE_IDS = "4,6,10,17,28,33,35,52,62"
+
+
+def export_exclude_base_ids() -> list[str]:
+    """Excel 导出排除的测试租户 base_id。
+
+    环境变量 HARVEST_EXPORT_EXCLUDE_BASE_IDS（逗号分隔）覆盖默认值；显式设为空串则不排除。
+    """
+    raw = os.getenv("HARVEST_EXPORT_EXCLUDE_BASE_IDS")
+    if raw is None:
+        raw = DEFAULT_EXPORT_EXCLUDE_BASE_IDS
+    return sorted({x.strip() for x in raw.split(",") if x.strip()}, key=lambda v: (len(v), v))
+
+
 @dataclass
 class ReportFilters:
     date_from: date
@@ -76,6 +91,8 @@ class ReportFilters:
     buckets: list[str] = field(default_factory=list)
     min_pct: float | None = None
     keyword: str | None = None
+    # 仅 Excel 导出使用：排除这些 base_id（测试租户）的地块；列表接口保持为空，不过滤。
+    exclude_base_ids: list[str] = field(default_factory=list)
 
 
 _LANDS = text(
@@ -90,6 +107,8 @@ _LANDS = text(
       AND (CAST(:kw AS text) IS NULL
            OR land_id = CAST(:kw AS text)
            OR land_name ILIKE '%' || CAST(:kw AS text) || '%')
+      AND (base_id IS NULL
+           OR CAST(base_id AS text) <> ALL(CAST(:exclude_base_ids AS text[])))
     ORDER BY land_id
     """
 )
@@ -458,6 +477,7 @@ async def load_report_raw(db: AsyncSession, filters: ReportFilters) -> tuple:
                     "group_id": filters.group_id or None,
                     "crop": filters.crop or None,
                     "kw": (filters.keyword or "").strip() or None,
+                    "exclude_base_ids": [str(b) for b in filters.exclude_base_ids],
                 },
             )
         ).fetchall()
@@ -618,6 +638,7 @@ async def load_parcels(
         "group_id": filters.group_id or None,
         "crop": filters.crop or None,
         "kw": (filters.keyword or "").strip() or None,
+        "exclude_base_ids": [str(b) for b in filters.exclude_base_ids],
     }
     common = {"sensor": SENSOR, "method_version": HARVEST_PROGRESS_METHOD_VERSION}
     lands = [dict(r._mapping) for r in (await db.execute(_LANDS, lp)).fetchall()]

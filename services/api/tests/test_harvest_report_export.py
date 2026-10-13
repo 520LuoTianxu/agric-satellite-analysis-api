@@ -199,6 +199,18 @@ async def _fake_load_simple(filters):
     return hr.build_report(filters, lands, [], [], {}, {}, date(2026, 10, 10))
 
 
+class ExcludeParamsTests(unittest.TestCase):
+    def test_hash_includes_exclusion_and_roundtrip(self):
+        f = hr.ReportFilters(date_from=date(2026, 8, 1), date_to=date(2026, 10, 10))
+        a = hx.params_of(f, "combined_pct", "desc", True)
+        f2 = hr.ReportFilters(date_from=date(2026, 8, 1), date_to=date(2026, 10, 10),
+                              exclude_base_ids=["4", "62"])
+        b = hx.params_of(f2, "combined_pct", "desc", True)
+        self.assertNotEqual(hx.params_hash(a), hx.params_hash(b))
+        self.assertEqual(hx.filters_from(b).exclude_base_ids, ["4", "62"])
+        self.assertEqual(hx.filters_from({"from": "2026-08-01", "to": "2026-10-10"}).exclude_base_ids, [])
+
+
 class ExportJobRouterTests(unittest.TestCase):
     def test_endpoints(self):
         from app.middleware.auth import require_roles  # noqa: F401
@@ -233,6 +245,7 @@ class ExportJobRouterTests(unittest.TestCase):
             self.assertEqual(d.content, b"abc")
             self.assertIn("attachment", d.headers["content-disposition"])
             self.assertEqual(c.get("/v1/agri/harvest-report/export-jobs/nope").status_code, 404)
+            self.assertIn("62", r.json()["params"]["exclude_base_ids"])
             bad = c.post("/v1/agri/harvest-report/export-jobs?status=xx")
             self.assertEqual(bad.status_code, 422)
 

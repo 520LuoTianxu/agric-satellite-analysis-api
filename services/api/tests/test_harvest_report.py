@@ -407,6 +407,47 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(wb["逐日明细"].max_row, 5)  # 只含筛选后地块（3 个分组行 + 1 条）
 
 
+class ExcludeTestTenantTests(unittest.TestCase):
+    def _client(self):
+        return EndpointTests._client(self)
+
+    def test_env_default_override_and_empty(self):
+        import os
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARVEST_EXPORT_EXCLUDE_BASE_IDS", None)
+            self.assertEqual(hr.export_exclude_base_ids(),
+                             ["4", "6", "10", "17", "28", "33", "35", "52", "62"])
+        with patch.dict(os.environ, {"HARVEST_EXPORT_EXCLUDE_BASE_IDS": " 7, 3 ,7,"}):
+            self.assertEqual(hr.export_exclude_base_ids(), ["3", "7"])
+        with patch.dict(os.environ, {"HARVEST_EXPORT_EXCLUDE_BASE_IDS": ""}):
+            self.assertEqual(hr.export_exclude_base_ids(), [])
+
+    def test_sql_has_exclusion_clause(self):
+        sql = str(hr._LANDS)
+        self.assertIn(":exclude_base_ids", sql)
+        self.assertIn("base_id IS NULL", sql)
+
+    def test_export_passes_exclusion_and_notes_line(self):
+        import os
+        app, mod = self._client()
+        load = AsyncMock(return_value=_build([_land("1")], [_row("1", "2026-09-01", 95)]))
+        with patch.object(mod.hr, "load_report", load), patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARVEST_EXPORT_EXCLUDE_BASE_IDS", None)
+            r = TestClient(app).get("/v1/agri/harvest-report/export.xlsx?from=2026-08-01&to=2026-10-10")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("62", load.await_args.args[1].exclude_base_ids)
+        ws = load_workbook(io.BytesIO(r.content))["说明"]
+        vals = [c.value for row in ws.iter_rows() for c in row]
+        self.assertIn("已排除测试租户", vals)
+
+    def test_list_does_not_exclude(self):
+        app, mod = self._client()
+        load = AsyncMock(return_value=[])
+        with patch.object(mod.hr, "load_parcels", load):
+            TestClient(app).get("/v1/agri/harvest-report")
+        self.assertEqual(load.await_args.args[1].exclude_base_ids, [])
+
+
 class LoadReportTests(unittest.TestCase):
     def test_reads_all_queries_and_tolerates_missing_coverage_table(self):
         class _Res:
