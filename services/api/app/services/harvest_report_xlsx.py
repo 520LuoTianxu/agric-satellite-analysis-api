@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+from copy import copy
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -88,7 +89,6 @@ SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
     ("confidence_zh", "置信等级", 8, None),
     ("confirmed_zh", "已确认", 7, None),
     ("obs_count", "区间结果期数", 9, "0"),
-    ("method_version", "算法版本", 26, None),
 ]
 
 DAILY_COLS: list[tuple[str, str, int, str | None]] = [
@@ -116,7 +116,6 @@ DAILY_COLS: list[tuple[str, str, int, str | None]] = [
     ("confidence", "置信度", 8, "0.00"),
     ("confidence_zh", "置信等级", 8, None),
     ("confirmed_zh", "已确认", 7, None),
-    ("method_version", "算法版本", 26, None),
 ]
 LEVEL_ZH = ["省", "租户", "项目", "地块"]
 HIER_KEYS = ["province_name", "base_name", "group_name", "land_name"]
@@ -225,24 +224,50 @@ def _header(ws, row: int, cols) -> None:
     ws.row_dimensions[row].height = 32
 
 
+_STYLE_CACHE: dict[tuple, Any] = {}
+
+
+def _apply_style(c, level: int, num_fmt: str | None, align: str | None, subtotal: bool) -> None:
+    """逐格设置 font/fill/border 会触发 openpyxl 样式表哈希（2 万地块时占 70%+ 耗时），
+    这里按样式组合缓存 StyleArray，同组合直接复制，输出与逐项设置完全一致。"""
+    wb_id = id(c.parent.parent)
+    key = (wb_id, level, num_fmt, align, subtotal)
+    cached = _STYLE_CACHE.get(key)
+    if cached is not None:
+        c._style = copy(cached)
+        return
+    group_row = level < 3
+    c.border = BORDER
+    c.font = LEVEL_FONTS[level] if group_row else BASE_FONT
+    if group_row:
+        c.fill = PatternFill("solid", fgColor=LEVEL_FILLS[level])
+    if num_fmt:
+        c.number_format = num_fmt
+    if align:
+        c.alignment = Alignment(horizontal=align, vertical="center")
+    if subtotal:
+        c.font = Font(bold=True, italic=True, size=10, color="6B7280")
+    _STYLE_CACHE[key] = copy(c._style)
+
+
 def _write_row(ws, r: int, cols, rec: dict[str, Any], level: int) -> None:
     """level 0-2 为汇总行（底色+粗体），3 为明细行；行分组 outline 层级 = level。"""
     group_row = level < 3
     for i, (k, _t, _w, fmt) in enumerate(cols, start=1):
         v = rec.get(k)
         c = ws.cell(row=r, column=i, value=v)
-        c.border = BORDER
-        c.font = LEVEL_FONTS[level] if group_row else BASE_FONT
-        if group_row:
-            c.fill = PatternFill("solid", fgColor=LEVEL_FILLS[level])
-        if fmt and v is not None:
-            c.number_format = fmt
+        align = None
         if i <= N_HIER:
-            c.alignment = Alignment(horizontal="left", vertical="center")
-            if v == "小计":
-                c.font = Font(bold=True, italic=True, size=10, color="6B7280")
+            align = "left"
         elif isinstance(v, str):
-            c.alignment = Alignment(horizontal="center" if k.endswith("_zh") else "left", vertical="center")
+            align = "center" if k.endswith("_zh") else "left"
+        _apply_style(
+            c,
+            level,
+            fmt if (fmt and v is not None) else None,
+            align,
+            i <= N_HIER and v == "小计",
+        )
     if level:
         ws.row_dimensions[r].outline_level = level
     if group_row:
@@ -310,6 +335,7 @@ def build_workbook(
     carry_forward: bool = True,
 ) -> bytes:
     gen = (generated_at or datetime.now(CN_TZ)).astimezone(CN_TZ)
+    _STYLE_CACHE.clear()
     wb = Workbook()
 
     # ---- Sheet1 汇总 ----
@@ -526,9 +552,8 @@ def build_workbook(
         ("", ""),
         (
             "算法",
-            "Sentinel-2 残茬/裸土单调判别 + Sentinel-1 佐证（"
-            f"{parcels[0]['method_version'] if parcels and parcels[0]['method_version'] else 's2s1_residue_monotonic_v4'}"
-            "）：每像元在本季内状态单调（未收获→疑似收获→已收获），占比只增不减。",
+            "Sentinel-2 残茬/裸土单调判别 + Sentinel-1 佐证："
+            "每像元在本季内状态单调（未收获→疑似收获→已收获），占比只增不减。",
         ),
         (
             "落库门槛",

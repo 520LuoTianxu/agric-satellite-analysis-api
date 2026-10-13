@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.harvest_progress import HARVEST_PROGRESS_METHOD_VERSION
 from app.middleware.auth import OrgContext, require_roles
 from app.services import harvest_report as hr
+from app.services import harvest_report_export as hx
 from app.services.harvest_report_xlsx import build_workbook
 
 router = APIRouter(prefix="/agri", tags=["agri"])
@@ -142,4 +143,69 @@ async def export_harvest_report(
         content=content,
         media_type=XLSX_MIME,
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+# ---------------- 异步导出任务（全量地块时同步接口会超过网关 60s） ----------------
+
+
+def _redis(request: Request):
+    r = getattr(request.app.state, "redis_client", None)
+    if r is None:
+        raise HTTPException(503, "Redis 未就绪")
+    return r
+
+
+@router.post("/harvest-report/export-jobs", status_code=202)
+async def create_harvest_export_job(
+    request: Request,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+    filters: Annotated[hr.ReportFilters, Depends(_filters)],
+    sort: str = Query("combined_pct"),
+    order: Literal["asc", "desc"] = Query("desc"),
+    carry_forward: bool = Query(True, description="透视表未入库日沿用上一期合计%"),
+) -> dict[str, Any]:
+    """创建导出任务（参数与 export.xlsx 一致，走 query string）；同参数进行中的任务直接复用。"""
+    params = hx.params_of(filters, sort, order, carry_forward)
+    user = getattr(ctx, "user", None)
+    job, reused = await hx.create_job(
+        _redis(request), params, str(getattr(user, "id", "") or "") or None
+    )
+    return {**hx.public_view(job), "reused": reused}
+
+
+@router.get("/harvest-report/export-jobs/{job_id}")
+async def get_harvest_export_job(
+    job_id: str,
+    request: Request,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+) -> dict[str, Any]:
+    job = await hx.get_job(_redis(request), job_id)
+    if job is None:
+        raise HTTPException(404, "导出任务不存在或已过期（24 小时）")
+    return hx.public_view(job)
+
+
+@router.get("/harvest-report/export-jobs/{job_id}/download")
+async def download_harvest_export_job(
+    job_id: str,
+    request: Request,
+    ctx: Annotated[OrgContext, Depends(_reader)],
+) -> StreamingResponse:
+    job = await hx.get_job(_redis(request), job_id)
+    if job is None:
+        raise HTTPException(404, "导出任务不存在或已过期（24 小时）")
+    if job["status"] != "done" or not job.get("object_key"):
+        raise HTTPException(409, f"导出任务尚未完成（{job['status']}）")
+    storage = hx._storage()
+    from urllib.parse import quote
+
+    name = job["file_name"]
+    return StreamingResponse(
+        storage.iter_bytes(job["object_key"]),
+        media_type=XLSX_MIME,
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{name}\"; filename*=UTF-8''{quote(name)}",
+            **({"Content-Length": str(job["size_bytes"])} if job.get("size_bytes") else {}),
+        },
     )

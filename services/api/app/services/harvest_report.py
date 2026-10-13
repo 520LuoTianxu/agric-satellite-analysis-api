@@ -444,6 +444,11 @@ async def load_report(
     db: AsyncSession, filters: ReportFilters
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """读库并组装（未分页）。只读；覆盖表缺失（迁移未执行）时按无标记处理。"""
+    return build_report(*(await load_report_raw(db, filters)))
+
+
+async def load_report_raw(db: AsyncSession, filters: ReportFilters) -> tuple:
+    """只读库，返回 build_report 的入参；异步导出据此把纯 CPU 组装移出事件循环。"""
     lands = [
         dict(r._mapping)
         for r in (
@@ -490,7 +495,7 @@ async def load_report(
                     coverage[str(r.land_id)] = dict(r._mapping)
         except Exception as exc:  # 覆盖表未建：全部按“无标记”处理
             logger.warning("harvest_report_coverage_unavailable", error=str(exc)[:200])
-    return build_report(filters, lands, rows, prev, coverage, latest)
+    return (filters, lands, rows, prev, coverage, latest)
 
 
 # ---------------------------------------------------------------------------
