@@ -52,6 +52,12 @@ SOURCE_SQL = text(
         'Asia/Shanghai' AS timezone,
         CAST(al.base_id AS CHAR) AS base_id,
         CAST(lg.base_id AS CHAR) AS group_base_id,
+        (
+            SELECT ab.base_name
+            FROM agriculture_baseinfo AS ab
+            WHERE ab.base_id = al.base_id
+            LIMIT 1
+        ) AS base_name,
         al.province_code,
         al.province_name,
         al.city_code,
@@ -95,6 +101,7 @@ class SourceParcel:
     region: str | None
     timezone: str
     base_id: str | None
+    base_name: str | None
     province_code: str | None
     province_name: str | None
     city_code: str | None
@@ -222,6 +229,7 @@ def normalize_source_row(row: dict[str, Any]) -> SourceParcel:
 
     direct_fields = (
         "base_id",
+        "base_name",
         "province_code",
         "province_name",
         "city_code",
@@ -284,6 +292,7 @@ def normalize_source_row(row: dict[str, Any]) -> SourceParcel:
         region=None,
         timezone="Asia/Shanghai",
         base_id=normalized["base_id"],
+        base_name=normalized["base_name"],
         province_code=normalized["province_code"],
         province_name=normalized["province_name"],
         city_code=normalized["city_code"],
@@ -431,6 +440,7 @@ def _land_values(
         "org_code": record.org_code,
         "org_name": record.org_name,
         "base_id": record.base_id,
+        "base_name": record.base_name,
         "province_code": record.province_code,
         "province_name": record.province_name,
         "city_code": record.city_code,
@@ -522,6 +532,7 @@ async def _apply_batch(
         "org_code",
         "org_name",
         "base_id",
+        "base_name",
         "province_code",
         "province_name",
         "city_code",

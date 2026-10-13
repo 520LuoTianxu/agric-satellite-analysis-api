@@ -89,6 +89,8 @@ class LandParcel(Base):
     org_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     org_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     base_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 租户/基地名称，同步时由 MySQL agriculture_baseinfo 按 base_id 回填。
+    base_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     province_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     province_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     city_code: Mapped[str | None] = mapped_column(String(32), nullable=True)

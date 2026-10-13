@@ -236,33 +236,86 @@ class WorkbookTests(unittest.TestCase):
         wb = self._wb()
         self.assertEqual(wb.sheetnames, ["汇总", "逐日明细", "透视", "说明"])
         s = wb["汇总"]
-        self.assertEqual(s["A7"].value, "地块ID")
+        self.assertEqual([c.value for c in s[7][:5]], ["省", "租户", "项目", "地块", "地块ID"])
         self.assertEqual(s["A5"].value, 3)  # 地块数
-        self.assertEqual(s.freeze_panes, "C8")
+        self.assertEqual(s.freeze_panes, "E8")
         self.assertTrue(s.auto_filter.ref.startswith("A7:"))
-        self.assertEqual(s.max_row, 10)
+        self.assertEqual(s.max_row, 13)  # 省/租户/项目 3 个汇总行 + 3 块地
         self.assertGreater(len(s.conditional_formatting), 0)
         d = wb["逐日明细"]
-        self.assertEqual(d.max_row, 4)
-        self.assertEqual(d.freeze_panes, "C2")
+        self.assertEqual(d.max_row, 7)
+        self.assertEqual(d.freeze_panes, "E2")
+        self.assertEqual(wb["透视"].freeze_panes, "E2")
         self.assertIn("2026-10-10 16:30", wb["说明"]["B1"].value)
 
     def test_pivot_carry_forward(self):
         p = self._wb()["透视"]
         self.assertEqual(
-            [c.value.date() for c in p[1][3:]],
+            [c.value.date() for c in p[1][6:]],
             [date(2026, 9, 1), date(2026, 9, 5), date(2026, 9, 10)],
         )
-        rows = {r[0].value: [c.value for c in r[3:]] for r in p.iter_rows(min_row=2)}
+        rows = {r[4].value: [c.value for c in r[6:]] for r in p.iter_rows(min_row=5)}
         self.assertEqual(rows["1"], [10, 10, 60])  # 09-05 沿用
         self.assertEqual(rows["2"], [None, 30, 30])
         self.assertEqual(rows["3"], [None, None, None])
-        self.assertTrue(p.cell(row=2, column=5).font.i)
+        self.assertTrue(p.cell(row=5, column=8).font.i)
         plain = {
-            r[0].value: [c.value for c in r[3:]]
-            for r in self._wb(carry=False)["透视"].iter_rows(min_row=2)
+            r[4].value: [c.value for c in r[6:]]
+            for r in self._wb(carry=False)["透视"].iter_rows(min_row=5)
         }
         self.assertEqual(plain["1"], [10, None, 60])
+
+
+    def test_four_level_drilldown_outline_and_weighted_subtotals(self):
+        lands = [
+            _land("1", 100, province_name="吉林省", base_name="租户A", group_name="项目1"),
+            _land("2", 300, province_name="吉林省", base_name="租户A", group_name="项目1"),
+            _land("3", 50, province_name="辽宁省", base_name="租户B", group_name="项目2"),
+        ]
+        parcels, daily = _build(
+            lands,
+            [_row("1", "2026-09-01", 100), _row("2", "2026-09-01", 20), _row("3", "2026-09-01", 50)],
+        )
+        data = build_workbook(parcels, daily, hr.summarize(parcels), F)
+        wb = load_workbook(io.BytesIO(data))
+        s = wb["汇总"]
+        tree = [
+            tuple(s.cell(row=r, column=c).value for c in range(1, 5))
+            + (s.row_dimensions[r].outline_level,)
+            for r in range(8, s.max_row + 1)
+        ]
+        self.assertEqual(
+            tree,
+            [
+                ("吉林省", "小计", None, None, 0),
+                ("吉林省", "租户A", "小计", None, 1),
+                ("吉林省", "租户A", "项目1", "小计", 2),
+                ("吉林省", "租户A", "项目1", "地块1", 3),
+                ("吉林省", "租户A", "项目1", "地块2", 3),
+                ("辽宁省", "小计", None, None, 0),
+                ("辽宁省", "租户B", "小计", None, 1),
+                ("辽宁省", "租户B", "项目2", "小计", 2),
+                ("辽宁省", "租户B", "项目2", "地块3", 3),
+            ],
+        )
+        cols = [c.value for c in s[7]]
+        pct = cols.index("合计%(已收获+疑似)") + 1
+        area = cols.index("面积(亩)") + 1
+        self.assertEqual(s.cell(row=8, column=area).value, 400)
+        self.assertEqual(s.cell(row=8, column=pct).value, 40.0)  # (100*100+300*20)/400
+        self.assertFalse(s.sheet_properties.outlinePr.summaryBelow)
+        p = wb["透视"]
+        self.assertEqual(p.cell(row=2, column=1).value, "吉林省")
+        self.assertEqual(p.cell(row=2, column=2).value, "小计")
+        self.assertEqual(p.cell(row=2, column=7).value, 40.0)
+        d = wb["逐日明细"]
+        self.assertEqual([d.cell(row=5, column=c).value for c in range(1, 5)],
+                         ["吉林省", "租户A", "项目1", "地块1"])
+        for ws in (s, p, d):
+            self.assertTrue(ws.auto_filter.ref.endswith(f"{ws.max_row}"))
+            self.assertEqual(ws.auto_filter.ref.split(":")[1].rstrip("0123456789"),
+                             ws.cell(row=1, column=ws.max_column).column_letter)
+        self.assertEqual(wb["逐日明细"].row_dimensions[5].outline_level, 3)
 
 
 class EndpointTests(unittest.TestCase):
@@ -349,7 +402,7 @@ class EndpointTests(unittest.TestCase):
         )
         wb = load_workbook(io.BytesIO(r.content))
         self.assertEqual(wb["汇总"]["A5"].value, 1)
-        self.assertEqual(wb["逐日明细"].max_row, 2)  # 只含筛选后地块
+        self.assertEqual(wb["逐日明细"].max_row, 5)  # 只含筛选后地块（3 个分组行 + 1 条）
 
 
 class LoadReportTests(unittest.TestCase):

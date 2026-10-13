@@ -544,6 +544,7 @@ CREATE TABLE agric_satellite.land_parcels (
     org_code text,
     org_name text,
     base_id text,
+    base_name text,
     province_code text,
     province_name text,
     city_code text,
