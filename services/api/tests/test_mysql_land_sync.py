@@ -15,6 +15,7 @@ def _row(**overrides):
         "farms_id": "1001",
         "farms_name": "测试项目",
         "base_id": "12",
+        "base_name": "测试租户",
         "province_code": "43",
         "province_name": "湖南省",
         "city_code": "4301",
@@ -69,3 +70,20 @@ def test_subtract_months_uses_calendar_months():
 def test_next_sync_at_is_beijing_22_00():
     now = datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc)
     assert next_sync_at(now) == datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)
+
+
+def test_base_name_is_normalized_and_hashed():
+    parcel = normalize_source_row(_row())
+    assert parcel.base_name == "测试租户"
+    assert normalize_source_row(_row(base_name="  ")).base_name is None
+    assert normalize_source_row(_row(base_name="新租户")).sync_hash != parcel.sync_hash
+
+
+def test_source_sql_reads_base_name_from_baseinfo():
+    from app.services.mysql_land_sync import SOURCE_SQL, _land_values, _selected_source_query
+
+    assert "agriculture_baseinfo" in SOURCE_SQL.text
+    query, _ = _selected_source_query(["2001"])
+    assert "AS base_name" in query.text
+    values = _land_values(normalize_source_row(_row()), None, datetime.now(timezone.utc))
+    assert values["base_name"] == "测试租户"

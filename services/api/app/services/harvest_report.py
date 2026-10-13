@@ -81,7 +81,7 @@ class ReportFilters:
 _LANDS = text(
     """
     SELECT land_id, land_name, group_id, group_name, farm_id, crop_type,
-           province_name, city_name, county_name,
+           base_name, province_name, city_name, county_name,
            COALESCE(land_area_mu, area_ha * 15) AS area_mu
     FROM agric_satellite.land_parcels
     WHERE deleted_at IS NULL
@@ -352,6 +352,7 @@ def _land_cols(land: dict[str, Any], area: float | None) -> dict[str, Any]:
         "group_name": land.get("group_name"),
         "farm_id": land.get("farm_id"),
         "crop_type": land.get("crop_type"),
+        "base_name": land.get("base_name"),
         "province_name": land.get("province_name"),
         "city_name": land.get("city_name"),
         "county_name": land.get("county_name"),

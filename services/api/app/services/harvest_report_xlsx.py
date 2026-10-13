@@ -1,4 +1,7 @@
-"""收获进度报表 Excel（openpyxl）：汇总 / 逐日明细 / 透视 / 说明 四个工作表。"""
+"""收获进度报表 Excel（openpyxl）：汇总 / 逐日明细 / 透视 / 说明 四个工作表。
+
+前三张表按 省 → 租户(base_name) → 项目(group_name) → 地块 四级行分组下钻。
+"""
 
 from __future__ import annotations
 
@@ -40,29 +43,44 @@ PCT = '0.0"%"'
 MU = "#,##0.00"
 DATE = "yyyy-mm-dd"
 
+# 四级下钻：省级 → 租户级 → 项目级 → 地块级
+LEVELS: list[tuple[str, str, str]] = [
+    ("province_name", "省", "未知省份"),
+    ("base_name", "租户", "未知租户"),
+    ("group_name", "项目", "未分组项目"),
+]
+LEVEL_FILLS = ["CFE8D8", "E1F1E6", "F1F8F3"]
+LEVEL_FONTS = [
+    Font(bold=True, size=12, color="14532D"),
+    Font(bold=True, size=11, color="166534"),
+    Font(bold=True, size=10, color="15803D"),
+]
+BASE_FONT = Font(name="微软雅黑", size=10)
+
 # (key, 表头, 列宽, 数字格式)
 SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
-    ("land_id", "地块ID", 10, None),
-    ("land_name", "地块名称", 24, None),
-    ("group_name", "分组/农场", 18, None),
+    ("tree_name", "省 / 租户 / 项目 / 地块", 36, None),
+    ("level_zh", "层级", 7, None),
+    ("land_id", "地块ID", 12, None),
+    ("land_count", "地块数", 8, "#,##0"),
+    ("computed_count", "已计算地块", 9, "#,##0"),
     ("crop_type", "作物", 8, None),
-    ("province_name", "省", 12, None),
     ("city_name", "市", 10, None),
     ("county_name", "区县", 10, None),
-    ("area_mu", "面积(亩)", 11, MU),
+    ("area_mu", "面积(亩)", 12, MU),
+    ("harvested_pct", "已收获%", 10, PCT),
+    ("suspected_pct", "疑似收获%", 10, PCT),
+    ("combined_pct", "合计%(已收获+疑似)", 13, PCT),
+    ("harvested_area_mu", "已收获面积(亩)", 13, MU),
+    ("combined_area_mu", "合计收获面积(亩)", 14, MU),
+    ("newly_combined_pct", "较上期新增%", 11, PCT),
+    ("status_zh", "状态", 9, None),
+    ("bucket_zh", "进度分档", 14, None),
     ("season_start", "本季起始日", 12, DATE),
     ("first_harvest_date", "首次收获日", 12, DATE),
     ("latest_date", "最新结果日", 12, DATE),
     ("latest_obs_date", "最新影像日", 12, DATE),
     ("days_since_last_image", "距最新影像(天)", 10, "0"),
-    ("harvested_pct", "已收获%", 10, PCT),
-    ("suspected_pct", "疑似收获%", 10, PCT),
-    ("combined_pct", "合计%(已收获+疑似)", 14, PCT),
-    ("harvested_area_mu", "已收获面积(亩)", 12, MU),
-    ("combined_area_mu", "合计收获面积(亩)", 13, MU),
-    ("newly_combined_pct", "较上期新增%", 11, PCT),
-    ("status_zh", "状态", 9, None),
-    ("bucket_zh", "进度分档", 14, None),
     ("confidence", "置信度", 8, "0.00"),
     ("confidence_zh", "置信等级", 8, None),
     ("confirmed_zh", "已确认", 7, None),
@@ -71,21 +89,23 @@ SUMMARY_COLS: list[tuple[str, str, int, str | None]] = [
 ]
 
 DAILY_COLS: list[tuple[str, str, int, str | None]] = [
+    ("tree_name", "省 / 租户 / 项目 / 地块", 36, None),
+    ("level_zh", "层级", 7, None),
     ("land_id", "地块ID", 10, None),
-    ("land_name", "地块名称", 24, None),
-    ("group_name", "分组/农场", 18, None),
+    ("land_count", "地块数", 8, "#,##0"),
+    ("record_count", "记录数", 8, "#,##0"),
+    ("date", "观测日", 12, DATE),
     ("crop_type", "作物", 8, None),
     ("county_name", "区县", 10, None),
-    ("area_mu", "面积(亩)", 11, MU),
-    ("date", "观测日", 12, DATE),
+    ("area_mu", "面积(亩)", 12, MU),
     ("status_zh", "状态", 9, None),
     ("harvested_pct", "已收获%", 10, PCT),
     ("suspected_pct", "疑似收获%", 10, PCT),
     ("combined_pct", "合计%", 10, PCT),
     ("newly_harvested_pct", "新增已收获%", 11, PCT),
     ("newly_combined_pct", "较上期新增合计%", 13, PCT),
-    ("harvested_area_mu", "已收获面积(亩)", 12, MU),
-    ("combined_area_mu", "合计收获面积(亩)", 13, MU),
+    ("harvested_area_mu", "已收获面积(亩)", 13, MU),
+    ("combined_area_mu", "合计收获面积(亩)", 14, MU),
     ("valid_pct", "有效像元%", 10, PCT),
     ("season_start", "本季起始日", 12, DATE),
     ("confidence", "置信度", 8, "0.00"),
@@ -93,6 +113,7 @@ DAILY_COLS: list[tuple[str, str, int, str | None]] = [
     ("confirmed_zh", "已确认", 7, None),
     ("method_version", "算法版本", 26, None),
 ]
+LEVEL_ZH = ["省", "租户", "项目", "地块"]
 
 
 def _decorate(r: dict[str, Any]) -> dict[str, Any]:
@@ -108,6 +129,74 @@ def _decorate(r: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _level_key(rec: dict[str, Any], depth: int) -> tuple[str, ...]:
+    out = []
+    for key, _zh, missing in LEVELS[:depth]:
+        v = rec.get(key)
+        out.append(str(v).strip() if v not in (None, "") else missing)
+    return tuple(out)
+
+
+def _tree(records: list[dict[str, Any]]):
+    """按 省→租户→项目 分组，返回 [(level, path, members)] 前序遍历（组行在前）。"""
+    ordered = sorted(
+        records,
+        key=lambda r: (
+            _level_key(r, 3),
+            str(r.get("land_name") or ""),
+            str(r.get("land_id") or ""),
+            r.get("date") or date.min,
+        ),
+    )
+    out: list[tuple[int, tuple[str, ...], list[dict[str, Any]]]] = []
+
+    def walk(level: int, prefix: tuple[str, ...], members: list[dict[str, Any]]):
+        if level == 3:
+            return
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for m in members:
+            groups.setdefault(_level_key(m, level + 1)[level], []).append(m)
+        for name, sub in groups.items():
+            out.append((level, prefix + (name,), sub))
+            walk(level + 1, prefix + (name,), sub)
+
+    walk(0, (), ordered)
+    return out
+
+
+def _weighted(items: list[tuple[float | None, float | None]]) -> float | None:
+    num = den = 0.0
+    for area, pct in items:
+        if pct is None:
+            continue
+        a = float(area) if area else 0.0
+        num += a * float(pct)
+        den += a
+    if den > 0:
+        return round(num / den, 1)
+    vals = [float(p) for _a, p in items if p is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _agg(parcels: list[dict[str, Any]]) -> dict[str, Any]:
+    computed = [p for p in parcels if p.get("bucket") != "not_computed"]
+
+    def s(key: str, rows) -> float | None:
+        vals = [float(r[key]) for r in rows if r.get(key) is not None]
+        return round(sum(vals), 2) if vals else None
+
+    return {
+        "land_count": len(parcels),
+        "computed_count": len(computed),
+        "area_mu": s("area_mu", parcels),
+        "harvested_area_mu": s("harvested_area_mu", computed),
+        "combined_area_mu": s("combined_area_mu", computed),
+        "harvested_pct": _weighted([(p.get("area_mu"), p.get("harvested_pct")) for p in computed]),
+        "suspected_pct": _weighted([(p.get("area_mu"), p.get("suspected_pct")) for p in computed]),
+        "combined_pct": _weighted([(p.get("area_mu"), p.get("combined_pct")) for p in computed]),
+    }
+
+
 def _header(ws, row: int, cols) -> None:
     for i, (_k, title, width, _fmt) in enumerate(cols, start=1):
         c = ws.cell(row=row, column=i, value=title)
@@ -117,17 +206,34 @@ def _header(ws, row: int, cols) -> None:
     ws.row_dimensions[row].height = 32
 
 
-def _rows(ws, start: int, cols, records) -> int:
-    r = start
-    for rec in records:
-        for i, (k, _t, _w, fmt) in enumerate(cols, start=1):
-            v = rec.get(k)
-            c = ws.cell(row=r, column=i, value=v)
-            c.border = BORDER
-            if fmt and v is not None:
-                c.number_format = fmt
-        r += 1
-    return r - 1
+def _write_row(ws, r: int, cols, rec: dict[str, Any], level: int) -> None:
+    """level 0-2 为汇总行（底色+粗体），3 为明细行；行分组 outline 层级 = level。"""
+    group_row = level < 3
+    for i, (k, _t, _w, fmt) in enumerate(cols, start=1):
+        v = rec.get(k)
+        c = ws.cell(row=r, column=i, value=v)
+        c.border = BORDER
+        c.font = LEVEL_FONTS[level] if group_row else BASE_FONT
+        if group_row:
+            c.fill = PatternFill("solid", fgColor=LEVEL_FILLS[level])
+        if fmt and v is not None:
+            c.number_format = fmt
+        if i == 1:
+            c.alignment = Alignment(indent=level * 2, vertical="center")
+        elif isinstance(v, str):
+            c.alignment = Alignment(horizontal="center" if k.endswith("_zh") else "left", vertical="center")
+    if level:
+        ws.row_dimensions[r].outline_level = level
+    if group_row:
+        ws.row_dimensions[r].height = 20 - level * 1
+
+
+def _outline_setup(ws) -> None:
+    # 汇总行在明细上方；左侧 1/2/3/4 按钮即可一键折叠到省/租户/项目/地块。
+    ws.sheet_properties.outlinePr.summaryBelow = False
+    ws.sheet_properties.outlinePr.applyStyles = False
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
 
 
 def _print_setup(ws, title_rows: str) -> None:
@@ -216,8 +322,27 @@ def build_workbook(
     ws.row_dimensions[4].height = 30
     hdr = 7
     _header(ws, hdr, SUMMARY_COLS)
-    last = _rows(ws, hdr + 1, SUMMARY_COLS, (_decorate(p) for p in parcels))
-    ws.freeze_panes = ws.cell(row=hdr + 1, column=3)
+    _outline_setup(ws)
+    r = hdr + 1
+    for level, path, members in _tree(parcels):
+        rec = {"tree_name": path[-1], "level_zh": LEVEL_ZH[level], **_agg(members)}
+        _write_row(ws, r, SUMMARY_COLS, rec, level)
+        r += 1
+        if level == 2:
+            for p in members:
+                d = _decorate(p)
+                d.update(tree_name=p.get("land_name") or p.get("land_id"), level_zh="地块", land_count=1,
+                         computed_count=0 if p.get("bucket") == "not_computed" else 1)
+                _write_row(ws, r, SUMMARY_COLS, d, 3)
+                fill = BUCKET_FILLS.get(p.get("bucket"))
+                if fill:
+                    cell = ws[f"{_col(SUMMARY_COLS, 'bucket_zh')}{r}"]
+                    cell.fill = PatternFill("solid", fgColor=fill)
+                    if p["bucket"] == "ge90":
+                        cell.font = Font(color="FFFFFF", bold=True)
+                r += 1
+    last = r - 1
+    ws.freeze_panes = ws.cell(row=hdr + 1, column=4)
     ws.auto_filter.ref = (
         f"A{hdr}:{get_column_letter(len(SUMMARY_COLS))}{max(last, hdr)}"
     )
@@ -232,39 +357,48 @@ def build_workbook(
         hdr + 1,
         last,
     )
-    bcol = _col(SUMMARY_COLS, "bucket_zh")
-    for r, p in enumerate(parcels, start=hdr + 1):
-        fill = BUCKET_FILLS.get(p["bucket"])
-        if fill:
-            cell = ws[f"{bcol}{r}"]
-            cell.fill = PatternFill("solid", fgColor=fill)
-            if p["bucket"] == "ge90":
-                cell.font = Font(color="FFFFFF", bold=True)
-
     _print_setup(ws, f"{hdr}:{hdr}")
 
     # ---- Sheet2 逐日明细 ----
     ws2 = wb.create_sheet("逐日明细")
     _header(ws2, 1, DAILY_COLS)
-    recs = sorted(daily, key=lambda r: (r["land_id"], r["date"] or date.min))
-    last2 = _rows(ws2, 2, DAILY_COLS, (_decorate(r) for r in recs))
-    ws2.freeze_panes = "C2"
+    _outline_setup(ws2)
+    r = 2
+    for level, path, members in _tree(daily):
+        lands = {m["land_id"] for m in members}
+        rec = {
+            "tree_name": path[-1],
+            "level_zh": LEVEL_ZH[level],
+            "land_count": len(lands),
+            "record_count": len(members),
+        }
+        _write_row(ws2, r, DAILY_COLS, rec, level)
+        r += 1
+        if level == 2:
+            for m in members:
+                d = _decorate(m)
+                d.update(tree_name=m.get("land_name") or m.get("land_id"), level_zh="地块")
+                _write_row(ws2, r, DAILY_COLS, d, 3)
+                r += 1
+    last2 = r - 1
+    ws2.freeze_panes = "D2"
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(DAILY_COLS))}{max(last2, 1)}"
     _pct_bars(ws2, DAILY_COLS, [("combined_pct", "EA580C")], 2, last2)
-
     _print_setup(ws2, "1:1")
 
     # ---- Sheet3 透视 ----
     ws3 = wb.create_sheet("透视")
+    _outline_setup(ws3)
     dates = sorted({r["date"] for r in daily if r["date"]})
     fixed = [
+        ("tree_name", "省 / 租户 / 项目 / 地块", 36),
         ("land_id", "地块ID", 10),
-        ("land_name", "地块名称", 24),
-        ("area_mu", "面积(亩)", 10),
+        ("area_mu", "面积(亩)", 11),
     ]
     for i, (_k, title, width) in enumerate(fixed, start=1):
         c = ws3.cell(row=1, column=i, value=title)
         c.fill, c.font, c.border = HEADER_FILL, HEADER_FONT, BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws3.column_dimensions[get_column_letter(i)].width = width
     for j, d in enumerate(dates, start=len(fixed) + 1):
         c = ws3.cell(row=1, column=j, value=d)
@@ -276,18 +410,16 @@ def build_workbook(
     cell_of: dict[tuple[str, date], dict[str, Any]] = {
         (r["land_id"], r["date"]): r for r in daily if r["date"]
     }
-    for i, p in enumerate(parcels, start=2):
-        ws3.cell(row=i, column=1, value=p["land_id"])
-        ws3.cell(row=i, column=2, value=p["land_name"])
-        a = ws3.cell(row=i, column=3, value=p["area_mu"])
-        a.number_format = MU
+    # 先算每块地每日值（含沿用），组行取面积加权
+    values: dict[str, list[tuple[Any, bool]]] = {}
+    for p in parcels:
         carried: dict[str, Any] | None = None
-        for j, d in enumerate(dates, start=len(fixed) + 1):
-            r = cell_of.get((p["land_id"], d))
-            if r is not None:
-                carried = r
-                c = ws3.cell(row=i, column=j, value=r["combined_pct"])
-                c.number_format = "0"
+        seq: list[tuple[Any, bool]] = []
+        for d in dates:
+            rr = cell_of.get((p["land_id"], d))
+            if rr is not None:
+                carried = rr
+                seq.append((rr["combined_pct"], False))
             elif (
                 carry_forward
                 and carried is not None
@@ -296,13 +428,46 @@ def build_workbook(
                     or carried["season_start"] == p["season_start"]
                 )
             ):
-                c = ws3.cell(row=i, column=j, value=carried["combined_pct"])
-                c.number_format = "0"
-                c.font = CARRY_FONT
-    if dates and parcels:
+                seq.append((carried["combined_pct"], True))
+            else:
+                seq.append((None, False))
+        values[p["land_id"]] = seq
+    r = 2
+    for level, path, members in _tree(parcels):
+        area = _agg(members)["area_mu"]
+        row_vals = [
+            _weighted([(m.get("area_mu"), values[m["land_id"]][j][0]) for m in members])
+            for j in range(len(dates))
+        ]
+        rec = {"tree_name": path[-1], "area_mu": area}
+        for j, v in enumerate(row_vals):
+            rec[f"d{j}"] = v
+        cols = [(k, t, w, MU if k == "area_mu" else None) for k, t, w in fixed] + [
+            (f"d{j}", "", 6, "0") for j in range(len(dates))
+        ]
+        _write_row(ws3, r, cols, rec, level)
+        r += 1
+        if level == 2:
+            for p in members:
+                prec = {
+                    "tree_name": p.get("land_name") or p["land_id"],
+                    "land_id": p["land_id"],
+                    "area_mu": p.get("area_mu"),
+                }
+                for j, (v, _c) in enumerate(values[p["land_id"]]):
+                    prec[f"d{j}"] = v
+                _write_row(ws3, r, cols, prec, 3)
+                for j, (v, carried_flag) in enumerate(values[p["land_id"]]):
+                    if carried_flag:
+                        ws3.cell(row=r, column=len(fixed) + 1 + j).font = Font(
+                            name="微软雅黑", size=10, italic=True
+                        )
+                r += 1
+    last3 = r - 1
+    if dates and last3 >= 2:
         rng = (
             f"{get_column_letter(len(fixed) + 1)}2:"
-            f"{get_column_letter(len(fixed) + len(dates))}{len(parcels) + 1}"
+            f"{get_column_letter(len(fixed) + len(dates))}{last3}"
         )
         ws3.conditional_formatting.add(
             rng,
@@ -327,9 +492,8 @@ def build_workbook(
         )
     ws3.freeze_panes = "D2"
     ws3.auto_filter.ref = (
-        f"A1:{get_column_letter(len(fixed) + len(dates))}{len(parcels) + 1}"
+        f"A1:{get_column_letter(len(fixed) + len(dates))}{max(last3, 1)}"
     )
-
     _print_setup(ws3, "1:1")
 
     # ---- Sheet4 说明 ----
@@ -358,13 +522,19 @@ def build_workbook(
         ),
         (
             "透视表",
-            "单元格为该观测日合计%（已收获+疑似）。"
+            "单元格为该观测日合计%（已收获+疑似）；省/租户/项目汇总行为面积加权值。"
             + (
                 "斜体为沿用上一期结果（结果单调，未入库日沿用上一期值，仅限同一季）；"
                 "首个结果日之前留空（≤门槛）。"
                 if carry_forward
                 else "仅显示入库观测日，未入库日留空。"
             ),
+        ),
+        ("", ""),
+        (
+            "下钻",
+            "汇总/逐日明细/透视三张表均按 省 → 租户 → 项目 → 地块 四级分组；"
+            "点击左侧 1/2/3/4 或 +/- 可折叠展开。汇总行的百分比为已计算地块的面积加权值，面积为合计。",
         ),
         ("", ""),
         ("字段", "定义"),
