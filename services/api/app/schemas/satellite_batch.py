@@ -135,6 +135,8 @@ class SatelliteBatchResponse(BaseModel):
     requested_land_count: int | None = None
     selected_land_ids: list[str] = Field(default_factory=list)
     skipped_land_count: int = 0
+    # 修复后仍无有效边界的地块不再拒绝整批，单独列出并说明原因。
+    skipped_invalid_lands: list[dict[str, str]] = Field(default_factory=list)
     date_from: date
     date_to: date
     groups: list[SatelliteBatchGroup]

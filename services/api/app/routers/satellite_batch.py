@@ -20,7 +20,10 @@ from app.services.smart_land_backfill import (
     LandSelectionError,
     ensure_land_parcels,
 )
-from app.services.satellite_batch import create_satellite_batch_jobs
+from app.services.satellite_batch import (
+    create_satellite_batch_jobs,
+    find_invalid_satellite_lands,
+)
 from app.services.satellite_history import backfill_satellite_history
 
 router = APIRouter()
@@ -78,6 +81,19 @@ async def backfill_satellite_batch(
             else str(exc)
         )
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    # 边界自动修复后仍无效的地块只跳过自身，不再让整批 422。
+    invalid_ids = await find_invalid_satellite_lands(lands)
+    skipped_invalid = [
+        {"land_id": str(land.land_id), "reason": "修复后仍缺少有效的WGS84多边形边界"}
+        for land in lands
+        if str(land.land_id) in invalid_ids
+    ]
+    lands = [land for land in lands if str(land.land_id) not in invalid_ids]
+    if not lands:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "没有可处理的有效地块", "skipped_invalid_lands": skipped_invalid},
+        )
     try:
         groups, jobs, _ = await create_satellite_batch_jobs(
             db,
@@ -102,7 +118,11 @@ async def backfill_satellite_batch(
             selection.get("requested_land_count") if selection else len(requested_land_ids)
         ),
         selected_land_ids=[str(land.land_id) for land in lands],
-        skipped_land_count=(selection.get("skipped_land_count", 0) if selection else 0),
+        skipped_land_count=(
+            (selection.get("skipped_land_count", 0) if selection else 0)
+            + len(skipped_invalid)
+        ),
+        skipped_invalid_lands=skipped_invalid,
         date_from=body.date_from,
         date_to=body.date_to,
         groups=groups,
