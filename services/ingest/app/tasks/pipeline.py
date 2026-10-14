@@ -569,6 +569,19 @@ def search_scenes(
 # ── Band reading ─────────────────────────────────────────────────────
 
 
+def _snap_window(window):
+    """小数窗口 → 覆盖它的整像元窗口（四周再各留 1 像元）。"""
+    import math
+
+    from rasterio.windows import Window
+
+    c0 = math.floor(window.col_off) - 1
+    r0 = math.floor(window.row_off) - 1
+    c1 = math.ceil(window.col_off + window.width) + 1
+    r1 = math.ceil(window.row_off + window.height) + 1
+    return Window(c0, r0, c1 - c0, r1 - r0)
+
+
 def _read_band_windowed_profiled(
     href: str,
     bounds: tuple,
@@ -577,14 +590,21 @@ def _read_band_windowed_profiled(
     *,
     target_crs: str = "EPSG:4326",
     resampling: Resampling = Resampling.bilinear,
+    snap_window: bool = False,
 ) -> BandReadResult[np.ndarray]:
-    """读取远程 COG 窗口，并分别记录远端 I/O 与本地重投影耗时。"""
+    """读取远程 COG 窗口，并分别记录远端 I/O 与本地重投影耗时。
+
+    ``snap_window=True`` 时把窗口外扩到整像元：rasterio 读取会把小数窗口偏移取整，
+    而 ``windows.transform`` 仍用小数偏移，二者不一致会造成最多 1 像元的错位。
+    默认关闭以保持既有产品输出不变（项目 COG 开启）。"""
     # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
     with gdal_read_slot(), rasterio.Env():
         t_io = time.perf_counter()
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
             window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
+            if snap_window:
+                window = _snap_window(window)
             # 用Rasterio掩膜同时保留源NoData与boundless窗口外区域，避免0参与双线性插值。
             data = src.read(1, window=window, boundless=True, masked=True)
             data = np.asarray(data.astype(np.float32).filled(np.nan))
@@ -647,6 +667,7 @@ def read_bands_windowed_parallel(
     scene_workers: int = 1,
     resampling_by_band: dict[str, Resampling] | None = None,
     log_context: dict[str, object] | None = None,
+    snap_window: bool = False,
 ) -> dict[str, np.ndarray]:
     """同景波段并行读取；可为 SCL 等分类波段指定 nearest 重采样。"""
 
@@ -661,6 +682,7 @@ def read_bands_windowed_parallel(
             target_transform,
             target_crs=target_crs,
             resampling=resampling,
+            snap_window=snap_window,
         )
 
     return run_parallel_band_jobs(

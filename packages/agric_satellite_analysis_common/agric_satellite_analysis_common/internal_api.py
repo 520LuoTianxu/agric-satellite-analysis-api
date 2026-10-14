@@ -565,6 +565,28 @@ def agri_satellite_batch_inputs(
         return _do(c)
 
 
+def project_harvest_inputs(
+    run_id: str,
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """项目收获分析运行输入：去重后地块（裁剪几何）+ 全部地块边界 + 参数。"""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = c.get(f"/v1/internal/project-harvest/runs/{run_id}/inputs")
+        _raise_for_status(r, context="project-harvest/inputs")
+        data = r.json()
+        if not isinstance(data, dict) or "parcels" not in data:
+            raise InternalApiError("project-harvest/inputs returned invalid data")
+        return data
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
 def project_cog_inputs(
     *,
     group_id: str | None = None,

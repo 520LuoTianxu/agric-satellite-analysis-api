@@ -144,7 +144,18 @@ def parcel_geometry(geojson: Mapping[str, Any] | str | None):
             polys.extend(p for p in part.geoms if not p.is_empty)
     if not polys:
         return None
-    return MultiPolygon(polys) if len(polys) > 1 else polys[0]
+    out = MultiPolygon(polys) if len(polys) > 1 else polys[0]
+    x0, y0, x1, y1 = out.bounds
+    if max(x1 - x0, y1 - y0) > max_span_deg():
+        return None  # 明显错误的边界（如跨 0.25°），不参与分块/掩膜
+    return out
+
+
+def max_span_deg() -> float:
+    try:
+        return float(os.environ.get("PROJECT_SCENE_COGS_MAX_SPAN_DEG", "0.05"))
+    except ValueError:
+        return 0.05
 
 
 def _snap_down(v: float, step: float) -> float:
