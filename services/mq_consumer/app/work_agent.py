@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 from agric_satellite_analysis_common.celery_app import (
     CPU_COMPUTE_QUEUE,
+    SATELLITE_DOWNLOAD_QUEUE,
     celery_client,
     task_queue_for,
 )
@@ -50,6 +51,7 @@ DEFAULT_TYPES = [
     WEATHER_WORK_TYPE,
     "soil_fetch",
     "admin_task",
+    "project_task",
 ]
 
 # 管理员页面只允许触发这组预先登记的任务；下载机再次校验，避免 API
@@ -62,6 +64,14 @@ ADMIN_TASK_NAMES = frozenset(
     }
 )
 
+# 项目级任务（COG 补数、收获分析）白名单；与 API services/project_tasks.py 保持一致。
+PROJECT_TASK_NAMES = frozenset(
+    {
+        "app.tasks.project_cogs.build_project_cogs",
+        "app.tasks.project_harvest.run_project_harvest",
+    }
+)
+
 COMPLETE_ON_DISPATCH_TYPES = frozenset(
     {
         "land_bootstrap",
@@ -71,6 +81,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
         "weather_backfill",
         "soil_fetch",
         "admin_task",
+        "project_task",
     }
 )
 
@@ -607,6 +618,20 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
             "admin_task_run_id": payload.get("admin_task_run_id"),
         }
 
+    if wtype == "project_task":
+        payload = dict(item.get("payload_json") or {})
+        task_name = str(payload.get("task_name") or "")
+        if task_name not in PROJECT_TASK_NAMES:
+            raise ValueError(f"unsupported project task: {task_name}")
+        options = {
+            "kwargs": dict(payload.get("kwargs") or {}),
+            "queue": task_queue_for(task_name, requested_queue=SATELLITE_DOWNLOAD_QUEUE),
+        }
+        if priority > BACKGROUND_TASK_PRIORITY:
+            options["priority"] = celery_priority_for(priority)
+        async_result = celery_client.send_task(task_name, **options)
+        return {"dispatched": [task_name], "celery_id": async_result.id}
+
     land_id, extras = _payload_parts(item)
     if not land_id:
         raise ValueError("work item missing land_id")
@@ -774,6 +799,7 @@ __all__ = [
     "max_local_backlog",
     "MAX_WORK_ITEM_ATTEMPTS",
     "ADMIN_TASK_NAMES",
+    "PROJECT_TASK_NAMES",
     "DEFAULT_TYPES",
     "claim_batch",
     "claim_types",
