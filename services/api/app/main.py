@@ -26,6 +26,7 @@ from app.routers import (
     crops,
     farms,
     lands,
+    project_harvest,
     project_monitoring,
     parcel_insights,
     jobs,
@@ -207,6 +208,8 @@ app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(lands.router, prefix=PREFIX, tags=["lands"])
 app.include_router(project_monitoring.router, prefix=PREFIX, tags=["projects"])
+app.include_router(project_harvest.router, prefix=PREFIX)  # 项目级收获分析 proj_ts_m1_v1
+app.include_router(project_harvest.internal_router, prefix=PREFIX)
 app.include_router(satellite_batch.router, prefix=PREFIX, tags=["lands"])
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])

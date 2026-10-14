@@ -47,7 +47,8 @@ from app.core.project_cogs import (
 
 logger = structlog.get_logger()
 
-CACHE_SENSOR = "S2L2A_COG"  # 与指数链路的窗口缓存分开（波段集合不同）
+NATIVE_10M_BANDS = ("B02", "B03", "B04", "B08")
+CACHE_SENSOR = "S2L2A_COG_SNAP"  # 与指数链路的窗口缓存分开（波段集合不同）
 
 
 class LocalDirStorage:
@@ -76,6 +77,9 @@ class LocalDirStorage:
 
     def get_bytes(self, key: str, *, max_bytes: int | None = None) -> bytes:
         return self._p(key).read_bytes()
+
+    def download_file(self, key: str, file_path: str) -> None:
+        Path(file_path).write_bytes(self._p(key).read_bytes())
 
 
 def _storage():
@@ -140,7 +144,9 @@ def read_item_stack(item: Mapping[str, Any], block: Block) -> np.ndarray:
 
     hrefs = _item_hrefs(item)
     shape = (block.height, block.width)
-    resampling = {"SCL": Resampling.nearest}
+    # 10 m 波段与块网格同格对齐，用最近邻保持原值（与原型一致）；20/60 m 波段双线性，SCL 最近邻
+    resampling = {b: Resampling.nearest for b in NATIVE_10M_BANDS}
+    resampling["SCL"] = Resampling.nearest
     arrays = read_scene_window(
         scene_id=str(item.get("id") or ""),
         sensor=CACHE_SENSOR,
@@ -159,6 +165,7 @@ def read_item_stack(item: Mapping[str, Any], block: Block) -> np.ndarray:
             target_crs=block.crs,
             resampling_by_band=resampling,
             log_context={"scene_id": item.get("id"), "sensor": CACHE_SENSOR},
+            snap_window=True,
         )
         try:
             write_scene_window(

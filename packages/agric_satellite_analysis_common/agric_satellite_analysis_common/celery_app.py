@@ -25,6 +25,7 @@ SATELLITE_TASK_PREFIXES = (
     "app.tasks.sentinel1.",
     "app.tasks.satellite_batch.",
     "app.tasks.project_cogs.",
+    "app.tasks.project_harvest.",
 )
 
 CPU_TASK_PREFIXES = (
@@ -70,6 +71,7 @@ TASK_ROUTES: dict[str, dict[str, str]] = {
     "app.tasks.sentinel1.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
     "app.tasks.satellite_batch.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
     "app.tasks.project_cogs.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
+    "app.tasks.project_harvest.*": {"queue": SATELLITE_DOWNLOAD_QUEUE},
     "app.tasks.vegetation.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.ndvi.*": {"queue": CPU_COMPUTE_QUEUE},
     "app.tasks.indices.*": {"queue": CPU_COMPUTE_QUEUE},

@@ -32,6 +32,7 @@ INGEST_INCLUDES = [
     "app.tasks.overview_preagg",
     "app.tasks.satellite_history",
     "app.tasks.project_cogs",
+    "app.tasks.project_harvest",
 ]
 
 celery_app = create_celery_app(

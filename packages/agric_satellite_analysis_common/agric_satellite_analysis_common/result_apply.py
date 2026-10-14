@@ -962,6 +962,163 @@ def apply_project_scene_cog(payload: dict[str, Any]) -> str:
         session.close()
 
 
+
+# ---------------------------------------------------------------- project harvest (proj_ts_m1_v1)
+_PH_STAT_COLS = (
+    "run_id", "land_id", "obs_date", "block_key", "weight_px", "area_mu", "crop_mu", "high_mu",
+    "medium_mu", "low_mu", "unharvested_mu", "cloud_mu", "noncrop_mu", "harvested_pct",
+    "cloud_pct", "peak_ndvi_median", "is_pick",
+)
+_PH_SUM_COLS = (
+    "run_id", "obs_date", "scope_type", "scope_key", "parcel_count", "area_mu", "crop_mu",
+    "high_mu", "medium_mu", "low_mu", "unharvested_mu", "cloud_mu", "noncrop_mu", "harvested_pct",
+)
+_PH_RASTER_COLS = (
+    "run_id", "block_key", "obs_date", "kind", "format", "oss_key", "crs", "width", "height",
+    "west", "south", "east", "north",
+)
+
+
+def _insert_sql(table: str, cols: tuple[str, ...]):
+    return text(
+        f"INSERT INTO agric_satellite.{table} ({', '.join(cols)}) "
+        f"VALUES ({', '.join(':' + c for c in cols)})"
+    )
+
+
+def project_harvest_rows(result: dict[str, Any], meta: dict[str, dict[str, Any]]) -> dict[str, list[dict]]:
+    """result.json → 三张表的行（纯函数，便于测试与本地模拟）。"""
+    from agric_satellite_analysis_common import project_harvest as ph
+
+    run_id = str(result["run_id"])
+    stats = []
+    for r in result.get("stats") or []:
+        stats.append({c: r.get(c) for c in _PH_STAT_COLS if c != "run_id"} | {"run_id": run_id})
+    summaries = [
+        {c: s.get(c) for c in _PH_SUM_COLS if c != "run_id"} | {"run_id": run_id}
+        for s in ph.build_summaries(result.get("stats") or [], meta, str(result["season_to"]))
+    ]
+    rasters = []
+    for r in result.get("rasters") or []:
+        w, so, e, n = r["bounds_4326"]
+        rasters.append(
+            {c: r.get(c) for c in _PH_RASTER_COLS if c in r and c != "run_id"}
+            | {"run_id": run_id, "west": w, "south": so, "east": e, "north": n}
+        )
+    return {"stats": stats, "summaries": summaries, "rasters": rasters}
+
+
+def _ph_table_missing(exc: Exception) -> bool:
+    msg = str(exc)
+    return "project_" in msg and ("does not exist" in msg or "UndefinedTable" in msg or "UndefinedColumn" in msg)
+
+
+def apply_project_harvest_result(payload: dict[str, Any]) -> str:
+    """下载机收获分析回执：running/failed 只更新运行状态；succeeded 读 OSS result.json 写统计/汇总/栅格并切换 is_current。"""
+    run_id = str(payload.get("run_id") or "")
+    if not run_id:
+        raise ValueError("project_harvest_result missing run_id")
+    status = str(payload.get("status") or "")
+    session = SyncSession()
+    try:
+        if status == "running":
+            session.execute(
+                text(
+                    "UPDATE agric_satellite.project_harvest_runs SET status='running', "
+                    "started_at=COALESCE(started_at, now()) WHERE run_id=CAST(:r AS uuid) AND status IN ('queued','running')"
+                ),
+                {"r": run_id},
+            )
+            session.commit()
+            return "running"
+        if status != "succeeded":
+            session.execute(
+                text(
+                    "UPDATE agric_satellite.project_harvest_runs SET status='failed', error=:e, finished_at=now() "
+                    "WHERE run_id=CAST(:r AS uuid) AND status <> 'succeeded'"
+                ),
+                {"r": run_id, "e": str(payload.get("error") or "failed")[:4000]},
+            )
+            session.commit()
+            return "failed"
+        key = str(payload.get("result_oss_key") or "")
+        result = json.loads(get_storage().get_bytes(key))
+        run = session.execute(
+            text(
+                "SELECT group_id, dedup_hash, method_version FROM agric_satellite.project_harvest_runs "
+                "WHERE run_id=CAST(:r AS uuid)"
+            ),
+            {"r": run_id},
+        ).mappings().first()
+        if run is None:
+            logger.warning("project_harvest_run_unknown run_id=%s", run_id)
+            return "unknown_run"
+        meta = {
+            str(m["land_id"]): dict(m)
+            for m in session.execute(
+                text(
+                    "SELECT land_id, land_status, town_name, village_name FROM agric_satellite.project_parcel_dedup "
+                    "WHERE group_id=:g AND dedup_hash=:h"
+                ),
+                {"g": run["group_id"], "h": run["dedup_hash"]},
+            ).mappings()
+        }
+        rows = project_harvest_rows(result, meta)
+        for table in ("project_harvest_parcel_stats", "project_harvest_summaries", "project_harvest_rasters"):
+            session.execute(text(f"DELETE FROM agric_satellite.{table} WHERE run_id=CAST(:r AS uuid)"), {"r": run_id})
+        if rows["stats"]:
+            session.execute(_insert_sql("project_harvest_parcel_stats", _PH_STAT_COLS), rows["stats"])
+        if rows["summaries"]:
+            session.execute(_insert_sql("project_harvest_summaries", _PH_SUM_COLS), rows["summaries"])
+        if rows["rasters"]:
+            session.execute(_insert_sql("project_harvest_rasters", _PH_RASTER_COLS), rows["rasters"])
+        pick_dates: dict[str, int] = {}
+        for r in result.get("stats") or []:
+            if r.get("is_pick"):
+                pick_dates[str(r["obs_date"])] = pick_dates.get(str(r["obs_date"]), 0) + 1
+        session.execute(
+            text(
+                "UPDATE agric_satellite.project_harvest_runs SET status='succeeded', finished_at=now(), error=NULL, "
+                "result_oss_key=:k, valid_dates=CAST(:vd AS date[]), blocks=CAST(:b AS jsonb), "
+                "thresholds=CAST(:t AS jsonb), scenes=CAST(:s AS jsonb), extras=CAST(:x AS jsonb) "
+                "WHERE run_id=CAST(:r AS uuid)"
+            ),
+            {
+                "r": run_id,
+                "k": key,
+                "vd": "{" + ",".join(result.get("valid_dates") or []) + "}",
+                "b": json.dumps(result.get("blocks") or [], ensure_ascii=False),
+                "t": json.dumps(result.get("thresholds") or {}),
+                "s": json.dumps(result.get("scenes") or {}, ensure_ascii=False),
+                "x": json.dumps(
+                    {"pick_dates": pick_dates, "unassigned_land_ids": result.get("unassigned_land_ids") or [],
+                     "elapsed_s": result.get("elapsed_s")}
+                ),
+            },
+        )
+        session.execute(
+            text(
+                "UPDATE agric_satellite.project_harvest_runs SET is_current=false "
+                "WHERE group_id=:g AND method_version=:m AND is_current AND run_id<>CAST(:r AS uuid)"
+            ),
+            {"g": run["group_id"], "m": run["method_version"], "r": run_id},
+        )
+        session.execute(
+            text("UPDATE agric_satellite.project_harvest_runs SET is_current=true WHERE run_id=CAST(:r AS uuid)"),
+            {"r": run_id},
+        )
+        session.commit()
+        return "succeeded"
+    except Exception as exc:
+        session.rollback()
+        if _ph_table_missing(exc):
+            logger.warning("project_harvest_tables_missing run_id=%s", run_id)
+            return "table_missing"
+        raise
+    finally:
+        session.close()
+
+
 def _apply_domain_from_payload(
     payload: dict[str, Any] | None,
     *,
@@ -997,6 +1154,8 @@ def _apply_domain_from_payload(
             "grade": payload.get("grade"),
             "filename": payload.get("filename"),
         }
+    elif kind == "project_harvest_result":
+        stats["project_harvest_result"] = apply_project_harvest_result(payload)
     elif kind == "project_scene_cog":
         stats["project_scene_cog"] = apply_project_scene_cog(payload)
     elif kind == "season_growth_report":
@@ -1120,6 +1279,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         "assessment_report",
         "season_growth_report",
         "project_scene_cog",
+        "project_harvest_result",
     ):
         stats["domain"] = _apply_domain_from_payload(envelope, status=status)
         return stats
