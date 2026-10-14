@@ -112,6 +112,9 @@ class MemStorage:
     def get_bytes(self, key):
         return self.objs[key]
 
+    def delete(self, key):
+        self.objs.pop(key, None)
+
     def download_file(self, key, path):
         with open(path, "wb") as f:
             f.write(self.objs[key])
@@ -160,7 +163,10 @@ def test_build_block_date_empty_returns_none():
         group_id="g", block=block, obs_date="2026-10-10", items=ITEMS[:1], storage=st,
         reader=_fake_reader({"A": 0}),
     ) is None
-    assert st.objs == {}
+    # 无 COG，只留空标记旁车
+    assert [k for k in st.objs if k.endswith(".tif")] == []
+    (side,) = [json.loads(v) for k, v in st.objs.items() if k.endswith(".json")]
+    assert side["empty"] is True and side["fingerprint"] == pc.block_fingerprint(block)
 
 
 def test_run_group_reports(monkeypatch):

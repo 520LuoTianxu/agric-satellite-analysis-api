@@ -10,6 +10,8 @@
 （地块集合/几何哈希/范围/尺寸/外扩距离，见 ``block_fingerprint``）与当前块一致时只重放回执，不重新下载；
 指纹不一致（项目新增/删除地块、边界改动、块范围变化）则重读原始影像重写该块该日。
 旧旁车无指纹：land_ids 与宽高一致则复用并回填指纹，否则重建。
+整块无有效像元（且无景读取失败）时写“空标记”旁车（``empty=true`` + 指纹，无 COG），并删除旧 COG；
+同指纹再次运行直接跳过、不重读影像；指纹变化后重新尝试。
 因此项目新增地块后，用补数接口（force=False）对历史日期区间重跑即可只重建受影响的块。
 内存：单块像元数受 ``PROJECT_SCENE_COGS_MAX_BLOCK_PIXELS`` 限制，逐景读取、即时转 uint16。
 """
@@ -88,6 +90,9 @@ class LocalDirStorage:
 
     def get_bytes(self, key: str, *, max_bytes: int | None = None) -> bytes:
         return self._p(key).read_bytes()
+
+    def delete(self, key: str) -> None:
+        self._p(key).unlink(missing_ok=True)
 
     def download_file(self, key: str, file_path: str) -> None:
         Path(file_path).write_bytes(self._p(key).read_bytes())
@@ -285,8 +290,14 @@ def compose_block_date(
     items: Sequence[Mapping[str, Any]],
     reader: Callable[[Mapping[str, Any], Block], np.ndarray] = read_item_stack,
     mask: np.ndarray | None = None,
+    info: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """读景、镶嵌并写本地 COG 临时文件；返回 (临时路径, 回执载荷)。整块无有效像元时返回 None。"""
+    """读景、镶嵌并写本地 COG 临时文件；返回 (临时路径, 回执载荷)。整块无有效像元时返回 None。
+
+    ``info`` 若给出，会写入 ``read_failed``（读取失败的景数），用于区分“真无数据”和“读失败”。
+    """
+    if info is not None:
+        info["read_failed"] = 0
     key = cog_key(group_id, block.key, obs_date)
     mask = parcel_mask(block) if mask is None else mask
     acc: np.ndarray | None = None
@@ -296,6 +307,8 @@ def compose_block_date(
             stack = reader(it, block)
         except Exception as exc:
             logger.warning("project_cog_item_read_failed", item=it.get("id"), exc_type=type(exc).__name__, error=str(exc)[:300])
+            if info is not None:
+                info["read_failed"] += 1
             continue
         stack[:, ~mask] = 0
         if not (stack[:-1] != 0).any():
@@ -344,6 +357,48 @@ def publish_block_date(tmp: str, payload: dict[str, Any], storage: Any) -> dict[
     return payload
 
 
+def _empty_marker(*, group_id: str, block: Block, obs_date: str, key: str, items: Sequence[Mapping[str, Any]],
+                  fp: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "project_scene_cog_empty",
+        "empty": True,
+        "format_version": COG_FORMAT_VERSION,
+        "product": PRODUCT,
+        "group_id": group_id,
+        "block_key": block.key,
+        "obs_date": obs_date,
+        "oss_key": key,
+        "scene_ids": [str(i.get("id")) for i in items],
+        "land_ids": list(block.land_ids),
+        "width": block.width,
+        "height": block.height,
+        "fingerprint": dict(fp),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def mark_empty(*, group_id: str, block: Block, obs_date: str, items: Sequence[Mapping[str, Any]], storage: Any,
+               fp: Mapping[str, Any] | None = None, cog_exists: bool | None = None) -> dict[str, Any]:
+    """整块无有效像元：删除旧 COG（若有），写空标记旁车。删除失败只告警（标记照写，复用逻辑以标记为准）。"""
+    key = cog_key(group_id, block.key, obs_date)
+    fp = block_fingerprint(block) if fp is None else fp
+    if cog_exists is None:
+        cog_exists = storage.exists(key)
+    if cog_exists:
+        try:
+            storage.delete(key)
+            logger.info("project_cog_stale_deleted", key=key)
+        except Exception as exc:
+            logger.warning("project_cog_stale_delete_failed", key=key, exc_type=type(exc).__name__, error=str(exc)[:200])
+    marker = _empty_marker(group_id=group_id, block=block, obs_date=obs_date, key=key, items=items, fp=fp)
+    storage.put_bytes(sidecar_key(key), json.dumps(marker, ensure_ascii=False).encode(), content_type="application/json")
+    return marker
+
+
+def is_empty_marker(payload: Any) -> bool:
+    return isinstance(payload, Mapping) and bool(payload.get("empty"))
+
+
 def try_reuse(*, group_id: str, block: Block, obs_date: str, items: Sequence[Mapping[str, Any]],
               storage: Any, mask: np.ndarray, fp: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """尝试复用 OSS 上已有的块-日 COG，返回回执载荷；需要重建（不存在/指纹不符）时返回 None。
@@ -351,13 +406,22 @@ def try_reuse(*, group_id: str, block: Block, obs_date: str, items: Sequence[Map
     - COG+旁车且指纹一致：重放旁车；
     - 旧旁车（无指纹）且 land_ids、宽高一致：复用并把指纹回填进旁车（不重读影像）；
     - 指纹不一致：返回 None（调用方重读影像并覆盖 COG+旁车，再回执）；
+    - 指纹一致的空标记（``empty=true``）：原样返回标记，调用方按“无数据”处理，不读影像；
     - COG 在、旁车缺失/不可读：由 COG 重建旁车（尺寸与当前块不符则返回 None 重建）。
     """
     key = cog_key(group_id, block.key, obs_date)
-    if not storage.exists(key):
-        return None
     side = sidecar_key(key)
     fp = block_fingerprint(block) if fp is None else fp
+    if not storage.exists(key):
+        # 无 COG：仅当存在指纹一致的空标记时跳过，否则需构建
+        if storage.exists(side):
+            try:
+                marker = json.loads(storage.get_bytes(side))
+            except Exception:
+                return None
+            if is_empty_marker(marker) and fingerprint_status(marker, fp) == "match":
+                return marker
+        return None
     if storage.exists(side):
         try:
             payload = json.loads(storage.get_bytes(side))
@@ -366,6 +430,10 @@ def try_reuse(*, group_id: str, block: Block, obs_date: str, items: Sequence[Map
             payload = None
         if payload is not None:
             status = fingerprint_status(payload, fp)
+            if is_empty_marker(payload):
+                if status == "match":
+                    return payload  # 旧 COG 删除失败遗留：以空标记为准
+                return None
             if status == "match":
                 payload["reused"] = True
                 return payload
@@ -406,14 +474,23 @@ def build_block_date(
     """生成（或复用）一个块一天的 COG，返回回执载荷；整块无有效像元时返回 None。
 
     COG 已存在：指纹一致则重放旁车，指纹不符则重建；无旁车则由 COG 重建旁车（见 :func:`try_reuse`）。
+    整块无有效像元（且无景读取失败）时写空标记并删除旧 COG；指纹一致的空标记直接返回 None、不读影像。
     """
     mask = parcel_mask(block) if mask is None else mask
+    fp = block_fingerprint(block)
     if not force:
-        payload = try_reuse(group_id=group_id, block=block, obs_date=obs_date, items=items, storage=storage, mask=mask)
+        payload = try_reuse(group_id=group_id, block=block, obs_date=obs_date, items=items, storage=storage,
+                            mask=mask, fp=fp)
+        if is_empty_marker(payload):
+            return None
         if payload is not None:
             return payload
-    built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items, reader=reader, mask=mask)
+    info: dict[str, Any] = {}
+    built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items, reader=reader,
+                               mask=mask, info=info)
     if built is None:
+        if not info.get("read_failed"):
+            mark_empty(group_id=group_id, block=block, obs_date=obs_date, items=items, storage=storage, fp=fp)
         return None
     return publish_block_date(*built, storage)
 
@@ -443,7 +520,7 @@ def run_group(
     wanted = {str(d)[:10] for d in dates} if dates else None
     blocks = build_blocks(parcels)
     stats = {"group_id": group_id, "blocks": len(blocks), "written": 0, "reused": 0, "empty": 0, "failed": 0,
-             "rebuilt": 0, "fingerprint_backfilled": 0,
+             "rebuilt": 0, "fingerprint_backfilled": 0, "empty_marked_skipped": 0,
              "reported": 0, "report_failed": 0, "failed_dates": []}
     lock = threading.Lock()
 
@@ -494,19 +571,27 @@ def run_group(
                     payload = None if force else try_reuse(
                         group_id=group_id, block=block, obs_date=obs_date, items=items,
                         storage=storage, mask=mask, fp=fp)
-                    if payload is not None:
+                    if is_empty_marker(payload):
+                        stats["empty"] += 1
+                        stats["empty_marked_skipped"] += 1
+                    elif payload is not None:
                         with lock:
                             stats["reused"] += 1
                             if payload.get("fingerprint_backfilled"):
                                 stats["fingerprint_backfilled"] += 1
                         pending.append(pool.submit(_report, payload))
                     else:
-                        if not force and storage.exists(cog_key(group_id, block.key, obs_date)):
+                        cog_exists = storage.exists(cog_key(group_id, block.key, obs_date))
+                        if not force and cog_exists:
                             stats["rebuilt"] += 1
+                        info: dict[str, Any] = {}
                         built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items,
-                                                   reader=reader, mask=mask)
+                                                   reader=reader, mask=mask, info=info)
                         if built is None:
                             stats["empty"] += 1
+                            if not info.get("read_failed"):
+                                mark_empty(group_id=group_id, block=block, obs_date=obs_date, items=items,
+                                           storage=storage, fp=fp, cog_exists=cog_exists)
                         else:
                             pending.append(pool.submit(_publish, *built))
                 except Exception as exc:

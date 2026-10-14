@@ -153,6 +153,19 @@ class RobustStorage:
         return self._retry("download_file", lambda: self._inner.download_file(key, file_path), key)
 
 
+    def delete(self, key: str) -> None:
+        """删除对象（不存在视为成功）；后端不支持删除时抛 NotImplementedError。"""
+        if self._bucket is not None:
+            return self._retry("delete", lambda: self._bucket.delete_object(key) and None, key)
+        fn = getattr(self._inner, "delete", None) or getattr(self._inner, "delete_object", None)
+        if callable(fn):
+            return self._retry("delete", lambda: fn(key) and None, key)
+        bucket = getattr(self._inner, "_bucket", None)
+        if bucket is not None:
+            return self._retry("delete", lambda: bucket.delete_object(key) and None, key)
+        raise NotImplementedError(f"storage {type(self._inner).__name__} has no delete")
+
+
 def robust(storage: Any) -> Any:
     return storage if isinstance(storage, RobustStorage) else RobustStorage(storage)
 

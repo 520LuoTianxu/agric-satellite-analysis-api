@@ -143,3 +143,65 @@ def test_cog_without_sidecar_wrong_size_rebuilds():
     grown = base + [{"land_id": "7", "boundary_geojson": _square(114.302, 36.4990, 0.01)}]
     s = _run(st, grown, CountingReader())
     assert s["failed"] == 0 and s["written"] >= 1
+
+
+# ---------------------------------------------------------------- 空标记
+def test_empty_first_build_writes_marker_then_skips():
+    st = MemStorage()
+    s1 = _run(st, PARCELS, _fake_reader({"A": 0, "B": 0}))
+    assert s1["empty"] == 2 and s1["written"] == 0
+    assert not [k for k in st.objs if k.endswith(".tif")]
+    assert all(p["empty"] for p in _sides(st).values())
+    s2 = _run(st, PARCELS, _no_read, [])
+    assert s2["empty"] == 2 and s2["empty_marked_skipped"] == 2 and s2["reused"] == 0 and s2["failed"] == 0
+
+
+def test_empty_marker_fingerprint_change_retries():
+    st = MemStorage()
+    _run(st, PARCELS, _fake_reader({"A": 0, "B": 0}))
+    added = PARCELS + [{"land_id": "9", "boundary_geojson": _square(114.3005, 36.5005, 0.0005)}]
+    r = CountingReader()
+    s = _run(st, added, r)
+    assert s["written"] == 1 and s["empty_marked_skipped"] == 1 and r.calls > 0
+    side = [p for p in _sides(st).values() if "9" in p["land_ids"]][0]
+    assert not side.get("empty") and side["oss_key"] in st.objs
+
+
+def test_mismatch_rebuild_empty_deletes_stale_cog_and_marks():
+    st = MemStorage()
+    _run(st, PARCELS, CountingReader())
+    added = PARCELS + [{"land_id": "9", "boundary_geojson": _square(114.3005, 36.5005, 0.0005)}]
+    s = _run(st, added, _fake_reader({"A": 0, "B": 0}))
+    assert s["rebuilt"] == 1 and s["empty"] == 1 and s["reused"] == 1
+    blk = [b for b in pc.build_blocks(added) if "9" in b.land_ids][0]
+    key = pc.cog_key("g", blk.key, "2026-10-10")
+    assert key not in st.objs
+    m = json.loads(st.objs[pc.sidecar_key(key)])
+    assert m["empty"] is True and m["fingerprint"] == pc.block_fingerprint(blk)
+    s2 = _run(st, added, _no_read)
+    assert s2["empty_marked_skipped"] == 1 and s2["reused"] == 1
+
+
+def test_empty_marker_wins_when_stale_delete_failed():
+    class NoDelete(MemStorage):
+        def delete(self, key):
+            raise PermissionError("AccessDenied")
+
+    st = NoDelete()
+    _run(st, PARCELS, CountingReader())
+    added = PARCELS + [{"land_id": "9", "boundary_geojson": _square(114.3005, 36.5005, 0.0005)}]
+    s = _run(st, added, _fake_reader({"A": 0, "B": 0}))
+    assert s["failed"] == 0 and s["empty"] == 1
+    s2 = _run(st, added, _no_read)
+    assert s2["empty_marked_skipped"] == 1 and s2["failed"] == 0
+
+
+def test_read_failure_does_not_mark_empty():
+    st = MemStorage()
+
+    def boom(*a):
+        raise OSError("network")
+
+    s = _run(st, PARCELS, boom)
+    assert s["empty"] == 2
+    assert _sides(st) == {}

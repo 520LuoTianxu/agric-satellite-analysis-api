@@ -197,3 +197,36 @@ def test_harvest_tolerated_missing_recorded(monkeypatch):
                          season_from=__import__("datetime").date(2026, 8, 1), season_to=__import__("datetime").date(2026, 10, 13),
                          params=params, storage=orb.robust(st), report=None, searcher=lambda *a: ITEMS)
     assert r["block"]["missing_dates"] == ["2026-10-10"]
+
+
+def test_harvest_skips_empty_marked_date_cleanly():
+    from agric_satellite_analysis_common import project_harvest as ph
+
+    from app.tasks import project_harvest as phtask
+
+    st = MemStorage()
+    task.run_group("g", PARCELS[:2], None, None, storage=st, report=None,
+                   searcher=lambda *a: ITEMS, reader=_fake_reader({"A": 0, "B": 0}))
+    block = pc.build_blocks(PARCELS[:2])[0]
+    key = pc.cog_key("g", block.key, "2026-10-10")
+    assert key not in st.objs and json.loads(st.objs[pc.sidecar_key(key)])["empty"] is True
+    parcels = [{"land_id": p["land_id"], "clipped_geojson": pc.parcel_geometry(p["boundary_geojson"]).__geo_interface__,
+                "clipped_area_mu": 1.0} for p in PARCELS[:2]]
+
+    def no_read(*a):
+        raise AssertionError("should not re-read scenes")
+
+    r = phtask.run_block(group_id="g", run_id="r", block=block, parcels=parcels,
+                         season_from=__import__("datetime").date(2026, 8, 1), season_to=__import__("datetime").date(2026, 10, 13),
+                         params=ph.merge_params(None), storage=orb.robust(st), report=None, searcher=lambda *a: ITEMS,
+                         reader=no_read)
+    rec = r["scenes"][0]
+    assert rec["note"] == "no_data" and rec["valid"] is False
+    assert "missing_dates" not in r["block"]
+
+
+def test_robust_delete():
+    st = MemStorage()
+    st.objs["k"] = b"x"
+    orb.robust(st).delete("k")
+    assert "k" not in st.objs
