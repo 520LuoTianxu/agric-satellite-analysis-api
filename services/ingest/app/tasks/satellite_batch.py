@@ -1975,6 +1975,15 @@ def process_satellite_batch(
                     else "",
                 },
             )
+        try:
+            # 项目级全波段 COG（默认关闭）：只派发异步任务，失败不影响本批结果。
+            from app.tasks.project_cogs import maybe_dispatch_after_batch
+
+            maybe_dispatch_after_batch(
+                params["land_ids"], final_snapshot.get("published_products") or [], sensor
+            )
+        except Exception as exc:
+            logger.warning("project_cog_hook_failed", job_id=job_id, error=str(exc)[:300])
         return {"job_id": job_id, "status": status, **progress_snapshot()}
     except SoftTimeLimitExceeded as exc:
         # 12 分钟软超时：不落永久 failed，保持 running 并 Celery retry 重入队列。
