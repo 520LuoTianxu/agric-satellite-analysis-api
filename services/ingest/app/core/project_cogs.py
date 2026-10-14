@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-
 import math
 import os
 from dataclasses import dataclass, field
@@ -358,3 +358,59 @@ def write_cog(
                 quiet=True,
                 add_mask=False,
             )
+
+
+# ---------------------------------------------------------------- fingerprint
+FINGERPRINT_VERSION = 1
+GEOM_HASH_PRECISION_M = 0.01  # 投影坐标取 1 cm 精度后再哈希，避免浮点噪声误判
+
+
+def _geom_hash(land_ids: Sequence[str], geoms: Sequence[Any]) -> str:
+    import shapely
+
+    h = hashlib.sha256()
+    for lid, g in sorted(zip((str(x) for x in land_ids), geoms), key=lambda t: t[0]):
+        h.update(lid.encode())
+        h.update(b"\0")
+        h.update(shapely.to_wkb(shapely.set_precision(g, GEOM_HASH_PRECISION_M), hex=False))
+        h.update(b"\1")
+    return h.hexdigest()
+
+
+def block_fingerprint(block: Block, buffer_m: float | None = None) -> dict[str, Any]:
+    """块指纹：地块集合、几何、范围/尺寸、外扩距离任一变化都会改变指纹。
+
+    块键只编码左上角原点；尺寸变化（新地块把块撑大）也由指纹中的 width/height/bounds 覆盖。
+    """
+    buffer_m = mask_buffer_m() if buffer_m is None else buffer_m
+    x0, y0, x1, y1 = block.bounds
+    return {
+        "version": FINGERPRINT_VERSION,
+        "crs": block.crs,
+        "land_ids": sorted(str(x) for x in block.land_ids),
+        "bounds": [round(float(v), 3) for v in (x0, y0, x1, y1)],
+        "width": int(block.width),
+        "height": int(block.height),
+        "buffer_m": round(float(buffer_m), 3),
+        "geom_hash": _geom_hash(block.land_ids, block.geoms),
+    }
+
+
+def fingerprint_status(sidecar: Mapping[str, Any] | None, fp: Mapping[str, Any]) -> str:
+    """比较旁车与当前块指纹：``match`` / ``legacy_match`` / ``mismatch``。
+
+    旧旁车（无 ``fingerprint`` 字段）：比较 land_ids 集合与 width/height（若有）；一致视为
+    ``legacy_match``（可复用并回填指纹），否则 ``mismatch``。
+    """
+    if not isinstance(sidecar, Mapping):
+        return "mismatch"
+    old = sidecar.get("fingerprint")
+    if isinstance(old, Mapping):
+        return "match" if dict(old) == dict(fp) else "mismatch"
+    ids = sidecar.get("land_ids")
+    if not isinstance(ids, list) or sorted(str(x) for x in ids) != list(fp["land_ids"]):
+        return "mismatch"
+    for k in ("width", "height"):
+        if k in sidecar and sidecar.get(k) is not None and int(sidecar[k]) != int(fp[k]):
+            return "mismatch"
+    return "legacy_match"
