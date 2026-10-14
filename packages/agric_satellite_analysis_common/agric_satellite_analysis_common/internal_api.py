@@ -565,6 +565,37 @@ def agri_satellite_batch_inputs(
         return _do(c)
 
 
+def project_cog_inputs(
+    *,
+    group_id: str | None = None,
+    land_ids: list[str] | None = None,
+    client: httpx.Client | None = None,
+    timeout: float = 60.0,
+) -> list[dict[str, Any]]:
+    """项目级 COG 输入：按 group_id，或按地块找到所属项目，返回各项目全部有效地块边界。"""
+    if not group_id and not land_ids:
+        raise ValueError("group_id or land_ids required")
+    body: dict[str, Any] = {}
+    if group_id:
+        body["group_id"] = str(group_id)
+    if land_ids:
+        body["land_ids"] = [str(x) for x in land_ids]
+
+    def _do(c: httpx.Client) -> list[dict[str, Any]]:
+        r = c.post("/v1/internal/agri/project-cogs/inputs", json=body)
+        _raise_for_status(r, context="agri/project-cogs/inputs")
+        data = r.json()
+        groups = data.get("groups") if isinstance(data, dict) else None
+        if not isinstance(groups, list):
+            raise InternalApiError("agri/project-cogs/inputs returned invalid data")
+        return groups
+
+    if client is not None:
+        return _do(client)
+    with internal_client(timeout=timeout) as c:
+        return _do(c)
+
+
 def agri_scenes_summary(
     land_id: str,
     *,

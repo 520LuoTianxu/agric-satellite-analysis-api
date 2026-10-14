@@ -875,6 +875,93 @@ def _apply_season_growth_job_progress(
     finally:
         session.close()
 
+_PROJECT_SCENE_COG_UPSERT = text(
+    """
+    INSERT INTO agric_satellite.project_scene_cogs (
+        group_id, block_key, obs_date, product, sensor, oss_key, size_bytes, crs,
+        transform, width, height, west, south, east, north, bounds_native, bands,
+        dtype, nodata, scale, acquired_at, scene_ids, tiles, land_ids, parcel_count,
+        valid_pixel_count, mask_pixel_count, mask_buffer_m, format_version, updated_at
+    ) VALUES (
+        :group_id, :block_key, :obs_date, :product, :sensor, :oss_key, :size_bytes, :crs,
+        :transform, :width, :height, :west, :south, :east, :north, :bounds_native, :bands,
+        :dtype, :nodata, :scale, :acquired_at, :scene_ids, :tiles, :land_ids, :parcel_count,
+        :valid_pixel_count, :mask_pixel_count, :mask_buffer_m, :format_version, now()
+    )
+    ON CONFLICT (group_id, block_key, obs_date, product) DO UPDATE SET
+        sensor = EXCLUDED.sensor, oss_key = EXCLUDED.oss_key, size_bytes = EXCLUDED.size_bytes,
+        crs = EXCLUDED.crs, transform = EXCLUDED.transform, width = EXCLUDED.width,
+        height = EXCLUDED.height, west = EXCLUDED.west, south = EXCLUDED.south,
+        east = EXCLUDED.east, north = EXCLUDED.north, bounds_native = EXCLUDED.bounds_native,
+        bands = EXCLUDED.bands, dtype = EXCLUDED.dtype, nodata = EXCLUDED.nodata,
+        scale = EXCLUDED.scale, acquired_at = EXCLUDED.acquired_at,
+        scene_ids = EXCLUDED.scene_ids, tiles = EXCLUDED.tiles, land_ids = EXCLUDED.land_ids,
+        parcel_count = EXCLUDED.parcel_count, valid_pixel_count = EXCLUDED.valid_pixel_count,
+        mask_pixel_count = EXCLUDED.mask_pixel_count, mask_buffer_m = EXCLUDED.mask_buffer_m,
+        format_version = EXCLUDED.format_version, updated_at = now()
+    """
+)
+
+
+def project_scene_cog_params(payload: dict[str, Any]) -> dict[str, Any]:
+    """把下载机回执转为 project_scene_cogs 行参数；缺少关键字段时抛 ValueError。"""
+    required = ("group_id", "block_key", "obs_date", "oss_key", "crs", "width", "height")
+    missing = [k for k in required if payload.get(k) in (None, "")]
+    if missing:
+        raise ValueError(f"project_scene_cog missing fields: {missing}")
+    b4326 = list(payload.get("bounds_4326") or [None] * 4)
+    return {
+        "group_id": str(payload["group_id"]),
+        "block_key": str(payload["block_key"]),
+        "obs_date": str(payload["obs_date"])[:10],
+        "product": str(payload.get("product") or "s2l2a_v1"),
+        "sensor": str(payload.get("sensor") or "S2"),
+        "oss_key": str(payload["oss_key"]),
+        "size_bytes": payload.get("size_bytes"),
+        "crs": str(payload["crs"]),
+        "transform": [float(v) for v in (payload.get("transform") or [])],
+        "width": int(payload["width"]),
+        "height": int(payload["height"]),
+        "west": b4326[0],
+        "south": b4326[1],
+        "east": b4326[2],
+        "north": b4326[3],
+        "bounds_native": [float(v) for v in (payload.get("bounds") or [])],
+        "bands": [str(v) for v in (payload.get("bands") or [])],
+        "dtype": str(payload.get("dtype") or "uint16"),
+        "nodata": payload.get("nodata", 0),
+        "scale": payload.get("scale", 0.0001),
+        "acquired_at": normalize_acquired_at(payload.get("acquired_at")) if payload.get("acquired_at") else None,
+        "scene_ids": [str(v) for v in (payload.get("scene_ids") or [])],
+        "tiles": [str(v) for v in (payload.get("tiles") or [])],
+        "land_ids": [str(v) for v in (payload.get("land_ids") or [])],
+        "parcel_count": payload.get("parcel_count"),
+        "valid_pixel_count": payload.get("valid_pixel_count"),
+        "mask_pixel_count": payload.get("mask_pixel_count"),
+        "mask_buffer_m": payload.get("mask_buffer_m"),
+        "format_version": int(payload.get("format_version") or 1),
+    }
+
+
+def apply_project_scene_cog(payload: dict[str, Any]) -> str:
+    """写入项目级 COG 元数据；表尚未创建时记录并跳过（不触发重试）。"""
+    params = project_scene_cog_params(payload)
+    session = SyncSession()
+    try:
+        session.execute(_PROJECT_SCENE_COG_UPSERT, params)
+        session.commit()
+        return "upserted"
+    except Exception as exc:
+        session.rollback()
+        msg = str(exc)
+        if "project_scene_cogs" in msg and ("does not exist" in msg or "UndefinedTable" in msg):
+            logger.warning("project_scene_cogs_table_missing key=%s", params["oss_key"])
+            return "table_missing"
+        raise
+    finally:
+        session.close()
+
+
 def _apply_domain_from_payload(
     payload: dict[str, Any] | None,
     *,
@@ -910,6 +997,8 @@ def _apply_domain_from_payload(
             "grade": payload.get("grade"),
             "filename": payload.get("filename"),
         }
+    elif kind == "project_scene_cog":
+        stats["project_scene_cog"] = apply_project_scene_cog(payload)
     elif kind == "season_growth_report":
         job_updated = _apply_season_growth_job_progress(payload, status=status)
         stats["season_growth_report"] = {
@@ -1030,6 +1119,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         "soil_profile",
         "assessment_report",
         "season_growth_report",
+        "project_scene_cog",
     ):
         stats["domain"] = _apply_domain_from_payload(envelope, status=status)
         return stats

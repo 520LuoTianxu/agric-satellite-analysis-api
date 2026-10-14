@@ -378,3 +378,121 @@ async def backfill_harvest_progress(
         enqueued = await enqueue_lands(db, body.land_ids, start, delay_seconds=0)
     await db.commit()
     return {"enqueued": enqueued, "date_from": start.isoformat()}
+
+
+# ---------------------------------------------------------------- project scene COGs
+class ProjectCogInputsRequest(BaseModel):
+    group_id: str | None = Field(default=None, max_length=64)
+    land_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] | None = Field(
+        default=None, max_length=500
+    )
+
+    @model_validator(mode="after")
+    def require_selector(self) -> "ProjectCogInputsRequest":
+        if not self.group_id and not self.land_ids:
+            raise ValueError("group_id or land_ids required")
+        return self
+
+
+class ProjectCogLandOut(BaseModel):
+    land_id: str
+    land_status: str | None = None
+    boundary_geojson: Any = None
+
+
+class ProjectCogGroupOut(BaseModel):
+    group_id: str
+    lands: list[ProjectCogLandOut] = Field(default_factory=list)
+
+
+class ProjectCogInputsOut(BaseModel):
+    groups: list[ProjectCogGroupOut] = Field(default_factory=list)
+
+
+@router.post("/project-cogs/inputs", response_model=ProjectCogInputsOut)
+async def project_cog_inputs(
+    body: ProjectCogInputsRequest,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """项目级 COG 输入：返回目标项目内全部未删除地块边界（按地块反查所属项目）。"""
+    group_ids: set[str] = set()
+    if body.group_id:
+        group_ids.add(body.group_id.strip())
+    if body.land_ids:
+        rows = (
+            await db.execute(
+                select(LandParcel.group_id).where(
+                    LandParcel.land_id.in_([x.strip() for x in body.land_ids]),
+                    LandParcel.deleted_at.is_(None),
+                    LandParcel.group_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+        group_ids.update(str(g) for g in rows if g)
+    if not group_ids:
+        return ProjectCogInputsOut(groups=[])
+    land_rows = (
+        await db.execute(
+            select(
+                LandParcel.group_id,
+                LandParcel.land_id,
+                LandParcel.land_status,
+                LandParcel.boundary_geojson,
+            )
+            .where(LandParcel.group_id.in_(sorted(group_ids)), LandParcel.deleted_at.is_(None))
+            .order_by(LandParcel.group_id, LandParcel.land_id)
+        )
+    ).mappings().all()
+    by_group: dict[str, list[ProjectCogLandOut]] = {g: [] for g in sorted(group_ids)}
+    for r in land_rows:
+        if r["boundary_geojson"] is None:
+            continue
+        by_group[str(r["group_id"])].append(
+            ProjectCogLandOut(
+                land_id=r["land_id"],
+                land_status=r["land_status"],
+                boundary_geojson=r["boundary_geojson"],
+            )
+        )
+    return ProjectCogInputsOut(
+        groups=[ProjectCogGroupOut(group_id=g, lands=v) for g, v in by_group.items() if v]
+    )
+
+
+class ProjectCogBackfillRequest(BaseModel):
+    group_id: str = Field(min_length=1, max_length=64)
+    date_from: date
+    date_to: date
+    force: bool = False
+
+    @model_validator(mode="after")
+    def check_range(self) -> "ProjectCogBackfillRequest":
+        if self.date_to < self.date_from:
+            raise ValueError("date_to must be >= date_from")
+        if (self.date_to - self.date_from).days > 400:
+            raise ValueError("date range must be <= 400 days")
+        return self
+
+
+@router.post("/project-cogs/backfill")
+async def project_cog_backfill(body: ProjectCogBackfillRequest, _: InternalAuth):
+    """派发项目级 COG 回填任务到下载机队列（不受 PROJECT_SCENE_COGS_ENABLED 限制）。"""
+    import asyncio
+
+    from agric_satellite_analysis_common.celery_app import SATELLITE_DOWNLOAD_QUEUE
+
+    from app.celery_client import send_task
+
+    result = await asyncio.to_thread(
+        send_task,
+        "app.tasks.project_cogs.build_project_cogs",
+        kwargs={
+            "group_id": body.group_id,
+            "date_from": body.date_from.isoformat(),
+            "date_to": body.date_to.isoformat(),
+            "force": body.force,
+        },
+        queue=SATELLITE_DOWNLOAD_QUEUE,
+    )
+    return {"task_id": str(result.id), "queued": True}
