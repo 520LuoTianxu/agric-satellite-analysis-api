@@ -476,23 +476,49 @@ class ProjectCogBackfillRequest(BaseModel):
 
 
 @router.post("/project-cogs/backfill")
-async def project_cog_backfill(body: ProjectCogBackfillRequest, _: InternalAuth):
-    """派发项目级 COG 回填任务到下载机队列（不受 PROJECT_SCENE_COGS_ENABLED 限制）。"""
+async def project_cog_backfill(
+    body: ProjectCogBackfillRequest,
+    _: InternalAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """派发项目级 COG 回填任务到下载机（不受 PROJECT_SCENE_COGS_ENABLED 限制）。
+
+    claim 模式写 work_items(type=project_task)，下载机 claim 后投递本机队列；
+    同一 group/日期/force 已有排队或执行中的工作项时直接复用（幂等）。
+    """
     import asyncio
 
     from agric_satellite_analysis_common.celery_app import SATELLITE_DOWNLOAD_QUEUE
 
+    from app.services import project_tasks as pt
+
+    kwargs = {
+        "group_id": body.group_id,
+        "date_from": body.date_from.isoformat(),
+        "date_to": body.date_to.isoformat(),
+        "force": body.force,
+    }
+    if pt.use_work_items():
+        item, reused = await pt.enqueue_project_task(
+            db,
+            task_name=pt.BUILD_PROJECT_COGS,
+            kwargs=kwargs,
+            dedup_key=(
+                f"cogs:{body.group_id}:{kwargs['date_from']}:{kwargs['date_to']}:"
+                f"{int(body.force)}"
+            ),
+        )
+        await db.commit()
+        return {
+            "work_item_id": str(item.id),
+            "queued": True,
+            "reused": reused,
+            "via": "work_items",
+        }
+
     from app.celery_client import send_task
 
     result = await asyncio.to_thread(
-        send_task,
-        "app.tasks.project_cogs.build_project_cogs",
-        kwargs={
-            "group_id": body.group_id,
-            "date_from": body.date_from.isoformat(),
-            "date_to": body.date_to.isoformat(),
-            "force": body.force,
-        },
-        queue=SATELLITE_DOWNLOAD_QUEUE,
+        send_task, pt.BUILD_PROJECT_COGS, kwargs=kwargs, queue=SATELLITE_DOWNLOAD_QUEUE
     )
-    return {"task_id": str(result.id), "queued": True}
+    return {"task_id": str(result.id), "queued": True, "via": "celery"}

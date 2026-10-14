@@ -34,7 +34,9 @@ class TriggerDisabled(RuntimeError):
 
 
 def trigger_enabled() -> bool:
-    return str(os.getenv("PROJECT_HARVEST_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
+    """默认开启；仅当显式设置 PROJECT_HARVEST_ENABLED=0/false/no/off 时关闭（应急开关）。"""
+    raw = str(os.getenv("PROJECT_HARVEST_ENABLED", "")).strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def default_season(today: date | None = None) -> tuple[date, date]:
@@ -235,7 +237,7 @@ async def create_run(
 ) -> tuple[dict, bool]:
     """返回 (run, reused)。同 group 已有排队/运行中的运行且未 force 时直接复用。"""
     if not trigger_enabled():
-        raise TriggerDisabled("PROJECT_HARVEST_ENABLED 未开启")
+        raise TriggerDisabled("PROJECT_HARVEST_ENABLED 已被关闭")
     act = await active_run(db, group_id)
     if act and not force:
         return act, True
@@ -257,6 +259,16 @@ async def create_run(
         {"r": run_id, "g": group_id, "m": ph.METHOD_VERSION, "h": dd["hash"], "d0": d0, "d1": d1,
          "p": json.dumps(p), "n": dd["kept"], "mc": dd["merged"], "a": round(dd["area_mu"], 2), "t": trigger},
     ))
+    from app.services import project_tasks as pt
+
+    if pt.use_work_items():
+        # claim 模式：与运行记录同一事务写入 work_items，下载机领取后投递本机队列。
+        await pt.enqueue_project_task(
+            db, task_name=TASK_NAME, kwargs={"run_id": run_id}, dedup_key=f"harvest:{run_id}", unique=True
+        )
+        await db.commit()
+        run = await get_run(db, group_id, run_id)
+        return run or {"run_id": run_id, "group_id": group_id, "status": "queued"}, False
     await db.commit()
     try:
         await run_in_threadpool(dispatch, run_id)

@@ -29,6 +29,7 @@ CLAIMABLE_TYPES = frozenset(
         "weather_backfill",
         "soil_fetch",
         "admin_task",
+        "project_task",  # 项目级 COG 补数 / 项目收获分析（payload 带白名单 task_name）
     }
 )
 
@@ -43,6 +44,7 @@ COMPLETE_ON_DISPATCH_TYPES = frozenset(
         "weather_backfill",
         "soil_fetch",
         "admin_task",
+        "project_task",
     }
 )
 

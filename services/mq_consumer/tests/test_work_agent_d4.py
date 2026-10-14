@@ -238,3 +238,31 @@ class MainEntrypointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjectTaskDispatchTests(unittest.TestCase):
+    def test_project_task_in_default_and_complete_types(self) -> None:
+        self.assertIn("project_task", wa.DEFAULT_TYPES)
+        self.assertIn("project_task", wa.COMPLETE_ON_DISPATCH_TYPES)
+
+    def test_build_project_cogs_dispatched_to_satellite_queue(self) -> None:
+        result = MagicMock(id="celery-cogs-1")
+        kwargs = {"group_id": "2878", "date_from": "2026-08-10", "date_to": "2026-08-31", "force": False}
+        item = {
+            "id": "w-cogs-1",
+            "type": "project_task",
+            "payload_json": {"task_name": "app.tasks.project_cogs.build_project_cogs", "kwargs": kwargs},
+        }
+        with patch.object(wa.celery_client, "send_task", return_value=result) as send:
+            out = wa._dispatch_celery(item)
+        send.assert_called_once_with(
+            "app.tasks.project_cogs.build_project_cogs", kwargs=kwargs, queue=wa.SATELLITE_DOWNLOAD_QUEUE
+        )
+        self.assertEqual(out["celery_id"], "celery-cogs-1")
+
+    def test_project_task_rejects_unlisted_task(self) -> None:
+        item = {"id": "w", "type": "project_task", "payload_json": {"task_name": "app.tasks.evil.run", "kwargs": {}}}
+        with patch.object(wa.celery_client, "send_task") as send:
+            with self.assertRaises(ValueError):
+                wa._dispatch_celery(item)
+        send.assert_not_called()
