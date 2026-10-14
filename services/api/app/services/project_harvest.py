@@ -135,13 +135,16 @@ async def stats(db: AsyncSession, run_id: str, date_: str | None = None) -> list
     return await _guard(q())
 
 
-async def rasters(db: AsyncSession, run_id: str, date_: str) -> list[dict]:
+async def rasters(db: AsyncSession, run_id: str, date_: str | date) -> list[dict]:
+    # asyncpg 对 CAST(:d AS date) 只接受 datetime.date，传字符串会抛 DataError → 500。
+    d = date_ if isinstance(date_, date) else date.fromisoformat(str(date_))
+
     async def q():
         r = await db.execute(
             text(
                 "SELECT * FROM agric_satellite.project_harvest_rasters WHERE run_id=CAST(:r AS uuid) AND obs_date=CAST(:d AS date)"
             ),
-            {"r": run_id, "d": date_},
+            {"r": run_id, "d": d},
         )
         return [dict(x) for x in r.mappings()]
 
