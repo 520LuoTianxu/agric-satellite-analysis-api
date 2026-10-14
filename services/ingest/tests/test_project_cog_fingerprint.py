@@ -167,22 +167,10 @@ def test_empty_marker_fingerprint_change_retries():
     assert not side.get("empty") and side["oss_key"] in st.objs
 
 
-def test_mismatch_rebuild_empty_deletes_stale_cog_and_marks():
-    st = MemStorage()
-    _run(st, PARCELS, CountingReader())
-    added = PARCELS + [{"land_id": "9", "boundary_geojson": _square(114.3005, 36.5005, 0.0005)}]
-    s = _run(st, added, _fake_reader({"A": 0, "B": 0}))
-    assert s["rebuilt"] == 1 and s["empty"] == 1 and s["reused"] == 1
-    blk = [b for b in pc.build_blocks(added) if "9" in b.land_ids][0]
-    key = pc.cog_key("g", blk.key, "2026-10-10")
-    assert key not in st.objs
-    m = json.loads(st.objs[pc.sidecar_key(key)])
-    assert m["empty"] is True and m["fingerprint"] == pc.block_fingerprint(blk)
-    s2 = _run(st, added, _no_read)
-    assert s2["empty_marked_skipped"] == 1 and s2["reused"] == 1
+def test_mismatch_rebuild_empty_overwrites_stale_cog_and_marks(tmp_path):
+    import numpy as np
+    import rasterio
 
-
-def test_empty_marker_wins_when_stale_delete_failed():
     class NoDelete(MemStorage):
         def delete(self, key):
             raise PermissionError("AccessDenied")
@@ -191,9 +179,27 @@ def test_empty_marker_wins_when_stale_delete_failed():
     _run(st, PARCELS, CountingReader())
     added = PARCELS + [{"land_id": "9", "boundary_geojson": _square(114.3005, 36.5005, 0.0005)}]
     s = _run(st, added, _fake_reader({"A": 0, "B": 0}))
-    assert s["failed"] == 0 and s["empty"] == 1
+    assert s["rebuilt"] == 1 and s["empty"] == 1 and s["reused"] == 1 and s["failed"] == 0
+    blk = [b for b in pc.build_blocks(added) if "9" in b.land_ids][0]
+    key = pc.cog_key("g", blk.key, "2026-10-10")
+    f = tmp_path / "e.tif"
+    f.write_bytes(st.objs[key])
+    with rasterio.open(f) as ds:
+        assert ds.count == 13 and (ds.width, ds.height) == (blk.width, blk.height)
+        assert ds.transform == blk.transform and ds.crs.to_string() == blk.crs and ds.nodata == 0
+        assert list(ds.descriptions) == list(pc.BAND_NAMES)
+        assert ds.profile["compress"].lower() == "zstd"
+        assert not np.any(ds.read())
+    m = json.loads(st.objs[pc.sidecar_key(key)])
+    assert m["empty"] is True and m["fingerprint"] == pc.block_fingerprint(blk)
     s2 = _run(st, added, _no_read)
-    assert s2["empty_marked_skipped"] == 1 and s2["failed"] == 0
+    assert s2["empty_marked_skipped"] == 1 and s2["reused"] == 1 and s2["failed"] == 0
+
+
+def test_first_empty_build_writes_no_cog():
+    st = MemStorage()
+    _run(st, PARCELS, _fake_reader({"A": 0, "B": 0}))
+    assert not [k for k in st.objs if k.endswith(".tif")]
 
 
 def test_read_failure_does_not_mark_empty():

@@ -10,7 +10,8 @@
 （地块集合/几何哈希/范围/尺寸/外扩距离，见 ``block_fingerprint``）与当前块一致时只重放回执，不重新下载；
 指纹不一致（项目新增/删除地块、边界改动、块范围变化）则重读原始影像重写该块该日。
 旧旁车无指纹：land_ids 与宽高一致则复用并回填指纹，否则重建。
-整块无有效像元（且无景读取失败）时写“空标记”旁车（``empty=true`` + 指纹，无 COG），并删除旧 COG；
+整块无有效像元（且无景读取失败）时写“空标记”旁车（``empty=true`` + 指纹）；若有旧 COG 则用同尺寸全 nodata COG 覆盖
+（账号无删除权限），首次即为空则不写 COG；
 同指纹再次运行直接跳过、不重读影像；指纹变化后重新尝试。
 因此项目新增地块后，用补数接口（force=False）对历史日期区间重跑即可只重建受影响的块。
 内存：单块像元数受 ``PROJECT_SCENE_COGS_MAX_BLOCK_PIXELS`` 限制，逐景读取、即时转 uint16。
@@ -377,19 +378,32 @@ def _empty_marker(*, group_id: str, block: Block, obs_date: str, key: str, items
     }
 
 
+def overwrite_with_nodata(*, group_id: str, block: Block, obs_date: str, key: str, storage: Any) -> None:
+    """用当前块尺寸/变换/CRS 的 13 波段 uint16 全 0 COG 覆盖 ``key``（ZSTD 压缩后很小）。"""
+    stack = np.zeros((len(BAND_NAMES), block.height, block.width), dtype=np.uint16)
+    tags = {"product": PRODUCT, "group_id": group_id, "block": block.key, "date": obs_date, "scale": "0.0001",
+            "scenes": "", "empty": "true"}
+    fd, tmp = tempfile.mkstemp(suffix=".tif", prefix="project_cog_empty_")
+    os.close(fd)
+    try:
+        write_cog(tmp, stack, block, tags=tags)
+        storage.upload_file(key, tmp, content_type="image/tiff")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    logger.info("project_cog_stale_overwritten_nodata", key=key)
+
+
 def mark_empty(*, group_id: str, block: Block, obs_date: str, items: Sequence[Mapping[str, Any]], storage: Any,
                fp: Mapping[str, Any] | None = None, cog_exists: bool | None = None) -> dict[str, Any]:
-    """整块无有效像元：删除旧 COG（若有），写空标记旁车。删除失败只告警（标记照写，复用逻辑以标记为准）。"""
+    """整块无有效像元：旧 COG（若有）用全 nodata COG 覆盖，再写空标记旁车；首次即为空时只写标记。"""
     key = cog_key(group_id, block.key, obs_date)
     fp = block_fingerprint(block) if fp is None else fp
     if cog_exists is None:
         cog_exists = storage.exists(key)
     if cog_exists:
-        try:
-            storage.delete(key)
-            logger.info("project_cog_stale_deleted", key=key)
-        except Exception as exc:
-            logger.warning("project_cog_stale_delete_failed", key=key, exc_type=type(exc).__name__, error=str(exc)[:200])
+        # 账号无 DeleteObject 权限：用同尺寸全 0（nodata）COG 覆盖旧文件，绕过标记的读者也只会读到无数据
+        overwrite_with_nodata(group_id=group_id, block=block, obs_date=obs_date, key=key, storage=storage)
     marker = _empty_marker(group_id=group_id, block=block, obs_date=obs_date, key=key, items=items, fp=fp)
     storage.put_bytes(sidecar_key(key), json.dumps(marker, ensure_ascii=False).encode(), content_type="application/json")
     return marker
@@ -432,7 +446,7 @@ def try_reuse(*, group_id: str, block: Block, obs_date: str, items: Sequence[Map
             status = fingerprint_status(payload, fp)
             if is_empty_marker(payload):
                 if status == "match":
-                    return payload  # 旧 COG 删除失败遗留：以空标记为准
+                    return payload  # 旧 COG 已被全 nodata 覆盖：以空标记为准
                 return None
             if status == "match":
                 payload["reused"] = True
@@ -474,7 +488,7 @@ def build_block_date(
     """生成（或复用）一个块一天的 COG，返回回执载荷；整块无有效像元时返回 None。
 
     COG 已存在：指纹一致则重放旁车，指纹不符则重建；无旁车则由 COG 重建旁车（见 :func:`try_reuse`）。
-    整块无有效像元（且无景读取失败）时写空标记并删除旧 COG；指纹一致的空标记直接返回 None、不读影像。
+    整块无有效像元（且无景读取失败）时写空标记（旧 COG 以全 nodata COG 覆盖）；指纹一致的空标记直接返回 None、不读影像。
     """
     mask = parcel_mask(block) if mask is None else mask
     fp = block_fingerprint(block)

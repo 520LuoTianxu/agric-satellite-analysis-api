@@ -230,3 +230,27 @@ def test_robust_delete():
     st.objs["k"] = b"x"
     orb.robust(st).delete("k")
     assert "k" not in st.objs
+
+
+def test_harvest_overwritten_nodata_cog_is_no_data_not_failure():
+    from agric_satellite_analysis_common import project_harvest as ph
+
+    from app.tasks import project_harvest as phtask
+
+    st = MemStorage()
+    _harvest_setup(st)
+    added = PARCELS[:2] + [{"land_id": "9", "boundary_geojson": {
+        "type": "Polygon", "coordinates": [[[114.3005, 36.5005], [114.301, 36.5005], [114.301, 36.501], [114.3005, 36.501], [114.3005, 36.5005]]]}}]
+    task.run_group("g", added, None, None, storage=st, report=None,
+                   searcher=lambda *a: ITEMS, reader=_fake_reader({"A": 0, "B": 0}))
+    block = pc.build_blocks(added)[0]
+    key = pc.cog_key("g", block.key, "2026-10-10")
+    assert key in st.objs and json.loads(st.objs[pc.sidecar_key(key)])["empty"] is True
+    parcels = [{"land_id": p["land_id"], "clipped_geojson": pc.parcel_geometry(p["boundary_geojson"]).__geo_interface__,
+                "clipped_area_mu": 1.0} for p in added]
+    r = phtask.run_block(group_id="g", run_id="r", block=block, parcels=parcels,
+                         season_from=__import__("datetime").date(2026, 8, 1), season_to=__import__("datetime").date(2026, 10, 13),
+                         params=ph.merge_params(None), storage=orb.robust(st), report=None, searcher=lambda *a: ITEMS)
+    rec = r["scenes"][0]
+    assert rec["valid"] is False and rec.get("note") != "read_failed"
+    assert "missing_dates" not in r["block"]
