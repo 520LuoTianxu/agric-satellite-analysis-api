@@ -112,6 +112,10 @@ class MemStorage:
     def get_bytes(self, key):
         return self.objs[key]
 
+    def download_file(self, key, path):
+        with open(path, "wb") as f:
+            f.write(self.objs[key])
+
 
 ITEMS = [
     {"id": "A", "properties": {"datetime": "2026-10-10T03:00:00Z", "grid:code": "MGRS-50SLC", "eo:cloud_cover": 1}},
