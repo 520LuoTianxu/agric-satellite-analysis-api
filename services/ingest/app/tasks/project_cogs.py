@@ -6,7 +6,11 @@
 - 手动补数：API ``POST /v1/internal/agri/project-cogs/backfill`` 派发 :func:`build_project_cogs`；
 - 本地：``python -m app.tasks.project_cogs --parcels-json ... --local-dir ...``（不连 API/OSS）。
 
-幂等：OSS 键确定（见 ``core.project_cogs.cog_key``）；键已存在且旁车 JSON 存在时只重放回执，不重新下载。
+幂等：OSS 键确定（见 ``core.project_cogs.cog_key``）；键已存在且旁车 JSON 中的块指纹
+（地块集合/几何哈希/范围/尺寸/外扩距离，见 ``block_fingerprint``）与当前块一致时只重放回执，不重新下载；
+指纹不一致（项目新增/删除地块、边界改动、块范围变化）则重读原始影像重写该块该日。
+旧旁车无指纹：land_ids 与宽高一致则复用并回填指纹，否则重建。
+因此项目新增地块后，用补数接口（force=False）对历史日期区间重跑即可只重建受影响的块。
 内存：单块像元数受 ``PROJECT_SCENE_COGS_MAX_BLOCK_PIXELS`` 限制，逐景读取、即时转 uint16。
 """
 
@@ -35,8 +39,10 @@ from app.core.project_cogs import (
     SCL_BAND,
     Block,
     band_radiometry,
+    block_fingerprint,
     build_blocks,
     cog_key,
+    fingerprint_status,
     mask_buffer_m,
     mosaic_fill,
     parcel_mask,
@@ -233,8 +239,13 @@ def _cog_payload(*, group_id: str, block: Block, obs_date: str, key: str, used_i
         "valid_pixel_count": valid,
         "mask_pixel_count": mask_pixels,
         "mask_buffer_m": mask_buffer_m(),
+        "fingerprint": block_fingerprint(block),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+class StaleCogError(Exception):
+    """OSS 上的 COG 与当前块不一致（尺寸/范围变化），需要重建。"""
 
 
 def rebuild_sidecar(*, group_id: str, block: Block, obs_date: str, key: str,
@@ -248,6 +259,8 @@ def rebuild_sidecar(*, group_id: str, block: Block, obs_date: str, key: str,
         storage.download_file(key, tmp)
         size = os.path.getsize(tmp)
         with rasterio.open(tmp) as ds:
+            if (ds.width, ds.height) != (block.width, block.height):
+                raise StaleCogError(f"{key}: COG {ds.width}x{ds.height} != block {block.width}x{block.height}")
             tags = ds.tags()
             data = ds.read(list(range(1, ds.count)))  # 光谱波段（末波段为 SCL）
         valid = int((data != 0).any(axis=0).sum())
@@ -331,6 +344,54 @@ def publish_block_date(tmp: str, payload: dict[str, Any], storage: Any) -> dict[
     return payload
 
 
+def try_reuse(*, group_id: str, block: Block, obs_date: str, items: Sequence[Mapping[str, Any]],
+              storage: Any, mask: np.ndarray, fp: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """尝试复用 OSS 上已有的块-日 COG，返回回执载荷；需要重建（不存在/指纹不符）时返回 None。
+
+    - COG+旁车且指纹一致：重放旁车；
+    - 旧旁车（无指纹）且 land_ids、宽高一致：复用并把指纹回填进旁车（不重读影像）；
+    - 指纹不一致：返回 None（调用方重读影像并覆盖 COG+旁车，再回执）；
+    - COG 在、旁车缺失/不可读：由 COG 重建旁车（尺寸与当前块不符则返回 None 重建）。
+    """
+    key = cog_key(group_id, block.key, obs_date)
+    if not storage.exists(key):
+        return None
+    side = sidecar_key(key)
+    fp = block_fingerprint(block) if fp is None else fp
+    if storage.exists(side):
+        try:
+            payload = json.loads(storage.get_bytes(side))
+        except Exception as exc:
+            logger.warning("project_cog_sidecar_unreadable", key=side, exc_type=type(exc).__name__, error=str(exc)[:200])
+            payload = None
+        if payload is not None:
+            status = fingerprint_status(payload, fp)
+            if status == "match":
+                payload["reused"] = True
+                return payload
+            if status == "legacy_match":
+                payload.pop("reused", None)
+                payload["fingerprint"] = dict(fp)
+                storage.put_bytes(side, json.dumps(payload, ensure_ascii=False).encode(), content_type="application/json")
+                logger.info("project_cog_fingerprint_backfilled", key=key)
+                payload["reused"] = True
+                payload["fingerprint_backfilled"] = True
+                return payload
+            logger.info("project_cog_fingerprint_mismatch", key=key, group_id=group_id, block=block.key, date=obs_date,
+                        old_land_ids=len(payload.get("land_ids") or []), new_land_ids=len(fp["land_ids"]))
+            return None
+    else:
+        logger.info("project_cog_exists_without_sidecar", key=key)
+    try:
+        payload = rebuild_sidecar(group_id=group_id, block=block, obs_date=obs_date, key=key, items=items,
+                                  storage=storage, mask=mask)
+    except StaleCogError as exc:
+        logger.info("project_cog_stale_without_sidecar", key=key, error=str(exc)[:200])
+        return None
+    payload["reused"] = True
+    return payload
+
+
 def build_block_date(
     *,
     group_id: str,
@@ -344,25 +405,13 @@ def build_block_date(
 ) -> dict[str, Any] | None:
     """生成（或复用）一个块一天的 COG，返回回执载荷；整块无有效像元时返回 None。
 
-    COG 已存在：有旁车则重放旁车；无旁车则由 COG 重建旁车（不再跳过，免 force 即可补回执）。
+    COG 已存在：指纹一致则重放旁车，指纹不符则重建；无旁车则由 COG 重建旁车（见 :func:`try_reuse`）。
     """
-    key = cog_key(group_id, block.key, obs_date)
-    side = sidecar_key(key)
     mask = parcel_mask(block) if mask is None else mask
-    if not force and storage.exists(key):
-        if storage.exists(side):
-            try:
-                payload = json.loads(storage.get_bytes(side))
-                payload["reused"] = True
-                return payload
-            except Exception as exc:
-                logger.warning("project_cog_sidecar_unreadable", key=side, exc_type=type(exc).__name__, error=str(exc)[:200])
-        else:
-            logger.info("project_cog_exists_without_sidecar", key=key)
-        payload = rebuild_sidecar(group_id=group_id, block=block, obs_date=obs_date, key=key, items=items,
-                                  storage=storage, mask=mask)
-        payload["reused"] = True
-        return payload
+    if not force:
+        payload = try_reuse(group_id=group_id, block=block, obs_date=obs_date, items=items, storage=storage, mask=mask)
+        if payload is not None:
+            return payload
     built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items, reader=reader, mask=mask)
     if built is None:
         return None
@@ -394,6 +443,7 @@ def run_group(
     wanted = {str(d)[:10] for d in dates} if dates else None
     blocks = build_blocks(parcels)
     stats = {"group_id": group_id, "blocks": len(blocks), "written": 0, "reused": 0, "empty": 0, "failed": 0,
+             "rebuilt": 0, "fingerprint_backfilled": 0,
              "reported": 0, "report_failed": 0, "failed_dates": []}
     lock = threading.Lock()
 
@@ -436,18 +486,23 @@ def run_group(
                 _fail(block.key, "*", "search", exc)
                 continue
             mask = parcel_mask(block)  # 每块一次，各日期复用
+            fp = block_fingerprint(block)
             for obs_date, items in by_date.items():
                 if wanted is not None and obs_date not in wanted:
                     continue
                 try:
-                    key = cog_key(group_id, block.key, obs_date)
-                    if not force and storage.exists(key):
-                        payload = build_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items,
-                                                   storage=storage, force=False, reader=reader, mask=mask)
-                        if payload is not None:
+                    payload = None if force else try_reuse(
+                        group_id=group_id, block=block, obs_date=obs_date, items=items,
+                        storage=storage, mask=mask, fp=fp)
+                    if payload is not None:
+                        with lock:
                             stats["reused"] += 1
-                            pending.append(pool.submit(_report, payload))
+                            if payload.get("fingerprint_backfilled"):
+                                stats["fingerprint_backfilled"] += 1
+                        pending.append(pool.submit(_report, payload))
                     else:
+                        if not force and storage.exists(cog_key(group_id, block.key, obs_date)):
+                            stats["rebuilt"] += 1
                         built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items,
                                                    reader=reader, mask=mask)
                         if built is None:
