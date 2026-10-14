@@ -16,7 +16,9 @@ import argparse
 import json
 import os
 import tempfile
-from collections import defaultdict
+import threading
+from collections import defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -45,7 +47,10 @@ from app.core.project_cogs import (
     write_cog,
 )
 
+from app.core.oss_robust import retrying_report, robust
+
 logger = structlog.get_logger()
+UPLOAD_WORKERS = max(1, int(os.environ.get("PROJECT_SCENE_COGS_UPLOAD_WORKERS") or 4))
 
 NATIVE_10M_BANDS = ("B02", "B03", "B04", "B08")
 CACHE_SENSOR = "S2L2A_COG_SNAP"  # 与指数链路的窗口缓存分开（波段集合不同）
@@ -88,7 +93,7 @@ def _storage():
         return LocalDirStorage(local)
     from agric_satellite_analysis_common.storage import get_storage
 
-    return get_storage()
+    return robust(get_storage())
 
 
 def _report_to_api(payload: dict[str, Any]) -> dict[str, Any]:
@@ -193,74 +198,14 @@ def read_item_stack(item: Mapping[str, Any], block: Block) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- build
-def build_block_date(
-    *,
-    group_id: str,
-    block: Block,
-    obs_date: str,
-    items: Sequence[Mapping[str, Any]],
-    storage: Any,
-    force: bool = False,
-    reader: Callable[[Mapping[str, Any], Block], np.ndarray] = read_item_stack,
-) -> dict[str, Any] | None:
-    """生成（或复用）一个块一天的 COG，返回回执载荷；整块无有效像元时返回 None。"""
-    key = cog_key(group_id, block.key, obs_date)
-    side = sidecar_key(key)
-    if not force and storage.exists(key):
-        if storage.exists(side):
-            try:
-                payload = json.loads(storage.get_bytes(side))
-                payload["reused"] = True
-                return payload
-            except Exception:
-                logger.warning("project_cog_sidecar_unreadable", key=side)
-        else:
-            logger.info("project_cog_exists_without_sidecar", key=key)
-            return {"kind": "project_scene_cog", "oss_key": key, "skipped": "exists_no_sidecar"}
-
-    mask = parcel_mask(block)
-    acc: np.ndarray | None = None
-    used: list[Mapping[str, Any]] = []
-    for it in items:
-        try:
-            stack = reader(it, block)
-        except Exception as exc:
-            logger.warning("project_cog_item_read_failed", item=it.get("id"), error=str(exc)[:300])
-            continue
-        stack[:, ~mask] = 0
-        if not (stack[:-1] != 0).any():
-            continue
-        before = None if acc is None else int((acc[:-1] != 0).any(axis=0).sum())
-        acc = mosaic_fill(acc, stack)
-        del stack
-        if before is None or int((acc[:-1] != 0).any(axis=0).sum()) > before:
-            used.append(it)
-        if int((acc[:-1] != 0).any(axis=0)[mask].sum()) >= int(mask.sum()):
-            break  # 掩膜内已全部覆盖
-    if acc is None:
-        return None
-    valid = int((acc[:-1] != 0).any(axis=0).sum())
+def _cog_payload(*, group_id: str, block: Block, obs_date: str, key: str, used_ids: Sequence[str],
+                 items: Sequence[Mapping[str, Any]], size: int, valid: int, mask_pixels: int) -> dict[str, Any]:
+    by_id = {str(i.get("id")): i for i in items}
+    used = [by_id[x] for x in used_ids if x in by_id]
     acquired = sorted(str((i.get("properties") or {}).get("datetime")) for i in used)
-    tags = {
-        "product": PRODUCT,
-        "group_id": group_id,
-        "block": block.key,
-        "date": obs_date,
-        "scale": "0.0001",
-        "scenes": ",".join(str(i.get("id")) for i in used),
-    }
-    fd, tmp = tempfile.mkstemp(suffix=".tif", prefix="project_cog_")
-    os.close(fd)
-    try:
-        write_cog(tmp, acc, block, tags=tags)
-        size = os.path.getsize(tmp)
-        storage.upload_file(key, tmp, content_type="image/tiff")
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
     w, s, e, n = block.bounds_4326()
     x0, y0, x1, y1 = block.bounds
-    payload: dict[str, Any] = {
+    return {
         "kind": "project_scene_cog",
         "format_version": COG_FORMAT_VERSION,
         "product": PRODUCT,
@@ -281,17 +226,147 @@ def build_block_date(
         "dtype": "uint16",
         "nodata": 0,
         "scale": 0.0001,
-        "scene_ids": [str(i.get("id")) for i in used],
+        "scene_ids": [str(x) for x in used_ids],
         "tiles": sorted({str((i.get("properties") or {}).get("grid:code") or "") for i in used} - {""}),
         "land_ids": list(block.land_ids),
         "parcel_count": len(block.land_ids),
         "valid_pixel_count": valid,
-        "mask_pixel_count": int(mask.sum()),
+        "mask_pixel_count": mask_pixels,
         "mask_buffer_m": mask_buffer_m(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    storage.put_bytes(side, json.dumps(payload, ensure_ascii=False).encode(), content_type="application/json")
+
+
+def rebuild_sidecar(*, group_id: str, block: Block, obs_date: str, key: str,
+                    items: Sequence[Mapping[str, Any]], storage: Any, mask: np.ndarray) -> dict[str, Any]:
+    """COG 已在 OSS 但旁车 JSON 缺失（上次上传后回执/旁车写失败）：从 COG 本身重建旁车并返回回执载荷。"""
+    import rasterio
+
+    fd, tmp = tempfile.mkstemp(suffix=".tif", prefix="project_cog_side_")
+    os.close(fd)
+    try:
+        storage.download_file(key, tmp)
+        size = os.path.getsize(tmp)
+        with rasterio.open(tmp) as ds:
+            tags = ds.tags()
+            data = ds.read(list(range(1, ds.count)))  # 光谱波段（末波段为 SCL）
+        valid = int((data != 0).any(axis=0).sum())
+        del data
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    used_ids = [x for x in str(tags.get("scenes") or "").split(",") if x]
+    payload = _cog_payload(group_id=group_id, block=block, obs_date=obs_date, key=key, used_ids=used_ids,
+                           items=items, size=size, valid=valid, mask_pixels=int(mask.sum()))
+    payload["sidecar_rebuilt"] = True
+    storage.put_bytes(sidecar_key(key), json.dumps(payload, ensure_ascii=False).encode(), content_type="application/json")
+    logger.info("project_cog_sidecar_rebuilt", key=key)
     return payload
+
+
+def compose_block_date(
+    *,
+    group_id: str,
+    block: Block,
+    obs_date: str,
+    items: Sequence[Mapping[str, Any]],
+    reader: Callable[[Mapping[str, Any], Block], np.ndarray] = read_item_stack,
+    mask: np.ndarray | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """读景、镶嵌并写本地 COG 临时文件；返回 (临时路径, 回执载荷)。整块无有效像元时返回 None。"""
+    key = cog_key(group_id, block.key, obs_date)
+    mask = parcel_mask(block) if mask is None else mask
+    acc: np.ndarray | None = None
+    used: list[Mapping[str, Any]] = []
+    for it in items:
+        try:
+            stack = reader(it, block)
+        except Exception as exc:
+            logger.warning("project_cog_item_read_failed", item=it.get("id"), exc_type=type(exc).__name__, error=str(exc)[:300])
+            continue
+        stack[:, ~mask] = 0
+        if not (stack[:-1] != 0).any():
+            continue
+        before = None if acc is None else int((acc[:-1] != 0).any(axis=0).sum())
+        acc = mosaic_fill(acc, stack)
+        del stack
+        if before is None or int((acc[:-1] != 0).any(axis=0).sum()) > before:
+            used.append(it)
+        if int((acc[:-1] != 0).any(axis=0)[mask].sum()) >= int(mask.sum()):
+            break  # 掩膜内已全部覆盖
+    if acc is None:
+        return None
+    valid = int((acc[:-1] != 0).any(axis=0).sum())
+    tags = {
+        "product": PRODUCT,
+        "group_id": group_id,
+        "block": block.key,
+        "date": obs_date,
+        "scale": "0.0001",
+        "scenes": ",".join(str(i.get("id")) for i in used),
+    }
+    fd, tmp = tempfile.mkstemp(suffix=".tif", prefix="project_cog_")
+    os.close(fd)
+    try:
+        write_cog(tmp, acc, block, tags=tags)
+    except Exception:
+        os.remove(tmp)
+        raise
+    del acc
+    payload = _cog_payload(group_id=group_id, block=block, obs_date=obs_date, key=key,
+                           used_ids=[str(i.get("id")) for i in used], items=items,
+                           size=os.path.getsize(tmp), valid=valid, mask_pixels=int(mask.sum()))
+    return tmp, payload
+
+
+def publish_block_date(tmp: str, payload: dict[str, Any], storage: Any) -> dict[str, Any]:
+    """上传 COG 与旁车 JSON（旁车最后写：存在即代表 COG 完整）；总会删除临时文件。"""
+    key = payload["oss_key"]
+    try:
+        storage.upload_file(key, tmp, content_type="image/tiff")
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    storage.put_bytes(sidecar_key(key), json.dumps(payload, ensure_ascii=False).encode(), content_type="application/json")
+    return payload
+
+
+def build_block_date(
+    *,
+    group_id: str,
+    block: Block,
+    obs_date: str,
+    items: Sequence[Mapping[str, Any]],
+    storage: Any,
+    force: bool = False,
+    reader: Callable[[Mapping[str, Any], Block], np.ndarray] = read_item_stack,
+    mask: np.ndarray | None = None,
+) -> dict[str, Any] | None:
+    """生成（或复用）一个块一天的 COG，返回回执载荷；整块无有效像元时返回 None。
+
+    COG 已存在：有旁车则重放旁车；无旁车则由 COG 重建旁车（不再跳过，免 force 即可补回执）。
+    """
+    key = cog_key(group_id, block.key, obs_date)
+    side = sidecar_key(key)
+    mask = parcel_mask(block) if mask is None else mask
+    if not force and storage.exists(key):
+        if storage.exists(side):
+            try:
+                payload = json.loads(storage.get_bytes(side))
+                payload["reused"] = True
+                return payload
+            except Exception as exc:
+                logger.warning("project_cog_sidecar_unreadable", key=side, exc_type=type(exc).__name__, error=str(exc)[:200])
+        else:
+            logger.info("project_cog_exists_without_sidecar", key=key)
+        payload = rebuild_sidecar(group_id=group_id, block=block, obs_date=obs_date, key=key, items=items,
+                                  storage=storage, mask=mask)
+        payload["reused"] = True
+        return payload
+    built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items, reader=reader, mask=mask)
+    if built is None:
+        return None
+    return publish_block_date(*built, storage)
 
 
 def run_group(
@@ -306,44 +381,85 @@ def run_group(
     report: Callable[[dict[str, Any]], Any] | None = _report_to_api,
     searcher: Callable[..., list[dict]] = search_items,
     reader: Callable[[Mapping[str, Any], Block], np.ndarray] = read_item_stack,
+    upload_workers: int | None = None,
 ) -> dict[str, Any]:
-    """为一个项目在日期区间内（可选限定具体日期）生成全部块的 COG。"""
-    storage = storage or _storage()
+    """为一个项目在日期区间内（可选限定具体日期）生成全部块的 COG。
+
+    读景/写 COG 在当前线程串行；上传 OSS + 回执 API 放到小线程池（默认 4），
+    在途任务数有上限（2×workers），避免本地临时 COG 堆积。每块的掩膜只算一次。
+    """
+    storage = robust(storage or _storage())
+    report = retrying_report(report)
+    workers = max(1, upload_workers or UPLOAD_WORKERS)
     wanted = {str(d)[:10] for d in dates} if dates else None
     blocks = build_blocks(parcels)
-    stats = {"group_id": group_id, "blocks": len(blocks), "written": 0, "reused": 0, "empty": 0, "failed": 0, "reported": 0}
-    for block in blocks:
-        try:
-            by_date = group_items_by_date(searcher(block.bounds_4326(), date_from, date_to))
-        except Exception as exc:
-            logger.exception("project_cog_search_failed", group_id=group_id, block=block.key)
+    stats = {"group_id": group_id, "blocks": len(blocks), "written": 0, "reused": 0, "empty": 0, "failed": 0,
+             "reported": 0, "report_failed": 0, "failed_dates": []}
+    lock = threading.Lock()
+
+    def _fail(block_key: str, obs_date: str, stage: str, exc: BaseException) -> None:
+        logger.error("project_cog_build_failed", group_id=group_id, block=block_key, date=obs_date, stage=stage,
+                     exc_type=type(exc).__name__, error=str(exc)[:500], exc_info=exc)
+        with lock:
             stats["failed"] += 1
-            continue
-        for obs_date, items in by_date.items():
-            if wanted is not None and obs_date not in wanted:
-                continue
+            stats["failed_dates"].append(f"{block_key}/{obs_date}")
+
+    def _report(payload: dict[str, Any]) -> None:
+        if report is None:
+            return
+        try:
+            report(payload)
+            with lock:
+                stats["reported"] += 1
+        except Exception as exc:
+            logger.error("project_cog_report_failed", key=payload.get("oss_key"), exc_type=type(exc).__name__,
+                         error=str(exc)[:300])
+            with lock:
+                stats["report_failed"] += 1
+
+    def _publish(tmp: str, payload: dict[str, Any]) -> None:
+        try:
+            publish_block_date(tmp, payload, storage)
+        except Exception as exc:
+            _fail(payload["block_key"], payload["obs_date"], "upload", exc)
+            return
+        with lock:
+            stats["written"] += 1
+        _report(payload)
+
+    pending: deque[Future] = deque()
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cog-upload") as pool:
+        for block in blocks:
             try:
-                payload = build_block_date(
-                    group_id=group_id, block=block, obs_date=obs_date, items=items,
-                    storage=storage, force=force, reader=reader,
-                )
+                by_date = group_items_by_date(searcher(block.bounds_4326(), date_from, date_to))
             except Exception as exc:
-                logger.exception("project_cog_build_failed", group_id=group_id, block=block.key, date=obs_date)
-                stats["failed"] += 1
+                _fail(block.key, "*", "search", exc)
                 continue
-            if payload is None:
-                stats["empty"] += 1
-                continue
-            if payload.get("skipped"):
-                stats["reused"] += 1
-                continue
-            stats["reused" if payload.get("reused") else "written"] += 1
-            if report is not None:
+            mask = parcel_mask(block)  # 每块一次，各日期复用
+            for obs_date, items in by_date.items():
+                if wanted is not None and obs_date not in wanted:
+                    continue
                 try:
-                    report(payload)
-                    stats["reported"] += 1
+                    key = cog_key(group_id, block.key, obs_date)
+                    if not force and storage.exists(key):
+                        payload = build_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items,
+                                                   storage=storage, force=False, reader=reader, mask=mask)
+                        if payload is not None:
+                            stats["reused"] += 1
+                            pending.append(pool.submit(_report, payload))
+                    else:
+                        built = compose_block_date(group_id=group_id, block=block, obs_date=obs_date, items=items,
+                                                   reader=reader, mask=mask)
+                        if built is None:
+                            stats["empty"] += 1
+                        else:
+                            pending.append(pool.submit(_publish, *built))
                 except Exception as exc:
-                    logger.warning("project_cog_report_failed", key=payload.get("oss_key"), error=str(exc)[:300])
+                    _fail(block.key, obs_date, "build", exc)
+                while len(pending) > 2 * workers:
+                    pending.popleft().result()
+        for f in pending:
+            f.result()
     logger.info("project_cogs_group_done", **stats)
     return stats
 

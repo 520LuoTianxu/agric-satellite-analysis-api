@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -40,7 +41,29 @@ from app.tasks.project_cogs import (
     search_items,
 )
 
+from app.core.oss_robust import retry_call, retrying_report, robust
+
 logger = structlog.get_logger()
+READ_WORKERS = max(1, int(os.environ.get("PROJECT_HARVEST_READ_WORKERS") or 3))
+
+
+class CogReadError(RuntimeError):
+    """重试后仍有 COG 读取失败：不静默丢日期，整次运行失败。"""
+
+    def __init__(self, failed: Sequence[Mapping[str, Any]]) -> None:
+        self.failed = list(failed)
+        keys = ", ".join(f"{f['cog_key']} ({f['error']})" for f in self.failed[:20])
+        more = f" …共 {len(self.failed)} 个" if len(self.failed) > 20 else ""
+        super().__init__(f"project COG read failed after retries: {keys}{more}")
+
+
+def max_missing_frac(params: Mapping[str, Any]) -> float:
+    """每块允许读取失败的日期比例；默认 0 = 任何日期读不到就失败。"""
+    v = params.get("max_missing_date_frac", os.environ.get("PROJECT_HARVEST_MAX_MISSING_DATE_FRAC", 0))
+    try:
+        return max(0.0, float(v or 0))
+    except (TypeError, ValueError):
+        return 0.0
 
 RESULT_PREFIX = os.environ.get("PROJECT_HARVEST_PREFIX", "project-harvest")
 NEED = ("B02", "B03", "B04", "B08", "B11", "SCL")
@@ -52,6 +75,11 @@ def result_prefix(group_id: str, run_id: str) -> str:
 
 
 # ------------------------------------------------------------------ IO helpers
+def read_cog_bands_retry(storage: Any, key: str) -> dict[str, np.ndarray]:
+    """下载 + 解码整体再重试 1 次（下载本身已在 RobustStorage 内重试；此处兜底半截文件/解码错误）。"""
+    return retry_call(lambda: read_cog_bands(storage, key), what="read_cog", attempts=2, key=key)
+
+
 def read_cog_bands(storage: Any, key: str) -> dict[str, np.ndarray]:
     import rasterio
 
@@ -175,6 +203,9 @@ def run_block(
 
     by_date = group_items_by_date(searcher(block.bounds_4326(), season_from, season_to))
     scenes, dates, B4s, B8s, B11s, CLs, rgbs = [], [], [], [], [], [], []
+    failed: list[dict[str, Any]] = []
+    readable: list[tuple[str, dict[str, Any]]] = []
+    # 1) 确保 COG 存在（缺失时现场补建）
     for d in sorted(by_date):
         key = cog_key(group_id, block.key, d)
         rec: dict[str, Any] = {"date": d, "cog_key": key, "scene_ids": [str(i.get("id")) for i in by_date[d]]}
@@ -191,27 +222,62 @@ def run_block(
                     try:
                         report(payload)
                     except Exception as exc:
-                        logger.warning("project_harvest_cog_report_failed", key=key, error=str(exc)[:200])
-            b = read_cog_bands(storage, key)
+                        logger.warning("project_harvest_cog_report_failed", key=key, exc_type=type(exc).__name__,
+                                       error=str(exc)[:200])
         except Exception as exc:
-            logger.warning("project_harvest_cog_failed", key=key, error=str(exc)[:300])
-            rec.update(valid=False, note="read_failed")
+            logger.error("project_harvest_cog_failed", key=key, stage="build", exc_type=type(exc).__name__,
+                         error=str(exc)[:300])
+            rec.update(valid=False, note="read_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
             scenes.append(rec)
+            failed.append(rec)
             continue
-        clear = core.clear_mask(b["B02"], b["B08"], b["B11"], b["SCL"], params) & obs_mask
-        frac = float(clear.sum()) / n_in
-        rec["clear_frac"] = round(frac, 3)
-        rec["valid"] = frac >= float(params["valid_frac"])
-        scenes.append(rec)
-        if not rec["valid"]:
-            continue
-        dates.append(d)
-        B4s.append(core.refl(b["B04"], clear))
-        B8s.append(core.refl(b["B08"], clear))
-        B11s.append(core.refl(b["B11"], clear))
-        CLs.append(clear)
-        rgbs.append(core.rgb_stretch(b["B04"], b["B03"], b["B02"], inside))
-        del b
+        readable.append((d, rec))
+
+    # 2) 有界并行读取（每个 COG 自带重试）；按日期顺序消费，在途数受限以控内存
+    def _read(key: str):
+        try:
+            return read_cog_bands_retry(storage, key), None
+        except Exception as exc:
+            return None, exc
+
+    workers = max(1, int(params.get("read_workers") or READ_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ph-read") as pool:
+        futs = {}
+        nxt = 0
+        for i, (d, rec) in enumerate(readable):
+            while nxt < len(readable) and nxt < i + workers:
+                futs[nxt] = pool.submit(_read, readable[nxt][1]["cog_key"])
+                nxt += 1
+            b, exc = futs.pop(i).result()
+            if exc is not None:
+                logger.error("project_harvest_cog_failed", key=rec["cog_key"], stage="read", exc_type=type(exc).__name__,
+                             error=str(exc)[:300])
+                rec.update(valid=False, note="read_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+                scenes.append(rec)
+                failed.append(rec)
+                continue
+            clear = core.clear_mask(b["B02"], b["B08"], b["B11"], b["SCL"], params) & obs_mask
+            frac = float(clear.sum()) / n_in
+            rec["clear_frac"] = round(frac, 3)
+            rec["valid"] = frac >= float(params["valid_frac"])
+            scenes.append(rec)
+            if not rec["valid"]:
+                continue
+            dates.append(d)
+            B4s.append(core.refl(b["B04"], clear))
+            B8s.append(core.refl(b["B08"], clear))
+            B11s.append(core.refl(b["B11"], clear))
+            CLs.append(clear)
+            rgbs.append(core.rgb_stretch(b["B04"], b["B03"], b["B02"], inside))
+            del b
+    scenes.sort(key=lambda r: r["date"])
+    if failed:
+        total = len(by_date)
+        frac_missing = len(failed) / max(1, total)
+        info["missing_dates"] = [f["date"] for f in failed]
+        if frac_missing > max_missing_frac(params):
+            raise CogReadError(failed)
+        logger.warning("project_harvest_dates_missing_tolerated", block=block.key, missing=len(failed), total=total)
     info["dates"] = dates
     if len(dates) < 2:
         return {"block": info, "scenes": scenes, "valid_dates": dates, "thresholds": {}, "stats": [], "rasters": [],
@@ -283,7 +349,8 @@ def run(
     reader: Callable = read_item_stack,
 ) -> dict[str, Any]:
     """整次运行；上传 result.json，返回回执载荷。"""
-    storage = storage or _storage()
+    storage = robust(storage or _storage())
+    report = retrying_report(report)
     t0 = time.time()
     run_id = str(inputs["run_id"])
     group_id = str(inputs["group_id"])
@@ -340,6 +407,7 @@ def run(
         "stats": stats,
         "rasters": rasters,
         "unassigned_land_ids": sorted(set(by_lid) - assigned),
+        "missing_dates": {b["key"]: b["missing_dates"] for b in out_blocks if b.get("missing_dates")},
         "elapsed_s": round(time.time() - t0, 1),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -369,10 +437,14 @@ def run_project_harvest(run_id: str) -> dict:
         logger.warning("project_harvest_running_report_failed", run_id=run_id, error=str(exc)[:200])
     try:
         payload = run(_inputs(run_id))
+    except CogReadError as exc:
+        logger.error("project_harvest_failed", run_id=run_id, reason="cog_read_failed",
+                     failed_keys=[f["cog_key"] for f in exc.failed])
+        payload = {"kind": "project_harvest_result", "run_id": run_id, "status": "failed", "error": str(exc)[:2000]}
     except Exception as exc:
         logger.exception("project_harvest_failed", run_id=run_id)
         payload = {"kind": "project_harvest_result", "run_id": run_id, "status": "failed", "error": str(exc)[:2000]}
-    _report_to_api(payload)
+    retrying_report(_report_to_api)(payload)
     return {k: v for k, v in payload.items() if k != "valid_dates"}
 
 
