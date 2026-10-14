@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from datetime import date as date_cls
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -130,8 +131,12 @@ async def layers(group_id: GroupId, ctx: Annotated[OrgContext, Depends(_reader)]
                  db: Annotated[AsyncSession, Depends(get_db)], date: str = Query(..., max_length=10),
                  kind: Literal["tier", "rgb"] = "tier"):
     try:
+        try:
+            d = date_cls.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
         run = await _current(db, group_id)
-        rs = await svc.rasters(db, str(run["run_id"]), date)
+        rs = await svc.rasters(db, str(run["run_id"]), d)
     except svc.TablesMissing:
         return _not_configured()
     from app.core.storage import get_storage

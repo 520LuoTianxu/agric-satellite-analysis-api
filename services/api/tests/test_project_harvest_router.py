@@ -54,7 +54,9 @@ def client(monkeypatch):
         return STATS
 
     async def ras(db, r, d):
-        return [x for x in RASTERS if x["obs_date"].isoformat() == d]
+        # 生产 asyncpg 要求 date 对象；传字符串会 500（回归 #layers-500）
+        assert isinstance(d, date), type(d)
+        return [x for x in RASTERS if x["obs_date"] == d]
 
     async def dd(db, g, h, with_geom=True):
         return DEDUP
@@ -94,6 +96,7 @@ def test_endpoints(client):
     assert p["total"] == 1 and abs(p["items"][0]["harvested_mu"] - 1.0) < 1e-6
     g = client.get(base + "/parcels.geojson").json()
     assert g["features"][0]["properties"]["land_id"] == "1"
+    assert client.get(base + "/layers", params={"date": "2026/10/13"}).status_code == 422
     lay = client.get(base + "/layers", params={"date": "2026-10-13"}).json()
     assert lay["items"][0]["url"] == "https://oss/k.png"
     assert client.get(base + "/dedup").json()["kept"] == 1
