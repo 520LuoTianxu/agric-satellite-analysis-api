@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 from datetime import date as date_cls, datetime, timezone
 from typing import Any, Literal, TypedDict
 
+from agric_satellite_analysis_common.lonlat_pixels import extract_pixels, is_lonlat_format
+
 DroughtClass = Literal[
     "severe", "moderate", "mild", "normal", "unreliable", "out_of_season"
 ]
@@ -544,7 +546,7 @@ def overview_flood_bucket(cls: FloodClass | str | None) -> str | None:
 
 
 def _pixel_ndvi_ndmi_pairs(pixel_data: Any) -> list[tuple[float, float]]:
-    """Extract (ndvi, ndmi) pairs from lonlat_v1 or legacy grid pixel_data.
+    """Extract (ndvi, ndmi) pairs from lonlat (v1/columns) or legacy grid pixel_data.
 
     中文业务约束：兼容新经纬度稀疏点与旧版网格数组；有晴空标记时排除云像元，
     并剔除任一指数缺失的样本，确保后续多数判级只使用可比较的有效像元。
@@ -553,12 +555,9 @@ def _pixel_ndvi_ndmi_pairs(pixel_data: Any) -> list[tuple[float, float]]:
         return []
     out: list[tuple[float, float]] = []
     fmt = pixel_data.get("format")
-    pixels = pixel_data.get("pixels")
-    if not isinstance(pixels, list):
-        return []
 
-    if fmt == "lonlat_v1":
-        for p in pixels:
+    if is_lonlat_format(fmt):
+        for p in extract_pixels(pixel_data):
             if not isinstance(p, dict):
                 continue
             # 有明确云标记时只排除云像元；缺失clear标记的历史记录仍由有效指数决定是否可用。
@@ -570,6 +569,10 @@ def _pixel_ndvi_ndmi_pairs(pixel_data: Any) -> list[tuple[float, float]]:
                 continue
             out.append((ndvi, ndmi))
         return out
+
+    pixels = pixel_data.get("pixels")
+    if not isinstance(pixels, list):
+        return []
 
     # 旧版网格数组按固定字段位置读取，保持历史已入库像元仍可参与同一判级口径。
     # Legacy grid: {grid, pixels:[[i,j,evi,cire,ndmi,ndre,ndvi,mndwi], ...]}

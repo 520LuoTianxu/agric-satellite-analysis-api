@@ -198,6 +198,9 @@ async def _load_agri_share_series(
                            pixel_data->'decloud_reasons' AS decloud_reasons,
                            COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
                            CASE
+                             WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+                              AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
+                             THEN jsonb_array_length(pixel_data->'columns'->'lon')
                              WHEN pixel_data->>'format' = 'lonlat_v1'
                               AND jsonb_typeof(pixel_data->'pixels') = 'array'
                              THEN jsonb_array_length(pixel_data->'pixels')
@@ -809,9 +812,16 @@ async def get_share_agri_pixels(
                 FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id AND sensor = :sensor
                   {date_clause}
-                  AND pixel_data->>'format' = 'lonlat_v1'
-                  AND jsonb_typeof(pixel_data->'pixels') = 'array'
-                  AND jsonb_array_length(pixel_data->'pixels') > 0
+                  AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+                  AND (
+                    (pixel_data->>'format' = 'lonlat_v1'
+                     AND jsonb_typeof(pixel_data->'pixels') = 'array'
+                     AND jsonb_array_length(pixel_data->'pixels') > 0)
+                    OR
+                    (pixel_data->>'format' = 'lonlat_columns_v1'
+                     AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
+                     AND jsonb_array_length(pixel_data->'columns'->'lon') > 0)
+                  )
                 ORDER BY date DESC
                 LIMIT 1
                 """

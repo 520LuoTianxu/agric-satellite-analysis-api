@@ -1037,12 +1037,15 @@ def _upsert_agri_s1(
             result_delivery = "http"
     date_str = scene_date.isoformat()
     rel = parse_s1_relative_orbit(scene_id, relative_orbit)
-    pixel_data = {
-        "format": "lonlat_v1",
-        "source": "stac_s1_direct",
-        "algorithm_version": AGRI_S1_ALGORITHM_VERSION,
-        "pixels": pixels,
-    }
+    from agric_satellite_analysis_common.lonlat_pixels import to_columnar_pixel_data
+
+    pixel_data = to_columnar_pixel_data(
+        pixels,
+        extra={
+            "source": "stac_s1_direct",
+            "algorithm_version": AGRI_S1_ALGORITHM_VERSION,
+        },
+    )
     # S1质量分同样是地块掩膜内有效像元比例，随产品写入口径标识便于后续解释。
     pixel_data["quality_metrics"] = {
         "VV": {

@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 from agric_satellite_analysis_common.database_sync import SyncSession
 from agric_satellite_analysis_common.scene_time import normalize_acquired_at
+from agric_satellite_analysis_common.lonlat_pixels import is_lonlat_format
 from agric_satellite_analysis_common.settings import settings
 from agric_satellite_analysis_common.storage import ObjectTooLargeError, get_storage
 from sqlalchemy import text
@@ -314,7 +315,7 @@ def _download_json(url: str) -> Any | None:
 
 
 def _is_lonlat_scene_product(obj: Any) -> bool:
-    """只接收字段齐全且像元格式为 lonlat_v1 的场景对象进入场景表。"""
+    """只接收字段齐全且像元格式为 lonlat_v1 / lonlat_columns_v1 的场景对象进入场景表。"""
     if not isinstance(obj, dict):
         return False
     pixel_data = obj.get("pixel_data")
@@ -325,7 +326,7 @@ def _is_lonlat_scene_product(obj: Any) -> bool:
             return False
     if not isinstance(pixel_data, dict):
         return False
-    if pixel_data.get("format") != "lonlat_v1":
+    if not is_lonlat_format(pixel_data.get("format")):
         return False
     return bool(obj.get("land_id") and obj.get("date") and obj.get("scene_id"))
 
@@ -1253,7 +1254,7 @@ def _download_and_apply_oss(
 def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     """统一解析任务回执并分发场景、天气、土壤及报告结果。
 
-    兼容直接业务对象、MQ外层回执、嵌套apply对象和lonlat_v1场景列表。
+    兼容直接业务对象、MQ外层回执、嵌套apply对象和 lonlat_v1/lonlat_columns_v1 场景列表。
     返回处理统计；仅有派发凭证或没有业务载荷时标记为跳过。
     """
     if not isinstance(envelope, dict):
@@ -1284,7 +1285,7 @@ def apply_result_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
         stats["domain"] = _apply_domain_from_payload(envelope, status=status)
         return stats
 
-    # 内联场景列表只接受格式有效的lonlat_v1产品，避免把任意对象写入场景表。
+    # 内联场景列表只接受格式有效的 lonlat 产品，避免把任意对象写入场景表。
     scenes = envelope.get("scenes")
     if isinstance(scenes, list):
         n = 0

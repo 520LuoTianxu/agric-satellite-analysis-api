@@ -249,7 +249,11 @@ def iter_keys_from_file(path: Path, limit: int = 0) -> Iterator[str]:
 
 
 def _pixel_data_from_product(obj: dict) -> dict:
-    """读取产品自身的像素对象，保持场景产品表的单一 JSONB 存储。"""
+    """读取产品自身的像素对象，保持场景产品表的单一 JSONB 存储。
+
+    Nested ``pixel_data`` may be ``lonlat_v1`` (object list) or
+    ``lonlat_columns_v1`` (equal-length ``columns`` arrays).
+    """
     pixel_data = obj.get("pixel_data")
     if isinstance(pixel_data, str):
         try:

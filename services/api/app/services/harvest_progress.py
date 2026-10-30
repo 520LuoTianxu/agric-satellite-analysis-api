@@ -23,6 +23,7 @@ import uuid
 from datetime import date, timedelta
 from typing import Any, Iterable
 
+from agric_satellite_analysis_common.lonlat_pixels import extract_pixels
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -176,15 +177,21 @@ _LOAD_AREA = text(
 _LOAD_S1 = text(
     """
     SELECT date,
-           pixel_data->'pixels' AS pixels,
+           pixel_data AS pixel_data,
            pixel_data->>'algorithm_version' AS algorithm_version,
            NULLIF(pixel_data->>'relative_orbit', '')::int AS relative_orbit
     FROM agric_satellite.parcel_scene_products
     WHERE land_id = :land_id
       AND sensor = 'S1'
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' = 'lonlat_v1'
-      AND jsonb_typeof(pixel_data->'pixels') = 'array'
+      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+      AND (
+        (pixel_data->>'format' = 'lonlat_v1'
+         AND jsonb_typeof(pixel_data->'pixels') = 'array')
+        OR
+        (pixel_data->>'format' = 'lonlat_columns_v1'
+         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
+      )
     ORDER BY date ASC, scene_id ASC
     """
 )
@@ -194,13 +201,28 @@ _COUNT_INPUTS = text(
     """
     SELECT sensor,
            count(*) AS scenes,
-           COALESCE(max(jsonb_array_length(pixel_data->'pixels')), 0) AS max_pixels
+           COALESCE(max(
+             CASE
+               WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+                    AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
+               THEN jsonb_array_length(pixel_data->'columns'->'lon')
+               WHEN jsonb_typeof(pixel_data->'pixels') = 'array'
+               THEN jsonb_array_length(pixel_data->'pixels')
+               ELSE 0
+             END
+           ), 0) AS max_pixels
     FROM agric_satellite.parcel_scene_products
     WHERE land_id = :land_id
       AND sensor IN ('S1', 'S2')
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' = 'lonlat_v1'
-      AND jsonb_typeof(pixel_data->'pixels') = 'array'
+      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+      AND (
+        (pixel_data->>'format' = 'lonlat_v1'
+         AND jsonb_typeof(pixel_data->'pixels') = 'array')
+        OR
+        (pixel_data->>'format' = 'lonlat_columns_v1'
+         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
+      )
     GROUP BY sensor
     """
 )
@@ -209,7 +231,7 @@ _COUNT_INPUTS = text(
 _LOAD_SCENES = text(
     """
     SELECT date, scene_id,
-           pixel_data->'pixels' AS pixels,
+           pixel_data AS pixel_data,
            pixel_data->>'algorithm_version' AS algorithm_version,
            pixel_data->>'stac_item_id' AS stac_item_id,
            COALESCE(NULLIF(BTRIM(product_source), ''), NULLIF(BTRIM(pixel_data->>'source'), '')) AS source,
@@ -220,8 +242,14 @@ _LOAD_SCENES = text(
     WHERE land_id = :land_id
       AND sensor = 'S2'
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' = 'lonlat_v1'
-      AND jsonb_typeof(pixel_data->'pixels') = 'array'
+      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+      AND (
+        (pixel_data->>'format' = 'lonlat_v1'
+         AND jsonb_typeof(pixel_data->'pixels') = 'array')
+        OR
+        (pixel_data->>'format' = 'lonlat_columns_v1'
+         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
+      )
     ORDER BY date ASC, scene_id ASC
     """
 )
@@ -316,7 +344,7 @@ _LATEST_OBS_DATE = text(
     WHERE land_id = :land_id
       AND sensor = 'S2'
       AND date <= :on_date
-      AND pixel_data->>'format' = 'lonlat_v1'
+      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
     """
 )
 
@@ -455,8 +483,9 @@ async def load_s1_inputs(
         db, _LOAD_S1, {"land_id": land_id, "date_from": date_from, "date_to": date_to}
     ):
         d = dict(r._mapping)
+        raw_pixels = extract_pixels(d.pop("pixel_data", None))
         slim = await asyncio.to_thread(
-            _parse_slim_pixels, d.pop("pixels", None), _S1_PIXEL_KEYS_ANY_CASE, stride
+            _slim_pixels, raw_pixels, _S1_PIXEL_KEYS_ANY_CASE, stride
         )
         if True:
             if slim:
@@ -481,8 +510,9 @@ async def load_scene_inputs(
         d = dict(r._mapping)
         # 逐景解析后立即裁剪：原始 JSON 字符串和全波段 dict 不会跨景累积；
         # 大 JSON 解析在线程池中进行，不阻塞事件循环。
+        raw_pixels = extract_pixels(d.pop("pixel_data", None))
         slim = await asyncio.to_thread(
-            _parse_slim_pixels, d.pop("pixels", None), _S2_PIXEL_KEYS_ANY_CASE, stride
+            _slim_pixels, raw_pixels, _S2_PIXEL_KEYS_ANY_CASE, stride
         )
         if not slim:
             continue

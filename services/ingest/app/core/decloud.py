@@ -734,15 +734,18 @@ def decloud_pixel_payload(
     Fair/bad rows are persisted for audit; drought SQL still requires
     ``decloud_quality=good``. ``decloud_metrics`` keeps the gate inputs.
     """
-    payload: dict[str, Any] = {
-        "format": "lonlat_v1",
-        "source": DECLOUD_SOURCE,
-        "decloud_quality": quality,
-        "decloud_score": score,
-        "decloud_reasons": list(reasons or []),
-        "raw_scene_id": raw_scene_id,
-        "pixels": pixels,
-    }
+    from agric_satellite_analysis_common.lonlat_pixels import to_columnar_pixel_data
+
+    payload = to_columnar_pixel_data(
+        pixels,
+        extra={
+            "source": DECLOUD_SOURCE,
+            "decloud_quality": quality,
+            "decloud_score": score,
+            "decloud_reasons": list(reasons or []),
+            "raw_scene_id": raw_scene_id,
+        },
+    )
     if metrics:
         payload["decloud_metrics"] = dict(metrics)
     return payload

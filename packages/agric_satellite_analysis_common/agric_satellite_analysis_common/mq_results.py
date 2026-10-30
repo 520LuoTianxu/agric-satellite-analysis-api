@@ -132,7 +132,7 @@ def fit_inline_payload(
 
 
 def scene_json_oss_key(land_id: str, date_str: str, sensor: str = "S2") -> str:
-    """Stable OSS key for a lonlat_v1 parcel scene product JSON."""
+    """Stable OSS key for a lonlat parcel scene product JSON."""
     prefix = (settings.oss_prefix or "s1s2_parcel/json/").rstrip("/") + "/"
     return f"{prefix}{land_id}/{date_str}_{sensor}.json"
 

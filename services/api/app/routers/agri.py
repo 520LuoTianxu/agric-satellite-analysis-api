@@ -20,6 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.core.agri_classify import is_decloud_product, parse_s1_relative_orbit
+from agric_satellite_analysis_common.lonlat_pixels import (
+    SQL_LONLAT_FORMAT_IN,
+    SQL_LONLAT_NONEMPTY,
+    SQL_LONLAT_PIXEL_COUNT,
+    extract_pixels,
+    extract_pixels_from_product,
+    is_lonlat_format,
+)
 from app.core.database import get_db
 from app.core.storage import ObjectTooLargeError, get_parcel_product_storage
 from app.middleware.auth import OrgContext, require_roles
@@ -217,12 +225,12 @@ def _normalize_oss_pixels(raw_pixels: Any) -> list[dict[str, Any]]:
 
 
 def _pixels_from_db_lonlat(pixel_data: Any) -> list[dict[str, Any]] | None:
-    """只接受带 lonlat_v1 标记的数据库像元，避免误把旧行列网格当经纬度。"""
+    """只接受 lonlat_v1 / lonlat_columns_v1 标记的数据库像元，避免误把旧行列网格当经纬度。"""
     if not isinstance(pixel_data, dict):
         return None
-    if pixel_data.get("format") != "lonlat_v1":
+    if not is_lonlat_format(pixel_data.get("format")):
         return None
-    pixels = _normalize_lonlat_pixels(pixel_data.get("pixels"))
+    pixels = _normalize_lonlat_pixels(extract_pixels(pixel_data))
     return pixels or None
 
 
@@ -314,7 +322,7 @@ def _load_oss_scene_pixels(
     obj = _load_oss_scene_json(json_oss_key, read_budget=read_budget)
     if obj is None:
         return None
-    raw_pixels = obj.get("pixels")
+    raw_pixels = extract_pixels_from_product(obj)
     declared_count = obj.get("pixel_count")
     try:
         declared_count = int(declared_count or 0)
@@ -323,7 +331,7 @@ def _load_oss_scene_pixels(
     # OSS 回退先检查声明数量和数组长度，避免规范化明显超限的数据副本。
     if max_pixels is not None and (
         declared_count > max_pixels
-        or (isinstance(raw_pixels, list) and len(raw_pixels) > max_pixels)
+        or len(raw_pixels) > max_pixels
     ):
         raise _ScenePixelLimitExceeded("OSS scene pixel count exceeds the request budget")
     pixels = _normalize_oss_pixels(raw_pixels)
@@ -695,12 +703,7 @@ async def list_land_scenes(
                 SELECT
                     COALESCE(SUM(GREATEST(
                         COALESCE(pixel_count, 0),
-                        CASE
-                            WHEN pixel_data->>'format' = 'lonlat_v1'
-                             AND jsonb_typeof(pixel_data->'pixels') = 'array'
-                            THEN jsonb_array_length(pixel_data->'pixels')
-                            ELSE 0
-                        END
+                        {SQL_LONLAT_PIXEL_COUNT}
                     )), 0)::bigint AS pixel_count,
                     COALESCE(SUM(pg_column_size(pixel_data)), 0)::bigint AS payload_bytes
                 FROM (
@@ -1044,9 +1047,8 @@ async def list_ndvi_day_grade_shares(
     where = [
         "land_id = :land_id",
         "sensor = 'S2'",
-        "pixel_data->>'format' = 'lonlat_v1'",
-        "jsonb_typeof(pixel_data->'pixels') = 'array'",
-        "jsonb_array_length(pixel_data->'pixels') > 0",
+        SQL_LONLAT_FORMAT_IN,
+        SQL_LONLAT_NONEMPTY,
     ]
     params: dict[str, Any] = {"land_id": land_id, "limit": limit}
     if date_from is not None:
@@ -1081,9 +1083,16 @@ async def list_ndvi_day_grade_shares(
                 JOIN selected_dates USING (date)
                 WHERE scene.land_id = :land_id
                   AND scene.sensor = 'S2'
-                  AND scene.pixel_data->>'format' = 'lonlat_v1'
-                  AND jsonb_typeof(scene.pixel_data->'pixels') = 'array'
-                  AND jsonb_array_length(scene.pixel_data->'pixels') > 0
+                  AND scene.pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+                  AND (
+                    (scene.pixel_data->>'format' = 'lonlat_v1'
+                     AND jsonb_typeof(scene.pixel_data->'pixels') = 'array'
+                     AND jsonb_array_length(scene.pixel_data->'pixels') > 0)
+                    OR
+                    (scene.pixel_data->>'format' = 'lonlat_columns_v1'
+                     AND jsonb_typeof(scene.pixel_data->'columns'->'lon') = 'array'
+                     AND jsonb_array_length(scene.pixel_data->'columns'->'lon') > 0)
+                  )
                 ORDER BY scene.date ASC, scene.scene_id ASC
                 """
             ),
