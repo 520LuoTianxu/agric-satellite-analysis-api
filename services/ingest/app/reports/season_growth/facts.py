@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
-from agric_satellite_analysis_common.lonlat_pixels import extract_pixels, is_lonlat_format
+from agric_satellite_analysis_common.lonlat_pixels import (
+    SQL_LONLAT_PIXEL_COUNT,
+    extract_pixels,
+    is_lonlat_format,
+)
 
 import logging
 import re
@@ -102,7 +106,7 @@ def load_agri_s2_rows(
     rows = (
         session.execute(
             text(
-                """
+                f"""
             SELECT date, scene_id, ndvi_avg, evi_avg, mndwi_avg, ndmi_avg,
                    parcel_cloud_cover_pct,
                    COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
@@ -112,14 +116,7 @@ def load_agri_s2_rows(
                    COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
                    rgb_url, large_rgb_url, rgb_oss_key,
                    pixel_data->>'format' AS pixel_format,
-                   CASE
-                     WHEN pixel_data->>'format' = 'lonlat_columns_v1'
-                          AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-                     THEN jsonb_array_length(pixel_data->'columns'->'lon')
-                     WHEN jsonb_typeof(pixel_data->'pixels') = 'array'
-                     THEN jsonb_array_length(pixel_data->'pixels')
-                     ELSE 0
-                   END AS pixel_n
+                   {SQL_LONLAT_PIXEL_COUNT} AS pixel_n
             FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2'
               AND date >= :start_date AND date <= :end_date
