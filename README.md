@@ -151,7 +151,37 @@ OSS_ACCESS_KEY_ID=
 OSS_ACCESS_KEY_SECRET=
 OSS_BUCKET=agric-dev
 OSS_PREFIX=s1s2_parcel/json/
+```
 
+Uploads go through `OssStorage.upload_file` / `put_bytes` (also used by the
+download-machine Celery path `upload_file_via_storage`). Files at or above
+`OSS_MULTIPART_THRESHOLD_MB` (default **1 MiB**) use `oss2.resumable_upload`
+(multipart + local checkpoint under `OSS_RESUMABLE_STORE_DIR` or
+`{OPENFARM_SCRATCH_DIR}/oss_resume`); smaller objects use simple PUT. Both
+paths retry transient SSL / timeout / 5xx errors with exponential backoff.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `OSS_ENDPOINT` | regional Beijing | Use `https://oss-accelerate.aliyuncs.com` or `https://{bucket}.oss-accelerate.aliyuncs.com` on the download machine |
+| `OSS_IS_CNAME` | auto | `true` when the endpoint host starts with `{bucket}.` (bucket-prefixed accelerate URL) |
+| `OSS_MULTIPART_THRESHOLD_MB` | `1` | At/above → resumable multipart |
+| `OSS_PART_SIZE_MB` | `4` | Multipart part size (bench: 4–5 MiB) |
+| `OSS_MULTIPART_NUM_THREADS` | `8` | Concurrent part uploads (bench: 6–8) |
+| `OSS_UPLOAD_MAX_RETRIES` | `5` | Attempts per upload call |
+| `OSS_UPLOAD_RETRY_BACKOFF_S` | `2` | Base backoff seconds |
+| `OSS_RESUMABLE_STORE_DIR` | `{scratch}/oss_resume` | Checkpoint root for breakpoint resume |
+| `OSS_CONNECT_TIMEOUT_S` / `OSS_READ_TIMEOUT_S` | `10` / `180` | oss2 `(connect, read)` timeouts |
+
+Download-machine example (transfer acceleration + prod bucket):
+
+```bash
+OSS_BUCKET=agric-prod
+OSS_ENDPOINT=https://oss-accelerate.aliyuncs.com
+# or: OSS_ENDPOINT=https://agric-prod.oss-accelerate.aliyuncs.com
+OSS_MULTIPART_THRESHOLD_MB=1
+OSS_PART_SIZE_MB=4
+OSS_MULTIPART_NUM_THREADS=8
+OSS_UPLOAD_MAX_RETRIES=5
 ```
 
 Useful API routes (auth + `X-Org-Id` required):

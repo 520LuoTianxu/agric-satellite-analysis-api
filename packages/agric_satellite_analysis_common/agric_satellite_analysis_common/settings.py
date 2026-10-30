@@ -54,6 +54,22 @@ class CommonSettings(BaseSettings):
     oss_access_key_secret: str = ""
     oss_bucket: str = "agric-dev"
     oss_prefix: str = "s1s2_parcel/json/"
+    # When True, treat OSS_ENDPOINT as a custom/CNAME (or virtual-hosted
+    # ``{bucket}.oss-accelerate.aliyuncs.com``) host. None / unset = auto-detect
+    # when the endpoint host starts with ``{bucket}.``.
+    oss_is_cname: bool | None = None
+    # Upload reliability (download-machine → Beijing OSS / transfer acceleration).
+    # Files at or above the threshold use oss2.resumable_upload (multipart +
+    # local checkpoint); smaller files use put with retries.
+    oss_multipart_threshold_mb: float = 1.0
+    oss_part_size_mb: float = 4.0
+    oss_multipart_num_threads: int = 8
+    oss_upload_max_retries: int = 5
+    oss_upload_retry_backoff_s: float = 2.0
+    # Empty → ``{OPENFARM_SCRATCH_DIR}/oss_resume`` (ResumableStore root).
+    oss_resumable_store_dir: str = ""
+    oss_connect_timeout_s: float = 10.0
+    oss_read_timeout_s: float = 180.0
 
     # Shared scratch volume between ingest and storage workers
     openfarm_scratch_dir: str = "/data/scratch"
