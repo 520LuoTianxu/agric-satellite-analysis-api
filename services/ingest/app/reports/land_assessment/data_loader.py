@@ -15,6 +15,11 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from agric_satellite_analysis_common.settings import settings
+from agric_satellite_analysis_common.lonlat_pixels import (
+    SQL_LONLAT_FORMAT_IN,
+    extract_pixels,
+    is_lonlat_format,
+)
 from app.core.agri_classify import CLOUD_MAX_PCT, cloud_pct, official_s2_sql
 from agric_satellite_analysis_common.quality_metrics import (
     CLOUD_COMPLEMENT_HEURISTIC_V1,
@@ -200,11 +205,9 @@ def _extract_lonlat_pixels(
     """Normalize agri lonlat_v1 pixel_data.pixels; optionally keep clear=1 only."""
     if not isinstance(pixel_data, dict):
         return []
-    if pixel_data.get("format") != "lonlat_v1":
+    if not is_lonlat_format(pixel_data.get("format")):
         return []
-    raw = pixel_data.get("pixels")
-    if not isinstance(raw, list):
-        return []
+    raw = extract_pixels(pixel_data)
     out: list[dict[str, Any]] = []
     for pix in raw:
         if not isinstance(pix, dict):
@@ -247,7 +250,7 @@ def load_agri_lonlat_pixels(
     where = [
         "land_id = :land_id",
         "sensor = 'S2'",
-        "pixel_data->>'format' = 'lonlat_v1'",
+        SQL_LONLAT_FORMAT_IN,
         official_s2_sql(""),
     ]
     if dates:
@@ -305,6 +308,9 @@ def load_agri_pixel_date_index(
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud,
                pixel_count,
                CASE
+                 WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+                   AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
+                 THEN jsonb_array_length(pixel_data->'columns'->'lon')
                  WHEN pixel_data->>'format' = 'lonlat_v1'
                    AND jsonb_typeof(pixel_data->'pixels') = 'array'
                  THEN jsonb_array_length(pixel_data->'pixels')

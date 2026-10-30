@@ -526,7 +526,9 @@ def process_date(
     cloud_over_30 = False
     parcel_cloud = None
 
-    pixel_data = {"format": "lonlat_v1", "pixels": pixels}
+    from agric_satellite_analysis_common.lonlat_pixels import to_columnar_pixel_data
+
+    pixel_data = to_columnar_pixel_data(pixels)
     scene_id = f"stac_bridge_{date_str}_S2"
     row = {
         "land_id": meta["land_id"],

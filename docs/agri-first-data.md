@@ -14,7 +14,7 @@ Agri satellite jobs **do not** upload index `.tif` / COG products (`WRITE_INDEX_
 STAC (Sentinel-2 L2A / Sentinel-1 GRD)
   → download source bands (windowed to parcel)
   → compute indices in memory (NDVI, EVI, NDMI, NDRE, CIre, MNDWI; S1 VV/VH dB)
-  → sample parcel geometry → lonlat_v1 pixel JSON
+  → sample parcel geometry → lonlat_columns_v1 pixel JSON (columnar; legacy lonlat_v1 still readable)
   → upload lonlat JSON to OSS
   → publish one MQ result per scene (producer mq_result_writer pulls OSS → upserts PG)
   → optional compact JSON object under OSS_PREFIX
@@ -38,14 +38,15 @@ Env knobs (ingest worker):
 
 | Source | Role |
 | --- | --- |
-| **`agric_satellite.parcel_scene_products`** | **Primary** RS for agri parcels. Prefer `pixel_data.format = lonlat_v1` at insert/ingest time. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1`. |
+| **`agric_satellite.parcel_scene_products`** | **Primary** RS for agri parcels. New writes use `pixel_data.format = lonlat_columns_v1` (equal-length `columns` arrays). Legacy `lonlat_v1` object-list rows remain readable. Served via `GET /v1/agri/lands/{land_id}/scenes?include_pixels=1` (API still returns object-list `pixels_lonlat`). |
 | `agric_satellite.raster_layers` / `agric_satellite.field_stats` | Optional legacy COG + TiTiler path. Canonical parcel detail, 色斑图, and growth curves read the same `land_id` from `land_parcels` / `parcel_scene_products`. |
 
 Rules:
 
 - Canonical parcels use the lonlat-direct ingest path (not per-index COG backfill). Manual refresh still runs satellite jobs; they write lonlat, not TIFs.
 - Dedup for agri uses dates already in `parcel_scene_products`, not `raster_layers` (old COG rows must not block lonlat).
-- Ingest / seed must write **lonlat_v1** pixels into `parcel_scene_products` at insert time when available.
+- Ingest / seed must write **lonlat_columns_v1** (or legacy **lonlat_v1**) pixels into `parcel_scene_products` at insert time when available.
+- Columnar shape: `{"format":"lonlat_columns_v1","columns":{"lon":[...],"lat":[...],"clear":[...],"NDVI":[...],...}}`. Same pixel count/order/float precision as before; plain JSON (no gzip product wrapper).
 - Do **not** implement soil inside `parcel_scene_products`.
 
 ## Soil + weather tables

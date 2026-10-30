@@ -12,6 +12,7 @@ try:
 except ImportError:
     pass
 
+from agric_satellite_analysis_common.lonlat_pixels import extract_pixels
 from app.core.decloud import (
     DECLOUD_SOURCE,
     DecloudQualityInputs,
@@ -535,7 +536,7 @@ class PersistProductTests(unittest.TestCase):
         self.assertEqual(payload["decloud_quality"], "bad")
         self.assertEqual(payload["decloud_reasons"], ["ndvi_far_below_neighbors"])
         self.assertEqual(payload["source"], DECLOUD_SOURCE)
-        self.assertEqual(payload["pixels"][0]["NDVI"], 0.1)
+        self.assertEqual(extract_pixels(payload)[0]["NDVI"], 0.1)
 
     def test_pixel_payload_stores_quality_metrics_for_audit(self) -> None:
         metrics = decloud_quality_metrics(
@@ -561,7 +562,7 @@ class PersistProductTests(unittest.TestCase):
         )
         self.assertEqual(payload["decloud_metrics"]["ndvi_gap"], 0.79)
         # fair/bad still carry pixel values for non-drought use
-        self.assertEqual(payload["pixels"][0]["NDVI"], 0.0)
+        self.assertEqual(extract_pixels(payload)[0]["NDVI"], 0.0)
 
     def test_fallback_pixels_from_zonal_means(self) -> None:
         pixels = fallback_lonlat_pixels(

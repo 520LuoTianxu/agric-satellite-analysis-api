@@ -1,4 +1,4 @@
-"""Agri optical path: STAC bands -> in-memory indices -> lonlat_v1 upsert.
+"""Agri optical path: STAC bands -> in-memory indices -> lonlat_columns_v1 upsert.
 
 Does **not** upload index COG/TIF rasters. Compact scene JSON may still go
 to ``OSS_PREFIX`` (see ``UPLOAD_SCENE_JSON``).
@@ -71,7 +71,7 @@ from app.worker import celery_app
 
 logger = structlog.get_logger()
 
-# Pixel keys in lonlat_v1 (stable order; matches the OSS-COG bridge emit set).
+# Pixel keys in lonlat products (stable order; matches the OSS-COG bridge emit set).
 AGRI_OPTICAL_INDEX_KEYS = ("ndvi", "evi", "ndmi", "ndre", "cire", "mndwi")
 INDEX_KEY_TO_PIXEL = {
     "ndvi": "NDVI",
@@ -472,20 +472,23 @@ def emit_optical_lonlat(
     analysis_grid = describe_target_grid(
         transform, index_arrays["NDVI"].shape, target_crs
     )
-    pixel_data = {
-        "format": "lonlat_v1",
-        "source": "stac_direct",
-        "stac_item_id": stac_item_id,
-        "algorithm_version": AGRI_OPTICAL_ALGORITHM_VERSION,
-        "radiometry": {
-            "method": "scale_offset_to_reflectance",
-            "source": scene.get("band_radiometry_source"),
-            "band_sources": scene.get("band_radiometry_sources", {}),
-            "bands": scene.get("band_radiometry", {}),
+    from agric_satellite_analysis_common.lonlat_pixels import to_columnar_pixel_data
+
+    pixel_data = to_columnar_pixel_data(
+        pixels,
+        extra={
+            "source": "stac_direct",
+            "stac_item_id": stac_item_id,
+            "algorithm_version": AGRI_OPTICAL_ALGORITHM_VERSION,
+            "radiometry": {
+                "method": "scale_offset_to_reflectance",
+                "source": scene.get("band_radiometry_source"),
+                "band_sources": scene.get("band_radiometry_sources", {}),
+                "bands": scene.get("band_radiometry", {}),
+            },
+            "analysis_grid": analysis_grid,
         },
-        "analysis_grid": analysis_grid,
-        "pixels": pixels,
-    }
+    )
     if processing_window_km is not None:
         # 将实际检索窗口写入产品元数据，便于后续核验周边 5 km 数据确实参与处理。
         pixel_data["processing_window"] = {

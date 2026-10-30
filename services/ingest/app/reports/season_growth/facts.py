@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from agric_satellite_analysis_common.lonlat_pixels import extract_pixels, is_lonlat_format
+
 import logging
 import re
 from bisect import bisect_left, bisect_right
@@ -111,6 +113,9 @@ def load_agri_s2_rows(
                    rgb_url, large_rgb_url, rgb_oss_key,
                    pixel_data->>'format' AS pixel_format,
                    CASE
+                     WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+                          AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
+                     THEN jsonb_array_length(pixel_data->'columns'->'lon')
                      WHEN jsonb_typeof(pixel_data->'pixels') = 'array'
                      THEN jsonb_array_length(pixel_data->'pixels')
                      ELSE 0
@@ -1521,7 +1526,7 @@ def load_scene_lonlat_pixels(
             SELECT pixel_data
             FROM agric_satellite.parcel_scene_products
             WHERE land_id = :land_id AND sensor = 'S2' AND date = CAST(:d AS date)
-              AND pixel_data->>'format' = 'lonlat_v1'
+              AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
             ORDER BY
               CASE WHEN coalesce(parcel_cloud_cover_pct, cloud_cover) <= 20 THEN 0 ELSE 1 END,
               date DESC
@@ -1536,11 +1541,9 @@ def load_scene_lonlat_pixels(
     if not row:
         return []
     pixel_data = row.get("pixel_data")
-    if not isinstance(pixel_data, dict):
+    if not isinstance(pixel_data, dict) or not is_lonlat_format(pixel_data.get("format")):
         return []
-    raw = pixel_data.get("pixels")
-    if not isinstance(raw, list):
-        return []
+    raw = extract_pixels(pixel_data)
     out: list[dict[str, Any]] = []
     for pix in raw:
         if not isinstance(pix, dict):

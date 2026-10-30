@@ -8,6 +8,8 @@ from math import cos, radians, sqrt
 from statistics import mean, pstdev
 from typing import Any
 
+from agric_satellite_analysis_common.lonlat_pixels import extract_pixels, is_lonlat_format
+
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
@@ -329,9 +331,9 @@ def _sample_spatial_pixels(valid: list[list[float]]) -> list[list[float]]:
 
 def _spatial_snapshot_from_data(point: dict, pixel_data: Any) -> dict | None:
     """仅用明确标清且坐标/NDVI有效的像元计算全量统计，再生成地图代表点。"""
-    if not isinstance(pixel_data, dict) or pixel_data.get("format") != "lonlat_v1":
+    if not isinstance(pixel_data, dict) or not is_lonlat_format(pixel_data.get("format")):
         return None
-    pixels = pixel_data.get("pixels") or []
+    pixels = extract_pixels(pixel_data)
     valid = []
     for pixel in pixels:
         # 像元缺质量标记时不假定清晰；地块日均有效不代表每一个像元都可用。

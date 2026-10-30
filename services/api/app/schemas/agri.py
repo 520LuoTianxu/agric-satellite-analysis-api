@@ -165,14 +165,14 @@ class SceneProductOut(BaseModel):
         default=None,
         description=(
             "Legacy gridified pixels {grid, pixels:[[row,col,...]]}. "
-            "Only used as fallback when DB lonlat_v1 / OSS lon/lat are unavailable; "
+            "Only used as fallback when DB lonlat / OSS lon/lat are unavailable; "
             "omitted when pixels_lonlat is populated. Present only with include_pixels=1."
         ),
     )
     pixels_lonlat: list[dict[str, Any]] | None = Field(
         default=None,
         description=(
-            "Preferred lon/lat pixels when include_pixels=1 (DB lonlat_v1 primary, "
+            "Preferred lon/lat pixels when include_pixels=1 (DB lonlat primary, "
             "else OSS). S2: {lon,lat,clear?,NDVI,EVI,NDMI,NDRE,CIre,MNDWI}; "
             "S1: {lon,lat,VV_db,VH_db}."
         ),
@@ -200,7 +200,7 @@ class SceneProductOut(BaseModel):
         default=None,
         description=(
             "Which pixel payload is authoritative when include_pixels=1: "
-            "db_lonlat (DB pixel_data.format=lonlat_v1), oss, or db_grid."
+            "db_lonlat (DB pixel_data.format=lonlat_v1 or lonlat_columns_v1), oss, or db_grid."
         ),
     )
 

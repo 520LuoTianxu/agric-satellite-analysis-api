@@ -461,7 +461,7 @@ class ParcelProductTests(unittest.TestCase):
             ["http", "http"],
         )
         for (row, _), land in zip(products, self.lands):
-            for pixel in row["_pixel_data_obj"]["pixels"]:
+            for pixel in extract_pixels(row["_pixel_data_obj"]):
                 self.assertTrue(land["geom"].covers(Point(pixel["lon"], pixel["lat"])))
         np.testing.assert_array_equal(bands["B08"], original)
 
