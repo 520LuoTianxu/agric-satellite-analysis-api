@@ -27,6 +27,8 @@ from agric_satellite_analysis_common.lonlat_pixels import (
     extract_pixels,
     extract_pixels_from_product,
     is_lonlat_format,
+    sql_lonlat_format_in,
+    sql_lonlat_nonempty,
 )
 from app.core.database import get_db
 from app.core.storage import ObjectTooLargeError, get_parcel_product_storage
@@ -1083,16 +1085,8 @@ async def list_ndvi_day_grade_shares(
                 JOIN selected_dates USING (date)
                 WHERE scene.land_id = :land_id
                   AND scene.sensor = 'S2'
-                  AND scene.pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
-                  AND (
-                    (scene.pixel_data->>'format' = 'lonlat_v1'
-                     AND jsonb_typeof(scene.pixel_data->'pixels') = 'array'
-                     AND jsonb_array_length(scene.pixel_data->'pixels') > 0)
-                    OR
-                    (scene.pixel_data->>'format' = 'lonlat_columns_v1'
-                     AND jsonb_typeof(scene.pixel_data->'columns'->'lon') = 'array'
-                     AND jsonb_array_length(scene.pixel_data->'columns'->'lon') > 0)
-                  )
+                  AND {sql_lonlat_format_in("scene.pixel_data")}
+                  AND {sql_lonlat_nonempty("scene.pixel_data")}
                 ORDER BY scene.date ASC, scene.scene_id ASC
                 """
             ),

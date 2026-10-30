@@ -115,7 +115,7 @@ SELECT sensor, count(*) FROM agric_satellite.parcel_scene_products GROUP BY 1;
 
 -- jsonb 抽一个像元 NDVI
 SELECT land_id, date,
-       pixel_data #>> '{pixels,0,ndvi}' AS ndvi0
+       CASE WHEN pixel_data->>'format'='lonlat_columns_v1' THEN pixel_data #>> '{columns,NDVI,0}' ELSE pixel_data #>> '{pixels,0,NDVI}' END AS ndvi0
 FROM agric_satellite.parcel_scene_products
 WHERE sensor = 'S2' AND land_id = '15526'
 ORDER BY date DESC LIMIT 10;
