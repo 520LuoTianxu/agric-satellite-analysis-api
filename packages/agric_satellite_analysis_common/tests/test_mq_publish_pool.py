@@ -13,7 +13,9 @@ from agric_satellite_analysis_common.mq_schemas import ResultMessage
 
 
 @pytest.fixture(autouse=True)
-def _reset_mq_shared_state():
+def _reset_mq_shared_state(monkeypatch):
+    # Existing pool tests exercise the live AMQP publish path.
+    monkeypatch.setenv("CLOUDAMQP_RESULT_PUBLISH", "1")
     mq._reset_shared_publisher_for_tests()
     yield
     mq._reset_shared_publisher_for_tests()

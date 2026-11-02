@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import text
 
 from agric_satellite_analysis_common.database_sync import SyncSession
-from agric_satellite_analysis_common.mq import publish_result
+from agric_satellite_analysis_common.mq import publish_result, result_publish_enabled
 from agric_satellite_analysis_common.mq_schemas import ResultMessage
 from agric_satellite_analysis_common.settings import settings
 from agric_satellite_analysis_common.storage import get_storage
@@ -169,12 +169,16 @@ def publish_task_result(
     Weather/soil: pass ``payload`` (inline preferred; oversized → OSS fallback).
     Remote sensing: pass ``oss_urls`` (or enable collect_parcel_urls after
     json_oss_key is set on parcel_scene_products).
+
+    When CloudAMQP result publish is disabled (default), skip DB/OSS enrichment
+    that exists only to plump the AMQP body, and do not raise on the no-op bus.
     """
     urls: dict[str, str] = dict(oss_urls or {})
     inline: dict[str, Any] | None = payload
     publish_error = error
+    amqp_on = result_publish_enabled()
 
-    if inline is not None:
+    if inline is not None and amqp_on:
         inline, fallback_urls, fit_err = fit_inline_payload(
             task_id=task_id, payload=inline
         )
@@ -186,7 +190,7 @@ def publish_task_result(
                 status = "failed"
                 publish_error = fit_err
 
-    if collect_parcel_urls and land_id:
+    if amqp_on and collect_parcel_urls and land_id:
         # Merge DB-keyed scene URLs (does not overwrite explicit labels).
         for label, url in collect_parcel_oss_urls(land_id).items():
             urls.setdefault(label, url)
@@ -202,7 +206,13 @@ def publish_task_result(
         "has_inline_payload": inline is not None,
     }
 
-    if not urls and inline is None and upload_summary_if_empty and status == "success":
+    if (
+        amqp_on
+        and not urls
+        and inline is None
+        and upload_summary_if_empty
+        and status == "success"
+    ):
         try:
             urls.update(upload_result_summary(task_id, summary))
         except Exception as exc:
@@ -223,8 +233,9 @@ def publish_task_result(
     try:
         publish_result(msg)
     except Exception as exc:
+        # Never let the optional result bus fail the worker: HTTP claim/complete
+        # and OSS receipts already carry progress. Log and return the message.
         logger.error("publish_result_failed task_id=%s err=%s", task_id, exc)
-        raise
     return msg
 
 

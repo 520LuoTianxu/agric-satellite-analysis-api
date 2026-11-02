@@ -171,6 +171,29 @@ class SharedWindowTests(unittest.TestCase):
         self.assertEqual(result[0]["id"], "pc-scene")
         self.assertEqual(search.call_count, 2)
 
+
+    def test_partial_complete_ok_high_ratio_skips_more_compensation(self):
+        self.assertTrue(
+            batch._partial_complete_ok(
+                {"scenes_total": 20, "scenes_done": 18, "failed": 2}
+            )
+        )
+        self.assertFalse(
+            batch._partial_complete_ok(
+                {"scenes_total": 20, "scenes_done": 10, "failed": 10}
+            )
+        )
+        self.assertTrue(
+            batch._partial_complete_ok(
+                {
+                    "scenes_total": 10,
+                    "scenes_done": 10,
+                    "failed": 1,
+                    "straggler_abandoned_scene_ids": ["s1"],
+                }
+            )
+        )
+
     def test_assessment_batch_download_is_compensated_twice_then_stays_failed(self):
         job_id = str(uuid.uuid4())
         job = {

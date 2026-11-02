@@ -93,6 +93,9 @@ class CommonSettings(BaseSettings):
     cloudamqp_download_queue: str = "openfarm_download"
     # Process queue: workers publish ResultMessage; mq_result_writer consumes
     cloudamqp_process_queue: str = "openfarm_process"
+    # Result bus publish (CLOUDAMQP_RESULT_PUBLISH). Default OFF: claim/complete HTTP
+    # + OSS receipts are source of truth; disables AMQP TLS handshakes on publish_result.
+    cloudamqp_result_publish: bool = False
     # One-release backward-compat aliases (env: CLOUDAMQP_TASK_QUEUE / CLOUDAMQP_RESULT_QUEUE)
     cloudamqp_task_queue: str = ""
     cloudamqp_result_queue: str = ""

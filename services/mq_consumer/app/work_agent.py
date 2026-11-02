@@ -42,18 +42,24 @@ from agric_satellite_analysis_common.internal_api import internal_api_path as _i
 
 logger = logging.getLogger("work_agent")
 
-DEFAULT_TYPES = [
-    "assessment_report",
-    "season_growth_report",
+# Base data first so claim prefers downloads over report waiters.
+BASE_DATA_TYPES = [
+    "satellite_batch",
     "land_bootstrap",
     "satellite_analysis",
-    "satellite_batch",
     "agri_bridge",
     WEATHER_WORK_TYPE,
     "soil_fetch",
     "admin_task",
     "project_task",
 ]
+REPORT_TYPES = [
+    "assessment_report",
+    "season_growth_report",
+]
+BASE_DATA_TYPE_SET = frozenset(BASE_DATA_TYPES)
+REPORT_TYPE_SET = frozenset(REPORT_TYPES)
+DEFAULT_TYPES = list(BASE_DATA_TYPES) + list(REPORT_TYPES)
 
 # 管理员页面只允许触发这组预先登记的任务；下载机再次校验，避免 API
 # 被错误配置或恶意 payload 利用成任意 Celery 任务执行器。
@@ -112,6 +118,26 @@ def claim_types() -> list[str]:
         return configured
     # 天气 API 达到当天配额后只暂停天气类型，其他下载和计算任务继续领取。
     return [task_type for task_type in configured if task_type != WEATHER_WORK_TYPE]
+
+
+
+def reports_after_base_enabled() -> bool:
+    """WORK_CLAIM_REPORTS_AFTER_BASE (default on): only claim reports when no base-data item is pending."""
+    raw = _env("WORK_CLAIM_REPORTS_AFTER_BASE", "1").lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def split_claim_types(types: list[str] | None = None) -> tuple[list[str], list[str]]:
+    """Split configured claim types into (base_or_other, reports)."""
+    configured = list(claim_types() if types is None else types)
+    base: list[str] = []
+    reports: list[str] = []
+    for task_type in configured:
+        if task_type in REPORT_TYPE_SET:
+            reports.append(task_type)
+        else:
+            base.append(task_type)
+    return base, reports
 
 
 def worker_name() -> str:
@@ -838,7 +864,19 @@ def run_forever() -> None:
                         "work_claim_resumed local_backlog=%s cap=%s", backlog, cap
                     )
                     paused_logged = False
-                items = claim_batch(client, limit=1)
+                # Prefer base-data / download work; only claim reports when none left
+                # so assessment waiting_for_data does not starve satellite_batch.
+                if reports_after_base_enabled():
+                    base_types, report_types = split_claim_types()
+                    items = (
+                        claim_batch(client, types=base_types, limit=1)
+                        if base_types
+                        else []
+                    )
+                    if not items and report_types:
+                        items = claim_batch(client, types=report_types, limit=1)
+                else:
+                    items = claim_batch(client, limit=1)
                 if not items:
                     time.sleep(claim_interval_sec())
                 else:
@@ -852,6 +890,10 @@ def run_forever() -> None:
 __all__ = [
     "COMPLETE_ON_DISPATCH_TYPES",
     "DEFAULT_MAX_LOCAL_BACKLOG",
+    "BASE_DATA_TYPES",
+    "BASE_DATA_TYPE_SET",
+    "REPORT_TYPES",
+    "REPORT_TYPE_SET",
     "backlog_queue_names",
     "HEARTBEAT_ONLY_TYPE",
     "paused_heartbeat_interval_sec",
@@ -863,6 +905,8 @@ __all__ = [
     "ADMIN_TASK_NAMES",
     "PROJECT_TASK_NAMES",
     "DEFAULT_TYPES",
+    "reports_after_base_enabled",
+    "split_claim_types",
     "api_http_timeout",
     "claim_batch",
     "claim_types",
