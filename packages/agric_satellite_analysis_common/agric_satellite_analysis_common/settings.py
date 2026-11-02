@@ -71,7 +71,9 @@ class CommonSettings(BaseSettings):
     # Upload reliability (download-machine → Beijing OSS / transfer acceleration).
     # Files at or above the threshold use oss2.resumable_upload (multipart +
     # local checkpoint); smaller files use put with retries.
-    oss_multipart_threshold_mb: float = 1.0
+    # Default 0 → treat as 1 byte so every non-empty object uses multipart
+    # (Aliyun allows a single last part under the usual 100 KiB minimum).
+    oss_multipart_threshold_mb: float = 0.0
     oss_part_size_mb: float = 4.0
     oss_multipart_num_threads: int = 8
     oss_upload_max_retries: int = 5

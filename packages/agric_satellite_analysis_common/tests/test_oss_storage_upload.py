@@ -183,7 +183,7 @@ def _patch_settings(**kwargs):
         oss_bucket="agric-prod",
         oss_endpoint="https://oss-accelerate.aliyuncs.com",
         oss_is_cname=None,
-        oss_multipart_threshold_mb=1.0,
+        oss_multipart_threshold_mb=0.0,
         oss_part_size_mb=4.0,
         oss_multipart_num_threads=8,
         oss_upload_max_retries=5,
@@ -256,6 +256,55 @@ class OssStorageUploadTests(unittest.TestCase):
         self.assertEqual(calls["n"], 2)
         resumable.assert_not_called()
         self.assertEqual(bucket.put_object_from_file.call_count, 2)
+
+    def test_zero_threshold_small_file_uses_multipart(self) -> None:
+        """Default threshold 0 → even tiny files take resumable multipart."""
+        storage, bucket = self._make_storage(
+            oss_multipart_threshold_mb=0.0,
+            oss_part_size_mb=4.0,
+            oss_multipart_num_threads=8,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store_root = Path(tmp) / "resume"
+            storage._store_root = str(store_root)
+            path = Path(tmp) / "tiny.jpg"
+            path.write_bytes(b"x" * 300)  # << 100 KiB; still legal as sole/last part
+            with (
+                patch.object(storage_mod.oss2, "resumable_upload") as resumable,
+                patch.object(
+                    storage_mod.oss2,
+                    "ResumableStore",
+                    return_value=MagicMock(name="store"),
+                ) as store_cls,
+            ):
+                key = storage.upload_file(
+                    "k/tiny.jpg", str(path), content_type="image/jpeg"
+                )
+                store_cls.assert_called_once()
+                resumable.assert_called_once()
+                kwargs = resumable.call_args.kwargs
+                self.assertEqual(kwargs["multipart_threshold"], 1)
+                self.assertEqual(kwargs["part_size"], 4 * 1024 * 1024)
+                self.assertEqual(kwargs["num_threads"], 8)
+        self.assertEqual(key, "k/tiny.jpg")
+        bucket.put_object_from_file.assert_not_called()
+
+    def test_zero_threshold_put_bytes_routes_through_multipart(self) -> None:
+        storage, bucket = self._make_storage(oss_multipart_threshold_mb=0.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            storage._store_root = tmp
+            payload = b'{"a":1}'  # typical tiny JSON product
+            with patch.object(storage, "upload_file", return_value="k/tiny.json") as up:
+                key = storage.put_bytes(
+                    "k/tiny.json", payload, content_type="application/json"
+                )
+        self.assertEqual(key, "k/tiny.json")
+        up.assert_called_once()
+        bucket.put_object.assert_not_called()
+
+    def test_threshold_helper_zero_is_one_byte(self) -> None:
+        with _patch_settings(oss_multipart_threshold_mb=0.0):
+            self.assertEqual(storage_mod.oss_multipart_threshold_bytes(), 1)
 
     def test_large_file_uses_resumable_multipart(self) -> None:
         storage, bucket = self._make_storage(
