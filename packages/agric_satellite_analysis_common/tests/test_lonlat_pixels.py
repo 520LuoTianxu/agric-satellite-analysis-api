@@ -35,6 +35,7 @@ class LonlatPixelsEncodeDecodeTests(unittest.TestCase):
                 "EVI": 0.194153,
                 "CIre": 0.286218,
                 "MNDWI": -0.393624,
+                "NDTI": 0.1185,
             },
             {
                 "lon": 122.561032,
@@ -46,6 +47,7 @@ class LonlatPixelsEncodeDecodeTests(unittest.TestCase):
                 "EVI": 0.25,
                 "CIre": 0.3,
                 "MNDWI": -0.4,
+                "NDTI": 0.1,
             },
             # Sparse: clear omitted, one index missing → null in column, dropped on expand.
             {
@@ -57,6 +59,37 @@ class LonlatPixelsEncodeDecodeTests(unittest.TestCase):
         ]
         self.assertTrue(roundtrip_ok(pixels))
         columns = pixels_to_columns(pixels)
+        self.assertEqual(
+            [
+                k
+                for k in columns
+                if k
+                in {
+                    "lon",
+                    "lat",
+                    "clear",
+                    "NDVI",
+                    "EVI",
+                    "NDMI",
+                    "NDRE",
+                    "CIre",
+                    "MNDWI",
+                    "NDTI",
+                }
+            ],
+            [
+                "lon",
+                "lat",
+                "clear",
+                "NDVI",
+                "EVI",
+                "NDMI",
+                "NDRE",
+                "CIre",
+                "MNDWI",
+                "NDTI",
+            ],
+        )
         self.assertEqual(len(columns["lon"]), 3)
         self.assertEqual(columns["clear"][2], None)
         self.assertEqual(columns["NDMI"][2], None)

@@ -83,6 +83,14 @@ def _mndwi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     return np.clip(result, -1.0, 1.0)
 
 
+def _ndti(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
+    """Normalized Difference Tillage Index: (SWIR16 - SWIR22) / (SWIR16 + SWIR22)."""
+    swir16, swir22 = bands["B11"], bands["B12"]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = (swir16 - swir22) / (swir16 + swir22)
+    return np.clip(result, -1.0, 1.0)
+
+
 # ── Alert configuration ─────────────────────────────────────────────
 
 
@@ -247,6 +255,22 @@ _register(
         stac_asset_map={
             "B03": ("green", "B03"),
             "B11": ("swir16", "B11"),
+        },
+    )
+)
+
+_register(
+    IndexDef(
+        key="ndti",
+        label="NDTI",
+        bands=("B11", "B12"),
+        formula=_ndti,
+        colormap="ylorrd",
+        rescale=(-0.2, 0.4),
+        alerts=AlertDefaults(threshold=0.05, threshold_high=-0.05, drop_pct=20),
+        stac_asset_map={
+            "B11": ("swir16", "B11"),
+            "B12": ("swir22", "B12"),
         },
     )
 )

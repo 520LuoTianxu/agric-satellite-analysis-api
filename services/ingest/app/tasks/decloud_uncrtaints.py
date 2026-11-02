@@ -287,9 +287,7 @@ def cache_optical_s2_window(
     stack = stack_s2_13(bands)
     # 质量回退需要按反射率计算历史NDVI，缓存时从未裁剪的原始数组预先生成。
     ndvi = _ndvi_from_raw_window(bands, band_radiometry)
-    grid_key = window_grid_key(
-        target_crs, target_shape, target_transform, field_mask
-    )
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
     try:
         write_window_array(
             str(land_id),
@@ -329,15 +327,9 @@ def schedule_decloud_after_raw(
     from app.core.decloud import decloud_season_months
 
     months = (
-        season_months
-        if season_months is not None
-        else decloud_season_months(crop_type)
+        season_months if season_months is not None else decloud_season_months(crop_type)
     )
-    dates = [
-        str(r["date"])[:10]
-        for r in (raw_results or [])
-        if r and r.get("date")
-    ]
+    dates = [str(r["date"])[:10] for r in (raw_results or []) if r and r.get("date")]
     plan = plan_decloud_after_raw(
         enabled=True,
         mode=decloud_mode(),
@@ -781,9 +773,7 @@ def _publish_decloud_product(
         transform, index_arrays["NDVI"].shape, target_crs
     )
     # 质量统计已明确无有效NDVI时保持NULL；不能用零值伪装成真实的低绿度。
-    quality_ndvi = (
-        quality_inputs.ndvi_mean if quality_inputs is not None else None
-    )
+    quality_ndvi = quality_inputs.ndvi_mean if quality_inputs is not None else None
     if quality_inputs is not None:
         ndvi_avg = float(quality_ndvi) if quality_ndvi is not None else None
     else:
@@ -829,6 +819,9 @@ def _publish_decloud_product(
         "mndwi_avg": index_stats["MNDWI"][0],
         "mndwi_min": index_stats["MNDWI"][1],
         "mndwi_max": index_stats["MNDWI"][2],
+        "ndti_avg": index_stats["NDTI"][0],
+        "ndti_min": index_stats["NDTI"][1],
+        "ndti_max": index_stats["NDTI"][2],
         "pixel_data": json.dumps(pixel_data, separators=(",", ":")),
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
@@ -875,7 +868,9 @@ def _cache_s2_scene(
     if isinstance(sc_date, str):
         sc_date = date.fromisoformat(sc_date[:10])
     iso = sc_date.isoformat()
-    hrefs = {k: v for k, v in (scene.get("band_hrefs") or {}).items() if k != "SCL" and v}
+    hrefs = {
+        k: v for k, v in (scene.get("band_hrefs") or {}).items() if k != "SCL" and v
+    }
     put_window_meta(
         land_id=str(land_id),
         date_str=iso,
@@ -897,9 +892,7 @@ def _cache_s2_scene(
 
     grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
     if not force_read:
-        cached = read_window_array(
-            str(land_id), iso, "S2", expected_grid_key=grid_key
-        )
+        cached = read_window_array(str(land_id), iso, "S2", expected_grid_key=grid_key)
         if cached and cached.get("stack") is not None:
             return cached["stack"]
     if not hrefs:
@@ -967,7 +960,12 @@ def _buffer_s2_windows(
         row["stack"] = stack
         buffered.append(row)
     # Also keep catalog-only dates already on disk (prior chunks).
-    seen = {sc["date"] if isinstance(sc["date"], date) else date.fromisoformat(str(sc["date"])[:10]) for sc in buffered}
+    seen = {
+        sc["date"]
+        if isinstance(sc["date"], date)
+        else date.fromisoformat(str(sc["date"])[:10])
+        for sc in buffered
+    }
     for cached in list_cached_s2(str(land_id), date_from, date_to):
         if cached["date"] in seen:
             continue
@@ -982,17 +980,19 @@ def _buffer_s2_windows(
                     "cloud_cover": cached.get("cloud_cover"),
                     "band_hrefs": cached.get("band_hrefs") or {},
                     "band_radiometry": cached.get("band_radiometry"),
-                    "band_radiometry_source": cached.get(
-                        "band_radiometry_source"
-                    ),
-                    "band_radiometry_sources": cached.get(
-                        "band_radiometry_sources"
-                    ),
+                    "band_radiometry_source": cached.get("band_radiometry_source"),
+                    "band_radiometry_sources": cached.get("band_radiometry_sources"),
                     "stack": arr["stack"],
                 }
             )
             seen.add(cached["date"])
-    buffered.sort(key=lambda s: s["date"] if isinstance(s["date"], date) else date.fromisoformat(str(s["date"])[:10]))
+    buffered.sort(
+        key=lambda s: (
+            s["date"]
+            if isinstance(s["date"], date)
+            else date.fromisoformat(str(s["date"])[:10])
+        )
+    )
     logger.info(
         "decloud_s2_buffered",
         land_id=str(land_id),
@@ -1023,9 +1023,7 @@ def _buffer_s1_for_dates(
         return out
     need: list[date] = []
     for d in dates:
-        cached = read_window_array(
-            str(land_id), d, "S1", expected_grid_key=grid_key
-        )
+        cached = read_window_array(str(land_id), d, "S1", expected_grid_key=grid_key)
         if cached and cached.get("stack") is not None:
             out[d] = cached["stack"]
         else:
@@ -1037,9 +1035,7 @@ def _buffer_s1_for_dates(
     )
     for d, arr in zip(need, loaded):
         out[d] = arr
-        write_window_array(
-            str(land_id), d, "S1", grid_key=grid_key, stack=arr
-        )
+        write_window_array(str(land_id), d, "S1", grid_key=grid_key, stack=arr)
         put_window_meta(land_id=str(land_id), date_str=d, sensor="S1", has_array=True)
     logger.info(
         "decloud_s1_buffered",
@@ -1114,9 +1110,7 @@ def _decloud_one_from_buffer(
     land_id = str(land_meta["land_id"])
     from app.core.decloud_cache import window_grid_key
 
-    grid_key = window_grid_key(
-        target_crs, land_mask.shape, target_transform, land_mask
-    )
+    grid_key = window_grid_key(target_crs, land_mask.shape, target_transform, land_mask)
     input_t = decloud_input_t()
     if not batch_neighbors_ready(len(buffered_s2), input_t):
         logger.info(
@@ -1146,7 +1140,11 @@ def _decloud_one_from_buffer(
             )
             stack = None if cached is None else cached.get("stack")
         if stack is None:
-            return {"status": "skipped", "reason": "window_missing", "date": str(sc["date"])}
+            return {
+                "status": "skipped",
+                "reason": "window_missing",
+                "date": str(sc["date"]),
+            }
         s2_list.append(stack)
     s2_stack = np.stack(s2_list, axis=0)
 
@@ -1155,7 +1153,11 @@ def _decloud_one_from_buffer(
         h, w = s2_stack.shape[-2], s2_stack.shape[-1]
         s1_bands = []
         for sc in picked:
-            sc_date = sc["date"] if isinstance(sc["date"], date) else date.fromisoformat(str(sc["date"])[:10])
+            sc_date = (
+                sc["date"]
+                if isinstance(sc["date"], date)
+                else date.fromisoformat(str(sc["date"])[:10])
+            )
             arr = s1_by_date.get(sc_date)
             if arr is None:
                 arr = np.zeros((2, h, w), dtype=np.float32)
@@ -1169,7 +1171,11 @@ def _decloud_one_from_buffer(
             s2_stack,
             s1_stack,
             [
-                (sc["date"] if isinstance(sc["date"], date) else date.fromisoformat(str(sc["date"])[:10])).toordinal()
+                (
+                    sc["date"]
+                    if isinstance(sc["date"], date)
+                    else date.fromisoformat(str(sc["date"])[:10])
+                ).toordinal()
                 for sc in picked
             ],
         )
@@ -1259,7 +1265,9 @@ def _land_context(session, land_id: str):
         # 均由 API 从业务库读取后通过 Internal HTTP 返回。
         remote = resolve_land_http(str(land_id))
         if str(remote.get("land_id") or "") != str(land_id):
-            raise RuntimeError("internal land response does not match requested land_id")
+            raise RuntimeError(
+                "internal land response does not match requested land_id"
+            )
         land_geom_geojson = remote.get("boundary_geojson")
         land_geom = geojson_to_shape(land_geom_geojson)
         land_meta = {
@@ -1507,7 +1515,11 @@ def decloud_parcel_batch(
                 cloud_min_pct=decloud_cloud_min_pct(),
             ):
                 results.append(
-                    {"date": target.isoformat(), "status": "skipped", "reason": "below_cloud_threshold"}
+                    {
+                        "date": target.isoformat(),
+                        "status": "skipped",
+                        "reason": "below_cloud_threshold",
+                    }
                 )
                 continue
             one = _decloud_one_from_buffer(

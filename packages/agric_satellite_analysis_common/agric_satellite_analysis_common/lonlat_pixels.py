@@ -32,6 +32,7 @@ _PREFERRED_COLUMN_ORDER: tuple[str, ...] = (
     "NDRE",
     "CIre",
     "MNDWI",
+    "NDTI",
     "VV_db",
     "VH_db",
 )

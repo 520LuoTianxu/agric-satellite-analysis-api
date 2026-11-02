@@ -32,7 +32,8 @@ from app.tasks.pipeline import (
     compute_target_grid,
     process_scenes_parallel,
     collect_existing_scene_dates,
-    filter_scenes_skip_existing)
+    filter_scenes_skip_existing,
+)
 
 logger = structlog.get_logger()
 
@@ -101,14 +102,12 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
                 land_id_str,
                 layer_type=index_def.label,
                 satellite="S2",
-                agri_sensor="S2")
+                agri_sensor="S2",
+            )
             before = len(scenes)
             scenes = filter_scenes_skip_existing(
-                scenes,
-                existing,
-                force=False,
-                land_id=land_id_str,
-                index=index_def.key)
+                scenes, existing, force=False, land_id=land_id_str, index=index_def.key
+            )
             complete_step(
                 session,
                 job,
@@ -117,7 +116,8 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
                     "scene_count": before,
                     "scenes_after_dedup": len(scenes),
                     "skipped_existing": before - len(scenes),
-                })
+                },
+            )
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
 
@@ -156,7 +156,8 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             session,
             job,
             "process_scenes",
-            {"total_scenes": len(scenes), "workers": workers})
+            {"total_scenes": len(scenes), "workers": workers},
+        )
 
         layers_created = process_scenes_parallel(
             job_id=job_id,
@@ -172,21 +173,21 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
             date_from=date_from,
             date_to=date_to,
             historical_means=historical_means,
-            extra_params=extra_params)
+            extra_params=extra_params,
+        )
 
         session.expire(job)
         job = session.get(Job, uuid.UUID(job_id))
         if not job:
-            logger.error(
-                "job_missing_after_scenes", job_id=job_id, index=index_key
-            )
+            logger.error("job_missing_after_scenes", job_id=job_id, index=index_key)
             return {"job_id": job_id, "status": "error", "detail": "Job not found"}
 
         complete_step(
             session,
             job,
             "process_scenes",
-            {"layers_created": layers_created, "workers": workers})
+            {"layers_created": layers_created, "workers": workers},
+        )
 
         # Step 7: Complete
         job.status = "completed"
@@ -201,9 +202,8 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
         session.commit()
 
         logger.info(
-            f"{index_key}_job_completed",
-            job_id=job_id,
-            layers_created=layers_created)
+            f"{index_key}_job_completed", job_id=job_id, layers_created=layers_created
+        )
         return {
             "job_id": job_id,
             "status": "completed",
@@ -238,7 +238,8 @@ def _run_index_pipeline(self, job_id: str, index_key: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_evi(self, job_id: str) -> dict:
     """Process EVI for one land parcel."""
     return _run_index_pipeline(self, job_id, "evi")
@@ -252,7 +253,8 @@ def process_evi(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_savi(self, job_id: str) -> dict:
     """Process SAVI for one land parcel."""
     return _run_index_pipeline(self, job_id, "savi")
@@ -266,7 +268,8 @@ def process_savi(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_ndwi(self, job_id: str) -> dict:
     """Process NDWI for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndwi")
@@ -280,7 +283,8 @@ def process_ndwi(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_ndmi(self, job_id: str) -> dict:
     """Process NDMI for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndmi")
@@ -294,7 +298,8 @@ def process_ndmi(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_ndre(self, job_id: str) -> dict:
     """Process NDRE for one land parcel."""
     return _run_index_pipeline(self, job_id, "ndre")
@@ -308,7 +313,8 @@ def process_ndre(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_cire(self, job_id: str) -> dict:
     """Process CIre (chlorophyll index red-edge) for one land parcel."""
     return _run_index_pipeline(self, job_id, "cire")
@@ -322,7 +328,23 @@ def process_cire(self, job_id: str) -> dict:
     bind=True,
     max_retries=3,
     time_limit=1800,
-    soft_time_limit=1500)
+    soft_time_limit=1500,
+)
 def process_mndwi(self, job_id: str) -> dict:
     """Process MNDWI for one land parcel."""
     return _run_index_pipeline(self, job_id, "mndwi")
+
+
+# ── NDTI ─────────────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    name="app.tasks.vegetation.process_ndti",
+    bind=True,
+    max_retries=3,
+    time_limit=1800,
+    soft_time_limit=1500,
+)
+def process_ndti(self, job_id: str) -> dict:
+    """Process NDTI (tillage / residue) for one land parcel."""
+    return _run_index_pipeline(self, job_id, "ndti")
