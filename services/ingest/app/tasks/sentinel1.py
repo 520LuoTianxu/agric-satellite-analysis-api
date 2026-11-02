@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -245,6 +246,23 @@ def _load_s1_sigma0_lut(calibration_href: str) -> S1CalibrationLUT:
     return _load_s1_sigma0_lut_cached(_s1_sigma0_lut_cache_key(calibration_href))
 
 
+_s1_http_lock = threading.Lock()
+_s1_http_client: httpx.Client | None = None
+
+
+def _s1_http() -> httpx.Client:
+    """复用到 Azure Blob 的 keep-alive 连接，避免每景 VV/VH 定标 XML 各开新 TCP。"""
+    global _s1_http_client
+    with _s1_http_lock:
+        if _s1_http_client is None:
+            _s1_http_client = httpx.Client(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                follow_redirects=True,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            )
+        return _s1_http_client
+
+
 @lru_cache(maxsize=64)
 def _load_s1_sigma0_lut_cached(calibration_href: str) -> S1CalibrationLUT:
     """有界下载并缓存每个VV/VH定标XML，减小同一下载机重复读取开销。"""
@@ -256,12 +274,7 @@ def _load_s1_sigma0_lut_cached(calibration_href: str) -> S1CalibrationLUT:
     )
     chunks: list[bytes] = []
     received = 0
-    with httpx.stream(
-        "GET",
-        request_href,
-        timeout=httpx.Timeout(30.0, connect=10.0),
-        follow_redirects=True,
-    ) as response:
+    with _s1_http().stream("GET", request_href) as response:
         response.raise_for_status()
         declared_size = response.headers.get("content-length")
         if declared_size and int(declared_size) > _S1_CALIBRATION_MAX_BYTES:
@@ -272,6 +285,31 @@ def _load_s1_sigma0_lut_cached(calibration_href: str) -> S1CalibrationLUT:
                 raise ValueError("Sentinel-1 calibration asset exceeds the 2 MiB limit")
             chunks.append(chunk)
     return _parse_s1_sigma0_lut(b"".join(chunks))
+
+
+def _prefetch_s1_calibration_luts(scene: dict[str, Any]) -> None:
+    """在占用 GDAL 名额前并行预取 VV/VH 定标 XML，避免持锁下载阻塞其他波段。"""
+    hrefs = [
+        href
+        for key in ("vv", "vh")
+        if (href := scene.get(f"{key}_calibration_href"))
+    ]
+    if not hrefs:
+        return
+    t0 = time.perf_counter()
+    if len(hrefs) == 1:
+        _load_s1_sigma0_lut(hrefs[0])
+    else:
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="s1-cal-prefetch"
+        ) as pool:
+            list(pool.map(_load_s1_sigma0_lut, hrefs))
+    logger.info(
+        "s1_calibration_prefetch_done",
+        scene_id=scene.get("id"),
+        assets=len(hrefs),
+        elapsed_ms=int((time.perf_counter() - t0) * 1000),
+    )
 
 
 def _sigma0_calibration_factor_at_pixels(
@@ -737,13 +775,15 @@ def _read_band_windowed_db_profiled(
     """读取 GRD COG 窗口，并拆分远端 I/O 与目标网格重投影耗时。
 
     S1 GRD常以GCP而非常规仿射CRS定位；先反算原生像元窗口，避免整景下载和先重采样DN。
+    定标 XML 下载不计入 io_ms，也不应在已占用的 GDAL 名额内执行（调用方先 prefetch）。
     """
-    t_io = time.perf_counter()
+    # LUT 可能已由 _prefetch_s1_calibration_luts 填入 lru_cache；此处再取一次保证兜底。
     calibration_lut = (
         _load_s1_sigma0_lut(calibration_href) if calibration_href else None
     )
     s3_path = s1_open_path(href)
     dst = np.full(target_shape, np.nan, dtype=np.float32)
+    t_io = time.perf_counter()
     with gdal_read_slot(), rasterio.Env(**s1_gdal_env()):
         with rasterio.open(s3_path) as src:
             source_gcps, gcp_crs = src.gcps
@@ -1277,6 +1317,8 @@ def _process_one_s1_scene(
         t0 = time.perf_counter()
         radiometric_calibration = _s1_radiometric_calibration(scene)
         try:
+            # 先并行拉定标 XML，再进 GDAL 波段池，避免持有 gdal_read_slot 时做 HTTP。
+            _prefetch_s1_calibration_luts(scene)
             pol = run_parallel_band_jobs(
                 {"vv": scene["vv_href"], "vh": scene["vh_href"]},
                 lambda key, href: _read_band_windowed_db_profiled(
