@@ -21,6 +21,20 @@ ASSESSMENT_BATCH_MAX_COMPENSATIONS = 2
 ASSESSMENT_COMPENSATION_DELAY_SECONDS = 30
 
 
+def _assessment_wait_countdown_sec() -> int:
+    """Seconds between waiting_for_data Celery retries (default 120).
+
+    Longer than the old 30s so report waiters wake less often and free CPU
+    workers for real work while satellite/weather/soil finish.
+    """
+    import os
+
+    try:
+        return max(30, int(os.environ.get("ASSESSMENT_WAIT_COUNTDOWN_SEC", "120") or "120"))
+    except (TypeError, ValueError):
+        return 120
+
+
 def _update_job(
     session,
     job: Job | None,
@@ -616,8 +630,9 @@ def bootstrap_pulls_ready(
 @celery_app.task(
     name="app.tasks.assessment_report.generate_assessment_report",
     bind=True,
-    max_retries=90,
-    default_retry_delay=30,
+    # ~40 * 120s ≈ 80min wait budget; longer countdown cuts CPU spin.
+    max_retries=40,
+    default_retry_delay=120,
 )
 def generate_assessment_report(
     self,
@@ -758,7 +773,7 @@ def generate_assessment_report(
             )
             if not status["ready"]:
                 retries = int(getattr(self.request, "retries", 0) or 0)
-                max_r = int(getattr(self, "max_retries", 90) or 90)
+                max_r = int(getattr(self, "max_retries", 40) or 40)
                 progress_wait = {
                     "stage": "waiting_for_data",
                     "percent": min(55, 10 + retries),
@@ -780,11 +795,13 @@ def generate_assessment_report(
                 if job or job_id_str:
                     _update_job(session, job, "running", progress=progress_wait, job_id=job_id_str)
                 if retries < max_r:
+                    wait_cd = _assessment_wait_countdown_sec()
                     logger.info(
                         "assessment_waiting_for_bootstrap",
                         land_id=land_id_str,
                         job_id=job_id_str,
                         retry=retries,
+                        countdown_sec=wait_cd,
                         **{
                             k: status[k]
                             for k in (
@@ -797,7 +814,7 @@ def generate_assessment_report(
                             )
                         },
                     )
-                    raise self.retry(countdown=30)
+                    raise self.retry(countdown=wait_cd)
                 logger.warning(
                     "assessment_bootstrap_wait_timeout",
                     land_id=land_id_str,

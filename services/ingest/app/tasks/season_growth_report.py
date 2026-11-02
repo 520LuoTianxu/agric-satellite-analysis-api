@@ -14,7 +14,10 @@ from app.core.database_sync import SyncSession
 from app.core.logging import logger
 from app.models.tables import Job
 from app.reports.season_growth.service import generate_season_growth_pdf
-from app.tasks.assessment_report import bootstrap_pulls_ready
+from app.tasks.assessment_report import (
+    _assessment_wait_countdown_sec,
+    bootstrap_pulls_ready,
+)
 from app.tasks.storage_tasks import upload_file_via_storage
 from app.worker import celery_app
 
@@ -100,8 +103,8 @@ def _resolve_job(session, job_id: str | None) -> Job | None:
 @celery_app.task(
     name="app.tasks.season_growth_report.generate_season_growth_report",
     bind=True,
-    max_retries=90,
-    default_retry_delay=30,
+    max_retries=40,
+    default_retry_delay=120,
 )
 def generate_season_growth_report(
     self,
@@ -233,7 +236,7 @@ def generate_season_growth_report(
             )
             if not status["ready"]:
                 retries = int(getattr(self.request, "retries", 0) or 0)
-                max_r = int(getattr(self, "max_retries", 90) or 90)
+                max_r = int(getattr(self, "max_retries", 40) or 40)
                 progress_wait = {
                     "stage": "waiting_for_data",
                     "percent": min(55, 10 + retries),
@@ -268,7 +271,7 @@ def generate_season_growth_report(
                             )
                         },
                     )
-                    raise self.retry(countdown=30)
+                    raise self.retry(countdown=_assessment_wait_countdown_sec())
                 logger.warning(
                     "season_growth_bootstrap_wait_timeout",
                     land_id=land_id_str,

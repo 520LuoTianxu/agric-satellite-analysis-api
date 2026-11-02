@@ -151,6 +151,40 @@ def _active_compensation_attempt(progress: dict) -> int | None:
         return None
 
 
+
+def _partial_complete_ok(progress: dict) -> bool:
+    """True when nearly all scenes finished — prefer complete over another compensation pass.
+
+    Compensation re-runs the whole window and was getting stuck in "第N次补偿"
+    with high scenes_done after SSL/publish hangs. Accepting a high-ratio partial
+    releases workers immediately; failed land ids stay in progress_json.
+    """
+    try:
+        total = int(progress.get("scenes_total") or 0)
+        done = int(progress.get("scenes_done") or 0)
+        failed = int(progress.get("failed") or 0)
+    except (TypeError, ValueError):
+        return False
+    if total <= 0 or failed <= 0 or done <= 0:
+        return False
+    abandoned = progress.get("straggler_abandoned_scene_ids") or []
+    try:
+        abandoned_n = len(abandoned) if isinstance(abandoned, (list, tuple, set)) else 0
+    except TypeError:
+        abandoned_n = 0
+    # Only straggler abandons counted as failures → finish without compensation.
+    if abandoned_n > 0 and failed <= abandoned_n:
+        return True
+    try:
+        threshold = float(
+            os.environ.get("SATELLITE_BATCH_PARTIAL_OK_RATIO", "0.85") or "0.85"
+        )
+    except (TypeError, ValueError):
+        threshold = 0.85
+    threshold = min(0.99, max(0.5, threshold))
+    return (done / float(total)) >= threshold
+
+
 def _is_assessment_batch_child(job: dict) -> bool:
     """只对 assessment_batch 的共享下载子任务开启批次补偿。"""
     params = job.get("params_json") or {}
@@ -1960,7 +1994,27 @@ def process_satellite_batch(
         patch_progress()
         status_progress = progress_snapshot()
         status = "failed" if status_progress["failed"] else "completed"
-        if status == "failed":
+        if status == "failed" and _partial_complete_ok(status_progress):
+            # 高完成度：记 partial 并 completed，避免补偿假死再占工人十几分钟。
+            with state_lock:
+                progress["partial_complete"] = True
+                progress["partial_reason"] = (
+                    f"scenes_done={status_progress.get('scenes_done')}/"
+                    f"{status_progress.get('scenes_total')} "
+                    f"failed={status_progress.get('failed')} "
+                    "accepted_without_compensation"
+                )[:500]
+                progress_revision["value"] += 1
+            status = "completed"
+            logger.warning(
+                "satellite_batch_partial_complete",
+                job_id=job_id,
+                scenes_done=status_progress.get("scenes_done"),
+                scenes_total=status_progress.get("scenes_total"),
+                failed=status_progress.get("failed"),
+                compensation_attempt=compensation_attempt,
+            )
+        elif status == "failed":
             current_job = {**job, "progress_json": status_progress}
             if _schedule_satellite_compensation(
                 job_id,
@@ -2149,6 +2203,70 @@ def process_satellite_batch(
                 retries=retries,
             )
         # 仅当 soft-timeout 重试次数耗尽时落到此处；self.retry 的 Retry 信号会直接抛出。
+        soft_progress = None
+        try:
+            soft_snap = locals().get("progress_snapshot")
+            if callable(soft_snap):
+                soft_progress = soft_snap()
+            elif isinstance(locals().get("progress"), dict):
+                soft_progress = dict(locals().get("progress") or {})
+        except Exception:
+            soft_progress = None
+        if soft_progress and _partial_complete_ok(soft_progress):
+            try:
+                final_progress = dict(soft_progress)
+                final_progress.update(
+                    {
+                        "partial_complete": True,
+                        "partial_reason": (
+                            "soft_time_limit_exhausted_with_high_scene_ratio"
+                        )[:500],
+                        "stage": "completed",
+                    }
+                )
+                if compensation_attempt:
+                    final_progress = _compensation_progress(
+                        final_progress, compensation_attempt, active=False
+                    )
+                patch_job(
+                    job_id,
+                    {
+                        "status": "completed",
+                        "touch_finished": True,
+                        "progress_json": {
+                            k: v
+                            for k, v in final_progress.items()
+                            if k != "published_products"
+                        },
+                        "error": (
+                            f"软超时后按高完成度结单："
+                            f"{soft_progress.get('scenes_done')}/"
+                            f"{soft_progress.get('scenes_total')} "
+                            f"failed={soft_progress.get('failed')}"
+                        )[:2000],
+                    },
+                )
+                logger.warning(
+                    "satellite_batch_soft_timeout_partial_complete",
+                    job_id=job_id,
+                    scenes_done=soft_progress.get("scenes_done"),
+                    scenes_total=soft_progress.get("scenes_total"),
+                    failed=soft_progress.get("failed"),
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "partial_complete": True,
+                    **{
+                        k: soft_progress.get(k)
+                        for k in ("scenes_done", "scenes_total", "failed")
+                    },
+                }
+            except Exception:
+                logger.exception(
+                    "satellite_batch_soft_timeout_partial_complete_failed",
+                    job_id=job_id,
+                )
         compensation_scheduled = False
         try:
             if job is None:

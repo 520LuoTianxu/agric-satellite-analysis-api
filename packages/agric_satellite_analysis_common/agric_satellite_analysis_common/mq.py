@@ -42,6 +42,20 @@ def connection_label(url: str | None = None) -> str:
         return "(invalid-url)"
 
 
+
+def result_publish_enabled() -> bool:
+    """Whether ResultMessage may open an AMQP connection.
+
+    Default OFF (CLOUDAMQP_RESULT_PUBLISH / settings.cloudamqp_result_publish).
+    Claim/complete HTTP and OSS receipts are the control-plane source of truth;
+    keeping this off avoids SSL handshake storms to CloudAMQP.
+    """
+    raw = os.environ.get("CLOUDAMQP_RESULT_PUBLISH")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(getattr(settings, "cloudamqp_result_publish", False))
+
+
 def _params(url: str | None = None) -> pika.URLParameters:
     raw = url or settings.cloudamqp_url
     if not raw:
@@ -327,9 +341,19 @@ def publish_result(
 
     Uses one process-wide AMQP connection serialized by a lock so scene-parallel
     threads cannot open one TLS connection each (CloudAMQP connection cap).
+
+    When result publish is disabled (default), this is a no-op with one log line
+    and never opens a TLS/AMQP handshake.
     """
     if isinstance(message, dict):
         message = ResultMessage.model_validate(message)
+    if not result_publish_enabled():
+        logger.info(
+            "mq_result_publish_skipped task_id=%s status=%s reason=cloudamqp_result_publish_disabled",
+            message.task_id,
+            message.status,
+        )
+        return
     payload = message.model_dump(mode="json")
     target = _publish_locked(kind="process", payload=payload, url=url, queue=queue)
     logger.info(
