@@ -38,6 +38,13 @@ from app.core.band_parallel import (
 )
 from app.core.config import scene_max_workers
 from app.core.stac_client import open_stac_client
+from app.core.windowed_gdal import (
+    apply_process_windowed_gdal_defaults,
+    asset_is_non_cog_jp2,
+    is_non_cog_jp2_href,
+    log_timing,
+    windowed_cog_gdal_env,
+)
 from app.tasks.indices import IndexDef
 
 from agric_satellite_analysis_common.quality_metrics import PARCEL_VALID_FRACTION_V1
@@ -62,30 +69,10 @@ STAC_COLLECTION = "sentinel-2-l2a"
 # product skip (parcel_cloud_cover_pct / drought display). Keep search
 # conservative unless decloud raises the cap (see DECLOUD_STAC_CLOUD_MAX_PCT).
 MAX_CLOUD_COVER = 20
-# GDAL environment for reading remote COGs
-os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff")
-os.environ.setdefault("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
-os.environ.setdefault("GDAL_HTTP_MULTIPLEX", "YES")
-os.environ.setdefault("CPL_VSIL_CURL_USE_HEAD", "NO")
+# Windowed COG: process-level setdefault + explicit rasterio.Env(**windowed_cog_gdal_env()).
 # 远程窗口很小，长尾主要来自连接或 Range 请求挂起。由 GDAL/curl 在 C 调用内部
 # 中断阻塞；Python Future 超时无法安全终止正在执行的 rasterio/GDAL 调用。
-os.environ.setdefault("GDAL_HTTP_CONNECTTIMEOUT", "10")
-os.environ.setdefault("GDAL_HTTP_TIMEOUT", "60")
-os.environ.setdefault("GDAL_HTTP_LOW_SPEED_LIMIT", "1")
-os.environ.setdefault("GDAL_HTTP_LOW_SPEED_TIME", "30")
-# 应用层统一尝试三次时，GDAL 内部只允许一次补偿，避免两层重试相乘。
-os.environ.setdefault("GDAL_HTTP_MAX_RETRY", "1")
-os.environ.setdefault("GDAL_HTTP_RETRY_DELAY", "1")
-# TCP keepalive 配置从 GDAL 3.6 起生效；旧运行时会忽略，不改变 SSL 校验。
-os.environ.setdefault("GDAL_HTTP_TCP_KEEPALIVE", "YES")
-os.environ.setdefault("GDAL_HTTP_TCP_KEEPIDLE", "30")
-os.environ.setdefault("GDAL_HTTP_TCP_KEEPINTVL", "15")
-os.environ.setdefault("VSI_CACHE", "TRUE")
-os.environ.setdefault("VSI_CACHE_SIZE", "5000000")
-# Scene and band threads each open their own datasets; keep GDAL's internal
-# pool at 1 so scene x band parallelism does not spawn nested GDAL storms.
-os.environ.setdefault("GDAL_NUM_THREADS", "1")
+apply_process_windowed_gdal_defaults()
 
 # Serialize job.progress_json updates. SQLAlchemy Session and the Job row
 # are not thread-safe; each scene worker uses its own session and this lock.
@@ -275,7 +262,7 @@ def filter_scenes_skip_existing(
 def _resolve_band_hrefs(item, index_defs: list[IndexDef]) -> dict[str, str] | None:
     """Resolve unique band HREFs for one STAC item across index defs.
 
-    Returns None when any required band is missing.
+    Returns None when any required band is missing or only non-COG JP2.
     """
     band_hrefs: dict[str, str | None] = {}
     for index_def in index_defs:
@@ -285,8 +272,20 @@ def _resolve_band_hrefs(item, index_defs: list[IndexDef]) -> dict[str, str] | No
             href = None
             for asset_name in index_def.stac_asset_map.get(band_key, (band_key,)):
                 asset = item.assets.get(asset_name)
-                if asset:
-                    href = asset.href
+                if not asset:
+                    continue
+                if asset_is_non_cog_jp2(asset):
+                    logger.warning(
+                        "s2_asset_skipped_non_cog_jp2",
+                        scene_id=getattr(item, "id", None),
+                        band=band_key,
+                        asset=asset_name,
+                        href=str(getattr(asset, "href", "") or "")[:200],
+                    )
+                    continue
+                candidate = getattr(asset, "href", None)
+                if candidate and not is_non_cog_jp2_href(str(candidate)):
+                    href = candidate
                     break
             band_hrefs[band_key] = href
     if not all(band_hrefs.values()):
@@ -419,9 +418,18 @@ def _resolve_extra_asset_hrefs(
     for key, names in extra_assets.items():
         for asset_name in names:
             asset = item.assets.get(asset_name)
-            if asset and getattr(asset, "href", None):
-                out[key] = asset.href
-                break
+            if not asset or not getattr(asset, "href", None):
+                continue
+            if asset_is_non_cog_jp2(asset):
+                logger.warning(
+                    "s2_extra_asset_skipped_non_cog_jp2",
+                    scene_id=getattr(item, "id", None),
+                    asset_key=key,
+                    asset=asset_name,
+                )
+                continue
+            out[key] = asset.href
+            break
     return out
 
 
@@ -477,16 +485,27 @@ def search_scenes_for_defs(
         max_items=item_cap,
     )
     items = list(search.items())
+    stac_ms = int((time.perf_counter() - t0) * 1000)
     logger.info(
         "stac_search_results",
         count=len(items),
         index=label,
         date_from=str(date_from),
         date_to=str(date_to),
-        elapsed_ms=int((time.perf_counter() - t0) * 1000),
+        elapsed_ms=stac_ms,
         max_cloud_cover=cloud_cap,
         cloud_dedupe=dedupe,
         max_items=item_cap,
+    )
+    log_timing(
+        "stac_search",
+        sensor="S2",
+        index=label,
+        item_count=len(items),
+        wall_ms=stac_ms,
+        date_from=str(date_from),
+        date_to=str(date_to),
+        catalog=selected_catalog_url,
     )
     if not items:
         return []
@@ -598,7 +617,7 @@ def _read_band_windowed_profiled(
     而 ``windows.transform`` 仍用小数偏移，二者不一致会造成最多 1 像元的错位。
     默认关闭以保持既有产品输出不变（项目 COG 开启）。"""
     # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
-    with gdal_read_slot(), rasterio.Env():
+    with gdal_read_slot(), rasterio.Env(**windowed_cog_gdal_env()):
         t_io = time.perf_counter()
         with rasterio.open(href) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
@@ -708,7 +727,7 @@ def read_rgb_windowed(
     Element84 ``visual`` is typically uint8 RGB; values are preserved.
     """
     # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
-    with gdal_read_slot(), rasterio.Env():
+    with gdal_read_slot(), rasterio.Env(**windowed_cog_gdal_env()):
         with rasterio.open(href) as src:
             if src.count < 3:
                 return None

@@ -66,6 +66,7 @@ from app.core.agri_classify import (
     parse_s1_relative_orbit,
     s1_calibration_epoch,
 )
+from app.core.windowed_gdal import log_timing
 from app.core.s1_stac import (
     S1_STAC_COLLECTION,
     open_s1_stac_client,
@@ -1186,6 +1187,23 @@ def _upsert_agri_s1(
             uploaded_json=True,
             path="oss_http_redis",
         )
+        log_timing(
+            "oss_upload",
+            sensor="S1",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            wall_ms=json_upload_ms,
+            callback_ms=callback_ms,
+            path="oss_http_redis",
+        )
+        log_timing(
+            "db_or_callback",
+            sensor="S1",
+            land_id=meta.get("land_id"),
+            date=date_str,
+            wall_ms=callback_ms,
+            path="oss_http_redis",
+        )
         logger.info(
             "lonlat_oss_http_cached",
             land_id=meta.get("land_id"),
@@ -1221,6 +1239,22 @@ def _upsert_agri_s1(
         db_upsert_ms=0,
         mq_publish_ms=mq_publish_ms,
         uploaded_json=True,
+        path="oss_mq",
+    )
+    log_timing(
+        "oss_upload",
+        sensor="S1",
+        land_id=meta.get("land_id"),
+        date=date_str,
+        wall_ms=json_upload_ms,
+        path="oss_mq",
+    )
+    log_timing(
+        "db_or_callback",
+        sensor="S1",
+        land_id=meta.get("land_id"),
+        date=date_str,
+        wall_ms=mq_publish_ms,
         path="oss_mq",
     )
     logger.info(
@@ -1521,6 +1555,19 @@ def _process_one_s1_scene(
             pixels=pixels_n,
             published=published,
         )
+        log_timing(
+            "scene_total",
+            sensor="S1",
+            job_id=job_id,
+            scene_id=scene.get("id"),
+            date=str(scene.get("date")),
+            download_ms=download_ms,
+            product_build_ms=stats_ms,
+            write_cog_ms=write_cog_ms,
+            oss_upload_ms=write_lonlat_ms,
+            wall_ms=int((time.perf_counter() - t_scene) * 1000),
+            outcome="ok",
+        )
         return published
     except Exception as e:
         logger.error(
@@ -1528,6 +1575,17 @@ def _process_one_s1_scene(
             scene_id=scene_id,
             error=str(e),
             stac_api=s1_stac_api_url(),
+        )
+                log_timing(
+            "scene_total",
+            sensor="S1",
+            job_id=job_id,
+            scene_id=scene_id,
+            date=str(scene.get("date")),
+            wall_ms=int((time.perf_counter() - t_scene) * 1000),
+            outcome="error",
+            error_type=type(e).__name__,
+            error=str(e)[:300],
         )
         incr_done(job_id, failed=True)
         try:
@@ -1579,6 +1637,15 @@ def _process_s1_scenes_parallel(
         workers=workers,
         band_gdal_cap=band_max_workers(),
     )
+    log_timing(
+        "batch_start",
+        sensor="S1",
+        job_id=job_id,
+        land_id=land_id_str,
+        scene_count=total,
+        scene_workers=workers,
+        band_gdal_cap=band_max_workers(),
+    )
 
     processed = 0
     completed_n = 0
@@ -1626,6 +1693,7 @@ def _process_s1_scenes_parallel(
             if on_chunk and completed_n % flush_every == 0:
                 on_chunk(completed_n, processed)
 
+    _batch_ms = int((time.perf_counter() - t_process) * 1000)
     logger.info(
         "scene_parallel_done",
         job_id=job_id,
@@ -1633,7 +1701,17 @@ def _process_s1_scenes_parallel(
         layers_created=processed,
         total_scenes=total,
         workers=workers,
-        wall_ms=int((time.perf_counter() - t_process) * 1000),
+        wall_ms=_batch_ms,
+    )
+    log_timing(
+        "batch_end",
+        sensor="S1",
+        job_id=job_id,
+        land_id=land_id_str,
+        wall_ms=_batch_ms,
+        scene_count=total,
+        ok_count=processed,
+        scene_workers=workers,
     )
     return processed
 
@@ -1754,16 +1832,27 @@ def _process_s1_http_only(
         )
         skipped_existing = before - len(scenes)
 
+    _search_ms = int((time.perf_counter() - t_search) * 1000)
     logger.info(
         "job_phase_timing",
         phase="scene_search",
         sensor="S1",
         job_id=job_id,
-        elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+        elapsed_ms=_search_ms,
         scenes=len(scenes),
         skipped_existing=skipped_existing,
         date_from=str(d0),
         date_to=str(d1),
+        http_only=True,
+    )
+    log_timing(
+        "stac_search",
+        sensor="S1",
+        job_id=job_id,
+        land_id=land_id_str,
+        wall_ms=_search_ms,
+        item_count=len(scenes),
+        skipped_existing=skipped_existing,
         http_only=True,
     )
 
@@ -1937,16 +2026,26 @@ def process_s1_backfill(
             )
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        _search_ms = int((time.perf_counter() - t_search) * 1000)
         logger.info(
             "job_phase_timing",
             phase="scene_search",
             sensor="S1",
             job_id=job_id,
-            elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+            elapsed_ms=_search_ms,
             scenes=len(scenes),
             skipped_existing=skipped_existing,
             date_from=str(date_from),
             date_to=str(date_to),
+        )
+        log_timing(
+            "stac_search",
+            sensor="S1",
+            job_id=job_id,
+            land_id=land_id_str,
+            wall_ms=_search_ms,
+            item_count=len(scenes),
+            skipped_existing=skipped_existing,
         )
 
         if not scenes:

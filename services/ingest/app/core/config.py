@@ -64,9 +64,9 @@ class Settings(BaseSettings):
     # Concurrent SoilGrids WCS GetCoverage calls (props × depths × quantiles).
     soil_fetch_max_workers: int = 12
     # Concurrent Sentinel scene download+process threads inside one ingest job.
-    # Celery --concurrency is separate (typically 4); this speeds the per-job
-    # serial scene loop. Each thread opens its own DB session.
-    ingest_scene_max_workers: int = 16
+    # Bench (AWS windowed COG): workers=8 is the stable-fast sweet spot (~380
+    # S2 scenes/min); 16 raises contention. Celery --concurrency is separate.
+    ingest_scene_max_workers: int = 8
     # Rolling grace (seconds) after the last parallel scene completion before
     # abandoning still in-flight scenes so a stuck COG/HTTP call cannot block
     # batch finalize forever. Also applied from parallel start if zero scenes finish.
@@ -101,7 +101,7 @@ def scene_max_workers() -> int:
     try:
         n = int(settings.ingest_scene_max_workers)
     except (TypeError, ValueError):
-        n = 16
+        n = 8
     return max(1, n)
 
 

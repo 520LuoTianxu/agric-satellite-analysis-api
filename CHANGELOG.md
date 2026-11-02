@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Grep-friendly `TIMING stage=...` wall-clock logs across STAC search, scene download, band window reads, OSS upload/callback, batch start/end, and straggler waits (include land_id/scene_id/sensor).
+- Shared `windowed_cog_gdal_env()` for S2+S1 windowed COG `/vsicurl` reads (bench-proven HTTP/2 multiplex, 256KiB curl chunks, `GDAL_INGESTED_BYTES_AT_OPEN`).
+- Soft-skip of non-COG JPEG2000 S2 assets so one bad STAC href cannot fail a whole batch.
 - Field land report tab now shows a six-dimension hexagon of crop, soil, season vigor, weather, flood safety, and drought safety from that field's latest successful report. Generate the report first if no scores are shown; older reports without stored scores need a new generate.
 - Sentinel-1 agri ingest now defaults to Microsoft Planetary Computer (`sentinel-1-grd`, SAS-signed Azure assets) instead of Element84 requester-pays S3. Optical S2 still uses `STAC_API_URL`.
 - Optional cloud-removal step for cloudy crop-field satellite scenes. It is off by default. When turned on, a second product is stored next to the raw scene. Only high-quality results are used for drought and similar official metrics; lower-quality results are kept for audit. Raw cloudy scenes are not overwritten.
@@ -14,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fair and poor cloud-removed scenes are saved next to the raw scene whenever the reconstruction produced usable pixels, so those dates no longer disappear from the field history. Drought and other official land metrics still ignore them.
 
 ### Changed
+- Default `INGEST_SCENE_MAX_WORKERS` is now `8` (stable-fast sweet spot from AWS windowed-COG bench; was 16).
+- CloudAMQP publish connections set `socket_timeout` / `stack_timeout` (default 30s) so a hung publish cannot block the process-wide publish lock forever.
 - Optional cloud-removal now waits until nearby field windows (optical and radar) for that job are downloaded, then cleans cloudy dates in one batch. It no longer tries to clean a single cloudy date the moment that date finishes, which often lacked nearby scenes and produced empty or poor results. Raw scenes are still saved as they complete. Only high-quality cloud-removed products are used for official drought numbers. Fair and poor cloud-removed products are still saved and labelled as possibly unreliable.
 - Cloud-removal can now run on satellite scenes with up to 90% scene cloud (was 80). It still starts when the field or the scene is above 30% cloud.
 - On dates with both a raw scene and a high-quality cloud-removed product, drought still prefers a closer match to nearby clear days when the field is borderline cloudy. NDVI and similar growth charts go further: they prefer the raw scene when it better matches nearby clear days and the crop season, even if the cloud-removed product scored good.
@@ -22,7 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Field flood days now use Sentinel-1 VV against a per-orbit baseline (low VV, a drop versus that orbit's median, and a VH helper). Near-threshold dates are marked watch. Spring detections may be irrigation puddles, not disaster flood.
 - The agri time-series panel marks historical drought days on the chart and date list.
 - Agri field satellite refresh now writes color-spot data directly after computing indices. It no longer stores large index image files in object storage. Existing stored images are left as-is; new runs do not add more.
-- Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 16 per job by default), so a field backfill finishes faster without adding more Celery workers.
+- Historical vegetation-index and Sentinel-1 jobs now process multiple satellite scenes at the same time (up to 8 per job by default), so a field backfill finishes faster without adding more Celery workers.
 - A single satellite scene now downloads its image bands together instead of one after another, so multi-band crop-field refreshes finish sooner.
 
 ### Fixed

@@ -33,6 +33,7 @@ from app.core.band_window_cache import (
 )
 from app.core.geo import repair_polygon_geometry
 from app.core.config import scene_max_workers, scene_straggler_timeout_sec
+from app.core.windowed_gdal import log_timing
 from app.core.agri_classify import PARCEL_CLOUD_SOURCE_SCL
 from app.core.decloud import (
     decloud_enabled,
@@ -1682,6 +1683,17 @@ def process_satellite_batch(
             band_gdal_cap=band_max_workers(),
             straggler_timeout_sec=straggler_timeout,
         )
+        log_timing(
+            "batch_start",
+            sensor=sensor,
+            job_id=job_id,
+            scene_count=len(scenes),
+            scene_workers=workers,
+            publish_workers=publish_workers,
+            band_gdal_cap=band_max_workers(),
+            straggler_timeout_sec=straggler_timeout,
+        )
+        t_batch = time.perf_counter()
         patch_job(job_id, {"progress_json": dict(progress)})
 
         if scenes:
@@ -1870,6 +1882,14 @@ def process_satellite_batch(
                             scenes_total=timeout_progress["scenes_total"],
                             products_published=timeout_progress["products_published"],
                         )
+                        log_timing(
+                            "straggler_wait",
+                            sensor=sensor,
+                            job_id=job_id,
+                            timeout_sec=straggler_timeout,
+                            pending=len(not_done),
+                            outcome="abandoned",
+                        )
                         pending.clear()
                         break
             finally:
@@ -1880,6 +1900,7 @@ def process_satellite_batch(
             progress["failed_land_ids_complete"] = True
             progress_revision["value"] += 1
         summary = progress_snapshot()
+        _batch_ms = int((time.perf_counter() - t_batch) * 1000) if scenes else 0
         logger.info(
             "scene_parallel_done",
             job_id=job_id,
@@ -1888,6 +1909,19 @@ def process_satellite_batch(
             products_published=summary["products_published"],
             failed=summary["failed"],
             workers=workers,
+            wall_ms=_batch_ms,
+        )
+        log_timing(
+            "batch_end",
+            sensor=sensor,
+            job_id=job_id,
+            wall_ms=_batch_ms,
+            scene_count=len(scenes),
+            ok_count=summary.get("scenes_done"),
+            failed=summary.get("failed"),
+            products_published=summary.get("products_published"),
+            scene_workers=workers,
+            straggler_abandoned=len(summary.get("straggler_abandoned_scene_ids") or []),
         )
         if sensor == "S2" and decloud_enabled():
             from app.tasks.decloud_schedule_outbox import (

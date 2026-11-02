@@ -49,6 +49,17 @@ def _params(url: str | None = None) -> pika.URLParameters:
     params = pika.URLParameters(raw)
     params.heartbeat = 60
     params.blocked_connection_timeout = 300
+    # Avoid forever-blocked publishes under the process-wide publish lock.
+    try:
+        sock_to = float(os.environ.get("CLOUDAMQP_SOCKET_TIMEOUT_SEC", "30") or "30")
+    except (TypeError, ValueError):
+        sock_to = 30.0
+    params.socket_timeout = max(5.0, sock_to)
+    try:
+        stack_to = float(os.environ.get("CLOUDAMQP_STACK_TIMEOUT_SEC", "30") or "30")
+    except (TypeError, ValueError):
+        stack_to = 30.0
+    params.stack_timeout = max(5.0, stack_to)
     return params
 
 
