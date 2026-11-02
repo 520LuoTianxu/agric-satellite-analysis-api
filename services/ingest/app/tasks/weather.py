@@ -1,6 +1,9 @@
-"""Weather data tasks - fetch from Open-Meteo, compute agricultural indices.
+"""Weather data tasks - fetch from Open-Meteo (primary) / NASA POWER (fallback).
 
-Daily polling + historical backfill via Celery Beat.
+Daily polling + historical backfill via Celery Beat. When Open-Meteo is
+rate-limited, returns HTTP errors, or yields no usable rows, the fetch falls
+back to NASA POWER daily point so bootstrap / assessment can still get
+``weather_daily`` rows.
 """
 
 from __future__ import annotations
@@ -85,6 +88,28 @@ HOURLY_VARIABLE_MAP = {
     "vapour_pressure_deficit": "vapor_pressure_deficit",
     "cloud_cover": "cloud_cover_mean",
 }
+
+# NASA POWER daily point parameters (community=AG). Cap is 20 per request.
+# Depths for TSOIL* are approximate vs Open-Meteo soil layers; unmatched
+# Open-Meteo fields (FAO ET0, fine soil-moisture layers) stay null.
+NASA_POWER_PARAMETERS = [
+    "T2M",
+    "T2M_MAX",
+    "T2M_MIN",
+    "PRECTOTCORR",
+    "ALLSKY_SFC_SW_DWN",
+    "WS10M_MAX",
+    "CLOUD_AMT",
+    "TS",
+    "TSOIL1",
+    "TSOIL2",
+    "TSOIL3",
+    "SFMC",
+    "T2MDEW",
+    "RH2M",
+]
+
+NASA_POWER_FILL_VALUE = -999.0
 
 
 
@@ -278,6 +303,114 @@ def _fetch_open_meteo(
     return data
 
 
+def _nasa_power_value(raw: object) -> float | None:
+    """Convert a NASA POWER scalar, treating fill_value as missing."""
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val == NASA_POWER_FILL_VALUE:
+        return None
+    return val
+
+
+def _vapor_pressure_deficit_kpa(
+    t_mean_c: float | None, t_dew_c: float | None
+) -> float | None:
+    """Tetens VPD (kPa) from air temperature and dew point; matches Open-Meteo units."""
+    if t_mean_c is None or t_dew_c is None:
+        return None
+    import math
+
+    def _es(t: float) -> float:
+        return 0.6108 * math.exp((17.27 * t) / (t + 237.3))
+
+    return round(max(0.0, _es(float(t_mean_c)) - _es(float(t_dew_c))), 4)
+
+
+def _fetch_nasa_power(
+    latitude: float,
+    longitude: float,
+    start_date: date,
+    end_date: date,
+) -> dict:
+    """Fetch daily weather from NASA POWER and normalize to Open-Meteo-like daily dict.
+
+    Returns ``{"daily": {"time": [...], <db_or_api_key>: [...]}, "provider": "nasa-power"}``.
+    Fields NASA cannot supply (FAO ET0, fine soil-moisture layers) are omitted /
+    left null by the caller.
+    """
+    params = {
+        "parameters": ",".join(NASA_POWER_PARAMETERS),
+        "community": "AG",
+        "longitude": longitude,
+        "latitude": latitude,
+        "start": start_date.strftime("%Y%m%d"),
+        "end": end_date.strftime("%Y%m%d"),
+        "format": "JSON",
+    }
+    url = settings.nasa_power_daily_url
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    parameter = (payload.get("properties") or {}).get("parameter") or {}
+    if not parameter:
+        messages = payload.get("messages") or payload.get("header") or "empty"
+        raise ValueError(f"NASA POWER returned no parameter block: {messages}")
+
+    # Union of YYYYMMDD keys across requested series, sorted chronologically.
+    date_keys: set[str] = set()
+    for series in parameter.values():
+        if isinstance(series, dict):
+            date_keys.update(str(k) for k in series.keys())
+    if not date_keys:
+        raise ValueError("NASA POWER parameter series are empty")
+
+    sorted_keys = sorted(date_keys)
+    times = [f"{k[0:4]}-{k[4:6]}-{k[6:8]}" for k in sorted_keys]
+
+    def series_for(name: str) -> list[float | None]:
+        raw = parameter.get(name) or {}
+        return [_nasa_power_value(raw.get(k)) for k in sorted_keys]
+
+    t_mean = series_for("T2M")
+    t_dew = series_for("T2MDEW")
+    vpd = [
+        _vapor_pressure_deficit_kpa(tm, td) for tm, td in zip(t_mean, t_dew)
+    ]
+
+    # Keys match DAILY_VARIABLE_MAP / HOURLY_VARIABLE_MAP API names so the
+    # shared upsert loop can treat NASA like post-aggregated Open-Meteo.
+    daily = {
+        "time": times,
+        "temperature_2m_min": series_for("T2M_MIN"),
+        "temperature_2m_max": series_for("T2M_MAX"),
+        "temperature_2m_mean": t_mean,
+        "precipitation_sum": series_for("PRECTOTCORR"),
+        # et0_fao_evapotranspiration intentionally omitted (no FAO ET0 in POWER).
+        "shortwave_radiation_sum": series_for("ALLSKY_SFC_SW_DWN"),
+        "wind_speed_10m_max": series_for("WS10M_MAX"),
+        "soil_temperature_0cm": series_for("TS"),
+        "soil_temperature_6cm": series_for("TSOIL1"),
+        "soil_temperature_18cm": series_for("TSOIL2"),
+        "soil_temperature_54cm": series_for("TSOIL3"),
+        "soil_moisture_0_to_1cm": series_for("SFMC"),
+        # Deeper OM moisture layers have no POWER equivalent → stay null.
+        "vapour_pressure_deficit": vpd,
+        "cloud_cover": series_for("CLOUD_AMT"),
+    }
+    return {"daily": daily, "provider": "nasa-power", "raw_header": payload.get("header")}
+
+
+def _daily_has_usable_rows(daily: dict | None) -> bool:
+    """True when daily payload has at least one dated row."""
+    return bool(daily and daily.get("time"))
+
+
 @celery_app.task(
     name="app.tasks.weather.fetch_weather_for_land",
     bind=True,
@@ -302,17 +435,13 @@ def fetch_weather_for_land(
     Returns:
         dict with land_id, rows_upserted, status.
     """
-    if weather_daily_limit_reached():
+    # Open-Meteo 日配额耗尽时不再直接跳过：后面走 NASA POWER 兜底。
+    open_meteo_blocked = weather_daily_limit_reached()
+    if open_meteo_blocked:
         logger.info(
             "weather_fetch_skipped_daily_api_limit",
             land_id=land_id,
         )
-        return {
-            "land_id": land_id,
-            "rows_upserted": 0,
-            "status": "skipped",
-            "reason": "daily_api_limit_reached",
-        }
 
     from app.models.tables import WeatherDaily
 
@@ -386,14 +515,106 @@ def fetch_weather_for_land(
             end=end_date.isoformat(),
             archive=use_archive)
 
-        data = _fetch_open_meteo(
-            lat, lon, start_date, end_date, use_archive=use_archive
-        )
+        source = "open-meteo"
+        model_used = "best_match"
+        fallback_reason: str | None = None
+        data: dict | None = None
+        open_meteo_http_error: httpx.HTTPStatusError | None = None
+
+        if open_meteo_blocked:
+            fallback_reason = "daily_api_limit_reached"
+        else:
+            try:
+                data = _fetch_open_meteo(
+                    lat, lon, start_date, end_date, use_archive=use_archive
+                )
+                if not _daily_has_usable_rows(data.get("daily")):
+                    logger.warning("weather_no_daily_data", land_id=land_id)
+                    fallback_reason = "no_data"
+                    data = None
+            except httpx.HTTPStatusError as e:
+                open_meteo_http_error = e
+                if _is_daily_api_limit_response(e.response):
+                    marked = mark_weather_daily_limit_reached()
+                    logger.warning(
+                        "weather_daily_api_limit_reached",
+                        land_id=land_id,
+                        marked=marked,
+                        detail=DAILY_API_LIMIT_MESSAGE,
+                    )
+                    fallback_reason = "daily_api_limit_reached"
+                else:
+                    logger.error(
+                        "weather_api_error",
+                        land_id=land_id,
+                        status=e.response.status_code,
+                        detail=str(e),
+                    )
+                    fallback_reason = f"http_{e.response.status_code}"
+                data = None
+            except Exception as e:
+                logger.error(
+                    "weather_fetch_error",
+                    land_id=land_id,
+                    error=str(e),
+                    exc_info=True,
+                )
+                fallback_reason = "open_meteo_error"
+                data = None
+
+        if data is None:
+            reason = fallback_reason or "unknown"
+            logger.info(
+                "weather_fetch_fallback_nasa_power",
+                land_id=land_id,
+                reason=reason,
+                start=start_date.isoformat(),
+                end=end_date.isoformat(),
+            )
+            try:
+                data = _fetch_nasa_power(lat, lon, start_date, end_date)
+                source = "nasa-power"
+                model_used = "merra2"
+            except Exception as nasa_exc:
+                logger.error(
+                    "weather_nasa_power_fallback_failed",
+                    land_id=land_id,
+                    reason=reason,
+                    error=str(nasa_exc),
+                    exc_info=True,
+                )
+                if session is not None:
+                    session.rollback()
+                # Preserve Open-Meteo retry behaviour for transient HTTP errors
+                # when the fallback also fails.
+                if open_meteo_http_error is not None and not _is_daily_api_limit_response(
+                    open_meteo_http_error.response
+                ):
+                    raise self.retry(
+                        exc=open_meteo_http_error,
+                        countdown=60 * (2**self.request.retries),
+                    )
+                return {
+                    "land_id": land_id,
+                    "rows_upserted": 0,
+                    "status": "failed" if reason != "no_data" else "no_data",
+                    "reason": reason,
+                    "error": str(nasa_exc),
+                }
 
         daily = data.get("daily")
-        if not daily or "time" not in daily:
-            logger.warning("weather_no_daily_data", land_id=land_id)
-            return {"land_id": land_id, "rows_upserted": 0, "status": "no_data"}
+        if not _daily_has_usable_rows(daily):
+            logger.warning(
+                "weather_no_daily_data",
+                land_id=land_id,
+                source=source,
+            )
+            return {
+                "land_id": land_id,
+                "rows_upserted": 0,
+                "status": "no_data",
+                "source": source,
+            }
 
         # 累计 GDD 必须从窗口起点之前的最后一条记录接续；不能从窗口之后
         # 的最新记录倒推，否则前端选择较早年份时会出现累计值跳变。
@@ -422,12 +643,11 @@ def fetch_weather_for_land(
             # Extract raw variables from API response
             record: dict = {
                 "land_id": land_id,
-
                 "date": row_date,
                 "latitude": Decimal(str(round(lat, 8))),
                 "longitude": Decimal(str(round(lon, 8))),
-                "source": "open-meteo",
-                "model_used": "best_match",
+                "source": source,
+                "model_used": model_used,
                 "updated_at": datetime.now(timezone.utc),
             }
 
@@ -502,11 +722,16 @@ def fetch_weather_for_land(
             "weather_fetch_complete",
             land_id=land_id,
             rows_upserted=rows_upserted,
-            http_only=http_only)
+            http_only=http_only,
+            source=source,
+            fallback_reason=fallback_reason,
+        )
         return {
             "land_id": land_id,
             "rows_upserted": rows_upserted,
             "status": "success",
+            "source": source,
+            "fallback_reason": fallback_reason,
             "date_from": window.start.isoformat() if window else None,
             "date_to": window.end.isoformat() if window else None,
             "days": window.days if window else None,
@@ -514,6 +739,8 @@ def fetch_weather_for_land(
         }
 
     except httpx.HTTPStatusError as e:
+        # Open-Meteo / NASA HTTP errors that escaped the inner try (e.g. after
+        # fallback retry path). Keep previous retry / rate-limit semantics.
         if _is_daily_api_limit_response(e.response):
             marked = mark_weather_daily_limit_reached()
             logger.warning(
@@ -524,8 +751,6 @@ def fetch_weather_for_land(
             )
             if session is not None:
                 session.rollback()
-            # 日配额当天不会恢复，不能继续 Celery retry，否则会让同一下载机
-            # 持续领取并重复请求天气接口；claim agent 会据此暂停天气类型。
             return {
                 "land_id": land_id,
                 "rows_upserted": 0,
@@ -623,14 +848,12 @@ def schedule_daily_weather_fetch(
 
     配了 API_BASE_URL 时，地块清单走 Internal HTTP，不在下载机查库。
     """
-    if weather_daily_limit_reached():
-        logger.info("weather_schedule_skipped_daily_api_limit")
-        return {
-            "lands": 0,
-            "batches": 0,
-            "http": False,
-            "reason": "daily_api_limit_reached",
-        }
+    # Open-Meteo 日配额耗尽时仍派发任务：单地块 fetch 会走 NASA POWER 兜底。
+    open_meteo_limited = weather_daily_limit_reached()
+    if open_meteo_limited:
+        logger.info(
+            "weather_schedule_open_meteo_limited_nasa_fallback",
+        )
 
     land_ids: list[str] = []
     date_windows: dict[str, dict[str, str]] = {}
@@ -719,8 +942,14 @@ def schedule_daily_weather_fetch(
         lands=len(land_ids),
         batches=len(batches),
         http=http,
+        open_meteo_limited=open_meteo_limited,
     )
-    return {"lands": len(land_ids), "batches": len(batches), "http": http}
+    return {
+        "lands": len(land_ids),
+        "batches": len(batches),
+        "http": http,
+        "open_meteo_limited": open_meteo_limited,
+    }
 
 
 def _num(val):

@@ -41,10 +41,13 @@ class Settings(BaseSettings):
     titiler_internal_url: str = "http://tiler:80"
     titiler_public_url: str = "http://localhost:8080"
 
-    # Weather (Open-Meteo)
+    # Weather (Open-Meteo primary; NASA POWER fallback)
     open_meteo_forecast_url: str = "https://api.open-meteo.com/v1/forecast"
     open_meteo_archive_url: str = "https://archive-api.open-meteo.com/v1/archive"
     open_meteo_api_key: str = ""
+    nasa_power_daily_url: str = (
+        "https://power.larc.nasa.gov/api/temporal/daily/point"
+    )
     weather_backfill_days: int = DEFAULT_WEATHER_BACKFILL_DAYS
     weather_batch_size: int = 50
     weather_gdd_base_temp: float = 10.0
