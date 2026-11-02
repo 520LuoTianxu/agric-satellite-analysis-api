@@ -152,6 +152,9 @@ class SceneProductOut(BaseModel):
     cire_avg: float | None = None
     cire_min: float | None = None
     cire_max: float | None = None
+    ndti_avg: float | None = None
+    ndti_min: float | None = None
+    ndti_max: float | None = None
     # S1 SAR
     vv_avg: float | None = None
     vv_min: float | None = None

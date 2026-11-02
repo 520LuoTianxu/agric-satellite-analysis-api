@@ -13,7 +13,7 @@ Agri satellite jobs **do not** upload index `.tif` / COG products (`WRITE_INDEX_
 ```
 STAC (Sentinel-2 L2A / Sentinel-1 GRD)
   → download source bands (windowed to parcel)
-  → compute indices in memory (NDVI, EVI, NDMI, NDRE, CIre, MNDWI; S1 VV/VH dB)
+  → compute indices in memory (NDVI, EVI, NDMI, NDRE, CIre, MNDWI, NDTI; S1 VV/VH dB)
   → sample parcel geometry → lonlat_columns_v1 pixel JSON (columnar; legacy lonlat_v1 still readable)
   → upload lonlat JSON to OSS
   → publish one MQ result per scene (producer mq_result_writer pulls OSS → upserts PG)

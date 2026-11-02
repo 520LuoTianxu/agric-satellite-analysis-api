@@ -72,7 +72,7 @@ from app.worker import celery_app
 logger = structlog.get_logger()
 
 # Pixel keys in lonlat products (stable order; matches the OSS-COG bridge emit set).
-AGRI_OPTICAL_INDEX_KEYS = ("ndvi", "evi", "ndmi", "ndre", "cire", "mndwi")
+AGRI_OPTICAL_INDEX_KEYS = ("ndvi", "evi", "ndmi", "ndre", "cire", "mndwi", "ndti")
 INDEX_KEY_TO_PIXEL = {
     "ndvi": "NDVI",
     "evi": "EVI",
@@ -80,6 +80,7 @@ INDEX_KEY_TO_PIXEL = {
     "ndre": "NDRE",
     "cire": "CIre",
     "mndwi": "MNDWI",
+    "ndti": "NDTI",
 }
 # v5：Earth Search sentinel-2-l2a 不再重复扣除 BOA 偏移（v3/v4 该来源 NDVI 偏高/饱和）。
 AGRI_OPTICAL_ALGORITHM_VERSION = "stac-optical-lonlat-v5"
@@ -124,7 +125,9 @@ def _load_land_meta(
     """
     if remote is not None:
         if str(remote.get("land_id") or "") != str(land_id):
-            raise RuntimeError("internal land response does not match requested land_id")
+            raise RuntimeError(
+                "internal land response does not match requested land_id"
+            )
         return {
             "land_id": str(land_id),
             "tile_id": remote.get("tile_id"),
@@ -132,7 +135,9 @@ def _load_land_meta(
         }
 
     if session is None:
-        raise RuntimeError("land metadata requires a database session or remote response")
+        raise RuntimeError(
+            "land metadata requires a database session or remote response"
+        )
     from app.models.tables import LandParcel
 
     land = session.get(LandParcel, land_id)
@@ -252,7 +257,9 @@ def publish_optical_lonlat_to_oss_mq(
         "rgb_url": row.get("rgb_url"),
         "large_rgb_url": row.get("large_rgb_url"),
         "rgb_oss_key": row.get("rgb_oss_key"),
-        "source": row.get("_source") or (pixel_obj or {}).get("source") or "stac_direct",
+        "source": row.get("_source")
+        or (pixel_obj or {}).get("source")
+        or "stac_direct",
         "decloud_quality": row.get("_decloud_quality")
         or (pixel_obj or {}).get("decloud_quality"),
         "decloud_score": row.get("_decloud_score")
@@ -275,6 +282,9 @@ def publish_optical_lonlat_to_oss_mq(
         "mndwi_avg": row["mndwi_avg"],
         "mndwi_min": row["mndwi_min"],
         "mndwi_max": row["mndwi_max"],
+        "ndti_avg": row.get("ndti_avg"),
+        "ndti_min": row.get("ndti_min"),
+        "ndti_max": row.get("ndti_max"),
         "pixel_data": pixel_obj or json.loads(row["pixel_data"]),
     }
     key, json_url = upload_scene_product_json(
@@ -374,9 +384,7 @@ def upsert_optical_lonlat_row(
     mq_task_id: str | None = None,
 ) -> str | None:
     """兼容旧调用名；实际负责上传像元并发布回执，落库由结果写入器完成。"""
-    return publish_optical_lonlat_to_oss_mq(
-        row, mq_task_id=mq_task_id
-    )
+    return publish_optical_lonlat_to_oss_mq(row, mq_task_id=mq_task_id)
 
 
 def emit_optical_lonlat(
@@ -409,9 +417,7 @@ def emit_optical_lonlat(
     if "NDVI" not in index_arrays:
         return None
     t_sample = time.perf_counter()
-    pixels = _sample_lonlat(
-        geom4326, index_arrays, transform, target_crs, scl=scl
-    )
+    pixels = _sample_lonlat(geom4326, index_arrays, transform, target_crs, scl=scl)
     sample_ms = int((time.perf_counter() - t_sample) * 1000)
     if not pixels:
         logger.info(
@@ -441,6 +447,7 @@ def emit_optical_lonlat(
     ndre_avg, ndre_min, ndre_max = _avg_triple("NDRE")
     cire_avg, cire_min, cire_max = _avg_triple("CIre")
     mndwi_avg, mndwi_min, mndwi_max = _avg_triple("MNDWI")
+    ndti_avg, ndti_min, ndti_max = _avg_triple("NDTI")
 
     date_str = (
         scene["date"].isoformat()
@@ -463,9 +470,7 @@ def emit_optical_lonlat(
         parcel_cloud_raw = None
     if parcel_cloud_raw is None:
         source = None
-    parcel_out = (
-        _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
-    )
+    parcel_out = _round6(parcel_cloud_raw) if parcel_cloud_raw is not None else None
 
     # 场景主键继续使用按日期的兼容 ID；真实STAC item另存，避免丢失可追溯来源。
     stac_item_id = str(scene.get("id") or "").strip() or None
@@ -534,6 +539,9 @@ def emit_optical_lonlat(
         "mndwi_avg": mndwi_avg,
         "mndwi_min": mndwi_min,
         "mndwi_max": mndwi_max,
+        "ndti_avg": ndti_avg,
+        "ndti_min": ndti_min,
+        "ndti_max": ndti_max,
         "pixel_data": json.dumps(pixel_data, separators=(",", ":")),
         "json_oss_key": None,
         "_pixel_data_obj": pixel_data,
@@ -668,20 +676,12 @@ def _process_one_optical_scene(
                     )
             if scene_visual is None:
                 # Fallback: B04/B03/B02 over the padded window.
-                rgb_hrefs = {
-                    k: hrefs[k]
-                    for k in ("B04", "B03", "B02")
-                    if k in hrefs
-                }
+                rgb_hrefs = {k: hrefs[k] for k in ("B04", "B03", "B02") if k in hrefs}
                 # hrefs 已移除 visual；这里仅挑选光谱 RGB，不会把 SCL 送入预览。
                 # Re-read from original scene hrefs if needed.
                 if len(rgb_hrefs) < 3:
                     orig = dict(scene.get("band_hrefs") or {})
-                    rgb_hrefs = {
-                        k: orig[k]
-                        for k in ("B04", "B03", "B02")
-                        if k in orig
-                    }
+                    rgb_hrefs = {k: orig[k] for k in ("B04", "B03", "B02") if k in orig}
                 if len(rgb_hrefs) == 3:
                     try:
                         scene_bands = read_bands_windowed_parallel(
@@ -860,7 +860,6 @@ def _process_one_optical_scene(
         return None
 
 
-
 def _process_agri_optical_http_only(
     *,
     job_id: str | None,
@@ -892,9 +891,7 @@ def _process_agri_optical_http_only(
     if job_id and (not land_id or not date_from or not date_to):
         remote = get_job_http(job_id) or {}
         params = dict(remote.get("params_json") or {})
-        land_id = land_id or (
-            str(remote["land_id"]) if remote.get("land_id") else None
-        )
+        land_id = land_id or (str(remote["land_id"]) if remote.get("land_id") else None)
         date_from = date_from or params.get("date_from")
         date_to = date_to or params.get("date_to")
         force = bool(force or params.get("force"))
@@ -902,7 +899,9 @@ def _process_agri_optical_http_only(
             mq_task_id = str(params["mq_task_id"])
         growing_seasons = growing_seasons or params.get("growing_seasons")
         season_months = season_months or params.get("season_months")
-        processing_window_km = processing_window_km or params.get("processing_window_km")
+        processing_window_km = processing_window_km or params.get(
+            "processing_window_km"
+        )
 
     if not land_id or not date_from or not date_to:
         return {
@@ -1233,7 +1232,7 @@ def process_agri_optical_lonlat(
         land_id_str = str(job.land_id)
         write_cogs = write_index_cogs_enabled()
         force = bool(params.get("force") or False)
-        mq_task_id = (params.get("mq_task_id") or None)
+        mq_task_id = params.get("mq_task_id") or None
         if mq_task_id is not None:
             mq_task_id = str(mq_task_id)
 
@@ -1388,8 +1387,8 @@ def process_agri_optical_lonlat(
                     idx=idx,
                     total_scenes=len(scenes),
                     index_defs=index_defs,
-                target_transform=target_transform,
-                target_crs=target_crs,
+                    target_transform=target_transform,
+                    target_crs=target_crs,
                     target_shape=target_shape,
                     field_mask=field_mask,
                     bounds=bounds,

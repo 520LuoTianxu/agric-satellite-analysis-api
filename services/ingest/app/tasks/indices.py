@@ -114,6 +114,20 @@ def _mndwi(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
     return np.clip(result, -1.0, 1.0)
 
 
+def _ndti(bands: dict[str, np.ndarray], **_kw) -> np.ndarray:
+    """Normalized Difference Tillage Index: (SWIR16 - SWIR22) / (SWIR16 + SWIR22).
+
+    Uses Sentinel-2 B11/B12 (same L2A reflectance path as other agri indices).
+    Sensitive to crop residue / tillage; not a vegetation greenness index.
+    """
+    radiometry = _kw.get("band_radiometry")
+    swir16 = _reflectance_band(bands, "B11", radiometry)
+    swir22 = _reflectance_band(bands, "B12", radiometry)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = (swir16 - swir22) / (swir16 + swir22)
+    return np.clip(result, -1.0, 1.0)
+
+
 # ── Alert configuration ─────────────────────────────────────────────
 
 
@@ -164,7 +178,8 @@ _register(
         stac_asset_map={
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        })
+        },
+    )
 )
 
 _register(
@@ -181,7 +196,8 @@ _register(
             "B02": ("blue", "B02"),
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        })
+        },
+    )
 )
 
 _register(
@@ -196,7 +212,8 @@ _register(
         stac_asset_map={
             "B04": ("red", "B04"),
             "B08": ("nir", "B08"),
-        })
+        },
+    )
 )
 
 _register(
@@ -211,7 +228,8 @@ _register(
         stac_asset_map={
             "B03": ("green", "B03"),
             "B08": ("nir", "B08"),
-        })
+        },
+    )
 )
 
 _register(
@@ -226,7 +244,8 @@ _register(
         stac_asset_map={
             "B08": ("nir", "B08"),
             "B11": ("swir16", "B11"),
-        })
+        },
+    )
 )
 
 _register(
@@ -241,7 +260,8 @@ _register(
         stac_asset_map={
             "B05": ("rededge1", "B05"),
             "B08": ("nir", "B08"),
-        })
+        },
+    )
 )
 
 _register(
@@ -256,7 +276,8 @@ _register(
         stac_asset_map={
             "B05": ("rededge1", "B05"),
             "B07": ("rededge3", "B07"),
-        })
+        },
+    )
 )
 
 _register(
@@ -271,7 +292,24 @@ _register(
         stac_asset_map={
             "B03": ("green", "B03"),
             "B11": ("swir16", "B11"),
-        })
+        },
+    )
+)
+
+_register(
+    IndexDef(
+        key="ndti",
+        label="NDTI",
+        bands=("B11", "B12"),
+        formula=_ndti,
+        colormap="ylorrd",
+        rescale=(-0.2, 0.4),
+        alerts=AlertDefaults(threshold=0.05, threshold_high=-0.05, drop_pct=20),
+        stac_asset_map={
+            "B11": ("swir16", "B11"),
+            "B12": ("swir22", "B12"),
+        },
+    )
 )
 
 
