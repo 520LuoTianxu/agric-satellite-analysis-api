@@ -11,6 +11,9 @@
 # REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
 # Internal HTTP (D2 reads + optional D1 claim) — set in .env:
 #   API_BASE_URL=http://<api-lb>:8000
+#   # Gateway (no /v1): API_BASE_URL=https://joint-venture.cdfinance.com.cn/satellite-api
+#   #                 API_PATH_PREFIX=   (empty). Direct API: omit or /v1.
+#   API_PATH_PREFIX=/v1
 #   INTERNAL_API_TOKEN=<same as API>
 #   WORKER_NAME=download-1
 #   WORK_CLAIM_INTERVAL_SEC=4
@@ -40,6 +43,8 @@ services:
     environment:
       # D2: prefer internal HTTP reads when set (writes still use DATABASE_URL until D3)
       API_BASE_URL: ${API_BASE_URL:-}
+      # Only default when unset; empty string disables /v1 for public gateway.
+      API_PATH_PREFIX: ${API_PATH_PREFIX-/v1}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       # D3: keep 1 until cutover; set 0 to force HTTP job/result writes
       INGEST_PG_WRITES: ${INGEST_PG_WRITES:-1}
@@ -141,6 +146,9 @@ services:
     restart: unless-stopped
     environment:
       REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+      API_BASE_URL: ${API_BASE_URL:-}
+      API_PATH_PREFIX: ${API_PATH_PREFIX-/v1}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       SCHEDULE_DECLOUD_OUTBOX_ENABLED: ${SCHEDULE_DECLOUD_OUTBOX_ENABLED:-true}
 
   mq_consumer:
@@ -150,6 +158,7 @@ services:
     environment:
       # Claim mode (WORK_QUEUE_MODE=claim): poll API; REDIS_URL stays localhost Celery.
       API_BASE_URL: ${API_BASE_URL:-}
+      API_PATH_PREFIX: ${API_PATH_PREFIX-/v1}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       # 每台下载机必须配置唯一机器名，claim 与管理员心跳都使用它标识机器。
       WORKER_NAME: ${WORKER_NAME:-}

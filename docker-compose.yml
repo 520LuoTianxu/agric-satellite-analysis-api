@@ -188,6 +188,7 @@ services:
       OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/ingest.log
       OPENFARM_SCRATCH_DIR: /data/scratch
       API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      API_PATH_PREFIX: ${API_PATH_PREFIX-/v1}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}

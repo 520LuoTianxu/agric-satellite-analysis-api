@@ -38,6 +38,7 @@ from agric_satellite_analysis_common.weather_daily_limit import (
     WEATHER_WORK_TYPE,
     weather_daily_limit_reached,
 )
+from agric_satellite_analysis_common.internal_api import internal_api_path as _ipath
 
 logger = logging.getLogger("work_agent")
 
@@ -316,7 +317,7 @@ def claim_batch(
         "pending_queue_count": pending,
         "queue_depths": depths or {},
     }
-    response = client.post("/v1/internal/work/claim", json=body)
+    response = client.post(_ipath("/internal/work/claim"), json=body)
     response.raise_for_status()
     return list(response.json().get("items") or [])
 
@@ -349,14 +350,14 @@ def worker_heartbeat(client: httpx.Client) -> str:
         "queue_depths": depths or {},
     }
     if not _heartbeat_endpoint_missing:
-        response = client.post("/v1/internal/work/worker-heartbeat", json=body)
+        response = client.post(_ipath("/internal/work/worker-heartbeat"), json=body)
         if response.status_code not in (404, 405):
             response.raise_for_status()
             return "endpoint"
         _heartbeat_endpoint_missing = True
         logger.info("worker_heartbeat endpoint missing; using zero-match claim")
     body["types"] = [HEARTBEAT_ONLY_TYPE]
-    response = client.post("/v1/internal/work/claim", json=body)
+    response = client.post(_ipath("/internal/work/claim"), json=body)
     response.raise_for_status()
     items = list(response.json().get("items") or [])
     if items:  # 理论上不可能；绝不静默吞掉任务
@@ -367,7 +368,7 @@ def worker_heartbeat(client: httpx.Client) -> str:
 
 def complete(client: httpx.Client, work_id: str, result: dict[str, Any]) -> None:
     response = client.post(
-        f"/v1/internal/work/{work_id}/complete",
+        _ipath(f"/internal/work/{work_id}/complete"),
         json={"worker_id": worker_id(), "result": result},
     )
     response.raise_for_status()
@@ -377,7 +378,7 @@ def fail(
     client: httpx.Client, work_id: str, error: str, *, retry: bool = False
 ) -> None:
     response = client.post(
-        f"/v1/internal/work/{work_id}/fail",
+        _ipath(f"/internal/work/{work_id}/fail"),
         json={"worker_id": worker_id(), "error": error, "retry": retry},
     )
     response.raise_for_status()
@@ -385,7 +386,7 @@ def fail(
 
 def heartbeat(client: httpx.Client, work_id: str) -> None:
     response = client.post(
-        f"/v1/internal/work/{work_id}/heartbeat",
+        _ipath(f"/internal/work/{work_id}/heartbeat"),
         json={"worker_id": worker_id(), "lease_seconds": lease_seconds()},
     )
     response.raise_for_status()
@@ -393,7 +394,7 @@ def heartbeat(client: httpx.Client, work_id: str) -> None:
 
 def progress(client: httpx.Client, work_id: str, progress_body: dict[str, Any]) -> None:
     response = client.post(
-        f"/v1/internal/work/{work_id}/progress",
+        _ipath(f"/internal/work/{work_id}/progress"),
         json={"worker_id": worker_id(), "progress": progress_body},
     )
     response.raise_for_status()
@@ -410,7 +411,7 @@ def report_admin_task_status(
 ) -> None:
     """将下载机本地 Celery 的真实状态回传给 API 管理页面。"""
     response = client.post(
-        f"/v1/internal/admin/task-runs/{run_id}/status",
+        _ipath(f"/internal/admin/task-runs/{run_id}/status"),
         json={
             "worker_name": worker_name(),
             "celery_task_id": celery_task_id,
