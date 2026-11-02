@@ -209,10 +209,59 @@ class Sentinel1CalibrationPrefetchTests(unittest.TestCase):
                 return _Resp()
 
         client = _Client()
-        with patch.object(sentinel1, "s1_uses_planetary_computer", return_value=True), patch.object(
-            sentinel1, "sign_s1_href", side_effect=lambda href: signed if href == unsigned else href
-        ) as sign, patch.object(sentinel1, "_s1_http", return_value=client):
+        with patch.object(
+            sentinel1, "s1_http_href", side_effect=lambda href: signed if href == unsigned else href
+        ) as resolve, patch.object(sentinel1, "_s1_http", return_value=client):
             lut = sentinel1._load_s1_sigma0_lut(unsigned)
-        sign.assert_called()
+        resolve.assert_called()
         self.assertEqual(client.urls, [signed])
+        self.assertEqual(len(lut.lines), 2)
+
+    def test_load_sigma0_lut_rewrites_aws_s3_before_http_get(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        s3_href = (
+            "s3://sentinel-s1-l1c/GRD/2024/1/8/IW/DV/scene/"
+            "annotation/calibration/calibration-iw-vv.xml"
+        )
+        https_href = (
+            "https://sentinel-s1-l1c.s3.amazonaws.com/GRD/2024/1/8/IW/DV/scene/"
+            "annotation/calibration/calibration-iw-vv.xml"
+        )
+        sentinel1._load_s1_sigma0_lut_cached.cache_clear()
+
+        class _Resp:
+            headers = {"content-length": "64"}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_bytes(self):
+                yield (
+                    b"<cal>"
+                    b"<calibrationVector><line>0</line><pixel>0 1</pixel>"
+                    b"<sigmaNought>1 1</sigmaNought></calibrationVector>"
+                    b"<calibrationVector><line>1</line><pixel>0 1</pixel>"
+                    b"<sigmaNought>1 1</sigmaNought></calibrationVector>"
+                    b"</cal>"
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class _Client:
+            def __init__(self):
+                self.urls: list[str] = []
+
+            def stream(self, method, url):
+                self.urls.append(url)
+                return _Resp()
+
+        client = _Client()
+        with patch.object(sentinel1, "_s1_http", return_value=client):
+            # Use real s1_http_href from module under test.
+            lut = sentinel1._load_s1_sigma0_lut(s3_href)
+        self.assertEqual(client.urls, [https_href])
         self.assertEqual(len(lut.lines), 2)

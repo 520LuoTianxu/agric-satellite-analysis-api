@@ -71,6 +71,7 @@ from app.core.s1_stac import (
     open_s1_stac_client,
     s1_access_hint,
     s1_gdal_env,
+    s1_http_href,
     s1_open_path,
     s1_stac_api_url,
     s1_uses_planetary_computer,
@@ -251,7 +252,7 @@ _s1_http_client: httpx.Client | None = None
 
 
 def _s1_http() -> httpx.Client:
-    """复用到 Azure Blob 的 keep-alive 连接，避免每景 VV/VH 定标 XML 各开新 TCP。"""
+    """复用到 S1 定标 XML 源（AWS HTTPS / Azure SAS）的 keep-alive 连接。"""
     global _s1_http_client
     with _s1_http_lock:
         if _s1_http_client is None:
@@ -266,12 +267,8 @@ def _s1_http() -> httpx.Client:
 @lru_cache(maxsize=64)
 def _load_s1_sigma0_lut_cached(calibration_href: str) -> S1CalibrationLUT:
     """有界下载并缓存每个VV/VH定标XML，减小同一下载机重复读取开销。"""
-    # 缓存命中时不会走到这里；未命中时再签发可用凭证，避免把短期SAS放进缓存键。
-    request_href = (
-        sign_s1_href(calibration_href)
-        if s1_uses_planetary_computer()
-        else calibration_href
-    )
+    # 缓存命中时不会走到这里；未命中时再解析可读 HTTP(S)（AWS HTTPS 或 MPC SAS）。
+    request_href = s1_http_href(calibration_href)
     chunks: list[bytes] = []
     received = 0
     with _s1_http().stream("GET", request_href) as response:

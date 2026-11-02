@@ -82,7 +82,7 @@ services:
       -Q satellite_download
       -n satellite@%h
       --loglevel=info
-      --concurrency=2
+      --concurrency=4
 
   # Separate queue so UnCRtainTS runs while optical shards keep downloading.
   # Same image as ingest; env comes from compose base + .env (no secrets here).

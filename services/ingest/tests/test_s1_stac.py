@@ -9,16 +9,16 @@ from unittest.mock import patch
 
 
 class S1StacTests(unittest.TestCase):
-    def test_default_stac_is_planetary_computer(self) -> None:
+    def test_default_stac_is_element84_aws(self) -> None:
         from app.core.s1_stac import s1_stac_api_url, s1_uses_planetary_computer
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("S1_STAC_API_URL", None)
-            self.assertTrue(s1_uses_planetary_computer())
-            self.assertIn("planetarycomputer.microsoft.com", s1_stac_api_url())
+            self.assertFalse(s1_uses_planetary_computer())
+            self.assertIn("earth-search.aws.element84.com", s1_stac_api_url())
 
-    def test_open_path_maps_s3_to_vsis3_without_signing_non_mpc(self) -> None:
-        from app.core.s1_stac import s1_open_path
+    def test_open_path_rewrites_sentinel_s1_l1c_s3_to_https_vsicurl(self) -> None:
+        from app.core.s1_stac import s1_http_href, s1_open_path
 
         with patch.dict(
             os.environ,
@@ -26,14 +26,18 @@ class S1StacTests(unittest.TestCase):
             clear=False,
         ):
             self.assertEqual(
+                s1_http_href("s3://sentinel-s1-l1c/GRD/foo.tiff"),
+                "https://sentinel-s1-l1c.s3.amazonaws.com/GRD/foo.tiff",
+            )
+            self.assertEqual(
                 s1_open_path("s3://sentinel-s1-l1c/GRD/foo.tiff"),
-                "/vsis3/sentinel-s1-l1c/GRD/foo.tiff",
+                "/vsicurl/https://sentinel-s1-l1c.s3.amazonaws.com/GRD/foo.tiff",
             )
             self.assertEqual(
                 s1_open_path("https://example.com/vv.tif"),
                 "/vsicurl/https://example.com/vv.tif",
             )
-            # 已是 VSI 前缀时不重复包裹。
+            # 已是 VSI 前缀时先剥前缀再解析，最终仍包一层 vsicurl。
             self.assertEqual(
                 s1_open_path("/vsicurl/https://example.com/vv.tif?sig=abc"),
                 "/vsicurl/https://example.com/vv.tif?sig=abc",
@@ -90,14 +94,14 @@ class S1StacTests(unittest.TestCase):
         )
         self.assertIsNone(stac_asset_href(None))
 
-    def test_access_hint_mentions_planetary_computer(self) -> None:
+    def test_access_hint_mentions_element84_aws_https(self) -> None:
         from app.core.s1_stac import s1_access_hint
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("S1_STAC_API_URL", None)
             hint = s1_access_hint()
-        self.assertIn("Planetary Computer", hint)
-        self.assertIn("planetary-computer", hint)
+        self.assertIn("Element84", hint)
+        self.assertIn("sentinel-s1-l1c", hint)
 
     def test_sign_s1_href_calls_pc_when_mpc(self) -> None:
         from unittest.mock import MagicMock
@@ -106,8 +110,11 @@ class S1StacTests(unittest.TestCase):
 
         fake_pc = MagicMock()
         fake_pc.sign.return_value = "https://signed/x"
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("S1_STAC_API_URL", None)
+        with patch.dict(
+            os.environ,
+            {"S1_STAC_API_URL": "https://planetarycomputer.microsoft.com/api/stac/v1"},
+            clear=False,
+        ):
             # CI ingest tests do not install planetary-computer; inject a stub module.
             with patch.dict("sys.modules", {"planetary_computer": fake_pc}):
                 out = s1_stac.sign_s1_href("https://raw/x")
@@ -154,8 +161,11 @@ class S1StacTests(unittest.TestCase):
         fake_pc.sign.return_value = (
             "https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif?sig=abc"
         )
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("S1_STAC_API_URL", None)
+        with patch.dict(
+            os.environ,
+            {"S1_STAC_API_URL": "https://planetarycomputer.microsoft.com/api/stac/v1"},
+            clear=False,
+        ):
             with patch.dict("sys.modules", {"planetary_computer": fake_pc}):
                 signed = sign_s1_href(
                     "/vsicurl/https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif"

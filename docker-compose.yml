@@ -84,7 +84,7 @@ services:
       MYSQL_SYNC_RS_MONTHS: ${MYSQL_SYNC_RS_MONTHS:-24}
       MYSQL_SYNC_PROCESSING_WINDOW_KM: ${MYSQL_SYNC_PROCESSING_WINDOW_KM:-10}
       STAC_API_URL: ${STAC_API_URL}
-      S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      S1_STAC_API_URL: ${S1_STAC_API_URL:-https://earth-search.aws.element84.com/v1}
       PC_SDK_SAS_URL: ${PC_SDK_SAS_URL:-https://planetarycomputer.microsoft.com/api/sas/v1/token}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-agric-satellite-analysis <noreply@openfarm.earth>}
@@ -165,7 +165,7 @@ services:
       OSS_CONNECT_TIMEOUT_S: ${OSS_CONNECT_TIMEOUT_S:-10}
       OSS_READ_TIMEOUT_S: ${OSS_READ_TIMEOUT_S:-180}
       STAC_API_URL: ${STAC_API_URL}
-      S1_STAC_API_URL: ${S1_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      S1_STAC_API_URL: ${S1_STAC_API_URL:-https://earth-search.aws.element84.com/v1}
       PC_SDK_SAS_URL: ${PC_SDK_SAS_URL:-https://planetarycomputer.microsoft.com/api/sas/v1/token}
       SOILGRIDS_WCS_BASE_URL: ${SOILGRIDS_WCS_BASE_URL}
       POLARIS_S3_BUCKET: ${POLARIS_S3_BUCKET}
