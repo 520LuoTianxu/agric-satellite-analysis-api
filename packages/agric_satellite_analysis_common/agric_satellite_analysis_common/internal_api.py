@@ -4,6 +4,10 @@ When ``API_BASE_URL`` (and ``INTERNAL_API_TOKEN``) are set, workers can read
 field resolve / jobs / agri scene dates via HTTP instead of SyncSession.
 If unset, callers should fall back to legacy DATABASE_URL reads.
 
+Paths are ``{API_PATH_PREFIX}/internal/...`` (default prefix ``/v1``). Set
+``API_PATH_PREFIX`` empty when pointing at the public ``.../satellite-api``
+gateway, which exposes ``/internal`` without ``/v1``.
+
 D3 writes: prefer HTTP when ``http_writes_enabled()`` (see that helper).
 Keep SyncSession PG writes until ``INGEST_PG_WRITES=0`` or claim+HTTP.
 """
@@ -27,6 +31,8 @@ __all__ = [
     "agri_scene_dates",
     "agri_scenes_summary",
     "api_base_url",
+    "api_path_prefix",
+    "internal_api_path",
     "apply_results",
     "cache_results",
     "close_cached_result_client",
@@ -83,6 +89,36 @@ def _env(name: str, default: str = "") -> str:
 
 def api_base_url() -> str:
     return _env("API_BASE_URL").rstrip("/")
+
+
+def api_path_prefix() -> str:
+    """Path prefix before ``/internal/...``.
+
+    Defaults to ``/v1`` (direct API / compose). Set ``API_PATH_PREFIX`` empty
+    (or ``-`` / ``none``) when ``API_BASE_URL`` is the public gateway
+    ``.../satellite-api``, which already serves ``/internal`` without ``/v1``.
+    """
+    if "API_PATH_PREFIX" not in os.environ:
+        return "/v1"
+    raw = (os.environ.get("API_PATH_PREFIX") or "").strip()
+    if raw in ("", "-", "none"):
+        return ""
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    return raw.rstrip("/")
+
+
+def _ipath(path: str) -> str:
+    """Build an Internal HTTP path under the configured ``API_PATH_PREFIX``."""
+    if not path.startswith("/"):
+        path = "/" + path
+    prefix = api_path_prefix()
+    if not prefix:
+        return path
+    return prefix + path
+
+
+internal_api_path = _ipath
 
 
 def internal_api_token() -> str:
@@ -280,7 +316,7 @@ def ensure_admin_task_run(
     }
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post("/v1/internal/admin/task-runs/ensure", json=body)
+        r = c.post(_ipath("/internal/admin/task-runs/ensure"), json=body)
         _raise_for_status(r, context="admin/task-runs/ensure")
         data = r.json()
         if not isinstance(data, dict) or not data.get("run_id"):
@@ -317,7 +353,7 @@ def update_admin_task_run_status(
         body["error"] = str(error)[:4000]
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(f"/v1/internal/admin/task-runs/{run_id}/status", json=body)
+        r = c.post(_ipath(f"/internal/admin/task-runs/{run_id}/status"), json=body)
         _raise_for_status(r, context="admin/task-runs/status")
         data = r.json()
         if not isinstance(data, dict):
@@ -341,7 +377,7 @@ def resolve_land(
         params["land_id"] = str(land_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get("/v1/internal/lands/resolve", params=params)
+        r = c.get(_ipath("/internal/lands/resolve"), params=params)
         _raise_for_status(r, context="lands/resolve")
         data = r.json()
         if not isinstance(data, dict):
@@ -362,7 +398,7 @@ def get_job(
     """GET /v1/internal/jobs/{id}."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(f"/v1/internal/jobs/{job_id}")
+        r = c.get(_ipath(f"/internal/jobs/{job_id}"))
         _raise_for_status(r, context="jobs/get")
         data = r.json()
         if not isinstance(data, dict):
@@ -386,11 +422,11 @@ def patch_job(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         if include_progress:
-            r = c.patch(f"/v1/internal/jobs/{job_id}", json=body)
+            r = c.patch(_ipath(f"/internal/jobs/{job_id}"), json=body)
         else:
             # 高频增量进度只需确认写入状态，省去往返不断增长的产品历史列表。
             r = c.patch(
-                f"/v1/internal/jobs/{job_id}",
+                _ipath(f"/internal/jobs/{job_id}"),
                 json=body,
                 params={"include_progress": "false"},
             )
@@ -410,7 +446,7 @@ def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
     """把已发布 S2 的去云排程意图持久化到 API 数据库 Outbox。"""
     with internal_client(timeout=30.0) as client:
         response = client.post(
-            "/v1/internal/decloud-schedules",
+            _ipath("/internal/decloud-schedules"),
             json=_json_safe_payload(payload),
         )
         _raise_for_status(response, context="decloud-schedules/create")
@@ -436,7 +472,7 @@ def claim_decloud_schedules(
     }
     with internal_client(timeout=30.0) as client:
         response = client.post(
-            "/v1/internal/decloud-schedules/claim",
+            _ipath("/internal/decloud-schedules/claim"),
             json=body,
         )
         _raise_for_status(response, context="decloud-schedules/claim")
@@ -450,7 +486,7 @@ def complete_decloud_schedule(*, schedule_key: str, worker_id: str) -> None:
     """确认去云计划已经成功交给下游 Celery 队列。"""
     with internal_client() as client:
         response = client.post(
-            f"/v1/internal/decloud-schedules/{schedule_key}/complete",
+            _ipath(f"/internal/decloud-schedules/{schedule_key}/complete"),
             json={"worker_id": worker_id},
         )
         _raise_for_status(response, context="decloud-schedules/complete")
@@ -462,7 +498,7 @@ def fail_decloud_schedule(
     """保留排程失败原因并按 API 端退避时间重新开放领取。"""
     with internal_client() as client:
         response = client.post(
-            f"/v1/internal/decloud-schedules/{schedule_key}/fail",
+            _ipath(f"/internal/decloud-schedules/{schedule_key}/fail"),
             json={"worker_id": worker_id, "error": str(error)[:2000]},
         )
         _raise_for_status(response, context="decloud-schedules/fail")
@@ -480,7 +516,7 @@ def agri_land_meta(
     """GET /v1/internal/agri/lands/{land_id} → land_id, tile_id, land_name, …"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(f"/v1/internal/agri/lands/{land_id}")
+        r = c.get(_ipath(f"/internal/agri/lands/{land_id}"))
         _raise_for_status(r, context="agri/land")
         data = r.json()
         if not isinstance(data, dict):
@@ -503,7 +539,7 @@ def agri_scene_dates(
 
     def _do(c: httpx.Client) -> list[str]:
         r = c.get(
-            f"/v1/internal/agri/lands/{land_id}/scenes/dates",
+            _ipath(f"/internal/agri/lands/{land_id}/scenes/dates"),
             params={"sensor": sensor},
         )
         _raise_for_status(r, context="agri/scene-dates")
@@ -551,7 +587,7 @@ def agri_satellite_batch_inputs(
         body["existing_algorithm_version"] = str(existing_algorithm_version)
 
     def _do(c: httpx.Client) -> list[dict[str, Any]]:
-        r = c.post("/v1/internal/agri/satellite-batch/inputs", json=body)
+        r = c.post(_ipath("/internal/agri/satellite-batch/inputs"), json=body)
         _raise_for_status(r, context="agri/satellite-batch/inputs")
         data = r.json()
         items = data.get("items") if isinstance(data, dict) else None
@@ -574,7 +610,7 @@ def project_harvest_inputs(
     """项目收获分析运行输入：去重后地块（裁剪几何）+ 全部地块边界 + 参数。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(f"/v1/internal/project-harvest/runs/{run_id}/inputs")
+        r = c.get(_ipath(f"/internal/project-harvest/runs/{run_id}/inputs"))
         _raise_for_status(r, context="project-harvest/inputs")
         data = r.json()
         if not isinstance(data, dict) or "parcels" not in data:
@@ -604,7 +640,7 @@ def project_cog_inputs(
         body["land_ids"] = [str(x) for x in land_ids]
 
     def _do(c: httpx.Client) -> list[dict[str, Any]]:
-        r = c.post("/v1/internal/agri/project-cogs/inputs", json=body)
+        r = c.post(_ipath("/internal/agri/project-cogs/inputs"), json=body)
         _raise_for_status(r, context="agri/project-cogs/inputs")
         data = r.json()
         groups = data.get("groups") if isinstance(data, dict) else None
@@ -626,7 +662,7 @@ def agri_scenes_summary(
     """GET /v1/internal/agri/lands/{id}/scenes/summary."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(f"/v1/internal/agri/lands/{land_id}/scenes/summary")
+        r = c.get(_ipath(f"/internal/agri/lands/{land_id}/scenes/summary"))
         _raise_for_status(r, context="agri/scenes-summary")
         data = r.json()
         if not isinstance(data, dict):
@@ -650,7 +686,7 @@ def evaluate_land_alerts(
     body = {"replace_open": bool(replace_open)}
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(f"/v1/internal/lands/{land_id}/alerts/evaluate", json=body)
+        r = c.post(_ipath(f"/internal/lands/{land_id}/alerts/evaluate"), json=body)
         _raise_for_status(r, context="lands/alerts/evaluate")
         data = r.json()
         if not isinstance(data, dict):
@@ -673,7 +709,7 @@ def land_geom(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/lands/{land_id}/geom",
+            _ipath(f"/internal/lands/{land_id}/geom"),
             params={"include_geojson": 1 if include_geojson else 0},
         )
         _raise_for_status(r, context="lands/geom")
@@ -698,7 +734,7 @@ def apply_results(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.post(
-            "/v1/internal/results/apply",
+            _ipath("/internal/results/apply"),
             json={"result": _json_safe_payload(result)},
         )
         _raise_for_status(r, context="results/apply")
@@ -722,7 +758,7 @@ def cache_results(
     """将单景处理结果回执到 API 队列，默认复用进程级 HTTP 连接池。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post("/v1/internal/results/cache", json={"result": result})
+        r = c.post(_ipath("/internal/results/cache"), json={"result": result})
         _raise_for_status(r, context="results/cache")
         data = r.json()
         if not isinstance(data, dict):
@@ -747,7 +783,7 @@ def complete_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(f"/v1/internal/work/{work_id}/complete", json=body)
+        r = c.post(_ipath(f"/internal/work/{work_id}/complete"), json=body)
         _raise_for_status(r, context="work/complete")
         data = r.json()
         if not isinstance(data, dict):
@@ -774,7 +810,7 @@ def fail_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(f"/v1/internal/work/{work_id}/fail", json=body)
+        r = c.post(_ipath(f"/internal/work/{work_id}/fail"), json=body)
         _raise_for_status(r, context="work/fail")
         data = r.json()
         if not isinstance(data, dict):
@@ -800,7 +836,7 @@ def progress_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(f"/v1/internal/work/{work_id}/progress", json=body)
+        r = c.post(_ipath(f"/internal/work/{work_id}/progress"), json=body)
         _raise_for_status(r, context="work/progress")
         data = r.json()
         if not isinstance(data, dict):
@@ -830,7 +866,7 @@ def assessment_bundle(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/lands/{land_id}/assessment-bundle",
+            _ipath(f"/internal/lands/{land_id}/assessment-bundle"),
             params=params or None,
         )
         _raise_for_status(r, context="lands/assessment-bundle")
@@ -858,7 +894,7 @@ def season_growth_inputs(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/lands/{land_id}/season-growth-inputs",
+            _ipath(f"/internal/lands/{land_id}/season-growth-inputs"),
             params=params,
         )
         _raise_for_status(r, context="lands/season-growth-inputs")
@@ -878,7 +914,7 @@ def daily_satellite_prepare(
 ) -> dict[str, Any]:
     """通过API发现并派发每日全国下载，下载机不读取Postgres。"""
     return _daily_satellite_request(
-        "/v1/internal/schedule/daily-satellite",
+        _ipath("/internal/schedule/daily-satellite"),
         params={"as_of": as_of} if as_of else None,
         client=client,
     )
@@ -889,7 +925,7 @@ def daily_satellite_finalize(
 ) -> dict[str, Any]:
     """API确认结果入库后保存快照；未完成时返回阶段供Celery延时重试。"""
     return _daily_satellite_request(
-        f"/v1/internal/schedule/daily-satellite/{run_id}/finalize", client=client
+        _ipath(f"/internal/schedule/daily-satellite/{run_id}/finalize"), client=client
     )
 
 
@@ -900,7 +936,7 @@ def satellite_history_backfill(
     params = {"as_of": as_of} if as_of else None
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        response = c.post("/v1/internal/schedule/satellite-history", params=params)
+        response = c.post(_ipath("/internal/schedule/satellite-history"), params=params)
         _raise_for_status(response, context="schedule/satellite-history")
         data = response.json()
         if not isinstance(data, dict):
@@ -941,7 +977,7 @@ def weekly_index_prepare(
     """POST /v1/internal/schedule/weekly-index：过期地块 + 在 API 建 Job。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post("/v1/internal/schedule/weekly-index")
+        r = c.post(_ipath("/internal/schedule/weekly-index"))
         _raise_for_status(r, context="schedule/weekly-index")
         data = r.json()
         if not isinstance(data, dict):
@@ -961,7 +997,7 @@ def weather_land_ids(
     """GET /v1/internal/schedule/weather-lands：每日天气要拉的 land_id。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get("/v1/internal/schedule/weather-lands")
+        r = c.get(_ipath("/internal/schedule/weather-lands"))
         _raise_for_status(r, context="schedule/weather-lands")
         data = r.json()
         if not isinstance(data, dict):
@@ -994,7 +1030,7 @@ def refresh_overview_stats(
         params["after_land_id"] = str(after_land_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post("/v1/internal/schedule/overview-refresh", params=params)
+        r = c.post(_ipath("/internal/schedule/overview-refresh"), params=params)
         _raise_for_status(r, context="schedule/overview-refresh")
         data = r.json()
         if not isinstance(data, dict):
@@ -1017,7 +1053,7 @@ def finalize_overview_stats(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.post(
-            "/v1/internal/schedule/overview-refresh/finalize",
+            _ipath("/internal/schedule/overview-refresh/finalize"),
             json={"result_oss_key": str(result_oss_key)},
         )
         _raise_for_status(r, context="schedule/overview-refresh/finalize")
@@ -1048,7 +1084,7 @@ def data_readiness(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = c.get(
-            f"/v1/internal/lands/{land_id}/data-readiness",
+            _ipath(f"/internal/lands/{land_id}/data-readiness"),
             params=params or None,
         )
         _raise_for_status(r, context="lands/data-readiness")

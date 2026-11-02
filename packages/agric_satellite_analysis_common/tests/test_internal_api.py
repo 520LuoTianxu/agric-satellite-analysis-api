@@ -35,6 +35,29 @@ class InternalApiEnabledTests(unittest.TestCase):
             self.assertTrue(ia.internal_api_enabled())
 
 
+
+class ApiPathPrefixTests(unittest.TestCase):
+    def test_default_prefix_is_v1(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("API_PATH_PREFIX", None)
+            self.assertEqual(ia.api_path_prefix(), "/v1")
+            self.assertEqual(ia.internal_api_path("/internal/work/claim"), "/v1/internal/work/claim")
+
+    def test_empty_prefix_for_gateway(self) -> None:
+        with patch.dict(os.environ, {"API_PATH_PREFIX": ""}, clear=False):
+            self.assertEqual(ia.api_path_prefix(), "")
+            self.assertEqual(ia.internal_api_path("/internal/work/claim"), "/internal/work/claim")
+
+    def test_dash_means_empty(self) -> None:
+        with patch.dict(os.environ, {"API_PATH_PREFIX": "-"}, clear=False):
+            self.assertEqual(ia.api_path_prefix(), "")
+
+    def test_custom_prefix(self) -> None:
+        with patch.dict(os.environ, {"API_PATH_PREFIX": "v2"}, clear=False):
+            self.assertEqual(ia.api_path_prefix(), "/v2")
+            self.assertEqual(ia.internal_api_path("/internal/x"), "/v2/internal/x")
+
+
 class InternalApiClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.env = patch.dict(
@@ -74,6 +97,19 @@ class InternalApiClientTests(unittest.TestCase):
         ) as client:
             with self.assertRaises(ia.InternalApiError):
                 ia.daily_satellite_finalize("run-1", client=client)
+
+
+    def test_resolve_land_empty_path_prefix(self) -> None:
+        with patch.dict(os.environ, {"API_PATH_PREFIX": ""}, clear=False):
+            def handler(request: httpx.Request) -> httpx.Response:
+                self.assertEqual(request.url.path, "/internal/lands/resolve")
+                return httpx.Response(200, json={"land_id": "L1"})
+
+            with httpx.Client(
+                base_url="http://api.test", transport=httpx.MockTransport(handler)
+            ) as client:
+                out = ia.resolve_land(land_id="L1", client=client)
+                self.assertEqual(out["land_id"], "L1")
 
     def test_resolve_land(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
