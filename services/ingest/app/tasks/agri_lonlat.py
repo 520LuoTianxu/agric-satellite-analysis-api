@@ -41,6 +41,7 @@ from app.core.band_parallel import band_max_workers
 from app.core.config import scene_max_workers
 from app.core.geo import geojson_to_shape
 from app.core.index_cogs import write_index_cogs_enabled
+from app.core.windowed_gdal import log_timing
 from app.core.job_progress_redis import (
     flush_to_job,
     incr_done,
@@ -333,6 +334,25 @@ def publish_optical_lonlat_to_oss_mq(
             uploaded_json=True,
             path="oss_http_redis",
         )
+        log_timing(
+            "oss_upload",
+            sensor="S2",
+            land_id=row.get("land_id"),
+            scene_id=row.get("scene_id"),
+            date=row.get("date"),
+            wall_ms=json_upload_ms,
+            callback_ms=callback_ms,
+            path="oss_http_redis",
+        )
+        log_timing(
+            "db_or_callback",
+            sensor="S2",
+            land_id=row.get("land_id"),
+            scene_id=row.get("scene_id"),
+            date=row.get("date"),
+            wall_ms=callback_ms,
+            path="oss_http_redis",
+        )
         logger.info(
             "lonlat_oss_http_cached",
             land_id=row.get("land_id"),
@@ -365,6 +385,24 @@ def publish_optical_lonlat_to_oss_mq(
         db_upsert_ms=0,
         mq_publish_ms=mq_publish_ms,
         uploaded_json=True,
+        path="oss_mq",
+    )
+    log_timing(
+        "oss_upload",
+        sensor="S2",
+        land_id=row.get("land_id"),
+        scene_id=row.get("scene_id"),
+        date=row.get("date"),
+        wall_ms=json_upload_ms,
+        path="oss_mq",
+    )
+    log_timing(
+        "db_or_callback",
+        sensor="S2",
+        land_id=row.get("land_id"),
+        scene_id=row.get("scene_id"),
+        date=row.get("date"),
+        wall_ms=mq_publish_ms,
         path="oss_mq",
     )
     logger.info(
@@ -835,6 +873,7 @@ def _process_one_optical_scene(
         )
         write_lonlat_ms = int((time.perf_counter() - t0) * 1000)
         incr_done(job_id, failed=False)
+        total_ms = int((time.perf_counter() - t_scene) * 1000)
         logger.info(
             "scene_timing",
             sensor="S2",
@@ -845,9 +884,24 @@ def _process_one_optical_scene(
             compute_ms=compute_ms,
             write_cog_ms=write_cog_ms,
             write_lonlat_ms=write_lonlat_ms,
-            total_ms=int((time.perf_counter() - t_scene) * 1000),
+            total_ms=total_ms,
             bands=len(scene.get("band_hrefs") or {}),
             pixels=(result or {}).get("pixels"),
+        )
+        log_timing(
+            "scene_total",
+            sensor="S2",
+            job_id=job_id,
+            land_id=land_id_str,
+            scene_id=scene.get("id"),
+            date=str(scene.get("date")),
+            download_ms=download_ms,
+            product_build_ms=compute_ms,
+            write_cog_ms=write_cog_ms,
+            oss_upload_ms=write_lonlat_ms,
+            wall_ms=total_ms,
+            bands=len(scene.get("band_hrefs") or {}),
+            outcome="ok",
         )
         return result
     except Exception as e:
@@ -855,6 +909,18 @@ def _process_one_optical_scene(
             "agri_optical_scene_failed",
             scene_id=scene.get("id"),
             error=str(e),
+        )
+        log_timing(
+            "scene_total",
+            sensor="S2",
+            job_id=job_id,
+            land_id=land_id_str,
+            scene_id=scene.get("id"),
+            date=str(scene.get("date")),
+            wall_ms=int((time.perf_counter() - t_scene) * 1000),
+            outcome="error",
+            error_type=type(e).__name__,
+            error=str(e)[:300],
         )
         incr_done(job_id, failed=True)
         return None
@@ -1020,17 +1086,29 @@ def _process_agri_optical_http_only(
         )
         skipped_existing = before - len(scenes)
 
+    _search_ms = int((time.perf_counter() - t_search) * 1000)
     logger.info(
         "job_phase_timing",
         phase="scene_search",
         sensor="S2",
         job_id=job_id,
-        elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+        elapsed_ms=_search_ms,
         scenes=len(scenes),
         skipped_existing=skipped_existing,
         skipped_offseason_cloudy=skipped_offseason_cloudy,
         date_from=str(d0),
         date_to=str(d1),
+        http_only=True,
+    )
+    log_timing(
+        "stac_search",
+        sensor="S2",
+        job_id=job_id,
+        land_id=land_id_str,
+        wall_ms=_search_ms,
+        item_count=len(scenes),
+        skipped_existing=skipped_existing,
+        skipped_offseason_cloudy=skipped_offseason_cloudy,
         http_only=True,
     )
 
@@ -1053,6 +1131,16 @@ def _process_agri_optical_http_only(
     )
     workers = min(scene_max_workers(), len(scenes))
     set_total(synthetic_job_id, len(scenes), workers=workers)
+    log_timing(
+        "batch_start",
+        sensor="S2",
+        job_id=job_id,
+        land_id=land_id_str,
+        scene_count=len(scenes),
+        scene_workers=workers,
+        band_gdal_cap=band_max_workers(),
+        http_only=True,
+    )
 
     upserted = 0
     raw_results: list[dict[str, Any]] = []
@@ -1097,6 +1185,7 @@ def _process_agri_optical_http_only(
                 upserted += 1
                 raw_results.append(result)
 
+    _batch_ms = int((time.perf_counter() - t_process) * 1000)
     logger.info(
         "scene_parallel_done",
         job_id=job_id,
@@ -1104,7 +1193,18 @@ def _process_agri_optical_http_only(
         layers_created=upserted,
         total_scenes=len(scenes),
         workers=workers,
-        wall_ms=int((time.perf_counter() - t_process) * 1000),
+        wall_ms=_batch_ms,
+        http_only=True,
+    )
+    log_timing(
+        "batch_end",
+        sensor="S2",
+        job_id=job_id,
+        land_id=land_id_str,
+        wall_ms=_batch_ms,
+        scene_count=len(scenes),
+        ok_count=upserted,
+        scene_workers=workers,
         http_only=True,
     )
 
@@ -1313,16 +1413,26 @@ def process_agri_optical_lonlat(
             )
         else:
             complete_step(session, job, "scene_search", {"scene_count": len(scenes)})
+        _search_ms = int((time.perf_counter() - t_search) * 1000)
         logger.info(
             "job_phase_timing",
             phase="scene_search",
             sensor="S2",
             job_id=job_id,
-            elapsed_ms=int((time.perf_counter() - t_search) * 1000),
+            elapsed_ms=_search_ms,
             scenes=len(scenes),
             skipped_existing=skipped_existing,
             date_from=str(date_from),
             date_to=str(date_to),
+        )
+        log_timing(
+            "stac_search",
+            sensor="S2",
+            job_id=job_id,
+            land_id=land_id_str,
+            wall_ms=_search_ms,
+            item_count=len(scenes),
+            skipped_existing=skipped_existing,
         )
 
         if not scenes:
@@ -1357,6 +1467,15 @@ def process_agri_optical_lonlat(
             index="agri_optical",
             scenes=len(scenes),
             workers=workers,
+            band_gdal_cap=band_max_workers(),
+        )
+        log_timing(
+            "batch_start",
+            sensor="S2",
+            job_id=job_id,
+            land_id=land_id_str,
+            scene_count=len(scenes),
+            scene_workers=workers,
             band_gdal_cap=band_max_workers(),
         )
         set_total(job_id, len(scenes), workers=workers)
@@ -1424,6 +1543,7 @@ def process_agri_optical_lonlat(
                 if completed_n % flush_every == 0:
                     flush_to_job(session, job, current_step="process_scenes")
 
+        _batch_ms = int((time.perf_counter() - t_process) * 1000)
         logger.info(
             "scene_parallel_done",
             job_id=job_id,
@@ -1431,7 +1551,17 @@ def process_agri_optical_lonlat(
             layers_created=upserted,
             total_scenes=len(scenes),
             workers=workers,
-            wall_ms=int((time.perf_counter() - t_process) * 1000),
+            wall_ms=_batch_ms,
+        )
+        log_timing(
+            "batch_end",
+            sensor="S2",
+            job_id=job_id,
+            land_id=land_id_str,
+            wall_ms=_batch_ms,
+            scene_count=len(scenes),
+            ok_count=upserted,
+            scene_workers=workers,
         )
 
         session.expire(job)

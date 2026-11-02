@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from typing import Callable, Generic, Mapping, TypeVar
 from urllib.parse import urlsplit
 
+from app.core.windowed_gdal import log_timing
+
 _log = logging.getLogger("openfarm.ingest.band_parallel")
 
 
@@ -357,6 +359,21 @@ def run_parallel_band_jobs(
             band_read_max_ms=max(reads, default=0),
             timeout_retries=timeout_retries,
             slow_band_count=len(slow_bands),
+        )
+        log_timing(
+            "read_window",
+            sensor=context.get("sensor"),
+            job_id=context.get("job_id"),
+            scene_id=context.get("scene_id"),
+            date=context.get("date"),
+            wall_ms=wall_ms,
+            bands=n,
+            workers=workers,
+            outcome=outcome,
+            band_read_p50_ms=_percentile(reads, 0.50),
+            band_read_p95_ms=_percentile(reads, 0.95),
+            band_read_max_ms=max(reads, default=0),
+            timeout_retries=timeout_retries,
         )
 
     t0 = time.perf_counter()

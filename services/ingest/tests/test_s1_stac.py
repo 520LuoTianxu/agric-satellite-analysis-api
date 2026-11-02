@@ -64,7 +64,9 @@ class S1StacTests(unittest.TestCase):
         self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
         self.assertEqual(env["GDAL_HTTP_MAX_RETRY"], "1")
         self.assertNotIn("AWS_REQUEST_PAYER", env)
-        self.assertNotIn("AWS_NO_SIGN_REQUEST", env)
+        # Shared windowed Env uses anonymous AWS Open Data Range reads.
+        self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "YES")
+        self.assertEqual(env["GDAL_INGESTED_BYTES_AT_OPEN"], "32768")
 
     def test_gdal_env_honors_chunk_override(self) -> None:
         from app.core.s1_stac import s1_gdal_env
