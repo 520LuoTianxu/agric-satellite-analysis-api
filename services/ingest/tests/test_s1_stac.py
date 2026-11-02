@@ -113,3 +113,64 @@ class S1StacTests(unittest.TestCase):
                 out = s1_stac.sign_s1_href("https://raw/x")
         self.assertEqual(out, "https://signed/x")
         fake_pc.sign.assert_called_once_with("https://raw/x")
+
+    def test_staging_stac_still_uses_planetary_computer_signing(self) -> None:
+        from app.core.s1_stac import s1_uses_planetary_computer, sign_s1_href
+
+        with patch.dict(
+            os.environ,
+            {
+                "S1_STAC_API_URL": (
+                    "https://planetarycomputer-staging.microsoft.com/api/stac/v1"
+                )
+            },
+            clear=False,
+        ):
+            self.assertTrue(s1_uses_planetary_computer())
+            from unittest.mock import MagicMock
+
+            from app.core import s1_stac
+
+            fake_pc = MagicMock()
+            fake_pc.sign.return_value = (
+                "https://sentinel1euwest.blob.core.windows.net/s1-grd/x.xml?sig=1"
+            )
+            with patch.dict("sys.modules", {"planetary_computer": fake_pc}):
+                out = sign_s1_href(
+                    "https://sentinel1euwest.blob.core.windows.net/s1-grd/x.xml"
+                )
+            self.assertIn("sig=1", out)
+            fake_pc.sign.assert_called_once_with(
+                "https://sentinel1euwest.blob.core.windows.net/s1-grd/x.xml"
+            )
+
+    def test_sign_strips_vsicurl_before_pc_sign(self) -> None:
+        from unittest.mock import MagicMock
+
+        from app.core import s1_stac
+        from app.core.s1_stac import s1_open_path, sign_s1_href
+
+        fake_pc = MagicMock()
+        fake_pc.sign.return_value = (
+            "https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif?sig=abc"
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("S1_STAC_API_URL", None)
+            with patch.dict("sys.modules", {"planetary_computer": fake_pc}):
+                signed = sign_s1_href(
+                    "/vsicurl/https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif"
+                )
+                opened = s1_open_path(
+                    "/vsicurl/https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif"
+                )
+        self.assertEqual(
+            signed,
+            "https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif?sig=abc",
+        )
+        self.assertEqual(
+            opened,
+            "/vsicurl/https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif?sig=abc",
+        )
+        fake_pc.sign.assert_called_with(
+            "https://sentinel1euwest.blob.core.windows.net/s1-grd/vv.tif"
+        )
