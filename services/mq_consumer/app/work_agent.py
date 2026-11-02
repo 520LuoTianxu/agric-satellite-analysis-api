@@ -222,11 +222,17 @@ def local_backlog() -> int | None:
     """领取上限用的本机积压：WORK_CLAIM_BACKLOG_QUEUES 中各队列就绪消息（含优先级子队列）
     + 路由到这些队列的 unacked（已投递未确认，含 ETA/在途）。无法解析的 unacked 条目跳过。
 
-    读取失败返回 None（调用方按不限流处理，保持原有领取行为）。
+    读取失败或超过探测时限返回 None（调用方按不限流处理，保持原有领取行为）。
+    使用 HSCAN 而非 HVALS，并设墙钟上限，避免超大 unacked 把 claim 环堵死。
     """
     try:
         import redis
 
+        try:
+            budget = max(0.5, float(_env("WORK_CLAIM_BACKLOG_PROBE_SEC", "3")))
+        except ValueError:
+            budget = 3.0
+        deadline = time.monotonic() + budget
         client = redis.Redis.from_url(
             _env("REDIS_URL", "redis://127.0.0.1:6379/0"),
             socket_timeout=2.0,
@@ -236,14 +242,25 @@ def local_backlog() -> int | None:
             wanted = set(backlog_queue_names())
             total = 0
             for name in wanted:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("backlog probe budget exceeded during llen")
                 keys = {name}
                 # Celery Redis 优先级队列以 "<queue>\x06\x16<n>" 形式另存为 list
                 for key in client.scan_iter(match=f"{name}\x06\x16*", count=100):
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("backlog probe budget exceeded during scan")
                     keys.add(key.decode() if isinstance(key, bytes) else key)
                 total += sum(int(client.llen(k)) for k in keys)
-            for raw in client.hvals("unacked"):
-                if _unacked_queue(raw) in wanted:
-                    total += 1
+            cursor: int | bytes = 0
+            while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("backlog probe budget exceeded during hscan")
+                cursor, pairs = client.hscan("unacked", cursor=cursor, count=200)
+                for _field, raw in pairs.items():
+                    if _unacked_queue(raw) in wanted:
+                        total += 1
+                if cursor == 0 or cursor == b"0":
+                    break
             return total
         finally:
             client.close()
@@ -277,13 +294,23 @@ def _headers() -> dict[str, str]:
     }
 
 
+def api_http_timeout() -> httpx.Timeout:
+    """Claim 环出站 HTTP 硬超时，避免 progress/complete/claim 无限挂起。"""
+    try:
+        total = max(5.0, float(_env("WORK_CLAIM_HTTP_TIMEOUT_SEC", "20")))
+    except ValueError:
+        total = 20.0
+    connect = min(10.0, total)
+    return httpx.Timeout(total, connect=connect, read=total, write=total, pool=connect)
+
+
 def _client() -> httpx.Client:
     base = api_base_url()
     if not base:
         raise RuntimeError("API_BASE_URL is required for claim mode")
     return httpx.Client(
         base_url=base,
-        timeout=30.0,
+        timeout=api_http_timeout(),
         headers=_headers(),
         event_hooks={"request": [attach_trace_header]},
     )
@@ -649,13 +676,33 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
-    """Dispatch Celery and complete the lease for fan-out data tasks."""
+    """Dispatch Celery and complete the lease for fan-out data tasks.
+
+    Celery 一旦 send_task 成功，COMPLETE_ON_DISPATCH 类型必须尽力 complete，
+    不能因 progress/complete HTTP 失败再走 fail+retry（否则会双派发）；
+    派发前打 dispatch_start，便于区分“卡在 handler”与“卡在回报”。
+    """
     work_id = str(item["id"])
     wtype = item.get("type") or ""
     bind_trace_from_mapping(item.get("payload_json") or {})
     get_or_create_trace_id()
+    dispatched_ok = False
+    result: dict[str, Any] | None = None
     try:
+        land_hint = None
+        try:
+            land_hint, _ = _payload_parts(item)
+        except Exception:
+            land_hint = None
+        logger.info(
+            "work_item_dispatch_start id=%s type=%s land_id=%s attempt=%s",
+            work_id,
+            wtype,
+            land_hint,
+            item.get("attempts"),
+        )
         result = _dispatch_celery(item)
+        dispatched_ok = True
         if wtype == "admin_task":
             run_id = str(result.get("admin_task_run_id") or "")
             celery_task_id = str(result.get("celery_id") or "")
@@ -676,19 +723,19 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
                     celery_task_id,
                 )
             start_admin_task_monitor(client, run_id, celery_task_id)
-        progress(
-            client,
-            work_id,
-            {
-                "stage": "dispatched",
-                "celery_id": result.get("celery_id"),
-                "celery_ids": result.get("celery_ids"),
-                "dispatched": result.get("dispatched"),
-                "admin_task_run_id": result.get("admin_task_run_id"),
-                "job_id": result.get("job_id"),
-                "land_id": result.get("land_id"),
-            },
-        )
+        progress_body = {
+            "stage": "dispatched",
+            "celery_id": result.get("celery_id"),
+            "celery_ids": result.get("celery_ids"),
+            "dispatched": result.get("dispatched"),
+            "admin_task_run_id": result.get("admin_task_run_id"),
+            "job_id": result.get("job_id"),
+            "land_id": result.get("land_id"),
+        }
+        try:
+            progress(client, work_id, progress_body)
+        except Exception:
+            logger.exception("work_item_progress_failed id=%s type=%s", work_id, wtype)
         logger.info(
             "work_item_dispatched id=%s type=%s land_id=%s celery=%s",
             work_id,
@@ -697,21 +744,35 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
             result.get("celery_id") or result.get("celery_ids"),
         )
         if wtype in COMPLETE_ON_DISPATCH_TYPES:
-            complete(
-                client,
-                work_id,
-                {
-                    "phase": "dispatched",
-                    "type": wtype,
-                    "dispatched": result.get("dispatched"),
-                    "celery_ids": result.get("celery_ids")
-                    or ([result["celery_id"]] if result.get("celery_id") else []),
-                    "land_id": result.get("land_id"),
-                    "job_id": result.get("job_id"),
-                    "admin_task_run_id": result.get("admin_task_run_id"),
-                },
-            )
+            try:
+                complete(
+                    client,
+                    work_id,
+                    {
+                        "phase": "dispatched",
+                        "type": wtype,
+                        "dispatched": result.get("dispatched"),
+                        "celery_ids": result.get("celery_ids")
+                        or ([result["celery_id"]] if result.get("celery_id") else []),
+                        "land_id": result.get("land_id"),
+                        "job_id": result.get("job_id"),
+                        "admin_task_run_id": result.get("admin_task_run_id"),
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "work_item_complete_failed id=%s type=%s", work_id, wtype
+                )
     except Exception as exc:
+        if dispatched_ok and wtype in COMPLETE_ON_DISPATCH_TYPES:
+            # 派发已成功：不再 fail/retry，避免双派发；租约依赖上面的 complete 或到期回收。
+            logger.exception(
+                "work_item_post_dispatch_error_ignored id=%s type=%s err=%s",
+                work_id,
+                wtype,
+                exc,
+            )
+            return
         try:
             attempts = max(1, int(item.get("attempts") or 1))
         except (TypeError, ValueError):
@@ -802,6 +863,7 @@ __all__ = [
     "ADMIN_TASK_NAMES",
     "PROJECT_TASK_NAMES",
     "DEFAULT_TYPES",
+    "api_http_timeout",
     "claim_batch",
     "claim_types",
     "pending_queue_count",

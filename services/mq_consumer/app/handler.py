@@ -159,17 +159,25 @@ def _dispatch_satellite_analysis(
             )
             dispatched.append("app.tasks.agri_alerts.evaluate_agri_alerts_for_land")
     else:
-        publish_task_result(
-            task_id=task.task_id,
-            status="success",
-            land_id=land_id,
-            extras={
-                "phase": "dispatched",
-                "dispatched": dispatched,
-                "months": months,
-            },
-            upload_summary_if_empty=True,
-        )
+        try:
+            publish_task_result(
+                task_id=task.task_id,
+                status="success",
+                land_id=land_id,
+                extras={
+                    "phase": "dispatched",
+                    "dispatched": dispatched,
+                    "months": months,
+                },
+                collect_parcel_urls=False,
+                upload_summary_if_empty=True,
+            )
+        except Exception:
+            logger.exception(
+                "satellite_analysis_mq_result_publish_failed task_id=%s land_id=%s",
+                task.task_id,
+                land_id,
+            )
 
     return {
         "dispatched": dispatched,
@@ -390,20 +398,30 @@ def _dispatch_land_bootstrap(
         )
         celery_ids.append(result.id)
 
-    publish_task_result(
-        task_id=task.task_id,
-        status="success",
-        land_id=land_id,
-        extras={
-            "phase": "bootstrap_dispatched",
-            "dispatched": dispatched,
-            "skip_indices": skip_indices,
-            "date_from": extras.get("date_from"),
-            "date_to": extras.get("date_to"),
-            "days": weather_kwargs.get("days"),
-        },
-        upload_summary_if_empty=True,
-    )
+    # Claim 短轮询线程上禁止同步查库拉景 URL：远端 Postgres 无 statement_timeout
+    # 时会把整个领取环卡死数十分钟。派发成功即返回；MQ 结果仅尽力发送。
+    try:
+        publish_task_result(
+            task_id=task.task_id,
+            status="success",
+            land_id=land_id,
+            extras={
+                "phase": "bootstrap_dispatched",
+                "dispatched": dispatched,
+                "skip_indices": skip_indices,
+                "date_from": extras.get("date_from"),
+                "date_to": extras.get("date_to"),
+                "days": weather_kwargs.get("days"),
+            },
+            collect_parcel_urls=False,
+            upload_summary_if_empty=True,
+        )
+    except Exception:
+        logger.exception(
+            "land_bootstrap_mq_result_publish_failed task_id=%s land_id=%s",
+            task.task_id,
+            land_id,
+        )
     return {
         "dispatched": dispatched,
         "celery_ids": celery_ids,

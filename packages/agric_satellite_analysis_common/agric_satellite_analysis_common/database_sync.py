@@ -28,6 +28,8 @@ sync_engine = create_engine(
     # 任务 SQL 同时包含 ORM 和原生查询，统一设置唯一业务搜索路径。
     connect_args={
         "application_name": _app_name,
+        # 避免 claim 线程在不可达 Postgres 上无限挂起（psycopg2 默认无连接超时）。
+        "connect_timeout": max(1, int(os.environ.get("SYNC_DB_CONNECT_TIMEOUT", "10") or 10)),
         "options": f"-csearch_path={settings.database_schema}",
     },
 )
