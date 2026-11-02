@@ -59,7 +59,71 @@ class ResolveOssIsCnameTests(unittest.TestCase):
         )
 
 
+
+class ResolveOssPublicBaseTests(unittest.TestCase):
+    def test_accelerate_cname_defaults_to_regional_virtual_host(self) -> None:
+        base = storage_mod.resolve_oss_public_base(
+            bucket="agric-prod",
+            region="oss-cn-beijing",
+            upload_endpoint="https://agric-prod.oss-accelerate.aliyuncs.com",
+            is_cname=True,
+        )
+        self.assertEqual(base, "https://agric-prod.oss-cn-beijing.aliyuncs.com")
+
+    def test_bare_accelerate_defaults_to_regional_virtual_host(self) -> None:
+        base = storage_mod.resolve_oss_public_base(
+            bucket="agric-prod",
+            region="oss-cn-beijing",
+            upload_endpoint="https://oss-accelerate.aliyuncs.com",
+            is_cname=False,
+        )
+        self.assertEqual(base, "https://agric-prod.oss-cn-beijing.aliyuncs.com")
+
+    def test_explicit_public_base_url_wins(self) -> None:
+        base = storage_mod.resolve_oss_public_base(
+            bucket="agric-prod",
+            region="oss-cn-beijing",
+            upload_endpoint="https://agric-prod.oss-accelerate.aliyuncs.com",
+            is_cname=True,
+            public_base_url="https://cdn.example.com/static/",
+        )
+        self.assertEqual(base, "https://cdn.example.com/static")
+
+    def test_explicit_public_endpoint_builds_virtual_host(self) -> None:
+        base = storage_mod.resolve_oss_public_base(
+            bucket="agric-prod",
+            region="oss-cn-hangzhou",
+            upload_endpoint="https://oss-accelerate.aliyuncs.com",
+            is_cname=False,
+            public_endpoint="https://oss-cn-beijing.aliyuncs.com",
+        )
+        self.assertEqual(base, "https://agric-prod.oss-cn-beijing.aliyuncs.com")
+
+    def test_regional_endpoint_unchanged(self) -> None:
+        base = storage_mod.resolve_oss_public_base(
+            bucket="agric-dev",
+            region="oss-cn-beijing",
+            upload_endpoint="https://oss-cn-beijing.aliyuncs.com",
+            is_cname=False,
+        )
+        self.assertEqual(base, "https://agric-dev.oss-cn-beijing.aliyuncs.com")
+
+    def test_is_accelerate_helper(self) -> None:
+        self.assertTrue(
+            storage_mod.is_oss_accelerate_endpoint(
+                "https://agric-prod.oss-accelerate.aliyuncs.com"
+            )
+        )
+        self.assertTrue(
+            storage_mod.is_oss_accelerate_endpoint("https://oss-accelerate.aliyuncs.com")
+        )
+        self.assertFalse(
+            storage_mod.is_oss_accelerate_endpoint("https://oss-cn-beijing.aliyuncs.com")
+        )
+
+
 class TransientClassificationTests(unittest.TestCase):
+
     def test_ssl_and_timeout_are_transient(self) -> None:
         self.assertTrue(storage_mod.is_transient_oss_error(ssl.SSLEOFError(8, "eof")))
         self.assertTrue(storage_mod.is_transient_oss_error(TimeoutError("timed out")))
@@ -256,6 +320,41 @@ class OssStorageUploadTests(unittest.TestCase):
         key = storage.put_bytes("k/tiny.bin", b"abc")
         self.assertEqual(key, "k/tiny.bin")
         self.assertEqual(calls["n"], 2)
+
+    def test_public_url_accelerate_cname_uses_regional_host(self) -> None:
+        storage, _bucket = self._make_storage(
+            oss_endpoint="https://agric-prod.oss-accelerate.aliyuncs.com",
+            oss_region="oss-cn-beijing",
+            oss_bucket="agric-prod",
+        )
+        self.assertEqual(
+            storage.public_url("s1s2_parcel/json/x_S1.json"),
+            "https://agric-prod.oss-cn-beijing.aliyuncs.com/s1s2_parcel/json/x_S1.json",
+        )
+
+    def test_public_url_explicit_base_override(self) -> None:
+        storage, _bucket = self._make_storage(
+            oss_endpoint="https://oss-accelerate.aliyuncs.com",
+            oss_region="oss-cn-beijing",
+            oss_public_base_url="https://agric-prod.oss-cn-beijing.aliyuncs.com",
+        )
+        self.assertEqual(
+            storage.public_url("a/b.json"),
+            "https://agric-prod.oss-cn-beijing.aliyuncs.com/a/b.json",
+        )
+
+    def test_public_url_regional_endpoint_unchanged(self) -> None:
+        storage, _bucket = self._make_storage(
+            oss_endpoint="https://oss-cn-beijing.aliyuncs.com",
+            oss_region="oss-cn-beijing",
+            oss_bucket="agric-dev",
+        )
+        # _make_storage defaults bucket agric-prod unless overridden
+        storage._bucket_name = "agric-dev"
+        self.assertEqual(
+            storage.public_url("k.json"),
+            "https://agric-dev.oss-cn-beijing.aliyuncs.com/k.json",
+        )
 
 
 if __name__ == "__main__":

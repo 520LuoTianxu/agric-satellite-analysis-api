@@ -164,6 +164,7 @@ paths retry transient SSL / timeout / 5xx errors with exponential backoff.
 |---|---|---|
 | `OSS_ENDPOINT` | regional Beijing | Use `https://oss-accelerate.aliyuncs.com` or `https://{bucket}.oss-accelerate.aliyuncs.com` on the download machine |
 | `OSS_IS_CNAME` | auto | `true` when the endpoint host starts with `{bucket}.` (bucket-prefixed accelerate URL) |
+| `OSS_PUBLIC_BASE_URL` / `OSS_PUBLIC_ENDPOINT` | empty | Optional override for `public_url` / result `json_url`. Upload still uses `OSS_ENDPOINT`. On accelerate upload endpoints, receipts default to `https://{bucket}.{OSS_REGION}.aliyuncs.com/...` so a regional API acceptlist passes |
 | `OSS_MULTIPART_THRESHOLD_MB` | `1` | At/above → resumable multipart |
 | `OSS_PART_SIZE_MB` | `4` | Multipart part size (bench: 4–5 MiB) |
 | `OSS_MULTIPART_NUM_THREADS` | `8` | Concurrent part uploads (bench: 6–8) |
@@ -176,8 +177,11 @@ Download-machine example (transfer acceleration + prod bucket):
 
 ```bash
 OSS_BUCKET=agric-prod
+OSS_REGION=oss-cn-beijing
 OSS_ENDPOINT=https://oss-accelerate.aliyuncs.com
 # or: OSS_ENDPOINT=https://agric-prod.oss-accelerate.aliyuncs.com
+# Receipts / public_url use regional host by default; optional override:
+# OSS_PUBLIC_BASE_URL=https://agric-prod.oss-cn-beijing.aliyuncs.com
 OSS_MULTIPART_THRESHOLD_MB=1
 OSS_PART_SIZE_MB=4
 OSS_MULTIPART_NUM_THREADS=8

@@ -58,6 +58,16 @@ class CommonSettings(BaseSettings):
     # ``{bucket}.oss-accelerate.aliyuncs.com``) host. None / unset = auto-detect
     # when the endpoint host starts with ``{bucket}.``.
     oss_is_cname: bool | None = None
+    # Optional public URL overrides for result callbacks / ``public_url``.
+    # Upload SDK still uses ``OSS_ENDPOINT`` (accelerate OK). When the upload
+    # endpoint is transfer-acceleration, ``public_url`` defaults to the
+    # regional virtual-hosted host ``{bucket}.{OSS_REGION}.aliyuncs.com`` so
+    # a production API configured with a regional ``OSS_ENDPOINT`` accepts
+    # receipt URLs. Prefer an explicit override when needed:
+    #   OSS_PUBLIC_BASE_URL=https://agric-prod.oss-cn-beijing.aliyuncs.com
+    #   or OSS_PUBLIC_ENDPOINT=https://oss-cn-beijing.aliyuncs.com
+    oss_public_base_url: str = ""
+    oss_public_endpoint: str = ""
     # Upload reliability (download-machine → Beijing OSS / transfer acceleration).
     # Files at or above the threshold use oss2.resumable_upload (multipart +
     # local checkpoint); smaller files use put with retries.
