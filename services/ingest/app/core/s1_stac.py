@@ -32,10 +32,26 @@ def s1_stac_api_url() -> str:
     )
 
 
+# Prod + staging SAS/STAC hosts. Substring "planetarycomputer.microsoft.com"
+# alone misses planetarycomputer-staging.microsoft.com and skips signing → Azure 409.
+_MPC_HOST_MARKERS = (
+    "planetarycomputer.microsoft.com",
+    "planetarycomputer-staging.microsoft.com",
+)
+
+
 def s1_uses_planetary_computer() -> bool:
     """判断当前目录是否需要Planetary Computer的资产签名流程。"""
     url = s1_stac_api_url().lower()
-    return "planetarycomputer.microsoft.com" in url
+    return any(marker in url for marker in _MPC_HOST_MARKERS)
+
+
+def _strip_gdal_vsi_prefix(href: str) -> str:
+    """去掉 /vsicurl/ 等前缀，避免 pc.sign 不认 VSI 包装而原样返回未签名 URL。"""
+    for prefix in ("/vsicurl/", "/vsis3/", "/vsiaz/", "/vsis/"):
+        if href.startswith(prefix):
+            return href[len(prefix) :]
+    return href
 
 
 def sign_s1_href(href: str) -> str:
@@ -46,7 +62,7 @@ def sign_s1_href(href: str) -> str:
         return href
     import planetary_computer as pc
 
-    return str(pc.sign(href))
+    return str(pc.sign(_strip_gdal_vsi_prefix(href)))
 
 
 def open_s1_stac_client():

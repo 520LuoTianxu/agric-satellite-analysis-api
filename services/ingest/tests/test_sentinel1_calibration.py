@@ -165,3 +165,54 @@ class Sentinel1CalibrationPrefetchTests(unittest.TestCase):
         with patch.object(sentinel1, "_load_s1_sigma0_lut") as load:
             sentinel1._prefetch_s1_calibration_luts({"id": "scene-2"})
         load.assert_not_called()
+
+    def test_load_sigma0_lut_signs_before_http_get(self) -> None:
+        """MPC Azure calibration XML must be SAS-signed before httpx opens it."""
+        sentinel1 = _load_sentinel1_module()
+        unsigned = (
+            "https://sentinel1euwest.blob.core.windows.net/s1-grd/"
+            "annotation/calibration/calibration-iw-vv.xml"
+        )
+        signed = unsigned + "?sig=test-sas"
+        sentinel1._load_s1_sigma0_lut_cached.cache_clear()
+
+        class _Resp:
+            headers = {"content-length": "64"}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_bytes(self):
+                # Minimal well-formed LUT XML with two vectors.
+                xml = (
+                    b"<cal>"
+                    b"<calibrationVector><line>0</line><pixel>0 1</pixel>"
+                    b"<sigmaNought>1 1</sigmaNought></calibrationVector>"
+                    b"<calibrationVector><line>1</line><pixel>0 1</pixel>"
+                    b"<sigmaNought>1 1</sigmaNought></calibrationVector>"
+                    b"</cal>"
+                )
+                yield xml
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class _Client:
+            def __init__(self):
+                self.urls: list[str] = []
+
+            def stream(self, method, url):
+                self.urls.append(url)
+                return _Resp()
+
+        client = _Client()
+        with patch.object(sentinel1, "s1_uses_planetary_computer", return_value=True), patch.object(
+            sentinel1, "sign_s1_href", side_effect=lambda href: signed if href == unsigned else href
+        ) as sign, patch.object(sentinel1, "_s1_http", return_value=client):
+            lut = sentinel1._load_s1_sigma0_lut(unsigned)
+        sign.assert_called()
+        self.assertEqual(client.urls, [signed])
+        self.assertEqual(len(lut.lines), 2)
