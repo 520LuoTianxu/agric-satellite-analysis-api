@@ -88,6 +88,66 @@ def resolve_oss_is_cname(
     return host.startswith(f"{bucket_l}.")
 
 
+def _oss_endpoint_host(endpoint: str) -> tuple[str, str]:
+    """Return ``(scheme, host)`` from an OSS endpoint URL or bare host."""
+    parsed = urlparse((endpoint or "").strip())
+    host = (parsed.netloc or parsed.path or "").split("@")[-1].strip().rstrip("/")
+    scheme = (parsed.scheme or "https").strip() or "https"
+    return scheme, host
+
+
+def is_oss_accelerate_endpoint(endpoint: str) -> bool:
+    """True when the upload endpoint host is Aliyun transfer acceleration."""
+    _scheme, host = _oss_endpoint_host(endpoint)
+    return "oss-accelerate" in host.lower()
+
+
+def resolve_oss_public_base(
+    *,
+    bucket: str,
+    region: str,
+    upload_endpoint: str,
+    is_cname: bool,
+    public_base_url: str = "",
+    public_endpoint: str = "",
+) -> str:
+    """Choose the public URL authority used by ``OssStorage.public_url``.
+
+    Prefer explicit ``OSS_PUBLIC_BASE_URL`` / ``OSS_PUBLIC_ENDPOINT``. When the
+    upload endpoint is transfer acceleration (bare or ``{bucket}.``-prefixed),
+    default to the regional virtual-hosted host
+    ``https://{bucket}.{region}.aliyuncs.com`` so API result apply (which
+    acceptlists ``{bucket}.{OSS_ENDPOINT_host}``) can fetch receipts without
+    forcing production onto the accelerate hostname. Otherwise keep the
+    historical derivation from ``OSS_ENDPOINT`` / CNAME.
+    """
+    explicit_base = (public_base_url or "").strip().rstrip("/")
+    if explicit_base:
+        return explicit_base
+
+    explicit_endpoint = (public_endpoint or "").strip()
+    if explicit_endpoint:
+        scheme, host = _oss_endpoint_host(explicit_endpoint)
+        if not host:
+            raise ValueError("OSS_PUBLIC_ENDPOINT has no host")
+        if resolve_oss_is_cname(explicit_endpoint, bucket, None):
+            return f"{scheme}://{host}"
+        return f"{scheme}://{bucket}.{host}"
+
+    if is_oss_accelerate_endpoint(upload_endpoint):
+        region_id = (region or "oss-cn-beijing").strip().strip("/")
+        if not region_id:
+            region_id = "oss-cn-beijing"
+        return f"https://{bucket}.{region_id}.aliyuncs.com"
+
+    scheme, host = _oss_endpoint_host(upload_endpoint)
+    if not host:
+        raise ValueError("OSS_ENDPOINT has no host")
+    if is_cname:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{bucket}.{host}"
+
+
 def oss_multipart_threshold_bytes() -> int:
     """Byte threshold at/above which uploads use resumable multipart."""
     mb = max(float(settings.oss_multipart_threshold_mb), 0.0)
@@ -527,14 +587,16 @@ class OssStorage(ObjectStorage):
         )
 
     def public_url(self, key: str) -> str:
-        # Virtual-hosted-style URL derived from endpoint host.
-        parsed = urlparse(settings.oss_endpoint)
-        host = parsed.netloc or parsed.path
-        scheme = parsed.scheme or "https"
-        if self._is_cname:
-            # Endpoint already includes the bucket hostname (accelerate CNAME).
-            return f"{scheme}://{host}/{key}"
-        return f"{scheme}://{self._bucket_name}.{host}/{key}"
+        # Upload may use accelerate; receipts prefer regional/public override.
+        base = resolve_oss_public_base(
+            bucket=self._bucket_name,
+            region=settings.oss_region,
+            upload_endpoint=self._endpoint,
+            is_cname=self._is_cname,
+            public_base_url=settings.oss_public_base_url,
+            public_endpoint=settings.oss_public_endpoint,
+        )
+        return f"{base.rstrip('/')}/{key}"
 
     def presigned_get(
         self,
@@ -669,6 +731,8 @@ __all__ = [
     "restore_gdal_env",
     "signed_get_expire_sec",
     "resolve_oss_is_cname",
+    "is_oss_accelerate_endpoint",
+    "resolve_oss_public_base",
     "is_transient_oss_error",
     "retry_oss_call",
     "oss_multipart_threshold_bytes",
