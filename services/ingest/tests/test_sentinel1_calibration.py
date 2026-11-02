@@ -139,3 +139,29 @@ class UpsertAgriS1AcquiredAtTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Sentinel1CalibrationPrefetchTests(unittest.TestCase):
+    def test_prefetch_s1_calibration_luts_parallel(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        calls: list[str] = []
+
+        def fake_load(href: str):
+            calls.append(href)
+            return object()
+
+        with patch.object(sentinel1, "_load_s1_sigma0_lut", side_effect=fake_load):
+            sentinel1._prefetch_s1_calibration_luts(
+                {
+                    "id": "scene-1",
+                    "vv_calibration_href": "vv.xml",
+                    "vh_calibration_href": "vh.xml",
+                }
+            )
+        self.assertCountEqual(calls, ["vv.xml", "vh.xml"])
+
+    def test_prefetch_skips_when_no_calibration(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        with patch.object(sentinel1, "_load_s1_sigma0_lut") as load:
+            sentinel1._prefetch_s1_calibration_luts({"id": "scene-2"})
+        load.assert_not_called()

@@ -26,6 +26,9 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 |---|---|---|
 | `INGEST_SCENE_MAX_WORKERS` | `16` | Thread pool size for per-scene download+process. Independent of Celery `--concurrency` (compose ingest default is 4). |
 | `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 2 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
+| `S1_GDAL_CURL_CHUNK_SIZE` | `262144` | Azure S1 vsicurl Range chunk (bytes) inside `rasterio.Env(**s1_gdal_env())` only; does not change S2. Larger cuts RTT round-trips to `*.blob.core.windows.net`. |
+| `S1_GDAL_CURL_CACHE_SIZE` / `S1_VSI_CACHE_SIZE` | `64MiB` | Per-Env curl/VSI caches for S1 COG window reads. |
+| `S1_GDAL_HTTP_VERSION` | `2` | Prefer HTTP/2 multiplexing for Azure Range GETs; set `1.1` if the image curl lacks HTTP/2. |
 | `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the GDAL semaphore. |
 | `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `60` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=30` also aborts stalled Range responses. |
 | `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |

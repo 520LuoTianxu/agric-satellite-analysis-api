@@ -31,16 +31,48 @@ class S1StacTests(unittest.TestCase):
             )
             self.assertEqual(
                 s1_open_path("https://example.com/vv.tif"),
-                "https://example.com/vv.tif",
+                "/vsicurl/https://example.com/vv.tif",
+            )
+            # 已是 VSI 前缀时不重复包裹。
+            self.assertEqual(
+                s1_open_path("/vsicurl/https://example.com/vv.tif?sig=abc"),
+                "/vsicurl/https://example.com/vv.tif?sig=abc",
             )
 
     def test_gdal_env_is_https_friendly_not_requester_pays(self) -> None:
         from app.core.s1_stac import s1_gdal_env
 
-        env = s1_gdal_env()
+        with patch.dict(os.environ, {}, clear=False):
+            for key in (
+                "S1_GDAL_CURL_CHUNK_SIZE",
+                "S1_GDAL_CURL_CACHE_SIZE",
+                "S1_VSI_CACHE_SIZE",
+                "S1_GDAL_HTTP_VERSION",
+                "S1_GDAL_HTTP_MULTIRANGE",
+            ):
+                os.environ.pop(key, None)
+            env = s1_gdal_env()
         self.assertEqual(env["GDAL_DISABLE_READDIR_ON_OPEN"], "EMPTY_DIR")
+        self.assertEqual(env["CPL_VSIL_CURL_USE_HEAD"], "NO")
+        self.assertEqual(env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"], "YES")
+        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "YES")
+        self.assertEqual(env["GDAL_HTTP_VERSION"], "2")
+        self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
+        self.assertEqual(env["GDAL_HTTP_MAX_RETRY"], "1")
         self.assertNotIn("AWS_REQUEST_PAYER", env)
         self.assertNotIn("AWS_NO_SIGN_REQUEST", env)
+
+    def test_gdal_env_honors_chunk_override(self) -> None:
+        from app.core.s1_stac import s1_gdal_env
+
+        with patch.dict(
+            os.environ,
+            {"S1_GDAL_CURL_CHUNK_SIZE": "524288", "S1_GDAL_HTTP_VERSION": "1.1"},
+            clear=False,
+        ):
+            env = s1_gdal_env()
+        self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "524288")
+        self.assertEqual(env["GDAL_HTTP_VERSION"], "1.1")
 
     def test_stac_asset_href_prefers_https_alternate(self) -> None:
         from app.core.s1_stac import stac_asset_href

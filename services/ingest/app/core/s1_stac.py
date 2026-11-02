@@ -17,6 +17,12 @@ from typing import Any
 S1_STAC_API_URL_DEFAULT = "https://planetarycomputer.microsoft.com/api/stac/v1"
 S1_STAC_COLLECTION = "sentinel-1-grd"
 
+# Azure Blob（sentinel1euwest 等）跨区 RTT 高：默认 16 KiB curl 分块会放大
+# Range 往返次数。S1 Env 内加大分块/缓存，且不改进程级 GDAL，避免拖累 S2/OSS。
+_DEFAULT_CURL_CHUNK_SIZE = 262144  # 256 KiB
+_DEFAULT_CURL_CACHE_SIZE = 64 * 1024 * 1024
+_DEFAULT_VSI_CACHE_SIZE = 64 * 1024 * 1024
+
 
 def s1_stac_api_url() -> str:
     """读取S1目录地址，允许测试或替代部署通过环境变量覆盖默认目录。"""
@@ -55,23 +61,75 @@ def open_s1_stac_client():
     return open_stac_client(url)
 
 
+def _positive_int_env(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
 def s1_gdal_env() -> dict[str, str]:
     """为签名后的Azure COG配置GDAL读取参数，避免修改进程级环境变量。
 
     参数只在单次rasterio.Env中生效，防止共享worker里的OSS/GDAL任务互相串扰。
+    相对默认 vsicurl：更大 curl 分块、启用 HTTP/2 多路 Range、合并连续区间，
+    降低中国→西欧 Azure 高 RTT 下的往返次数。内部重试保持 1 次，避免与
+    ``BAND_READ_MAX_ATTEMPTS`` 相乘放大 SSL EOF。
     """
+    chunk = _positive_int_env(
+        "S1_GDAL_CURL_CHUNK_SIZE",
+        _DEFAULT_CURL_CHUNK_SIZE,
+        minimum=16 * 1024,
+    )
+    curl_cache = _positive_int_env(
+        "S1_GDAL_CURL_CACHE_SIZE",
+        _DEFAULT_CURL_CACHE_SIZE,
+        minimum=1024 * 1024,
+    )
+    vsi_cache = _positive_int_env(
+        "S1_VSI_CACHE_SIZE",
+        _DEFAULT_VSI_CACHE_SIZE,
+        minimum=1024 * 1024,
+    )
+    http_version = (os.environ.get("S1_GDAL_HTTP_VERSION") or "2").strip() or "2"
+    multirange = (os.environ.get("S1_GDAL_HTTP_MULTIRANGE") or "YES").strip() or "YES"
     return {
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
         "GDAL_HTTP_UNSAFESSL": "NO",
         "CPL_VSIL_CURL_USE_HEAD": "NO",
+        "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
+        "GDAL_HTTP_MULTIPLEX": "YES",
+        "GDAL_HTTP_MULTIRANGE": multirange,
+        "GDAL_HTTP_VERSION": http_version,
+        "CPL_VSIL_CURL_CHUNK_SIZE": str(chunk),
+        "CPL_VSIL_CURL_CACHE_SIZE": str(curl_cache),
+        "VSI_CACHE": "TRUE",
+        "VSI_CACHE_SIZE": str(vsi_cache),
+        "GDAL_HTTP_TCP_KEEPALIVE": "YES",
+        "GDAL_HTTP_TCP_KEEPIDLE": "30",
+        "GDAL_HTTP_TCP_KEEPINTVL": "15",
+        "GDAL_HTTP_CONNECTTIMEOUT": "10",
+        "GDAL_HTTP_TIMEOUT": "60",
+        "GDAL_HTTP_LOW_SPEED_LIMIT": "1",
+        "GDAL_HTTP_LOW_SPEED_TIME": "30",
+        "GDAL_HTTP_MAX_RETRY": "1",
+        "GDAL_HTTP_RETRY_DELAY": "1",
     }
 
 
 def s1_open_path(href: str) -> str:
-    """给MPC链接签名；S3 URI转为GDAL虚拟路径，HTTPS交由curl驱动读取。"""
+    """给MPC链接签名；S3 转 /vsis3/；HTTPS（含 SAS 查询串）走 /vsicurl/。"""
     signed = sign_s1_href(href)
     if signed.startswith("s3://"):
         return signed.replace("s3://", "/vsis3/", 1)
+    if signed.startswith(("/vsicurl/", "/vsis3/", "/vsiaz/", "/vsis/")):
+        return signed
+    if signed.startswith("http://") or signed.startswith("https://"):
+        # SAS 查询参数必须经 vsicurl 前缀，避免 Range 请求时丢失签名字段。
+        return f"/vsicurl/{signed}"
     return signed
 
 
