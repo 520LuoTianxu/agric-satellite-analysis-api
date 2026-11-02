@@ -28,6 +28,12 @@ class _FakeRedis:
         assert key == "unacked"
         return list(self.unacked)
 
+    def hscan(self, key, cursor=0, count=200):
+        assert key == "unacked"
+        # 单页返回全部，模拟小 hash；cursor 归零结束。
+        pairs = {str(i).encode(): raw for i, raw in enumerate(self.unacked)}
+        return (0, pairs)
+
     def close(self):
         pass
 
