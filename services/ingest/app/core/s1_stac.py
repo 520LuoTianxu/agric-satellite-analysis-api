@@ -1,11 +1,12 @@
-"""Sentinel-1 STAC / GDAL access helpers (Planetary Computer).
+"""Sentinel-1 STAC / GDAL access helpers.
 
-Default catalog is Microsoft Planetary Computer ``sentinel-1-grd``.
-Assets live on Azure Blob Storage; unsigned hrefs 404, so HREFs are SAS-signed
-via ``planetary_computer`` (no AWS requester-pays keys required).
+Default catalog is Element84 Earth Search ``sentinel-1-grd`` on AWS Open Data
+(``s3://sentinel-s1-l1c``). Objects are opened via anonymous HTTPS
+(``https://sentinel-s1-l1c.s3.amazonaws.com/...``) so workers do not need
+requester-pays AWS keys and avoid Azure ``sentinel1euwest`` RTT/SAS 409s.
 
-Optional override: set ``S1_STAC_API_URL`` (must still expose ``sentinel-1-grd``
-with readable VV/VH assets after signing when using MPC).
+Optional: set ``S1_STAC_API_URL`` to Planetary Computer (prod or staging) to
+use Azure assets with ``planetary_computer`` SAS signing.
 """
 
 from __future__ import annotations
@@ -13,9 +14,13 @@ from __future__ import annotations
 import os
 from typing import Any
 
-# Microsoft Planetary Computer STAC API (default for agri S1).
-S1_STAC_API_URL_DEFAULT = "https://planetarycomputer.microsoft.com/api/stac/v1"
+# Element84 Earth Search (default for agri S1 — AWS HTTPS, no Azure SAS).
+S1_STAC_API_URL_DEFAULT = "https://earth-search.aws.element84.com/v1"
 S1_STAC_COLLECTION = "sentinel-1-grd"
+
+# AWS Open Data bucket behind Element84 sentinel-1-grd assets.
+_S1_AWS_S3_PREFIX = "s3://sentinel-s1-l1c/"
+_S1_AWS_HTTPS_PREFIX = "https://sentinel-s1-l1c.s3.amazonaws.com/"
 
 # Azure Blob（sentinel1euwest 等）跨区 RTT 高：默认 16 KiB curl 分块会放大
 # Range 往返次数。S1 Env 内加大分块/缓存，且不改进程级 GDAL，避免拖累 S2/OSS。
@@ -54,6 +59,19 @@ def _strip_gdal_vsi_prefix(href: str) -> str:
     return href
 
 
+def s1_aws_https_href(href: str) -> str:
+    """把 Element84 的 s3://sentinel-s1-l1c/ 改写成可匿名 Range 的 HTTPS。
+
+    S3 API 对 requester-pays 需要密钥；实测同对象的 path-style HTTPS 可直接
+    HEAD/Range，适合中国区下载机，且避开 Azure SAS。
+    """
+    raw = _strip_gdal_vsi_prefix(href)
+    if raw.startswith(_S1_AWS_S3_PREFIX):
+        return _S1_AWS_HTTPS_PREFIX + raw[len(_S1_AWS_S3_PREFIX) :]
+    # Already path-style / virtual-hosted AWS URL for this bucket — keep.
+    return raw
+
+
 def sign_s1_href(href: str) -> str:
     """MPC资产默认禁止匿名读，按需签发短期SAS地址，其余目录保持原链接。"""
     if not href:
@@ -63,6 +81,18 @@ def sign_s1_href(href: str) -> str:
     import planetary_computer as pc
 
     return str(pc.sign(_strip_gdal_vsi_prefix(href)))
+
+
+def s1_http_href(href: str) -> str:
+    """统一在打开前解析可读的 HTTP(S) 地址：AWS 改写 HTTPS，MPC 签发 SAS。"""
+    if not href:
+        return href
+    raw = _strip_gdal_vsi_prefix(href)
+    if raw.startswith(_S1_AWS_S3_PREFIX) or "sentinel-s1-l1c.s3" in raw:
+        return s1_aws_https_href(raw)
+    if s1_uses_planetary_computer():
+        return sign_s1_href(raw)
+    return raw
 
 
 def open_s1_stac_client():
@@ -137,16 +167,17 @@ def s1_gdal_env() -> dict[str, str]:
 
 
 def s1_open_path(href: str) -> str:
-    """给MPC链接签名；S3 转 /vsis3/；HTTPS（含 SAS 查询串）走 /vsicurl/。"""
-    signed = sign_s1_href(href)
-    if signed.startswith("s3://"):
-        return signed.replace("s3://", "/vsis3/", 1)
-    if signed.startswith(("/vsicurl/", "/vsis3/", "/vsiaz/", "/vsis/")):
-        return signed
-    if signed.startswith("http://") or signed.startswith("https://"):
-        # SAS 查询参数必须经 vsicurl 前缀，避免 Range 请求时丢失签名字段。
-        return f"/vsicurl/{signed}"
-    return signed
+    """解析可读地址后走 /vsicurl/；sentinel-s1-l1c 优先 HTTPS，不再强制 /vsis3/。"""
+    resolved = s1_http_href(href)
+    if resolved.startswith(("/vsicurl/", "/vsis3/", "/vsiaz/", "/vsis/")):
+        return resolved
+    if resolved.startswith("s3://"):
+        # 非 Open Data 桶才回退 vsis3（需进程内 AWS 凭证）。
+        return resolved.replace("s3://", "/vsis3/", 1)
+    if resolved.startswith("http://") or resolved.startswith("https://"):
+        # 查询串（含 SAS）必须经 vsicurl，避免 Range 时丢签名。
+        return f"/vsicurl/{resolved}"
+    return resolved
 
 
 def stac_asset_href(asset: Any) -> str | None:
@@ -180,12 +211,13 @@ def s1_access_hint() -> str:
             "S1 uses Microsoft Planetary Computer "
             f"({s1_stac_api_url()}, collection={S1_STAC_COLLECTION}). "
             "Assets need SAS signing via planetary_computer; install the "
-            "planetary-computer package on the ingest image. No AWS "
-            "requester-pays keys are required for this path."
+            "planetary-computer package on the ingest image."
         )
     return (
-        f"S1 STAC is {s1_stac_api_url()} (collection={S1_STAC_COLLECTION}). "
-        "Ensure VV/VH assets are readable by GDAL from this catalog."
+        "S1 uses Element84 Earth Search "
+        f"({s1_stac_api_url()}, collection={S1_STAC_COLLECTION}). "
+        "Assets are read via anonymous HTTPS on sentinel-s1-l1c "
+        "(no requester-pays keys; avoids Azure SAS)."
     )
 
 
