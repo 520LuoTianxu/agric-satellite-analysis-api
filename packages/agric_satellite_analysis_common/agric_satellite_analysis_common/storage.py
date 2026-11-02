@@ -149,7 +149,12 @@ def resolve_oss_public_base(
 
 
 def oss_multipart_threshold_bytes() -> int:
-    """Byte threshold at/above which uploads use resumable multipart."""
+    """Byte threshold at/above which uploads use resumable multipart.
+
+    ``OSS_MULTIPART_THRESHOLD_MB=0`` (the default) resolves to 1 byte so every
+    non-empty object uses multipart. Empty objects still use PUT. Aliyun allows
+    the final (or only) part to be smaller than the usual 100 KiB minimum.
+    """
     mb = max(float(settings.oss_multipart_threshold_mb), 0.0)
     return max(int(mb * 1024 * 1024), 1)
 
