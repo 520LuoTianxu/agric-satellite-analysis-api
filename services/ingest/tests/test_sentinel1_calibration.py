@@ -6,6 +6,7 @@ import importlib
 import sys
 import types
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 import numpy as np
@@ -81,6 +82,59 @@ class Sentinel1CalibrationCoordinateTests(unittest.TestCase):
         )
         np.testing.assert_allclose(source_power, expected, rtol=1e-6, atol=1e-6)
         self.assertTrue(np.isfinite(source_power[:, [0, -1]]).all())
+
+
+class UpsertAgriS1AcquiredAtTests(unittest.TestCase):
+    """_upsert_agri_s1 must not NameError on acquired_at; pass acquisition_datetime."""
+
+    def _call(self, sentinel1, acquisition_datetime):
+        import agric_satellite_analysis_common.lonlat_pixels as lonlat_pixels
+        import agric_satellite_analysis_common.mq_results as mq_results
+        from app.core import http_mode
+
+        captured: dict = {}
+
+        def fake_upload(*, land_id, date_str, sensor, product):
+            captured["product"] = product
+            return ("oss/key.json", "https://example.com/key.json")
+
+        meta = {
+            "land_id": "26972",
+            "tile_id": "tile",
+            "land_name": "land",
+        }
+        with (
+            patch.object(mq_results, "upload_scene_product_json", side_effect=fake_upload),
+            patch.object(mq_results, "scene_json_oss_key", return_value="oss/key.json"),
+            patch.object(
+                lonlat_pixels, "to_columnar_pixel_data", return_value={"pixels": []}
+            ),
+            patch.object(http_mode, "cache_scene_result_http"),
+        ):
+            url = sentinel1._upsert_agri_s1(
+                None,
+                meta,
+                date(2024, 1, 7),
+                "S1A_item_stac",
+                "26972",
+                [{"lon": 110.0, "lat": 35.0, "vv": 0.1, "vh": 0.05}],
+                {"mean": 0.1, "min": 0.0, "max": 1.0, "quality_score": 1.0},
+                {"mean": 0.05, "min": 0.0, "max": 0.5, "quality_score": 1.0},
+                result_delivery="http",
+                acquisition_datetime=acquisition_datetime,
+            )
+        self.assertEqual(url, "https://example.com/key.json")
+        return captured["product"]
+
+    def test_acquired_at_set_from_acquisition_datetime(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        product = self._call(sentinel1, "2024-01-07T02:55:08.329Z")
+        self.assertEqual(product["acquired_at"], "2024-01-07T02:55:08.329+00:00")
+
+    def test_acquired_at_none_when_missing(self) -> None:
+        sentinel1 = _load_sentinel1_module()
+        product = self._call(sentinel1, None)
+        self.assertIsNone(product["acquired_at"])
 
 
 if __name__ == "__main__":
