@@ -1576,7 +1576,7 @@ def _process_one_s1_scene(
             error=str(e),
             stac_api=s1_stac_api_url(),
         )
-                log_timing(
+        log_timing(
             "scene_total",
             sensor="S1",
             job_id=job_id,
