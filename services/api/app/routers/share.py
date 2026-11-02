@@ -16,6 +16,11 @@ from jose import jwt
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agric_satellite_analysis_common.lonlat_pixels import (
+    SQL_LONLAT_FORMAT_IN,
+    SQL_LONLAT_NONEMPTY,
+    SQL_LONLAT_PIXEL_COUNT,
+)
 from agric_satellite_analysis_common.quality_metrics import (
     CLOUD_COMPLEMENT_HEURISTIC_V1,
     PARCEL_VALID_FRACTION_V1,
@@ -184,7 +189,7 @@ async def _load_agri_share_series(
         async with db.begin_nested():
             result = await db.execute(
                 text(
-                    """
+                    f"""
                     -- 标量质量元数据为空时兼容读取 JSONB，防止公开报告将旧去云景误判为原始景。
                     SELECT date, sensor,
                            ndvi_avg, evi_avg, ndmi_avg, ndre_avg,
@@ -197,15 +202,7 @@ async def _load_agri_share_series(
                            COALESCE(NULLIF(BTRIM(decloud_quality), ''), NULLIF(BTRIM(pixel_data->>'decloud_quality'), '')) AS decloud_quality,
                            pixel_data->'decloud_reasons' AS decloud_reasons,
                            COALESCE(NULLIF(BTRIM(parcel_cloud_source), ''), NULLIF(BTRIM(pixel_data->>'parcel_cloud_source'), '')) AS parcel_cloud_source,
-                           CASE
-                             WHEN pixel_data->>'format' = 'lonlat_columns_v1'
-                              AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-                             THEN jsonb_array_length(pixel_data->'columns'->'lon')
-                             WHEN pixel_data->>'format' = 'lonlat_v1'
-                              AND jsonb_typeof(pixel_data->'pixels') = 'array'
-                             THEN jsonb_array_length(pixel_data->'pixels')
-                             ELSE 0
-                           END AS lonlat_pixels
+                           {SQL_LONLAT_PIXEL_COUNT} AS lonlat_pixels
                     FROM agric_satellite.parcel_scene_products
                     WHERE land_id = :land_id
                     ORDER BY date DESC
@@ -812,16 +809,8 @@ async def get_share_agri_pixels(
                 FROM agric_satellite.parcel_scene_products
                 WHERE land_id = :land_id AND sensor = :sensor
                   {date_clause}
-                  AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
-                  AND (
-                    (pixel_data->>'format' = 'lonlat_v1'
-                     AND jsonb_typeof(pixel_data->'pixels') = 'array'
-                     AND jsonb_array_length(pixel_data->'pixels') > 0)
-                    OR
-                    (pixel_data->>'format' = 'lonlat_columns_v1'
-                     AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-                     AND jsonb_array_length(pixel_data->'columns'->'lon') > 0)
-                  )
+                  AND {SQL_LONLAT_FORMAT_IN}
+                  AND {SQL_LONLAT_NONEMPTY}
                 ORDER BY date DESC
                 LIMIT 1
                 """

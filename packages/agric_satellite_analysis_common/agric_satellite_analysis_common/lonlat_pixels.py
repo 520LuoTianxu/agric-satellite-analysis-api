@@ -36,32 +36,47 @@ _PREFERRED_COLUMN_ORDER: tuple[str, ...] = (
     "VH_db",
 )
 
-# SQL: accept either format when filtering parcel_scene_products rows.
-SQL_LONLAT_FORMAT_IN = (
-    f"pixel_data->>'format' IN ('{LONLAT_FORMAT_V1}', '{LONLAT_FORMAT_COLUMNS_V1}')"
-)
+def sql_lonlat_format_in(col: str = "pixel_data") -> str:
+    """SQL predicate: *col* format is lonlat_v1 or lonlat_columns_v1.
 
-# SQL: row has a non-empty lonlat pixel payload (object list or columnar lon).
-SQL_LONLAT_NONEMPTY = f"""(
-  (pixel_data->>'format' = '{LONLAT_FORMAT_V1}'
-   AND jsonb_typeof(pixel_data->'pixels') = 'array'
-   AND jsonb_array_length(pixel_data->'pixels') > 0)
+    *col* may be ``pixel_data`` or an aliased expression such as
+    ``scene.pixel_data``.
+    """
+    return (
+        f"{col}->>'format' IN ('{LONLAT_FORMAT_V1}', '{LONLAT_FORMAT_COLUMNS_V1}')"
+    )
+
+
+def sql_lonlat_nonempty(col: str = "pixel_data") -> str:
+    """SQL predicate: *col* has a non-empty lonlat pixel payload."""
+    return f"""(
+  ({col}->>'format' = '{LONLAT_FORMAT_V1}'
+   AND jsonb_typeof({col}->'pixels') = 'array'
+   AND jsonb_array_length({col}->'pixels') > 0)
   OR
-  (pixel_data->>'format' = '{LONLAT_FORMAT_COLUMNS_V1}'
-   AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-   AND jsonb_array_length(pixel_data->'columns'->'lon') > 0)
+  ({col}->>'format' = '{LONLAT_FORMAT_COLUMNS_V1}'
+   AND jsonb_typeof({col}->'columns'->'lon') = 'array'
+   AND jsonb_array_length({col}->'columns'->'lon') > 0)
 )"""
 
-# SQL: pixel count from either encoding (0 when unknown/empty).
-SQL_LONLAT_PIXEL_COUNT = f"""CASE
-  WHEN pixel_data->>'format' = '{LONLAT_FORMAT_COLUMNS_V1}'
-       AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-  THEN jsonb_array_length(pixel_data->'columns'->'lon')
-  WHEN pixel_data->>'format' = '{LONLAT_FORMAT_V1}'
-       AND jsonb_typeof(pixel_data->'pixels') = 'array'
-  THEN jsonb_array_length(pixel_data->'pixels')
+
+def sql_lonlat_pixel_count(col: str = "pixel_data") -> str:
+    """SQL expression: pixel count from either encoding (0 when unknown)."""
+    return f"""CASE
+  WHEN {col}->>'format' = '{LONLAT_FORMAT_COLUMNS_V1}'
+       AND jsonb_typeof({col}->'columns'->'lon') = 'array'
+  THEN jsonb_array_length({col}->'columns'->'lon')
+  WHEN {col}->>'format' = '{LONLAT_FORMAT_V1}'
+       AND jsonb_typeof({col}->'pixels') = 'array'
+  THEN jsonb_array_length({col}->'pixels')
   ELSE 0
 END"""
+
+
+# Default (unaliased) fragments — prefer these unless the column is aliased.
+SQL_LONLAT_FORMAT_IN = sql_lonlat_format_in()
+SQL_LONLAT_NONEMPTY = sql_lonlat_nonempty()
+SQL_LONLAT_PIXEL_COUNT = sql_lonlat_pixel_count()
 
 
 def is_lonlat_format(fmt: Any) -> bool:
@@ -262,6 +277,133 @@ def extract_pixels_from_product(obj: Any) -> list[dict[str, Any]]:
     return []
 
 
+def needs_columnar_migration(obj: Any) -> bool:
+    """True when *obj* still stores lonlat as an object-list (needs convert).
+
+    Accepts either a ``pixel_data`` dict or a full scene product JSON (nested
+    ``pixel_data`` and/or root ``pixels``).
+    """
+    if not isinstance(obj, dict):
+        return False
+    nested = obj.get("pixel_data")
+    if isinstance(nested, dict) and (
+        is_lonlat_format(nested.get("format"))
+        or "pixels" in nested
+        or "columns" in nested
+    ):
+        return _pixel_data_needs_migration(nested)
+    if is_lonlat_format(obj.get("format")) or "pixels" in obj or "columns" in obj:
+        # Bare pixel_data, or offline product with root pixels.
+        if "land_id" in obj or "scene_id" in obj or "pixel_count" in obj:
+            if isinstance(obj.get("pixels"), list) and not (
+                obj.get("format") == LONLAT_FORMAT_COLUMNS_V1
+                and isinstance(obj.get("columns"), dict)
+            ):
+                # Root object-list on a scene product.
+                if not isinstance(nested, dict) or _pixel_data_needs_migration(nested):
+                    return True
+        return _pixel_data_needs_migration(obj)
+    return False
+
+
+def _pixel_data_needs_migration(pixel_data: Mapping[str, Any]) -> bool:
+    fmt = pixel_data.get("format")
+    if fmt == LONLAT_FORMAT_COLUMNS_V1 and isinstance(pixel_data.get("columns"), dict):
+        # Already columnar; still migrate if a legacy ``pixels`` key remains.
+        return "pixels" in pixel_data
+    if fmt == LONLAT_FORMAT_V1:
+        return True
+    if isinstance(pixel_data.get("pixels"), list) and not isinstance(
+        pixel_data.get("columns"), dict
+    ):
+        return True
+    return False
+
+
+def migrate_pixel_data_to_columnar(
+    pixel_data: MutableMapping[str, Any],
+) -> bool:
+    """In-place convert *pixel_data* to ``lonlat_columns_v1``.
+
+    Preserves meta keys (source, algorithm_version, …), full float values, and
+    pixel count/order. Returns True when the mapping was modified.
+    """
+    if not isinstance(pixel_data, dict):
+        return False
+    if not _pixel_data_needs_migration(pixel_data):
+        return False
+    pixels = extract_pixels(pixel_data)
+    replace_pixels_with_columns(pixel_data, pixels)
+    return True
+
+
+def migrate_product_to_columnar(
+    product: MutableMapping[str, Any],
+) -> bool:
+    """In-place convert a scene product JSON to columnar ``pixel_data``.
+
+    - Nested ``pixel_data`` (API/ingest shape) is converted in place.
+    - Offline products with root ``pixels`` get a nested columnar
+      ``pixel_data``; root ``pixels`` / ``columns`` / lonlat ``format`` are
+      removed so readers use the nested payload.
+    Returns True when anything changed.
+    """
+    if not isinstance(product, dict):
+        return False
+    changed = False
+    nested = product.get("pixel_data")
+    if isinstance(nested, dict) and (
+        is_lonlat_format(nested.get("format"))
+        or "pixels" in nested
+        or "columns" in nested
+    ):
+        if migrate_pixel_data_to_columnar(nested):
+            changed = True
+    elif needs_columnar_migration(product) and (
+        "land_id" in product or "scene_id" in product or "pixel_count" in product
+    ):
+        pixels = extract_pixels_from_product(product)
+        extra: dict[str, Any] = {}
+        for key in (
+            "source",
+            "algorithm_version",
+            "stac_item_id",
+            "decloud_quality",
+            "parcel_cloud_source",
+            "radiometry",
+            "analysis_grid",
+            "processing_window",
+            "quality_metrics",
+            "radiometric_calibration",
+            "relative_orbit",
+        ):
+            if key in product and key not in ("format", "pixels", "columns"):
+                extra[key] = product[key]
+        product["pixel_data"] = to_columnar_pixel_data(pixels, extra=extra or None)
+        changed = True
+
+    # Drop duplicate root pixel payload once nested columnar exists.
+    nested = product.get("pixel_data")
+    if (
+        isinstance(nested, dict)
+        and nested.get("format") == LONLAT_FORMAT_COLUMNS_V1
+        and isinstance(nested.get("columns"), dict)
+    ):
+        for key in ("pixels", "columns"):
+            if key in product:
+                product.pop(key, None)
+                changed = True
+        if product.get("format") in LONLAT_FORMATS:
+            product.pop("format", None)
+            changed = True
+    elif isinstance(nested, dict) is False and _pixel_data_needs_migration(product):
+        # Bare pixel_data object passed as *product*.
+        if migrate_pixel_data_to_columnar(product):
+            changed = True
+    return changed
+
+
+
 def roundtrip_ok(
     pixels: Sequence[Mapping[str, Any]],
 ) -> bool:
@@ -288,6 +430,9 @@ __all__ = [
     "SQL_LONLAT_FORMAT_IN",
     "SQL_LONLAT_NONEMPTY",
     "SQL_LONLAT_PIXEL_COUNT",
+    "sql_lonlat_format_in",
+    "sql_lonlat_nonempty",
+    "sql_lonlat_pixel_count",
     "is_lonlat_format",
     "is_lonlat_pixel_data",
     "pixel_count",
@@ -298,5 +443,8 @@ __all__ = [
     "to_columnar_pixel_data",
     "replace_pixels_with_columns",
     "extract_pixels_from_product",
+    "needs_columnar_migration",
+    "migrate_pixel_data_to_columnar",
+    "migrate_product_to_columnar",
     "roundtrip_ok",
 ]

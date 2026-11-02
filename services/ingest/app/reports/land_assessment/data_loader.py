@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from agric_satellite_analysis_common.settings import settings
 from agric_satellite_analysis_common.lonlat_pixels import (
     SQL_LONLAT_FORMAT_IN,
+    SQL_LONLAT_PIXEL_COUNT,
     extract_pixels,
     is_lonlat_format,
 )
@@ -307,15 +308,7 @@ def load_agri_pixel_date_index(
         SELECT date, ndvi_avg,
                COALESCE(parcel_cloud_cover_pct, cloud_cover) AS cloud,
                pixel_count,
-               CASE
-                 WHEN pixel_data->>'format' = 'lonlat_columns_v1'
-                   AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-                 THEN jsonb_array_length(pixel_data->'columns'->'lon')
-                 WHEN pixel_data->>'format' = 'lonlat_v1'
-                   AND jsonb_typeof(pixel_data->'pixels') = 'array'
-                 THEN jsonb_array_length(pixel_data->'pixels')
-                 ELSE 0
-               END AS npix
+               {SQL_LONLAT_PIXEL_COUNT} AS npix
         FROM agric_satellite.parcel_scene_products
         WHERE land_id = :land_id AND sensor = 'S2'
           AND {official_s2_sql("")}

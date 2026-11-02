@@ -47,6 +47,7 @@ Rules:
 - Dedup for agri uses dates already in `parcel_scene_products`, not `raster_layers` (old COG rows must not block lonlat).
 - Ingest / seed must write **lonlat_columns_v1** (or legacy **lonlat_v1**) pixels into `parcel_scene_products` at insert time when available.
 - Columnar shape: `{"format":"lonlat_columns_v1","columns":{"lon":[...],"lat":[...],"clear":[...],"NDVI":[...],...}}`. Same pixel count/order/float precision as before; plain JSON (no gzip product wrapper).
+- Historical `lonlat_v1` OSS/DB rows: inventory + in-place convert with `scripts/migrate_lonlat_columnar.py` (default dry-run). See `docs/lonlat-columns-migration.md`.
 - Do **not** implement soil inside `parcel_scene_products`.
 
 ## Soil + weather tables

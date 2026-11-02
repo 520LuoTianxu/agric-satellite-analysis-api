@@ -23,7 +23,12 @@ import uuid
 from datetime import date, timedelta
 from typing import Any, Iterable
 
-from agric_satellite_analysis_common.lonlat_pixels import extract_pixels
+from agric_satellite_analysis_common.lonlat_pixels import (
+    SQL_LONLAT_FORMAT_IN,
+    SQL_LONLAT_NONEMPTY,
+    SQL_LONLAT_PIXEL_COUNT,
+    extract_pixels,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,7 +180,7 @@ _LOAD_AREA = text(
 )
 
 _LOAD_S1 = text(
-    """
+    f"""
     SELECT date,
            pixel_data AS pixel_data,
            pixel_data->>'algorithm_version' AS algorithm_version,
@@ -184,52 +189,31 @@ _LOAD_S1 = text(
     WHERE land_id = :land_id
       AND sensor = 'S1'
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
-      AND (
-        (pixel_data->>'format' = 'lonlat_v1'
-         AND jsonb_typeof(pixel_data->'pixels') = 'array')
-        OR
-        (pixel_data->>'format' = 'lonlat_columns_v1'
-         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
-      )
+      AND {SQL_LONLAT_FORMAT_IN}
+      AND {SQL_LONLAT_NONEMPTY}
     ORDER BY date ASC, scene_id ASC
     """
 )
 
 # 先只统计景数与最大像元数，用于决定抽样步长（不传输像元数组）。
 _COUNT_INPUTS = text(
-    """
+    f"""
     SELECT sensor,
            count(*) AS scenes,
-           COALESCE(max(
-             CASE
-               WHEN pixel_data->>'format' = 'lonlat_columns_v1'
-                    AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array'
-               THEN jsonb_array_length(pixel_data->'columns'->'lon')
-               WHEN jsonb_typeof(pixel_data->'pixels') = 'array'
-               THEN jsonb_array_length(pixel_data->'pixels')
-               ELSE 0
-             END
-           ), 0) AS max_pixels
+           COALESCE(max({SQL_LONLAT_PIXEL_COUNT}), 0) AS max_pixels
     FROM agric_satellite.parcel_scene_products
     WHERE land_id = :land_id
       AND sensor IN ('S1', 'S2')
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
-      AND (
-        (pixel_data->>'format' = 'lonlat_v1'
-         AND jsonb_typeof(pixel_data->'pixels') = 'array')
-        OR
-        (pixel_data->>'format' = 'lonlat_columns_v1'
-         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
-      )
+      AND {SQL_LONLAT_FORMAT_IN}
+      AND {SQL_LONLAT_NONEMPTY}
     GROUP BY sensor
     """
 )
 
 # 只取像元数组、质量字段与辐射定标来源，避免把整份产品 JSON 拉进内存。
 _LOAD_SCENES = text(
-    """
+    f"""
     SELECT date, scene_id,
            pixel_data AS pixel_data,
            pixel_data->>'algorithm_version' AS algorithm_version,
@@ -242,14 +226,8 @@ _LOAD_SCENES = text(
     WHERE land_id = :land_id
       AND sensor = 'S2'
       AND date >= :date_from AND date <= :date_to
-      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
-      AND (
-        (pixel_data->>'format' = 'lonlat_v1'
-         AND jsonb_typeof(pixel_data->'pixels') = 'array')
-        OR
-        (pixel_data->>'format' = 'lonlat_columns_v1'
-         AND jsonb_typeof(pixel_data->'columns'->'lon') = 'array')
-      )
+      AND {SQL_LONLAT_FORMAT_IN}
+      AND {SQL_LONLAT_NONEMPTY}
     ORDER BY date ASC, scene_id ASC
     """
 )
@@ -338,13 +316,13 @@ _LOAD_COVERAGE = text(
 
 # 某日当天或之前最近一期可参与计算的 S2 观测日（只读元数据，不取像元）。
 _LATEST_OBS_DATE = text(
-    """
+    f"""
     SELECT max(date) AS obs_date
     FROM agric_satellite.parcel_scene_products
     WHERE land_id = :land_id
       AND sensor = 'S2'
       AND date <= :on_date
-      AND pixel_data->>'format' IN ('lonlat_v1', 'lonlat_columns_v1')
+      AND {SQL_LONLAT_FORMAT_IN}
     """
 )
 

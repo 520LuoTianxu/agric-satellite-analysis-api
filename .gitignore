@@ -51,6 +51,7 @@ docs/adr/*
 !docs/agri-first-data.md
 !docs/decloud-uncrtaints.md
 !docs/agri-drought-flood.md
+!docs/lonlat-columns-migration.md
 
 # ── Logs / Temp ──────────────────────────────────────────────────────
 # 本地验证的依赖、预览构建和测试产物不进入代码仓库。

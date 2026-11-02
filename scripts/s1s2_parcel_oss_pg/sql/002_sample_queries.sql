@@ -24,25 +24,54 @@ GROUP BY tile_id, sensor
 ORDER BY n DESC
 LIMIT 50;
 
--- 4) 从 jsonb 抽取单个像元指标（示例：第一个像素的 NDVI）
+-- 4) 按 pixel_data.format 统计（迁移前 inventory）
+SELECT COALESCE(pixel_data->>'format', '(null)') AS fmt, count(*) AS n
+FROM agric_satellite.parcel_scene_products
+WHERE pixel_data IS NOT NULL
+GROUP BY 1
+ORDER BY n DESC;
+
+-- 5) 抽取第一个像元指标（兼容 lonlat_v1 对象数组与 lonlat_columns_v1 列式）
 SELECT land_id, date, scene_id,
-       pixel_data #>> '{pixels,0,ndvi}' AS first_pixel_ndvi,
-       pixel_data #>> '{pixels,0,lon}'  AS first_pixel_lon,
-       pixel_data #>> '{pixels,0,lat}'  AS first_pixel_lat
+       pixel_data->>'format' AS fmt,
+       CASE
+         WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+         THEN pixel_data #>> '{columns,NDVI,0}'
+         ELSE pixel_data #>> '{pixels,0,NDVI}'
+       END AS first_pixel_ndvi,
+       CASE
+         WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+         THEN pixel_data #>> '{columns,lon,0}'
+         ELSE pixel_data #>> '{pixels,0,lon}'
+       END AS first_pixel_lon,
+       CASE
+         WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+         THEN pixel_data #>> '{columns,lat,0}'
+         ELSE pixel_data #>> '{pixels,0,lat}'
+       END AS first_pixel_lat
 FROM agric_satellite.parcel_scene_products
 WHERE sensor = 'S2'
   AND land_id = '15526'
 ORDER BY date DESC
 LIMIT 20;
 
--- 5) S1：抽取第一个像元 VV_db
+-- 6) S1：抽取第一个像元 VV_db / VH_db（双格式）
 SELECT land_id, date, scene_id,
-       pixel_data #>> '{pixels,0,vv_db}' AS first_vv_db,
-       pixel_data #>> '{pixels,0,vh_db}' AS first_vh_db
+       pixel_data->>'format' AS fmt,
+       CASE
+         WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+         THEN pixel_data #>> '{columns,VV_db,0}'
+         ELSE COALESCE(pixel_data #>> '{pixels,0,VV_db}', pixel_data #>> '{pixels,0,vv_db}')
+       END AS first_vv_db,
+       CASE
+         WHEN pixel_data->>'format' = 'lonlat_columns_v1'
+         THEN pixel_data #>> '{columns,VH_db,0}'
+         ELSE COALESCE(pixel_data #>> '{pixels,0,VH_db}', pixel_data #>> '{pixels,0,vh_db}')
+       END AS first_vh_db
 FROM agric_satellite.parcel_scene_products
 WHERE sensor = 'S1'
 ORDER BY date DESC
 LIMIT 20;
 
--- 6) 最近入库批次
+-- 7) 最近入库批次
 SELECT * FROM agric_satellite.ingest_runs ORDER BY started_at DESC LIMIT 10;
