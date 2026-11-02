@@ -1015,6 +1015,8 @@ def _upsert_agri_s1(
     processing_window_bounds: tuple[float, float, float, float] | None = None,
     result_delivery: str = "mq",
     radiometric_calibration: dict[str, Any] | None = None,
+    *,
+    acquisition_datetime: Any | None = None,
 ) -> str | None:
     """上传S1经纬度像元并经选定通道发布，同时保留来源与网格元数据。
 
@@ -1090,7 +1092,7 @@ def _upsert_agri_s1(
         "sensor": "S1",
         "scene_id": scene_id,
         "land_name": meta["land_name"],
-        "acquired_at": normalize_acquired_at(scene.get("acquisition_datetime")),
+        "acquired_at": normalize_acquired_at(acquisition_datetime),
         "cloud_cover": None,
         "cloud_cover_over_30": None,
         "parcel_cloud_cover_pct": None,
@@ -1453,6 +1455,7 @@ def _process_one_s1_scene(
                     processing_window_km=processing_window_km,
                     processing_window_bounds=bounds,
                     radiometric_calibration=radiometric_calibration,
+                    acquisition_datetime=scene.get("acquisition_datetime"),
                 )
                 published = True
                 logger.info(

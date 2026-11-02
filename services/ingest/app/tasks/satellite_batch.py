@@ -934,6 +934,7 @@ def _publish_land(
             radiometric_calibration=_s1_radiometric_calibration(scene),
             # 日批结果走 API HTTP -> Redis 缓存 -> API 入库，不让下载机直写 PG 或发结果 MQ。
             result_delivery="http",
+            acquisition_datetime=scene.get("acquisition_datetime"),
         )
         return True
 
