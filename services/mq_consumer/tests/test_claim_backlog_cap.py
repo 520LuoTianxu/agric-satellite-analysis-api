@@ -142,6 +142,7 @@ class LoopTests(unittest.TestCase):
         decisions = iter([(True, 150, 100), (True, 120, 100), (False, 80, 100)])
         claims = MagicMock(side_effect=[[], KeyboardInterrupt()])
         client = MagicMock()
+        client.is_closed = False
         client.__enter__ = MagicMock(return_value=client)
         client.__exit__ = MagicMock(return_value=False)
         with (
@@ -152,6 +153,7 @@ class LoopTests(unittest.TestCase):
             ),
             patch.object(wa, "claim_batch", claims),
             patch.object(wa, "_client", return_value=client),
+            patch.object(wa, "claim_watchdog_sec", return_value=0.0),
             patch.object(wa.time, "sleep"),
             patch.object(wa, "claim_types", return_value=["satellite_batch"]),
             patch.object(wa, "should_run_claim_agent", return_value=True),

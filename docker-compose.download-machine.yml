@@ -18,6 +18,9 @@
 #   WORKER_NAME=download-1
 #   WORK_CLAIM_INTERVAL_SEC=4
 #   WORK_CLAIM_MAX_LOCAL_BACKLOG=100   # pause claiming when local backlog (ready+unacked) >= N; 0 = off
+#   WORK_CLAIM_HTTP_CONNECT_TIMEOUT_SEC=5
+#   WORK_CLAIM_HTTP_RETRIES=3
+#   WORK_CLAIM_WATCHDOG_SEC=90        # recreate httpx client if no claim-loop progress; 0=off
 #   WORK_QUEUE_MODE=claim   # optional; leave legacy until cutover (do not force)
 # ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2)
 # and assessment/season-growth bundles + weather/soil geom (D4.1).
@@ -174,6 +177,12 @@ services:
       WORK_CLAIM_BACKLOG_QUEUES: ${WORK_CLAIM_BACKLOG_QUEUES:-satellite_download}
       # 暂停领取期间向生产上报存活的间隔（秒）
       WORK_CLAIM_PAUSED_HEARTBEAT_SEC: ${WORK_CLAIM_PAUSED_HEARTBEAT_SEC:-30}
+      # Short connect timeout + retries + watchdog so gateway TLS flakes cannot stall claim for minutes
+      WORK_CLAIM_HTTP_TIMEOUT_SEC: ${WORK_CLAIM_HTTP_TIMEOUT_SEC:-20}
+      WORK_CLAIM_HTTP_CONNECT_TIMEOUT_SEC: ${WORK_CLAIM_HTTP_CONNECT_TIMEOUT_SEC:-5}
+      WORK_CLAIM_HTTP_RETRIES: ${WORK_CLAIM_HTTP_RETRIES:-3}
+      WORK_CLAIM_HTTP_RETRY_BACKOFF_SEC: ${WORK_CLAIM_HTTP_RETRY_BACKOFF_SEC:-0.5}
+      WORK_CLAIM_WATCHDOG_SEC: ${WORK_CLAIM_WATCHDOG_SEC:-90}
       # 上报本机各 Celery ready 队列的待处理数量。
       CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-cpu_compute}
       CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-satellite_download,cpu_compute,ingest,decloud,storage}

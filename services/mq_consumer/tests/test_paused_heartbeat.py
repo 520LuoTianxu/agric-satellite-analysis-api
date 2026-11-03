@@ -77,7 +77,10 @@ class WorkerHeartbeatTests(unittest.TestCase):
 
 class LoopHeartbeatTests(unittest.TestCase):
     def test_paused_loop_sends_throttled_heartbeats_and_never_claims(self) -> None:
-        ticks = iter([0.0, 5.0, 31.0, 40.0])
+        # 时间轴：t=0 启动；t=0/5/31/40 四次暂停轮询；mark_loop_progress 也读 monotonic。
+        clock = {"t": 0.0}
+        ticks = [0.0, 5.0, 31.0, 40.0]
+        tick_i = {"i": 0}
         rounds = {"n": 0}
 
         def paused():
@@ -86,7 +89,15 @@ class LoopHeartbeatTests(unittest.TestCase):
                 raise KeyboardInterrupt
             return True, 410, 100
 
+        def fake_mono():
+            # 心跳节流用轮次时间；其它调用（last_ok）复用当前轮时间，避免 StopIteration。
+            if tick_i["i"] < len(ticks):
+                clock["t"] = ticks[tick_i["i"]]
+                tick_i["i"] += 1
+            return clock["t"]
+
         client = MagicMock()
+        client.is_closed = False
         client.__enter__ = MagicMock(return_value=client)
         client.__exit__ = MagicMock(return_value=False)
         with (
@@ -96,9 +107,16 @@ class LoopHeartbeatTests(unittest.TestCase):
             patch.object(wa, "worker_heartbeat", return_value="endpoint") as hb,
             patch.object(wa, "_client", return_value=client),
             patch.object(wa, "claim_types", return_value=["satellite_batch"]),
+            patch.object(wa, "claim_watchdog_sec", return_value=0.0),
             patch.object(wa.time, "sleep"),
-            patch.object(wa.time, "monotonic", side_effect=lambda: next(ticks)),
-            patch.dict(os.environ, {"WORK_CLAIM_PAUSED_HEARTBEAT_SEC": "30"}),
+            patch.object(wa.time, "monotonic", side_effect=fake_mono),
+            patch.dict(
+                os.environ,
+                {
+                    "WORK_CLAIM_PAUSED_HEARTBEAT_SEC": "30",
+                    "WORK_CLAIM_WATCHDOG_SEC": "0",
+                },
+            ),
         ):
             with self.assertRaises(KeyboardInterrupt):
                 wa.run_forever()
