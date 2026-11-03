@@ -15,15 +15,19 @@ Keep SyncSession PG writes until ``INGEST_PG_WRITES=0`` or claim+HTTP.
 from __future__ import annotations
 
 import atexit
+import logging
 import math
 import os
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from numbers import Integral, Real
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "InternalApiError",
@@ -67,6 +71,11 @@ __all__ = [
     "weather_land_ids",
     "weekly_index_prepare",
     "satellite_history_backfill",
+    "http_timeout",
+    "http_retries",
+    "http_retry_backoff_sec",
+    "is_transient_http_error",
+    "request_with_retry",
 ]
 
 
@@ -196,6 +205,146 @@ def _headers() -> dict[str, str]:
     return headers
 
 
+
+
+_TRANSIENT_STATUS = frozenset({502, 503, 504})
+
+
+def http_retries() -> int:
+    """瞬时 TLS/超时/协议错误时的额外重试次数（不含首次）。"""
+    try:
+        return max(0, int(_env("INTERNAL_API_HTTP_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+def http_retry_backoff_sec() -> float:
+    try:
+        return max(0.05, float(_env("INTERNAL_API_HTTP_RETRY_BACKOFF_SEC", "0.5")))
+    except ValueError:
+        return 0.5
+
+
+def http_timeout(total: float | None = None) -> httpx.Timeout:
+    """Internal API 出站超时：read/write 用 total，connect/pool 单独收紧。"""
+    if total is None:
+        try:
+            total_v = max(5.0, float(_env("INTERNAL_API_HTTP_TIMEOUT_SEC", "30")))
+        except ValueError:
+            total_v = 30.0
+    else:
+        total_v = max(1.0, float(total))
+    try:
+        connect = max(1.0, float(_env("INTERNAL_API_HTTP_CONNECT_TIMEOUT_SEC", "5")))
+    except ValueError:
+        connect = 5.0
+    connect = min(connect, total_v)
+    pool = min(connect, 5.0)
+    return httpx.Timeout(
+        total_v, connect=connect, read=total_v, write=total_v, pool=pool
+    )
+
+
+def _as_timeout(timeout: float | httpx.Timeout) -> httpx.Timeout:
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+    return http_timeout(float(timeout))
+
+
+def is_transient_http_error(exc: BaseException) -> bool:
+    """网关 TLS/超时/协议抖动与 502–504 视为可重试。"""
+    if isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+            httpx.LocalProtocolError,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response is not None and exc.response.status_code in _TRANSIENT_STATUS
+    msg = str(exc).upper()
+    markers = (
+        "UNEXPECTED_EOF",
+        "EOF OCCURRED IN VIOLATION OF PROTOCOL",
+        "HANDSHAKE OPERATION TIMED OUT",
+        "SERVER DISCONNECTED",
+        "CONNECTION RESET",
+        "SSL: ",
+        "SSLEOF",
+    )
+    if any(marker in msg for marker in markers):
+        return isinstance(exc, (OSError, httpx.HTTPError, ConnectionError, TimeoutError))
+    return False
+
+
+def request_with_retry(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    retries: int | None = None,
+    backoff: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    on_transient: Callable[[BaseException, int], None] | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    """对 Internal API 出站请求做短退避重试；非瞬时错误立即抛出。"""
+    extra = http_retries() if retries is None else max(0, int(retries))
+    delay = (
+        http_retry_backoff_sec() if backoff is None else max(0.0, float(backoff))
+    )
+    attempts = extra + 1
+    op = getattr(client, method.lower())
+    last_exc: BaseException | None = None
+    for i in range(attempts):
+        try:
+            response = op(url, **kwargs)
+            if (
+                getattr(response, "status_code", None) in _TRANSIENT_STATUS
+                and i + 1 < attempts
+            ):
+                logger.warning(
+                    "internal_api_http_retry status=%s attempt=%s/%s method=%s url=%s",
+                    response.status_code,
+                    i + 1,
+                    attempts,
+                    method.upper(),
+                    url,
+                )
+                if on_transient is not None:
+                    on_transient(
+                        httpx.HTTPStatusError(
+                            f"HTTP {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        ),
+                        i,
+                    )
+                sleep(delay * (2**i))
+                continue
+            return response
+        except Exception as exc:
+            last_exc = exc
+            if not is_transient_http_error(exc) or i + 1 >= attempts:
+                raise
+            logger.warning(
+                "internal_api_http_retry error=%s attempt=%s/%s method=%s url=%s",
+                exc,
+                i + 1,
+                attempts,
+                method.upper(),
+                url,
+            )
+            if on_transient is not None:
+                on_transient(exc, i)
+            sleep(delay * (2**i))
+    assert last_exc is not None
+    raise last_exc
+
+
 def _json_safe_payload(value: Any) -> Any:
     """Recursively normalize values before encoding an internal API payload."""
     if isinstance(value, dict):
@@ -210,7 +359,7 @@ def _json_safe_payload(value: Any) -> Any:
 
 
 @contextmanager
-def internal_client(*, timeout: float = 30.0) -> Iterator[httpx.Client]:
+def internal_client(*, timeout: float | httpx.Timeout = 30.0) -> Iterator[httpx.Client]:
     base = api_base_url()
     if not base:
         raise InternalApiError("API_BASE_URL is required for internal HTTP")
@@ -218,14 +367,15 @@ def internal_client(*, timeout: float = 30.0) -> Iterator[httpx.Client]:
 
     with httpx.Client(
         base_url=base,
-        timeout=timeout,
+        timeout=_as_timeout(timeout),
         headers=_headers(),
         event_hooks={"request": [attach_trace_header]},
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
     ) as client:
         yield client
 
 
-def _cached_result_client(*, timeout: float = 30.0) -> httpx.Client:
+def _cached_result_client(*, timeout: float | httpx.Timeout = 30.0) -> httpx.Client:
     """复用下载worker的回执HTTP连接池，避免每景结果都重新握手。"""
     global _result_client, _result_client_pid
 
@@ -259,9 +409,10 @@ def _cached_result_client(*, timeout: float = 30.0) -> httpx.Client:
         headers.pop(TRACE_HEADER, None)
         _result_client = httpx.Client(
             base_url=base,
-            timeout=timeout,
+            timeout=_as_timeout(timeout),
             headers=headers,
             event_hooks={"request": [attach_trace_header]},
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
         _result_client_pid = pid
         return _result_client
@@ -316,7 +467,7 @@ def ensure_admin_task_run(
     }
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath("/internal/admin/task-runs/ensure"), json=body)
+        r = request_with_retry(c, "POST", _ipath("/internal/admin/task-runs/ensure"), json=body)
         _raise_for_status(r, context="admin/task-runs/ensure")
         data = r.json()
         if not isinstance(data, dict) or not data.get("run_id"):
@@ -353,7 +504,7 @@ def update_admin_task_run_status(
         body["error"] = str(error)[:4000]
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath(f"/internal/admin/task-runs/{run_id}/status"), json=body)
+        r = request_with_retry(c, "POST", _ipath(f"/internal/admin/task-runs/{run_id}/status"), json=body)
         _raise_for_status(r, context="admin/task-runs/status")
         data = r.json()
         if not isinstance(data, dict):
@@ -377,7 +528,7 @@ def resolve_land(
         params["land_id"] = str(land_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath("/internal/lands/resolve"), params=params)
+        r = request_with_retry(c, "GET", _ipath("/internal/lands/resolve"), params=params)
         _raise_for_status(r, context="lands/resolve")
         data = r.json()
         if not isinstance(data, dict):
@@ -398,7 +549,7 @@ def get_job(
     """GET /v1/internal/jobs/{id}."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath(f"/internal/jobs/{job_id}"))
+        r = request_with_retry(c, "GET", _ipath(f"/internal/jobs/{job_id}"))
         _raise_for_status(r, context="jobs/get")
         data = r.json()
         if not isinstance(data, dict):
@@ -422,10 +573,10 @@ def patch_job(
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         if include_progress:
-            r = c.patch(_ipath(f"/internal/jobs/{job_id}"), json=body)
+            r = request_with_retry(c, "PATCH", _ipath(f"/internal/jobs/{job_id}"), json=body)
         else:
             # 高频增量进度只需确认写入状态，省去往返不断增长的产品历史列表。
-            r = c.patch(
+            r = request_with_retry(c, "PATCH", 
                 _ipath(f"/internal/jobs/{job_id}"),
                 json=body,
                 params={"include_progress": "false"},
@@ -445,7 +596,7 @@ def patch_job(
 def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
     """把已发布 S2 的去云排程意图持久化到 API 数据库 Outbox。"""
     with internal_client(timeout=30.0) as client:
-        response = client.post(
+        response = request_with_retry(client, "POST", 
             _ipath("/internal/decloud-schedules"),
             json=_json_safe_payload(payload),
         )
@@ -471,7 +622,7 @@ def claim_decloud_schedules(
         "lease_seconds": lease_seconds,
     }
     with internal_client(timeout=30.0) as client:
-        response = client.post(
+        response = request_with_retry(client, "POST", 
             _ipath("/internal/decloud-schedules/claim"),
             json=body,
         )
@@ -485,7 +636,7 @@ def claim_decloud_schedules(
 def complete_decloud_schedule(*, schedule_key: str, worker_id: str) -> None:
     """确认去云计划已经成功交给下游 Celery 队列。"""
     with internal_client() as client:
-        response = client.post(
+        response = request_with_retry(client, "POST", 
             _ipath(f"/internal/decloud-schedules/{schedule_key}/complete"),
             json={"worker_id": worker_id},
         )
@@ -497,7 +648,7 @@ def fail_decloud_schedule(
 ) -> dict[str, Any]:
     """保留排程失败原因并按 API 端退避时间重新开放领取。"""
     with internal_client() as client:
-        response = client.post(
+        response = request_with_retry(client, "POST", 
             _ipath(f"/internal/decloud-schedules/{schedule_key}/fail"),
             json={"worker_id": worker_id, "error": str(error)[:2000]},
         )
@@ -516,7 +667,7 @@ def agri_land_meta(
     """GET /v1/internal/agri/lands/{land_id} → land_id, tile_id, land_name, …"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath(f"/internal/agri/lands/{land_id}"))
+        r = request_with_retry(c, "GET", _ipath(f"/internal/agri/lands/{land_id}"))
         _raise_for_status(r, context="agri/land")
         data = r.json()
         if not isinstance(data, dict):
@@ -538,7 +689,7 @@ def agri_scene_dates(
     """读取单个地块的已入库日期，沿用原始影像过滤口径以安全跳过重复处理。"""
 
     def _do(c: httpx.Client) -> list[str]:
-        r = c.get(
+        r = request_with_retry(c, "GET", 
             _ipath(f"/internal/agri/lands/{land_id}/scenes/dates"),
             params={"sensor": sensor},
         )
@@ -587,7 +738,7 @@ def agri_satellite_batch_inputs(
         body["existing_algorithm_version"] = str(existing_algorithm_version)
 
     def _do(c: httpx.Client) -> list[dict[str, Any]]:
-        r = c.post(_ipath("/internal/agri/satellite-batch/inputs"), json=body)
+        r = request_with_retry(c, "POST", _ipath("/internal/agri/satellite-batch/inputs"), json=body)
         _raise_for_status(r, context="agri/satellite-batch/inputs")
         data = r.json()
         items = data.get("items") if isinstance(data, dict) else None
@@ -610,7 +761,7 @@ def project_harvest_inputs(
     """项目收获分析运行输入：去重后地块（裁剪几何）+ 全部地块边界 + 参数。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath(f"/internal/project-harvest/runs/{run_id}/inputs"))
+        r = request_with_retry(c, "GET", _ipath(f"/internal/project-harvest/runs/{run_id}/inputs"))
         _raise_for_status(r, context="project-harvest/inputs")
         data = r.json()
         if not isinstance(data, dict) or "parcels" not in data:
@@ -640,7 +791,7 @@ def project_cog_inputs(
         body["land_ids"] = [str(x) for x in land_ids]
 
     def _do(c: httpx.Client) -> list[dict[str, Any]]:
-        r = c.post(_ipath("/internal/agri/project-cogs/inputs"), json=body)
+        r = request_with_retry(c, "POST", _ipath("/internal/agri/project-cogs/inputs"), json=body)
         _raise_for_status(r, context="agri/project-cogs/inputs")
         data = r.json()
         groups = data.get("groups") if isinstance(data, dict) else None
@@ -662,7 +813,7 @@ def agri_scenes_summary(
     """GET /v1/internal/agri/lands/{id}/scenes/summary."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath(f"/internal/agri/lands/{land_id}/scenes/summary"))
+        r = request_with_retry(c, "GET", _ipath(f"/internal/agri/lands/{land_id}/scenes/summary"))
         _raise_for_status(r, context="agri/scenes-summary")
         data = r.json()
         if not isinstance(data, dict):
@@ -686,7 +837,7 @@ def evaluate_land_alerts(
     body = {"replace_open": bool(replace_open)}
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath(f"/internal/lands/{land_id}/alerts/evaluate"), json=body)
+        r = request_with_retry(c, "POST", _ipath(f"/internal/lands/{land_id}/alerts/evaluate"), json=body)
         _raise_for_status(r, context="lands/alerts/evaluate")
         data = r.json()
         if not isinstance(data, dict):
@@ -708,7 +859,7 @@ def land_geom(
     """GET /v1/internal/lands/{id}/geom."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(
+        r = request_with_retry(c, "GET", 
             _ipath(f"/internal/lands/{land_id}/geom"),
             params={"include_geojson": 1 if include_geojson else 0},
         )
@@ -733,7 +884,7 @@ def apply_results(
     """POST /v1/internal/results/apply — domain upserts without a work_item lease."""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(
+        r = request_with_retry(c, "POST", 
             _ipath("/internal/results/apply"),
             json={"result": _json_safe_payload(result)},
         )
@@ -758,7 +909,12 @@ def cache_results(
     """将单景处理结果回执到 API 队列，默认复用进程级 HTTP 连接池。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath("/internal/results/cache"), json={"result": result})
+        r = request_with_retry(
+            c,
+            "POST",
+            _ipath("/internal/results/cache"),
+            json={"result": result},
+        )
         _raise_for_status(r, context="results/cache")
         data = r.json()
         if not isinstance(data, dict):
@@ -767,7 +923,15 @@ def cache_results(
 
     if client is not None:
         return _do(client)
-    return _do(_cached_result_client(timeout=timeout))
+
+    try:
+        return _do(_cached_result_client(timeout=timeout))
+    except Exception as exc:
+        if not is_transient_http_error(exc):
+            raise
+        # 连接池可能整池半开：重建后再完整重试一轮。
+        close_cached_result_client()
+        return _do(_cached_result_client(timeout=timeout))
 
 
 def complete_work(
@@ -783,7 +947,7 @@ def complete_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath(f"/internal/work/{work_id}/complete"), json=body)
+        r = request_with_retry(c, "POST", _ipath(f"/internal/work/{work_id}/complete"), json=body)
         _raise_for_status(r, context="work/complete")
         data = r.json()
         if not isinstance(data, dict):
@@ -810,7 +974,7 @@ def fail_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath(f"/internal/work/{work_id}/fail"), json=body)
+        r = request_with_retry(c, "POST", _ipath(f"/internal/work/{work_id}/fail"), json=body)
         _raise_for_status(r, context="work/fail")
         data = r.json()
         if not isinstance(data, dict):
@@ -836,7 +1000,7 @@ def progress_work(
         body["worker_id"] = worker_id
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath(f"/internal/work/{work_id}/progress"), json=body)
+        r = request_with_retry(c, "POST", _ipath(f"/internal/work/{work_id}/progress"), json=body)
         _raise_for_status(r, context="work/progress")
         data = r.json()
         if not isinstance(data, dict):
@@ -865,7 +1029,7 @@ def assessment_bundle(
         params["date_to"] = str(date_to)[:10]
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(
+        r = request_with_retry(c, "GET", 
             _ipath(f"/internal/lands/{land_id}/assessment-bundle"),
             params=params or None,
         )
@@ -893,7 +1057,7 @@ def season_growth_inputs(
     params = {"date_from": str(date_from)[:10], "date_to": str(date_to)[:10]}
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(
+        r = request_with_retry(c, "GET", 
             _ipath(f"/internal/lands/{land_id}/season-growth-inputs"),
             params=params,
         )
@@ -936,7 +1100,7 @@ def satellite_history_backfill(
     params = {"as_of": as_of} if as_of else None
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        response = c.post(_ipath("/internal/schedule/satellite-history"), params=params)
+        response = request_with_retry(c, "POST", _ipath("/internal/schedule/satellite-history"), params=params)
         _raise_for_status(response, context="schedule/satellite-history")
         data = response.json()
         if not isinstance(data, dict):
@@ -956,7 +1120,7 @@ def _daily_satellite_request(
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     def request(c: httpx.Client) -> dict[str, Any]:
-        response = c.post(path, params=params)
+        response = request_with_retry(c, "POST", path, params=params)
         _raise_for_status(response, context="schedule/daily-satellite")
         result = response.json()
         if not isinstance(result, dict):
@@ -977,7 +1141,7 @@ def weekly_index_prepare(
     """POST /v1/internal/schedule/weekly-index：过期地块 + 在 API 建 Job。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath("/internal/schedule/weekly-index"))
+        r = request_with_retry(c, "POST", _ipath("/internal/schedule/weekly-index"))
         _raise_for_status(r, context="schedule/weekly-index")
         data = r.json()
         if not isinstance(data, dict):
@@ -997,7 +1161,7 @@ def weather_land_ids(
     """GET /v1/internal/schedule/weather-lands：每日天气要拉的 land_id。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(_ipath("/internal/schedule/weather-lands"))
+        r = request_with_retry(c, "GET", _ipath("/internal/schedule/weather-lands"))
         _raise_for_status(r, context="schedule/weather-lands")
         data = r.json()
         if not isinstance(data, dict):
@@ -1030,7 +1194,7 @@ def refresh_overview_stats(
         params["after_land_id"] = str(after_land_id)
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(_ipath("/internal/schedule/overview-refresh"), params=params)
+        r = request_with_retry(c, "POST", _ipath("/internal/schedule/overview-refresh"), params=params)
         _raise_for_status(r, context="schedule/overview-refresh")
         data = r.json()
         if not isinstance(data, dict):
@@ -1052,7 +1216,7 @@ def finalize_overview_stats(
     """POST /v1/internal/schedule/overview-refresh/finalize：提交 OSS 结果包。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.post(
+        r = request_with_retry(c, "POST", 
             _ipath("/internal/schedule/overview-refresh/finalize"),
             json={"result_oss_key": str(result_oss_key)},
         )
@@ -1083,7 +1247,7 @@ def data_readiness(
         params["date_to"] = str(date_to)[:10]
 
     def _do(c: httpx.Client) -> dict[str, Any]:
-        r = c.get(
+        r = request_with_retry(c, "GET", 
             _ipath(f"/internal/lands/{land_id}/data-readiness"),
             params=params or None,
         )

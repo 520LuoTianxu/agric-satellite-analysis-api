@@ -20,6 +20,7 @@ from agric_satellite_analysis_common.internal_api import (
     agri_satellite_batch_inputs,
     get_job,
     internal_client,
+    is_transient_http_error,
     patch_job,
 )
 from agric_satellite_analysis_common.scheduled_land_filter import (
@@ -72,7 +73,7 @@ from app.tasks.sentinel1 import (
     search_s1_scenes,
 )
 from app.worker import celery_app
-from celery.exceptions import MaxRetriesExceededError, SoftTimeLimitExceeded
+from celery.exceptions import MaxRetriesExceededError, Retry, SoftTimeLimitExceeded
 
 logger = structlog.get_logger()
 
@@ -913,6 +914,29 @@ def _download_scene(
     return downloaded, scl
 
 
+def _publish_land_with_http_retry(*args, **kwargs) -> bool:
+    """发布地块结果；网关 TLS/瞬时 HTTP 失败时短退避重试，避免单次 EOF 直接记失败。"""
+    attempts = 4
+    delay = 0.5
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return _publish_land(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not is_transient_http_error(exc) or i + 1 >= attempts:
+                raise
+            logger.warning(
+                "satellite_batch_publish_http_retry",
+                attempt=i + 1,
+                attempts=attempts,
+                error=str(exc)[:300],
+            )
+            time.sleep(delay * (2**i))
+    assert last_exc is not None
+    raise last_exc
+
+
 def _publish_land(
     scene,
     sensor,
@@ -1320,7 +1344,7 @@ def _process_one_batch_scene(
                         flush_abandoned_progress()
                         return
                     # 限制同时裁栅格/生成预览的地块数，避免移出状态锁后放大峰值内存。
-                    published = _publish_land(
+                    published = _publish_land_with_http_retry(
                         product_scene,
                         sensor,
                         land,
@@ -2293,8 +2317,38 @@ def process_satellite_batch(
         except Exception:
             logger.exception("satellite_batch_failure_report_failed", job_id=job_id)
         raise
+    except Retry:
+        raise
     except Exception as exc:
         # HTTP和下载错误必须可见，不得把未产出数据的分组默认为成功。
+        if is_transient_http_error(exc):
+            retries = int(getattr(getattr(self, "request", None), "retries", 0) or 0)
+            if retries < SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES:
+                logger.warning(
+                    "satellite_batch_transient_http_requeue",
+                    job_id=job_id,
+                    retries=retries,
+                    error=str(exc)[:300],
+                )
+                try:
+                    patch_job(
+                        job_id,
+                        {
+                            "status": "running",
+                            "progress_json": {
+                                "stage": "transient_http_requeue",
+                                "last_error": str(exc)[:500],
+                            },
+                            "merge_progress": True,
+                            "error": f"瞬时网关/TLS错误，稍后重试: {exc}"[:2000],
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "satellite_batch_transient_http_state_update_failed",
+                        job_id=job_id,
+                    )
+                raise self.retry(exc=exc, countdown=15)
         compensation_scheduled = False
         try:
             if job is None:
