@@ -95,8 +95,9 @@ class InternalApiClientTests(unittest.TestCase):
         with httpx.Client(
             base_url="http://api.test", transport=httpx.MockTransport(handler)
         ) as client:
-            with self.assertRaises(ia.InternalApiError):
-                ia.daily_satellite_finalize("run-1", client=client)
+            with patch.object(ia, "http_retries", return_value=0):
+                with self.assertRaises(ia.InternalApiError):
+                    ia.daily_satellite_finalize("run-1", client=client)
 
 
     def test_resolve_land_empty_path_prefix(self) -> None:
@@ -415,3 +416,116 @@ class TraceHeaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HttpTimeoutConfigTests(unittest.TestCase):
+    def test_connect_timeout_defaults_shorter_than_total(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("INTERNAL_API_HTTP_TIMEOUT_SEC", None)
+            os.environ.pop("INTERNAL_API_HTTP_CONNECT_TIMEOUT_SEC", None)
+            t = ia.http_timeout()
+        self.assertEqual(t.read, 30.0)
+        self.assertEqual(t.connect, 5.0)
+        self.assertEqual(t.pool, 5.0)
+
+    def test_connect_timeout_clamped_to_total(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "INTERNAL_API_HTTP_TIMEOUT_SEC": "8",
+                "INTERNAL_API_HTTP_CONNECT_TIMEOUT_SEC": "30",
+            },
+        ):
+            t = ia.http_timeout()
+        self.assertEqual(t.read, 8.0)
+        self.assertEqual(t.connect, 8.0)
+
+
+class RequestWithRetryTests(unittest.TestCase):
+    def test_retries_connect_error_then_succeeds(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        ok = MagicMock()
+        ok.status_code = 200
+        client.get.side_effect = [
+            httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF"),
+            httpx.ConnectTimeout("handshake timed out"),
+            ok,
+        ]
+        sleeps: list[float] = []
+        out = ia.request_with_retry(
+            client,
+            "GET",
+            "/v1/internal/jobs/x",
+            retries=3,
+            backoff=0.5,
+            sleep=sleeps.append,
+        )
+        self.assertIs(out, ok)
+        self.assertEqual(client.get.call_count, 3)
+        self.assertEqual(sleeps, [0.5, 1.0])
+
+    def test_retries_503_then_succeeds(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        bad = MagicMock(status_code=503)
+        ok = MagicMock(status_code=200)
+        client.post.side_effect = [bad, ok]
+        sleeps: list[float] = []
+        out = ia.request_with_retry(
+            client,
+            "POST",
+            "/v1/internal/results/cache",
+            retries=2,
+            backoff=0.25,
+            sleep=sleeps.append,
+        )
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_non_transient_does_not_retry(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.get.side_effect = ValueError("boom")
+        with self.assertRaises(ValueError):
+            ia.request_with_retry(
+                client, "GET", "/x", retries=5, backoff=0.1, sleep=lambda _s: None
+            )
+        self.assertEqual(client.get.call_count, 1)
+
+    def test_is_transient_http_error_ssl_markers(self) -> None:
+        self.assertTrue(ia.is_transient_http_error(httpx.ConnectError("SSL EOF")))
+        self.assertTrue(
+            ia.is_transient_http_error(
+                httpx.ConnectError(
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1011)"
+                )
+            )
+        )
+        self.assertTrue(
+            ia.is_transient_http_error(httpx.RemoteProtocolError("Server disconnected"))
+        )
+        self.assertFalse(ia.is_transient_http_error(RuntimeError("business boom")))
+
+    def test_get_job_retries_transport_error(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise httpx.ConnectError(
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF", request=request
+                )
+            return httpx.Response(200, json={"id": "job-1", "status": "queued"})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(base_url="http://api.test", transport=transport)
+        with patch.object(ia, "http_retries", return_value=3), patch.object(
+            ia, "http_retry_backoff_sec", return_value=0.01
+        ), patch.object(ia.time, "sleep", return_value=None):
+            out = ia.get_job("job-1", client=client)
+        self.assertEqual(out["id"], "job-1")
+        self.assertEqual(calls["n"], 3)
