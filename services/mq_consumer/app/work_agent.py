@@ -321,13 +321,121 @@ def _headers() -> dict[str, str]:
 
 
 def api_http_timeout() -> httpx.Timeout:
-    """Claim 环出站 HTTP 硬超时，避免 progress/complete/claim 无限挂起。"""
+    """Claim 环出站 HTTP 硬超时，避免 progress/complete/claim 无限挂起。
+
+    connect 单独收紧（默认 5s），降低网关 TLS 半开时长时间卡在握手的概率；
+    pool 同样短，避免从坏连接池里干等。
+    """
     try:
         total = max(5.0, float(_env("WORK_CLAIM_HTTP_TIMEOUT_SEC", "20")))
     except ValueError:
         total = 20.0
-    connect = min(10.0, total)
-    return httpx.Timeout(total, connect=connect, read=total, write=total, pool=connect)
+    try:
+        connect = max(1.0, float(_env("WORK_CLAIM_HTTP_CONNECT_TIMEOUT_SEC", "5")))
+    except ValueError:
+        connect = 5.0
+    connect = min(connect, total)
+    pool = min(connect, 5.0)
+    return httpx.Timeout(total, connect=connect, read=total, write=total, pool=pool)
+
+
+def claim_http_retries() -> int:
+    """瞬时 TLS/超时/协议错误时的额外重试次数（不含首次）。"""
+    try:
+        return max(0, int(_env("WORK_CLAIM_HTTP_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+def claim_http_retry_backoff_sec() -> float:
+    try:
+        return max(0.05, float(_env("WORK_CLAIM_HTTP_RETRY_BACKOFF_SEC", "0.5")))
+    except ValueError:
+        return 0.5
+
+
+def claim_watchdog_sec() -> float:
+    """无成功 claim 环进度超过该秒数则重建 httpx 客户端；0 关闭看门狗。"""
+    try:
+        raw = float(_env("WORK_CLAIM_WATCHDOG_SEC", "90"))
+    except ValueError:
+        return 90.0
+    if raw <= 0:
+        return 0.0
+    return max(15.0, raw)
+
+
+_TRANSIENT_STATUS = frozenset({502, 503, 504})
+
+
+def is_transient_http_error(exc: BaseException) -> bool:
+    """网关 TLS/超时/协议抖动视为可重试。"""
+    if isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+            httpx.LocalProtocolError,
+        ),
+    ):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response is not None and exc.response.status_code in _TRANSIENT_STATUS
+    return False
+
+
+def request_with_retry(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    retries: int | None = None,
+    backoff: float | None = None,
+    sleep: Any = time.sleep,
+    **kwargs: Any,
+) -> httpx.Response:
+    """对 Internal API 出站请求做短退避重试；成功或非瞬时错误立即返回/抛出。"""
+    extra = claim_http_retries() if retries is None else max(0, int(retries))
+    delay = (
+        claim_http_retry_backoff_sec() if backoff is None else max(0.0, float(backoff))
+    )
+    attempts = extra + 1
+    op = getattr(client, method.lower())
+    last_exc: BaseException | None = None
+    for i in range(attempts):
+        try:
+            response = op(url, **kwargs)
+            if (
+                getattr(response, "status_code", None) in _TRANSIENT_STATUS
+                and i + 1 < attempts
+            ):
+                logger.warning(
+                    "work_claim_http_retry status=%s attempt=%s/%s method=%s url=%s",
+                    response.status_code,
+                    i + 1,
+                    attempts,
+                    method.upper(),
+                    url,
+                )
+                sleep(delay * (2**i))
+                continue
+            return response
+        except Exception as exc:
+            last_exc = exc
+            if not is_transient_http_error(exc) or i + 1 >= attempts:
+                raise
+            logger.warning(
+                "work_claim_http_retry error=%s attempt=%s/%s method=%s url=%s",
+                exc,
+                i + 1,
+                attempts,
+                method.upper(),
+                url,
+            )
+            sleep(delay * (2**i))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _client() -> httpx.Client:
@@ -339,6 +447,8 @@ def _client() -> httpx.Client:
         timeout=api_http_timeout(),
         headers=_headers(),
         event_hooks={"request": [attach_trace_header]},
+        # 网关半开时不要无限复用坏连接；短保活 + 小池便于看门狗重建。
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
     )
 
 
@@ -370,7 +480,9 @@ def claim_batch(
         "pending_queue_count": pending,
         "queue_depths": depths or {},
     }
-    response = client.post(_ipath("/internal/work/claim"), json=body)
+    response = request_with_retry(
+        client, "POST", _ipath("/internal/work/claim"), json=body
+    )
     response.raise_for_status()
     return list(response.json().get("items") or [])
 
@@ -403,14 +515,18 @@ def worker_heartbeat(client: httpx.Client) -> str:
         "queue_depths": depths or {},
     }
     if not _heartbeat_endpoint_missing:
-        response = client.post(_ipath("/internal/work/worker-heartbeat"), json=body)
+        response = request_with_retry(
+            client, "POST", _ipath("/internal/work/worker-heartbeat"), json=body
+        )
         if response.status_code not in (404, 405):
             response.raise_for_status()
             return "endpoint"
         _heartbeat_endpoint_missing = True
         logger.info("worker_heartbeat endpoint missing; using zero-match claim")
     body["types"] = [HEARTBEAT_ONLY_TYPE]
-    response = client.post(_ipath("/internal/work/claim"), json=body)
+    response = request_with_retry(
+        client, "POST", _ipath("/internal/work/claim"), json=body
+    )
     response.raise_for_status()
     items = list(response.json().get("items") or [])
     if items:  # 理论上不可能；绝不静默吞掉任务
@@ -420,7 +536,9 @@ def worker_heartbeat(client: httpx.Client) -> str:
 
 
 def complete(client: httpx.Client, work_id: str, result: dict[str, Any]) -> None:
-    response = client.post(
+    response = request_with_retry(
+        client,
+        "POST",
         _ipath(f"/internal/work/{work_id}/complete"),
         json={"worker_id": worker_id(), "result": result},
     )
@@ -430,7 +548,9 @@ def complete(client: httpx.Client, work_id: str, result: dict[str, Any]) -> None
 def fail(
     client: httpx.Client, work_id: str, error: str, *, retry: bool = False
 ) -> None:
-    response = client.post(
+    response = request_with_retry(
+        client,
+        "POST",
         _ipath(f"/internal/work/{work_id}/fail"),
         json={"worker_id": worker_id(), "error": error, "retry": retry},
     )
@@ -438,7 +558,9 @@ def fail(
 
 
 def heartbeat(client: httpx.Client, work_id: str) -> None:
-    response = client.post(
+    response = request_with_retry(
+        client,
+        "POST",
         _ipath(f"/internal/work/{work_id}/heartbeat"),
         json={"worker_id": worker_id(), "lease_seconds": lease_seconds()},
     )
@@ -446,7 +568,9 @@ def heartbeat(client: httpx.Client, work_id: str) -> None:
 
 
 def progress(client: httpx.Client, work_id: str, progress_body: dict[str, Any]) -> None:
-    response = client.post(
+    response = request_with_retry(
+        client,
+        "POST",
         _ipath(f"/internal/work/{work_id}/progress"),
         json={"worker_id": worker_id(), "progress": progress_body},
     )
@@ -463,7 +587,9 @@ def report_admin_task_status(
     error: str | None = None,
 ) -> None:
     """将下载机本地 Celery 的真实状态回传给 API 管理页面。"""
-    response = client.post(
+    response = request_with_retry(
+        client,
+        "POST",
         _ipath(f"/internal/admin/task-runs/{run_id}/status"),
         json={
             "worker_name": worker_name(),
@@ -820,23 +946,79 @@ def process_item(client: httpx.Client, item: dict[str, Any]) -> None:
 
 
 def run_forever() -> None:
-    """Short-poll claim loop; only WORK_QUEUE_MODE=claim may start it."""
+    """Short-poll claim loop; only WORK_QUEUE_MODE=claim may start it.
+
+    独立看门狗线程：若超过 WORK_CLAIM_WATCHDOG_SEC 无环进度，关闭并重建
+    httpx 客户端，打断半开 TLS / 卡死连接池，避免数十分钟零领取。
+    """
     if not should_run_claim_agent():
         raise RuntimeError(
             f"claim agent refused: WORK_QUEUE_MODE={work_queue_mode()!r} "
             "(only 'claim' is allowed; dual would double-dispatch with MQ)"
         )
+    watchdog_sec = claim_watchdog_sec()
     logger.info(
-        "work_agent starting worker_id=%s api=%s interval=%s types=%s",
+        "work_agent starting worker_id=%s api=%s interval=%s types=%s "
+        "http_timeout=%s watchdog_sec=%s",
         worker_id(),
         api_base_url(),
         claim_interval_sec(),
         claim_types(),
+        api_http_timeout(),
+        watchdog_sec,
     )
-    with _client() as client:
+    state: dict[str, Any] = {
+        "client": _client(),
+        "last_ok": time.monotonic(),
+        "stop": False,
+        "resets": 0,
+    }
+    client_lock = threading.Lock()
+
+    def mark_loop_progress() -> None:
+        state["last_ok"] = time.monotonic()
+
+    def reset_client(reason: str) -> None:
+        with client_lock:
+            old = state["client"]
+            state["resets"] += 1
+            logger.warning(
+                "work_claim_watchdog_reset reason=%s resets=%s stale_sec=%.1f",
+                reason,
+                state["resets"],
+                max(0.0, time.monotonic() - float(state["last_ok"])),
+            )
+            try:
+                old.close()
+            except Exception:
+                logger.exception("work_claim_watchdog_close_failed")
+            state["client"] = _client()
+            state["last_ok"] = time.monotonic()
+
+    def watchdog_loop() -> None:
+        # 同线程无法打断卡住的 HTTP；独立线程 close 客户端以唤醒主环。
+        while not state["stop"]:
+            time.sleep(min(5.0, max(1.0, watchdog_sec / 6.0)))
+            if state["stop"] or watchdog_sec <= 0:
+                continue
+            stale = time.monotonic() - float(state["last_ok"])
+            if stale >= watchdog_sec:
+                reset_client(f"no_loop_progress_for_{stale:.0f}s")
+
+    watchdog_thread: threading.Thread | None = None
+    if watchdog_sec > 0:
+        watchdog_thread = threading.Thread(
+            target=watchdog_loop,
+            name="work-claim-watchdog",
+            daemon=True,
+        )
+        watchdog_thread.start()
+
+    try:
         paused_logged = False
         last_paused_hb = float("-inf")
         while True:
+            client = state["client"]
             try:
                 paused, backlog, cap = claim_paused_for_backlog()
                 if paused:
@@ -857,6 +1039,7 @@ def run_forever() -> None:
                             )
                         except Exception as exc:
                             logger.warning("work_claim_paused_heartbeat failed: %s", exc)
+                    mark_loop_progress()
                     time.sleep(claim_interval_sec())
                     continue
                 if paused_logged:
@@ -877,14 +1060,29 @@ def run_forever() -> None:
                         items = claim_batch(client, types=report_types, limit=1)
                 else:
                     items = claim_batch(client, limit=1)
+                # 空领取也算一次成功 poll，刷新看门狗。
+                mark_loop_progress()
                 if not items:
                     time.sleep(claim_interval_sec())
                 else:
                     for item in items:
-                        process_item(client, item)
+                        process_item(state["client"], item)
+                        mark_loop_progress()
             except Exception:
                 logger.exception("work_agent_loop_error")
+                # 仅在真实 httpx 客户端已关闭时重建；MagicMock.is_closed 不能当 bool。
+                closed = getattr(client, "is_closed", False) is True
+                if closed and state["client"] is client:
+                    reset_client("loop_saw_closed_client")
                 time.sleep(claim_interval_sec())
+    finally:
+        state["stop"] = True
+        if watchdog_thread is not None:
+            watchdog_thread.join(timeout=2.0)
+        try:
+            state["client"].close()
+        except Exception:
+            logger.exception("work_agent_client_close_failed")
 
 
 __all__ = [
@@ -908,6 +1106,11 @@ __all__ = [
     "reports_after_base_enabled",
     "split_claim_types",
     "api_http_timeout",
+    "claim_http_retries",
+    "claim_http_retry_backoff_sec",
+    "claim_watchdog_sec",
+    "is_transient_http_error",
+    "request_with_retry",
     "claim_batch",
     "claim_types",
     "pending_queue_count",
