@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -596,3 +598,70 @@ class CachedClientReuseTests(unittest.TestCase):
         closer.assert_called()
         for c in clients:
             c.close()
+
+
+class InflightLimitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env = patch.dict(
+            os.environ,
+            {
+                "API_BASE_URL": "http://api.test",
+                "INTERNAL_API_TOKEN": "tok",
+                "INTERNAL_API_MAX_INFLIGHT": "1",
+                "INTERNAL_API_HTTP_RETRY_BACKOFF_SEC": "0",
+            },
+            clear=False,
+        )
+        self.env.start()
+        ia.close_cached_result_client()
+        # force semaphore rebuild for this pid/limit
+        ia._inflight_sem = None
+        ia._inflight_sem_pid = None
+        ia._inflight_sem_limit = None
+
+    def tearDown(self) -> None:
+        ia.close_cached_result_client()
+        self.env.stop()
+
+    def test_inflight_serializes_concurrent_calls(self) -> None:
+        active = {"n": 0, "max": 0}
+        lock = threading.Lock()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            with lock:
+                active["n"] += 1
+                active["max"] = max(active["max"], active["n"])
+            time.sleep(0.05)
+            with lock:
+                active["n"] -= 1
+            return httpx.Response(200, json={"ok": True, "id": "x"})
+
+        pooled = httpx.Client(
+            base_url="http://api.test", transport=httpx.MockTransport(handler)
+        )
+        with patch.object(ia, "_cached_result_client", return_value=pooled):
+            threads = [
+                threading.Thread(target=lambda: ia.cache_results({"status": "success"}))
+                for _ in range(4)
+            ]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=5)
+        self.assertEqual(active["max"], 1)
+
+    def test_create_decloud_uses_cached_client(self) -> None:
+        methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            methods.append(request.method + ":" + request.url.path)
+            return httpx.Response(200, json={"schedule_key": "sk-1"})
+
+        pooled = httpx.Client(
+            base_url="http://api.test", transport=httpx.MockTransport(handler)
+        )
+        with patch.object(ia, "_cached_result_client", return_value=pooled) as cached:
+            out = ia.create_decloud_schedule({"land_id": "1", "date": "2024-01-01"})
+        self.assertEqual(out["schedule_key"], "sk-1")
+        cached.assert_called()
+        self.assertTrue(any(m.startswith("POST:") for m in methods))
