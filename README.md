@@ -63,9 +63,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 
 For a split deployment, start the control plane on the API machine with
 `docker-compose.api-machine.yml`; run `docker-compose.download-machine.yml`
-only on download workers.
+only on download workers (see [docs/design/download-machine.md](docs/design/download-machine.md)).
 
-Do **not** commit `.env`. Only `.env.example` is in git.
+Do **not** commit `.env` (or any `*.env.live` / `*.env.full`). Only `.env.example` is in git.
 
 | Service | URL | Purpose |
 |---|---|---|

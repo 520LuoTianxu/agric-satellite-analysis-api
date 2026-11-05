@@ -1,31 +1,29 @@
 # Download machine: host networking; optional local Redis for Celery only.
-# Primary control plane (D1+): HTTP claim → API (no MQ required).
-# See docs/design/download-host-no-direct-pg-redis.md
+# Production control plane: HTTP claim → joint-venture gateway (no CloudAMQP results).
+# Runbook: docs/design/download-machine.md
+# Design: docs/design/download-host-no-direct-pg-redis.md
+# Cutover history: docs/design/work-queue-cutover.md
 #
-# Cutover runbook: docs/design/work-queue-cutover.md
-# Usage (legacy MQ still default until WORK_QUEUE_MODE=claim):
+# Usage (claim is the download-machine default):
+#   cp .env.example .env   # fill secrets + unique WORKER_NAME
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 #     -f docker-compose.download-machine.yml --profile consumer \
-#     up -d --build ingest satellite storage beat mq_consumer decloud
+#     --profile local-redis \
+#     up -d --build redis ingest satellite storage beat mq_consumer decloud
 #
 # REDIS_URL on this host MUST be localhost (Celery broker), never API :6379.
-# Internal HTTP (D2 reads + optional D1 claim) — set in .env:
-#   API_BASE_URL=http://<api-lb>:8000
-#   # Gateway (no /v1): API_BASE_URL=https://joint-venture.cdfinance.com.cn/satellite-api
-#   #                 API_PATH_PREFIX=   (empty). Direct API: omit or /v1.
-#   API_PATH_PREFIX=/v1
+# Required .env (see .env.example "Download machine" section):
+#   API_BASE_URL=https://joint-venture.cdfinance.com.cn/satellite-api
+#   API_PATH_PREFIX=                    # empty — gateway has no /v1
 #   INTERNAL_API_TOKEN=<same as API>
-#   WORKER_NAME=download-1
-#   WORK_CLAIM_INTERVAL_SEC=4
-#   WORK_CLAIM_MAX_LOCAL_BACKLOG=100   # pause claiming when local backlog (ready+unacked) >= N; 0 = off
-#   WORK_CLAIM_HTTP_CONNECT_TIMEOUT_SEC=5
-#   WORK_CLAIM_HTTP_RETRIES=3
-#   WORK_CLAIM_WATCHDOG_SEC=90        # recreate httpx client if no claim-loop progress; 0=off
-#   WORK_QUEUE_MODE=claim   # optional; leave legacy until cutover (do not force)
-# ingest/mq_consumer also use API_BASE_URL for field/agri/job reads (D2)
-# and assessment/season-growth bundles + weather/soil geom (D4.1).
+#   WORKER_NAME=download-<unique>       # unique per machine
+#   WORK_QUEUE_MODE=claim
+#   INGEST_PG_WRITES=0 / INGEST_PG_READS=0 / INGEST_HTTP_WRITES=1
+#   DATABASE_URL= / DATABASE_URL_SYNC=  # blank on download host
+#   CLOUDAMQP_RESULT_PUBLISH=0          # never reintroduce CloudAMQP results
+#   OSS_ENDPOINT=https://{bucket}.oss-accelerate.aliyuncs.com
 #
-# Secrets stay in .env / docker-compose.dev.yml — never hard-code credentials here.
+# Secrets stay in .env — never hard-code credentials here.
 
 services:
   db:
@@ -54,16 +52,23 @@ services:
       INTERNAL_API_HTTP_CONNECT_TIMEOUT_SEC: ${INTERNAL_API_HTTP_CONNECT_TIMEOUT_SEC:-5}
       INTERNAL_API_HTTP_RETRIES: ${INTERNAL_API_HTTP_RETRIES:-3}
       INTERNAL_API_HTTP_RETRY_BACKOFF_SEC: ${INTERNAL_API_HTTP_RETRY_BACKOFF_SEC:-0.5}
-      # D3: keep 1 until cutover; set 0 to force HTTP job/result writes
-      INGEST_PG_WRITES: ${INGEST_PG_WRITES:-1}
-      INGEST_HTTP_WRITES: ${INGEST_HTTP_WRITES:-0}
+      # Cap concurrent gateway calls + reuse keepalive (joint-venture TLS)
+      INTERNAL_API_MAX_INFLIGHT: ${INTERNAL_API_MAX_INFLIGHT:-2}
+      INTERNAL_API_MAX_CONNECTIONS: ${INTERNAL_API_MAX_CONNECTIONS:-4}
+      INTERNAL_API_MAX_KEEPALIVE: ${INTERNAL_API_MAX_KEEPALIVE:-4}
+      # Throttle per-job progress PATCH (seconds between updates)
+      INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC: ${INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC:-15}
+      # D3: download host defaults to HTTP writes (no direct PG)
+      INGEST_PG_WRITES: ${INGEST_PG_WRITES:-0}
+      INGEST_PG_READS: ${INGEST_PG_READS:-0}
+      INGEST_HTTP_WRITES: ${INGEST_HTTP_WRITES:-1}
       MPLCONFIGDIR: /tmp/matplotlib
       SYNC_DB_POOL_SIZE: "8"
       SYNC_DB_MAX_OVERFLOW: "8"
       SYNC_DB_POOL_RECYCLE: "300"
       SYNC_DB_APP_NAME: "download-ingest"
       INGEST_SCENE_MAX_WORKERS: "8"
-      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-30}
+      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-600}
       SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC: ${SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC:-720}
       SATELLITE_BATCH_TIME_LIMIT_SEC: ${SATELLITE_BATCH_TIME_LIMIT_SEC:-780}
       SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES: ${SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES:-6}
@@ -191,7 +196,7 @@ services:
       # 上报本机各 Celery ready 队列的待处理数量。
       CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-cpu_compute}
       CELERY_QUEUE_NAMES: ${CELERY_QUEUE_NAMES:-satellite_download,cpu_compute,ingest,decloud,storage}
-      WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-legacy}
+      WORK_QUEUE_MODE: ${WORK_QUEUE_MODE:-claim}
       WORK_LEASE_SECONDS: ${WORK_LEASE_SECONDS:-600}
       # Celery broker must be local Redis on download host (not API Redis).
       REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
