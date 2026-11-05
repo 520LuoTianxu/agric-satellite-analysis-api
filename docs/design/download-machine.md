@@ -64,7 +64,8 @@ Receipt / `public_url` hosts stay on the ordinary regional virtual-host domain
 | `INTERNAL_API_HTTP_*` TLS retries | 30s / 5s connect / 3 retries | ingest+satellite |
 | `INTERNAL_API_MAX_INFLIGHT` | `2` | gateway concurrency cap |
 | `INTERNAL_API_MAX_CONNECTIONS` / `KEEPALIVE` | `4` / `4` | httpx pool |
-| `INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC` | `15` | progress PATCH throttle |
+| `INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC` | `45` | progress PATCH throttle |
+| `INTERNAL_API_CACHE_BUFFER` / `FLUSH_MAX` / `FLUSH_SEC` | `1` / `8` / `2` | coalesce results/cache POSTs |
 
 ## What must stay out of git
 

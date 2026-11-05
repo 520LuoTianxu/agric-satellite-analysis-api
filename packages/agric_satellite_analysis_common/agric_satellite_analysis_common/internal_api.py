@@ -39,6 +39,7 @@ __all__ = [
     "internal_api_path",
     "apply_results",
     "cache_results",
+    "flush_cached_results",
     "close_cached_result_client",
     "assessment_bundle",
     "agri_satellite_batch_inputs",
@@ -96,6 +97,10 @@ _inflight_lock = threading.Lock()
 _inflight_sem: threading.Semaphore | None = None
 _inflight_sem_pid: int | None = None
 _inflight_sem_limit: int | None = None
+_cache_buf_lock = threading.Lock()
+_cache_buf: list[dict[str, Any]] = []
+_cache_buf_timer: threading.Timer | None = None
+_cache_buf_pid: int | None = None
 
 
 def _env(name: str, default: str = "") -> str:
@@ -507,7 +512,15 @@ def _call_with_cached_client(
         return do(_cached_result_client(timeout=timeout))
 
 
-atexit.register(close_cached_result_client)
+def _atexit_flush_internal_api() -> None:
+    try:
+        flush_cached_results()
+    except Exception:
+        pass
+    close_cached_result_client()
+
+
+atexit.register(_atexit_flush_internal_api)
 
 
 def _raise_for_status(r: httpx.Response, *, context: str) -> None:
@@ -980,20 +993,42 @@ def apply_results(
         return _do(c)
 
 
-def cache_results(
+def cache_buffer_enabled() -> bool:
+    """是否合并 results/cache 回执；默认开启，设 INTERNAL_API_CACHE_BUFFER=0 关闭。"""
+    raw = _env("INTERNAL_API_CACHE_BUFFER", "1").lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def cache_flush_max() -> int:
+    """攒满多少条 scene cache 就立刻合并 POST；默认 8。"""
+    try:
+        return max(1, int(_env("INTERNAL_API_CACHE_FLUSH_MAX", "8")))
+    except ValueError:
+        return 8
+
+
+def cache_flush_sec() -> float:
+    """最长等待多久再合并 flush；默认 2 秒。"""
+    try:
+        return max(0.05, float(_env("INTERNAL_API_CACHE_FLUSH_SEC", "2")))
+    except ValueError:
+        return 2.0
+
+
+def _post_cache_result(
     result: dict[str, Any],
     *,
     client: httpx.Client | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    """将单景处理结果回执到 API 队列，默认复用进程级 HTTP 连接池。"""
+    """立即 POST /internal/results/cache（不经缓冲）。"""
 
     def _do(c: httpx.Client) -> dict[str, Any]:
         r = request_with_retry(
             c,
             "POST",
             _ipath("/internal/results/cache"),
-            json={"result": result},
+            json={"result": _json_safe_payload(result)},
         )
         _raise_for_status(r, context="results/cache")
         data = r.json()
@@ -1004,6 +1039,117 @@ def cache_results(
     if client is not None:
         return _do(client)
     return _call_with_cached_client(_do, timeout=timeout)
+
+
+def _cancel_cache_timer_locked() -> None:
+    global _cache_buf_timer
+    timer = _cache_buf_timer
+    _cache_buf_timer = None
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+
+
+def _schedule_cache_timer_locked() -> None:
+    """在缓冲未满时安排一次延期 flush。"""
+    global _cache_buf_timer
+    if _cache_buf_timer is not None:
+        return
+    delay = cache_flush_sec()
+
+    def _fire() -> None:
+        try:
+            flush_cached_results()
+        except Exception as exc:
+            logger.warning("internal_api_cache_buffer_flush_failed err=%s", exc)
+
+    timer = threading.Timer(delay, _fire)
+    timer.daemon = True
+    _cache_buf_timer = timer
+    timer.start()
+
+
+def _coalesce_cache_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 land_id 合并 oss_urls，把多次握手压成少量 POST。"""
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        extras = item.get("extras") if isinstance(item.get("extras"), dict) else {}
+        land_id = str(extras.get("land_id") or "").strip() or "_"
+        oss = item.get("oss_urls") if isinstance(item.get("oss_urls"), dict) else {}
+        if land_id not in groups:
+            order.append(land_id)
+            merged = {
+                "status": item.get("status") or "success",
+                "oss_urls": dict(oss),
+            }
+            if extras:
+                merged["extras"] = dict(extras)
+            groups[land_id] = merged
+        else:
+            groups[land_id]["oss_urls"].update(oss)
+    return [groups[key] for key in order if groups[key].get("oss_urls")]
+
+
+def flush_cached_results(*, timeout: float = 30.0) -> list[dict[str, Any]]:
+    """冲刷进程内 results/cache 缓冲；任务收尾/失败路径必须调用。"""
+    global _cache_buf, _cache_buf_pid
+    with _cache_buf_lock:
+        _cancel_cache_timer_locked()
+        items = list(_cache_buf)
+        _cache_buf = []
+        _cache_buf_pid = os.getpid()
+    if not items:
+        return []
+    payloads = _coalesce_cache_items(items)
+    outs: list[dict[str, Any]] = []
+    for payload in payloads:
+        outs.append(_post_cache_result(payload, timeout=timeout))
+    if len(items) != len(payloads):
+        logger.info(
+            "internal_api_cache_buffer_flushed pending=%s posts=%s",
+            len(items),
+            len(payloads),
+        )
+    return outs
+
+
+def cache_results(
+    result: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 30.0,
+    flush: bool = False,
+) -> dict[str, Any]:
+    """将场景结果回执到 API 队列；默认短缓冲合并，复用进程级连接池。"""
+    if client is not None or flush or not cache_buffer_enabled():
+        if flush:
+            # 先冲刷旧缓冲，再强制发送当前这条，保证顺序与完整。
+            flush_cached_results(timeout=timeout)
+        return _post_cache_result(result, client=client, timeout=timeout)
+
+    pid = os.getpid()
+    should_flush = False
+    with _cache_buf_lock:
+        global _cache_buf_pid
+        if _cache_buf_pid is not None and _cache_buf_pid != pid:
+            # prefork 子进程不可继承父进程未发送缓冲。
+            _cache_buf.clear()
+            _cancel_cache_timer_locked()
+        _cache_buf_pid = pid
+        _cache_buf.append(dict(result))
+        if len(_cache_buf) >= cache_flush_max():
+            should_flush = True
+        else:
+            _schedule_cache_timer_locked()
+    if should_flush:
+        outs = flush_cached_results(timeout=timeout)
+        return outs[-1] if outs else {"ok": True, "queued": True, "buffered": True}
+    return {"ok": True, "queued": True, "buffered": True}
 
 
 def complete_work(

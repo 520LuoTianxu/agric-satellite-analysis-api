@@ -55,8 +55,9 @@ def cache_scene_result_http(
     label: str,
     json_url: str,
     extras: dict[str, Any],
+    flush: bool = False,
 ) -> dict[str, Any]:
-    """通过 API HTTP 将 OSS 结果放入 Redis 待入库队列，不在下载机直写 PG。"""
+    """通过 API HTTP 将 OSS 结果放入 Redis 待入库队列；默认可短缓冲合并握手。"""
     from agric_satellite_analysis_common.internal_api import cache_results
 
     result = cache_results(
@@ -66,10 +67,18 @@ def cache_scene_result_http(
             "extras": extras,
         },
         timeout=30.0,
+        flush=flush,
     )
     if result.get("ok") is False:
         raise RuntimeError(f"results/cache rejected scene result: {result}")
     return result
+
+
+def flush_scene_result_cache_http() -> None:
+    """冲刷未发送的 results/cache 缓冲（任务收尾/失败必调）。"""
+    from agric_satellite_analysis_common.internal_api import flush_cached_results
+
+    flush_cached_results()
 
 
 def get_job_http(job_id: str) -> dict[str, Any] | None:

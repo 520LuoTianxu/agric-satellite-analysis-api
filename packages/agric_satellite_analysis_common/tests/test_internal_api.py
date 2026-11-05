@@ -353,6 +353,102 @@ class HttpWritesTests(unittest.TestCase):
         self.assertTrue(out["queued"])
         self.assertEqual(out["ttl_seconds"], 86400)
 
+    def test_cache_results_buffer_coalesces_by_land(self) -> None:
+        posts: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/internal/results/cache")
+            payload = json.loads(request.content.decode("utf-8"))
+            posts.append(payload)
+            return httpx.Response(
+                200,
+                json={"ok": True, "queued": True, "ttl_seconds": 86400},
+            )
+
+        transport = httpx.MockTransport(handler)
+        # Direct client bypasses buffer; exercise process pool path via patch.
+        with patch.dict(
+            os.environ,
+            {
+                "API_BASE_URL": "http://api.test",
+                "INTERNAL_API_TOKEN": "tok",
+                "INTERNAL_API_CACHE_BUFFER": "1",
+                "INTERNAL_API_CACHE_FLUSH_MAX": "8",
+                "INTERNAL_API_CACHE_FLUSH_SEC": "30",
+            },
+            clear=False,
+        ):
+            ia.flush_cached_results()
+            with patch.object(ia, "_call_with_cached_client") as call_mock:
+                def _run(fn, timeout=30.0):
+                    client = httpx.Client(base_url="http://api.test", transport=transport)
+                    try:
+                        return fn(client)
+                    finally:
+                        client.close()
+
+                call_mock.side_effect = _run
+                for i in range(3):
+                    out = ia.cache_results(
+                        {
+                            "status": "success",
+                            "oss_urls": {f"2026-09-1{i}_S2": f"https://oss.test/{i}"},
+                            "extras": {
+                                "land_id": "L1",
+                                "scene_id": f"s{i}",
+                                "date": f"2026-09-1{i}",
+                                "sensor": "S2",
+                            },
+                        }
+                    )
+                    self.assertTrue(out.get("buffered"))
+                self.assertEqual(posts, [])
+                flushed = ia.flush_cached_results()
+                self.assertEqual(len(flushed), 1)
+                self.assertEqual(len(posts), 1)
+                oss = posts[0]["result"]["oss_urls"]
+                self.assertEqual(len(oss), 3)
+                self.assertEqual(posts[0]["result"]["extras"]["land_id"], "L1")
+
+    def test_cache_results_flush_flag_sends_immediately(self) -> None:
+        posts: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"ok": True, "queued": True})
+
+        transport = httpx.MockTransport(handler)
+        with patch.dict(
+            os.environ,
+            {
+                "API_BASE_URL": "http://api.test",
+                "INTERNAL_API_TOKEN": "tok",
+                "INTERNAL_API_CACHE_BUFFER": "1",
+                "INTERNAL_API_CACHE_FLUSH_MAX": "8",
+            },
+            clear=False,
+        ):
+            ia.flush_cached_results()
+            with patch.object(ia, "_call_with_cached_client") as call_mock:
+                def _run(fn, timeout=30.0):
+                    client = httpx.Client(base_url="http://api.test", transport=transport)
+                    try:
+                        return fn(client)
+                    finally:
+                        client.close()
+
+                call_mock.side_effect = _run
+                out = ia.cache_results(
+                    {
+                        "status": "success",
+                        "oss_urls": {"a": "https://oss.test/a"},
+                        "extras": {"land_id": "L2"},
+                    },
+                    flush=True,
+                )
+                self.assertTrue(out.get("queued"))
+                self.assertEqual(len(posts), 1)
+
 
 class AssessmentBundleClientTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -609,6 +705,7 @@ class InflightLimitTests(unittest.TestCase):
                 "INTERNAL_API_TOKEN": "tok",
                 "INTERNAL_API_MAX_INFLIGHT": "1",
                 "INTERNAL_API_HTTP_RETRY_BACKOFF_SEC": "0",
+                "INTERNAL_API_CACHE_BUFFER": "0",
             },
             clear=False,
         )

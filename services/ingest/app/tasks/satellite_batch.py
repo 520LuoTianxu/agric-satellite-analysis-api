@@ -1658,17 +1658,17 @@ def process_satellite_batch(
         published_progress_revision = 0
 
         def _progress_min_interval_sec() -> float:
-            """进度 PATCH 最小间隔，减轻 joint-venture 网关 TLS 压力；0 关闭节流。"""
+            """进度 PATCH 最小间隔，减轻 joint-venture 网关 TLS 压力；0 关闭节流。默认 45s。"""
             try:
                 return max(
                     0.0,
                     float(
-                        os.environ.get("INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC", "15")
-                        or "15"
+                        os.environ.get("INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC", "45")
+                        or "45"
                     ),
                 )
             except ValueError:
-                return 15.0
+                return 45.0
 
         last_progress_sent_at = {"t": 0.0}
 
@@ -1678,6 +1678,18 @@ def process_satellite_batch(
             默认同隔节流；收尾/超时/放弃必须 force=True，保证回执不丢。
             """
             nonlocal published_products_persisted, published_progress_revision
+            if force:
+                # 收尾前先冲刷 cache 缓冲，避免 force progress 与残留下的握手抢同一条 TLS。
+                try:
+                    from app.core.http_mode import flush_scene_result_cache_http
+
+                    flush_scene_result_cache_http()
+                except Exception as flush_exc:
+                    logger.warning(
+                        "satellite_batch_cache_flush_failed",
+                        job_id=job_id,
+                        error=str(flush_exc)[:300],
+                    )
             with progress_patch_lock:
                 with state_lock:
                     if progress_revision["value"] <= published_progress_revision:
@@ -2043,7 +2055,6 @@ def process_satellite_batch(
                             job_id=job_id,
                             land_id=land["meta"]["land_id"],
                         )
-        # 先尽力提交未确认的场景回执；迟到worker后续仍会按同一幂等增量补写。
         patch_progress(force=True)
         status_progress = progress_snapshot()
         status = "failed" if status_progress["failed"] else "completed"
