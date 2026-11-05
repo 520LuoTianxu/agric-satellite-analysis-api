@@ -74,6 +74,8 @@ __all__ = [
     "http_timeout",
     "http_retries",
     "http_retry_backoff_sec",
+    "http_client_limits",
+    "http_max_inflight",
     "is_transient_http_error",
     "request_with_retry",
 ]
@@ -90,6 +92,10 @@ class InternalApiError(RuntimeError):
 _result_client_lock = threading.Lock()
 _result_client: httpx.Client | None = None
 _result_client_pid: int | None = None
+_inflight_lock = threading.Lock()
+_inflight_sem: threading.Semaphore | None = None
+_inflight_sem_pid: int | None = None
+_inflight_sem_limit: int | None = None
 
 
 def _env(name: str, default: str = "") -> str:
@@ -225,6 +231,61 @@ def http_retry_backoff_sec() -> float:
         return 0.5
 
 
+def http_max_inflight() -> int:
+    """单进程同时打 joint-venture 的上限；0 关闭。默认 2 抑制握手风暴。"""
+    try:
+        return max(0, int(_env("INTERNAL_API_MAX_INFLIGHT", "2")))
+    except ValueError:
+        return 2
+
+
+def http_client_limits() -> httpx.Limits:
+    """进程级连接池大小；默认收紧，逼 keepalive 复用而不是并发新建握手。"""
+    try:
+        max_conn = max(1, int(_env("INTERNAL_API_MAX_CONNECTIONS", "4")))
+    except ValueError:
+        max_conn = 4
+    try:
+        max_keep = max(1, int(_env("INTERNAL_API_MAX_KEEPALIVE", "4")))
+    except ValueError:
+        max_keep = 4
+    max_keep = min(max_keep, max_conn)
+    return httpx.Limits(max_keepalive_connections=max_keep, max_connections=max_conn)
+
+
+def _inflight_semaphore() -> threading.Semaphore | None:
+    """按 pid/限额懒建信号量；fork 后子进程各自一份。"""
+    global _inflight_sem, _inflight_sem_pid, _inflight_sem_limit
+    limit = http_max_inflight()
+    if limit <= 0:
+        return None
+    pid = os.getpid()
+    with _inflight_lock:
+        if (
+            _inflight_sem is not None
+            and _inflight_sem_pid == pid
+            and _inflight_sem_limit == limit
+        ):
+            return _inflight_sem
+        _inflight_sem = threading.Semaphore(limit)
+        _inflight_sem_pid = pid
+        _inflight_sem_limit = limit
+        return _inflight_sem
+
+
+@contextmanager
+def _gateway_inflight_slot() -> Iterator[None]:
+    sem = _inflight_semaphore()
+    if sem is None:
+        yield
+        return
+    sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
+
+
 def http_timeout(total: float | None = None) -> httpx.Timeout:
     """Internal API 出站超时：read/write 用 total，connect/pool 单独收紧。"""
     if total is None:
@@ -301,7 +362,8 @@ def request_with_retry(
     last_exc: BaseException | None = None
     for i in range(attempts):
         try:
-            response = op(url, **kwargs)
+            with _gateway_inflight_slot():
+                response = op(url, **kwargs)
             if (
                 getattr(response, "status_code", None) in _TRANSIENT_STATUS
                 and i + 1 < attempts
@@ -370,7 +432,7 @@ def internal_client(*, timeout: float | httpx.Timeout = 30.0) -> Iterator[httpx.
         timeout=_as_timeout(timeout),
         headers=_headers(),
         event_hooks={"request": [attach_trace_header]},
-        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        limits=http_client_limits(),
     ) as client:
         yield client
 
@@ -412,7 +474,7 @@ def _cached_result_client(*, timeout: float | httpx.Timeout = 30.0) -> httpx.Cli
             timeout=_as_timeout(timeout),
             headers=headers,
             event_hooks={"request": [attach_trace_header]},
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            limits=http_client_limits(),
         )
         _result_client_pid = pid
         return _result_client
@@ -608,8 +670,11 @@ def patch_job(
 
 def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
     """把已发布 S2 的去云排程意图持久化到 API 数据库 Outbox。"""
-    with internal_client(timeout=30.0) as client:
-        response = request_with_retry(client, "POST", 
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        response = request_with_retry(
+            c,
+            "POST",
             _ipath("/internal/decloud-schedules"),
             json=_json_safe_payload(payload),
         )
@@ -618,6 +683,8 @@ def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(data, dict) or not data.get("schedule_key"):
             raise InternalApiError("decloud-schedules/create returned invalid response")
         return data
+
+    return _call_with_cached_client(_do, timeout=30.0)
 
 
 def claim_decloud_schedules(

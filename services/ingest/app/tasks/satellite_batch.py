@@ -1663,12 +1663,12 @@ def process_satellite_batch(
                 return max(
                     0.0,
                     float(
-                        os.environ.get("INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC", "5")
-                        or "5"
+                        os.environ.get("INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC", "15")
+                        or "15"
                     ),
                 )
             except ValueError:
-                return 5.0
+                return 15.0
 
         last_progress_sent_at = {"t": 0.0}
 
