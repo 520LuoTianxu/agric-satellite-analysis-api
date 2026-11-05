@@ -529,3 +529,70 @@ class RequestWithRetryTests(unittest.TestCase):
             out = ia.get_job("job-1", client=client)
         self.assertEqual(out["id"], "job-1")
         self.assertEqual(calls["n"], 3)
+
+
+class CachedClientReuseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env = patch.dict(
+            os.environ,
+            {"API_BASE_URL": "http://api.test", "INTERNAL_API_TOKEN": "tok"},
+            clear=False,
+        )
+        self.env.start()
+        ia.close_cached_result_client()
+
+    def tearDown(self) -> None:
+        ia.close_cached_result_client()
+        self.env.stop()
+
+    def test_patch_job_reuses_cached_client(self) -> None:
+        methods: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            methods.append(request.method)
+            return httpx.Response(200, json={"id": "job-1", "status": "running"})
+
+        transport = httpx.MockTransport(handler)
+        pooled = httpx.Client(base_url="http://api.test", transport=transport)
+        with patch.object(ia, "_cached_result_client", return_value=pooled) as cached:
+            out1 = ia.patch_job("job-1", {"status": "running"}, include_progress=False)
+            out2 = ia.patch_job(
+                "job-1",
+                {"progress_json": {"scenes_done": 1}, "merge_progress": True},
+                include_progress=False,
+            )
+            out3 = ia.get_job("job-1")
+        self.assertEqual(out1["status"], "running")
+        self.assertEqual(out2["status"], "running")
+        self.assertEqual(out3["id"], "job-1")
+        self.assertEqual(cached.call_count, 3)
+        self.assertEqual(methods, ["PATCH", "PATCH", "GET"])
+
+    def test_cached_client_rebuilds_after_transient(self) -> None:
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise httpx.ConnectTimeout("handshake timed out")
+            return httpx.Response(200, json={"id": "job-1", "status": "queued"})
+
+        clients = []
+
+        def make_client(*, timeout=30.0):
+            c = httpx.Client(
+                base_url="http://api.test",
+                transport=httpx.MockTransport(handler),
+            )
+            clients.append(c)
+            return c
+
+        with patch.object(ia, "_cached_result_client", side_effect=make_client), patch.object(
+            ia, "http_retries", return_value=0
+        ), patch.object(ia, "close_cached_result_client") as closer:
+            out = ia.get_job("job-1")
+        self.assertEqual(out["id"], "job-1")
+        self.assertEqual(len(clients), 2)
+        closer.assert_called()
+        for c in clients:
+            c.close()
