@@ -4,6 +4,11 @@
 .env
 .env.local
 .env.*.local
+*.env.live
+*.env.full
+dotenv.live
+download-machine.env*
+!.env.example
 
 # ── Python ───────────────────────────────────────────────────────────
 __pycache__/

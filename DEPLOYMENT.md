@@ -132,6 +132,10 @@ sudo docker compose \
 ```
 
 Run `docker-compose.download-machine.yml` separately on download machines.
+Copy `.env.example` → `.env`, fill the **Download machine** section (unique
+`WORKER_NAME`, `INTERNAL_API_TOKEN`, OSS credentials), then follow
+[docs/design/download-machine.md](docs/design/download-machine.md).
+Never commit the real `.env`.
 
 First build takes 5–10 minutes (downloading images, compiling). Subsequent deploys are faster with Docker layer caching.
 
