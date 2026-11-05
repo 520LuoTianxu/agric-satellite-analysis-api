@@ -1194,7 +1194,7 @@ def _process_one_batch_scene(
     def flush_abandoned_progress() -> None:
         """已超时景若有成功发布，及时保存场景回执供总览核验。"""
         try:
-            patch_progress()
+            patch_progress(force=True)
         except Exception:
             logger.exception(
                 "satellite_batch_abandoned_progress_patch_failed",
@@ -1657,8 +1657,26 @@ def process_satellite_batch(
         published_products_persisted = 0
         published_progress_revision = 0
 
-        def patch_progress() -> None:
-            """快照共享进度后在独立锁内提交，避免锁住场景状态等待HTTP。"""
+        def _progress_min_interval_sec() -> float:
+            """进度 PATCH 最小间隔，减轻 joint-venture 网关 TLS 压力；0 关闭节流。"""
+            try:
+                return max(
+                    0.0,
+                    float(
+                        os.environ.get("INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC", "5")
+                        or "5"
+                    ),
+                )
+            except ValueError:
+                return 5.0
+
+        last_progress_sent_at = {"t": 0.0}
+
+        def patch_progress(*, force: bool = False) -> None:
+            """快照共享进度后在独立锁内提交，避免锁住场景状态等待HTTP。
+
+            默认同隔节流；收尾/超时/放弃必须 force=True，保证回执不丢。
+            """
             nonlocal published_products_persisted, published_progress_revision
             with progress_patch_lock:
                 with state_lock:
@@ -1695,6 +1713,16 @@ def process_satellite_batch(
                         }
                     }
                     patch["published_products_delta"] = delta
+                now = time.monotonic()
+                interval = _progress_min_interval_sec()
+                if (
+                    not force
+                    and interval > 0
+                    and last_progress_sent_at["t"] > 0
+                    and (now - last_progress_sent_at["t"]) < interval
+                ):
+                    # 不推进游标：下次 force/间隔到时仍带上累计 delta。
+                    return
                 patch_job(
                     job_id,
                     {"progress_json": patch, "merge_progress": True},
@@ -1703,6 +1731,7 @@ def process_satellite_batch(
                 # 只在服务端确认成功后推进快照游标；失败重试可重复提交幂等回执。
                 published_products_persisted = product_count
                 published_progress_revision = revision
+                last_progress_sent_at["t"] = now
 
         def progress_snapshot() -> dict:
             """复制进度列表，避免迟到worker与Celery结果序列化并发读写。"""
@@ -1849,7 +1878,7 @@ def process_satellite_batch(
                                     progress_revision["value"] += 1
                                     should_patch = True
                             if should_patch:
-                                patch_progress()
+                                patch_progress(force=True)
                             logger.exception(
                                 "satellite_batch_scene_worker_crashed",
                                 job_id=job_id,
@@ -1927,7 +1956,7 @@ def process_satellite_batch(
                                 progress_revision["value"] += 1
                         if no_abandoned_scenes:
                             continue
-                        patch_progress()
+                        patch_progress(force=True)
                         timeout_progress = progress_snapshot()
                         logger.warning(
                             "scene_straggler_timeout",
@@ -2015,7 +2044,7 @@ def process_satellite_batch(
                             land_id=land["meta"]["land_id"],
                         )
         # 先尽力提交未确认的场景回执；迟到worker后续仍会按同一幂等增量补写。
-        patch_progress()
+        patch_progress(force=True)
         status_progress = progress_snapshot()
         status = "failed" if status_progress["failed"] else "completed"
         if status == "failed" and _partial_complete_ok(status_progress):

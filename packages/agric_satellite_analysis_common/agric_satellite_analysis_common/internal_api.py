@@ -430,6 +430,21 @@ def close_cached_result_client(*_args: Any, **_kwargs: Any) -> None:
         client.close()
 
 
+def _call_with_cached_client(
+    do: Callable[[httpx.Client], Any],
+    *,
+    timeout: float | httpx.Timeout = 30.0,
+) -> Any:
+    """高频 Internal API 走进程级连接池；TLS/EOF 半开时整池重建再试一轮。"""
+    try:
+        return do(_cached_result_client(timeout=timeout))
+    except Exception as exc:
+        if not is_transient_http_error(exc):
+            raise
+        close_cached_result_client()
+        return do(_cached_result_client(timeout=timeout))
+
+
 atexit.register(close_cached_result_client)
 
 
@@ -558,8 +573,7 @@ def get_job(
 
     if client is not None:
         return _do(client)
-    with internal_client() as c:
-        return _do(c)
+    return _call_with_cached_client(_do)
 
 
 def patch_job(
@@ -589,8 +603,7 @@ def patch_job(
 
     if client is not None:
         return _do(client)
-    with internal_client() as c:
-        return _do(c)
+    return _call_with_cached_client(_do)
 
 
 def create_decloud_schedule(payload: dict[str, Any]) -> dict[str, Any]:
@@ -923,15 +936,7 @@ def cache_results(
 
     if client is not None:
         return _do(client)
-
-    try:
-        return _do(_cached_result_client(timeout=timeout))
-    except Exception as exc:
-        if not is_transient_http_error(exc):
-            raise
-        # 连接池可能整池半开：重建后再完整重试一轮。
-        close_cached_result_client()
-        return _do(_cached_result_client(timeout=timeout))
+    return _call_with_cached_client(_do, timeout=timeout)
 
 
 def complete_work(
