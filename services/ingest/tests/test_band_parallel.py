@@ -15,6 +15,8 @@ from app.core.band_parallel import (
     band_read_timeout_sec,
     effective_band_workers,
     gdal_read_slot,
+    gdal_slot_snapshot,
+    max_gdal_orphan_slots,
     reset_band_gdal_limit,
     run_parallel_band_jobs,
 )
@@ -143,7 +145,8 @@ class RunParallelBandJobsTests(unittest.TestCase):
         def _scene() -> None:
             run_parallel_band_jobs({"a": 1, "b": 2}, _fn, scene_workers=1)
 
-        with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "2"}):
+        # cap=4 reserves 2 slots for orphans, so live overlap is at most 2.
+        with patch.dict(os.environ, {"INGEST_BAND_MAX_WORKERS": "4"}):
             reset_band_gdal_limit()
             threads = [threading.Thread(target=_scene) for _ in range(3)]
             for t in threads:
@@ -229,11 +232,11 @@ class RunParallelBandJobsTests(unittest.TestCase):
     def test_band_read_timeout_default_and_disable(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("BAND_READ_TIMEOUT_SEC", None)
-            self.assertEqual(band_read_timeout_sec(), 20.0)
+            self.assertEqual(band_read_timeout_sec(), 60.0)
         with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "0"}):
             self.assertEqual(band_read_timeout_sec(), 0.0)
         with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "nope"}):
-            self.assertEqual(band_read_timeout_sec(), 20.0)
+            self.assertEqual(band_read_timeout_sec(), 60.0)
 
 
 class BandReadWallTimeoutTests(unittest.TestCase):
@@ -313,6 +316,62 @@ class BandReadWallTimeoutTests(unittest.TestCase):
             release_hang.set()
             self.assertTrue(acquired_after_timeout.wait(2))
             probe.join(timeout=2)
+
+    def test_orphans_cannot_fill_half_the_cap(self) -> None:
+        self.assertEqual(max_gdal_orphan_slots(1), 0)
+        self.assertEqual(max_gdal_orphan_slots(2), 1)
+        self.assertEqual(max_gdal_orphan_slots(8), 4)
+
+        hang = threading.Event()
+        started = threading.Barrier(3)
+
+        def _fn(_key: str, _value: int) -> int:
+            started.wait(2)
+            hang.wait(5)
+            return 1
+
+        def _probe(acquired: threading.Event) -> None:
+            with gdal_read_slot():
+                acquired.set()
+
+        with patch.dict(
+            os.environ,
+            {
+                "INGEST_BAND_MAX_WORKERS": "4",
+                "BAND_READ_MAX_ATTEMPTS": "1",
+                "BAND_READ_TIMEOUT_SEC": "0.2",
+            },
+        ):
+            reset_band_gdal_limit()
+            workers = []
+            errors = []
+
+            def _run(key: str) -> None:
+                try:
+                    run_parallel_band_jobs({key: 1}, _fn)
+                except Exception as exc:  # noqa: BLE001 — collect for assertion
+                    errors.append(exc)
+
+            for key in ("A", "B"):
+                thread = threading.Thread(target=_run, args=(key,), daemon=True)
+                workers.append(thread)
+                thread.start()
+            started.wait(2)
+            for thread in workers:
+                thread.join(timeout=2)
+            self.assertEqual(len(errors), 2)
+            cap, live, orphans, max_orphans = gdal_slot_snapshot()
+            self.assertEqual((cap, live, orphans, max_orphans), (4, 0, 2, 2))
+
+            acquired = threading.Event()
+            probe = threading.Thread(target=_probe, args=(acquired,), daemon=True)
+            probe.start()
+            self.assertTrue(acquired.wait(1), "reserved live slots should stay available")
+            hang.set()
+            probe.join(timeout=2)
+            for thread in workers:
+                thread.join(timeout=2)
+
 
 
 

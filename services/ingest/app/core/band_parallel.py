@@ -43,7 +43,7 @@ def _band_log(event: str, *, level: str = "info", **kwargs) -> None:
 
 _DEFAULT_BAND_WORKERS = 8
 _gdal_limit_lock = threading.Lock()
-_gdal_limit: threading.BoundedSemaphore | None = None
+_gdal_limit: "_GdalSlotGate | None" = None
 _gdal_limit_n = 0
 _read_local = threading.local()
 
@@ -123,15 +123,21 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 
 def band_read_timeout_sec() -> float:
-    """Wall-clock seconds for one band-read attempt. Default 20; ``<= 0`` disables the watchdog."""
-    raw = os.environ.get("BAND_READ_TIMEOUT_SEC", "20")
+    """Wall-clock seconds for one band-read attempt. Default 60; ``<= 0`` disables the watchdog."""
+    raw = os.environ.get("BAND_READ_TIMEOUT_SEC", "60")
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return 20.0
+        return 60.0
     if value <= 0:
         return 0.0
     return value
+
+
+def max_gdal_orphan_slots(cap: int | None = None) -> int:
+    """Hung GDAL reads may occupy at most half the process cap (0 when cap is 1)."""
+    n = band_max_workers() if cap is None else int(cap)
+    return max(0, n // 2)
 
 
 def _unwrap_thread_result(box: dict[str, object]) -> object:
@@ -168,9 +174,9 @@ def _spawn_timed_call(
 def _run_fn_holding_slot(fn: Callable[[], object], timeout_sec: float) -> object:
     """Hold a GDAL slot while ``fn`` runs.
 
-    On wall-clock timeout the blocked GDAL/curl call cannot be killed, so the
-    slot stays reserved until that thread finishes and a reaper releases it.
-    That avoids letting a new read overlap an in-flight GDAL call.
+    On wall-clock timeout the blocked GDAL/curl call cannot be killed, so that
+    call keeps counting as an orphan until it returns. Orphans are capped at
+    half the process GDAL cap so live reads still have reserved slots.
     """
     if getattr(_read_local, "active", False):
         if timeout_sec <= 0:
@@ -184,39 +190,41 @@ def _run_fn_holding_slot(fn: Callable[[], object], timeout_sec: float) -> object
         with gdal_read_slot():
             return fn()
 
-    slot = _gdal_band_limit()
-    slot.acquire()
+    gate = _gdal_slot_gate()
+    gate.acquire_live()
     _read_local.active = True
     released = False
 
-    def _release() -> None:
+    def _release_live() -> None:
         nonlocal released
         if released:
             return
         released = True
         _read_local.active = False
-        slot.release()
+        gate.release_live()
 
     try:
         thread, box, timed_out = _spawn_timed_call(fn, timeout_sec)
         if timed_out:
+            gate.convert_live_to_orphan()
+            released = True
+            _read_local.active = False
+
             def _reap() -> None:
                 thread.join()
-                slot.release()
+                gate.release_orphan()
 
             threading.Thread(
                 target=_reap, daemon=True, name="ingest-band-slot-reap"
             ).start()
-            released = True
-            _read_local.active = False
             raise TimeoutError(f"band read exceeded {timeout_sec:g}s")
         try:
             return _unwrap_thread_result(box)
         finally:
-            _release()
+            _release_live()
     except Exception:
         if not released:
-            _release()
+            _release_live()
         raise
 
 
@@ -251,21 +259,73 @@ def effective_band_workers(n_bands: int, scene_workers: int = 1) -> int:
 
 
 def reset_band_gdal_limit() -> None:
-    """Drop the cached semaphore (tests that change the env cap)."""
+    """Drop the cached slot gate (tests that change the env cap)."""
     global _gdal_limit, _gdal_limit_n
     with _gdal_limit_lock:
         _gdal_limit = None
         _gdal_limit_n = 0
 
 
-def _gdal_band_limit() -> threading.BoundedSemaphore:
+class _GdalSlotGate:
+    """Process-wide GDAL cap with reserved slots for live reads.
+
+    Hung (orphaned) calls cannot occupy more than half the cap when cap >= 2,
+    so new live reads can still start. cap=1 has no reserve: the single slot
+    stays held until the orphan returns.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.max_orphans = max_gdal_orphan_slots(cap)
+        self._cond = threading.Condition()
+        self.live = 0
+        self.orphans = 0
+
+    def _can_start_live(self) -> bool:
+        if self.live + self.orphans >= self.cap:
+            return False
+        return self.live < self.cap - self.max_orphans
+
+    def acquire_live(self) -> None:
+        with self._cond:
+            while not self._can_start_live():
+                self._cond.wait()
+            self.live += 1
+
+    def release_live(self) -> None:
+        with self._cond:
+            self.live -= 1
+            self._cond.notify_all()
+
+    def convert_live_to_orphan(self) -> None:
+        with self._cond:
+            self.live -= 1
+            self.orphans += 1
+            self._cond.notify_all()
+
+    def release_orphan(self) -> None:
+        with self._cond:
+            self.orphans -= 1
+            self._cond.notify_all()
+
+    def snapshot(self) -> tuple[int, int, int, int]:
+        with self._cond:
+            return self.cap, self.live, self.orphans, self.max_orphans
+
+
+def _gdal_slot_gate() -> _GdalSlotGate:
     global _gdal_limit, _gdal_limit_n
     n = band_max_workers()
     with _gdal_limit_lock:
         if _gdal_limit is None or _gdal_limit_n != n:
-            _gdal_limit = threading.BoundedSemaphore(n)
+            _gdal_limit = _GdalSlotGate(n)
             _gdal_limit_n = n
         return _gdal_limit
+
+
+def gdal_slot_snapshot() -> tuple[int, int, int, int]:
+    """Return ``(cap, live, orphans, max_orphans)`` for tests."""
+    return _gdal_slot_gate().snapshot()
 
 
 @contextmanager
@@ -274,12 +334,14 @@ def gdal_read_slot():
     if getattr(_read_local, "active", False):
         yield
         return
-    with _gdal_band_limit():
-        _read_local.active = True
-        try:
-            yield
-        finally:
-            _read_local.active = False
+    gate = _gdal_slot_gate()
+    gate.acquire_live()
+    _read_local.active = True
+    try:
+        yield
+    finally:
+        _read_local.active = False
+        gate.release_live()
 
 
 def run_parallel_band_jobs(
@@ -530,6 +592,8 @@ __all__ = [
     "band_read_timeout_sec",
     "effective_band_workers",
     "gdal_read_slot",
+    "gdal_slot_snapshot",
+    "max_gdal_orphan_slots",
     "reset_band_gdal_limit",
     "run_parallel_band_jobs",
 ]
