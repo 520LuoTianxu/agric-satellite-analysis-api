@@ -24,16 +24,17 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 
 | Env | Default | Meaning |
 |---|---|---|
-| `INGEST_SCENE_MAX_WORKERS` | `8` | Thread pool size for per-scene download+process (bench stable-fast default). Independent of Celery `--concurrency` (compose satellite default is 4). Override via env; avoid >8 unless measured. |
-| `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent windowed band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 2 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. Cap stays at 8: timeouts now free the slot immediately, and hedging may open one extra connection per in-flight read. |
-| `GDAL_SLOT_WAIT_SEC` | `20` | Fail a band immediately if no slot is free in time, so later 1-2s jobs are not stuck behind a stalled queue. |
+| `INGEST_SCENE_MAX_WORKERS` | `8` | Thread pool size for per-scene download+process (bench stable-fast default). Independent of Celery `--concurrency` (compose satellite default is 6). Override via env; avoid >8 unless measured. |
+| `INGEST_SCENE_MAX_INFLIGHT` | `1` | Process-wide cap on scenes doing windowed IO at once (same domain as the slot cap: one Celery prefork worker). Default 1 so a started S2 scene can use the 8 slots to finish its bands. Six satellite workers can still run six scenes in parallel. |
+| `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent windowed band reads. A started scene uses `min(n_bands, cap, cap // inflight)` band threads. Cap stays at 8: timeouts free the slot immediately, and hedging may open one extra connection per in-flight read. |
+| `GDAL_SLOT_WAIT_SEC` | `20` | Fail that band immediately if no HTTP slot is free in time. This is admission failure, not a hung read: it is retryable and does not increment scene fail-fast. |
 | `S1_GDAL_CURL_CHUNK_SIZE` / `WINDOWED_GDAL_CURL_CHUNK_SIZE` | `262144` | Block size for leftover GDAL HTTP and for the httpx Range cache. S1_* overrides win for S1 Env. |
 | `WINDOWED_GDAL_*` / `S1_GDAL_*` caches | `64MiB` | Per-Env VSI caches for local decode (S2+S1). |
 | `S1_GDAL_HTTP_VERSION` / `GDAL_HTTP_VERSION` | `1.1` | Conservative leftover GDAL HTTP (multiplex off, `GDAL_HTTP_MULTIRANGE=SERIAL`). Windowed Range I/O itself uses httpx, not vsicurl. |
 | `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the slot. Hard HTTP timeouts are not retried on the same connection. |
 | `BAND_READ_TIMEOUT_SEC` | `20` | Per-request HTTP read/total timeout and parent wall for one band attempt. Timeouts cancel and free the slot immediately. Do not use 20s as a whole-scene or whole-job budget. |
 | `BAND_READ_HEDGE_AFTER_SEC` | `5` | If the first Range request has not succeeded, start a second connection and keep the first success. Skipped when a recent window already has a high timeout rate. `0` disables hedging. |
-| `BAND_SCENE_MAX_TIMEOUTS` / `BAND_SCENE_BUDGET_SEC` | `2` / `60` | Skip remaining bands of a scene after N timeouts, or once the scene wall budget is exhausted, so S2 does not queue 13 doomed reads. |
+| `BAND_SCENE_MAX_TIMEOUTS` / `BAND_SCENE_BUDGET_SEC` | `2` / `60` | Skip remaining bands after N real hung-read timeouts, or once in-slot IO time reaches the budget. Slot-wait time does not count. |
 | `BAND_WINDOW_CACHE` | `1` in compose | Shared already-reprojected scene-window cache so retries/reruns do not reopen remote COGs. Code default is off when the env var is unset. |
 | `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `20` | Leftover GDAL/libcurl connect and per-request timeouts. Windowed reads use `BAND_READ_*` via httpx instead. |
 | `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |

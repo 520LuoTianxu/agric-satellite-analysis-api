@@ -156,8 +156,15 @@ def band_scene_max_timeouts() -> int:
 
 
 def band_scene_budget_sec() -> float:
-    """Skip remaining bands once a scene has run this long. Default 60s."""
+    """Skip remaining bands once in-slot IO for a scene has run this long. Default 60s."""
     from app.core.cog_http import band_scene_budget_sec as _impl
+
+    return _impl()
+
+
+def scene_max_inflight() -> int:
+    """Process-wide cap on scenes doing windowed IO at once. Default 1."""
+    from app.core.band_parallel import scene_max_inflight as _impl
 
     return _impl()
 

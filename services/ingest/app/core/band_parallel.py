@@ -13,8 +13,12 @@ FIFO slot gate. A lone scene uses ``min(cap, n_bands)``.
 
 Slot acquire has its own wait timeout (``GDAL_SLOT_WAIT_SEC``). Timed-out
 Range/HTTP work is cancelled and the slot is released immediately so a
-later 1-2s read can start. A scene that already has two band timeouts
-(or that exhausts ``BAND_SCENE_BUDGET_SEC``) skips remaining bands.
+later 1-2s read can start. A scene that already has two *read* timeouts
+(or that exhausts ``BAND_SCENE_BUDGET_SEC`` of in-slot IO time) skips
+remaining bands. Slot-wait admission failures are retryable and do not
+count toward that fail-fast counter. ``INGEST_SCENE_MAX_INFLIGHT``
+(default 1, same process scope as the slot cap) limits how many scenes
+may be in IO at once so a started scene can finish its bands.
 """
 
 from __future__ import annotations
@@ -61,6 +65,10 @@ _gdal_limit_lock = threading.Lock()
 _gdal_limit: "_GdalSlotGate | None" = None
 _gdal_limit_n = 0
 _read_local = threading.local()
+_scene_inflight_lock = threading.Lock()
+_scene_inflight: "_SceneInflightGate | None" = None
+_scene_inflight_n = 0
+_scene_local = threading.local()
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -85,6 +93,22 @@ def band_max_workers() -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return _DEFAULT_BAND_WORKERS
+
+
+def scene_max_inflight() -> int:
+    """Process-wide cap on scenes doing windowed IO at once.
+
+    Shares the slot-cap domain (one Celery prefork worker). Default 1 so a
+    started S2 scene can use the 8 HTTP slots to finish its bands instead
+    of many scenes each grabbing one band and then waiting out.
+    """
+    raw = os.environ.get("INGEST_SCENE_MAX_INFLIGHT")
+    if raw is None or str(raw).strip() == "":
+        return 1
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
 
 
 def band_read_max_attempts() -> int:
@@ -184,39 +208,67 @@ def _spawn_timed_call(
     return thread, box, False
 
 
-def _run_fn_holding_slot(fn: Callable[[], object], timeout_sec: float) -> tuple[object, int]:
+def _run_fn_holding_slot(
+    fn: Callable[[], object],
+    timeout_sec: float,
+    *,
+    on_io_start: Callable[[], None] | None = None,
+    on_io_end: Callable[[], None] | None = None,
+) -> tuple[object, int]:
     """Acquire a slot (with wait timeout), run ``fn``, and return ``(value, wait_ms)``.
 
     The slot is released as soon as the parent declares a timeout or the call
     returns. Hung work is cancelled via the attempt context; a brief over-cap
     is possible only if a C-level decode ignores cancel, which is no longer the
-    HTTP path.
+    HTTP path. ``on_io_start`` / ``on_io_end`` book-end in-slot time for the
+    scene budget (not called when admission fails).
     """
     wait_timeout = gdal_slot_wait_sec()
     gate = _gdal_slot_gate()
     t_wait = time.perf_counter()
+    io_started = False
 
     def _wait_ms() -> int:
         return int((time.perf_counter() - t_wait) * 1000)
 
+    def _mark_io_start() -> None:
+        nonlocal io_started
+        if io_started:
+            return
+        io_started = True
+        if on_io_start is not None:
+            on_io_start()
+
+    def _mark_io_end() -> None:
+        nonlocal io_started
+        if not io_started:
+            return
+        io_started = False
+        if on_io_end is not None:
+            on_io_end()
+
     if getattr(_read_local, "active", False):
         wait_ms = _wait_ms()
-        if timeout_sec <= 0:
-            return fn(), wait_ms
-        with band_attempt_context(timeout_sec) as ctx:
-            thread, box, timed_out = _spawn_timed_call(fn, timeout_sec, ctx.cancel)
-            if timed_out:
-                ctx.cancel.set()
-                ctx.close_inflight()
-                _band_log(
-                    "band_read_killed",
-                    level="warning",
-                    timeout_sec=timeout_sec,
-                    wait_ms=wait_ms,
-                    io_ms=int(timeout_sec * 1000),
-                )
-                raise BandReadTimeout(f"band read exceeded {timeout_sec:g}s")
-            return _unwrap_thread_result(box), wait_ms
+        _mark_io_start()
+        try:
+            if timeout_sec <= 0:
+                return fn(), wait_ms
+            with band_attempt_context(timeout_sec) as ctx:
+                thread, box, timed_out = _spawn_timed_call(fn, timeout_sec, ctx.cancel)
+                if timed_out:
+                    ctx.cancel.set()
+                    ctx.close_inflight()
+                    _band_log(
+                        "band_read_killed",
+                        level="warning",
+                        timeout_sec=timeout_sec,
+                        wait_ms=wait_ms,
+                        io_ms=int(timeout_sec * 1000),
+                    )
+                    raise BandReadTimeout(f"band read exceeded {timeout_sec:g}s")
+                return _unwrap_thread_result(box), wait_ms
+        finally:
+            _mark_io_end()
 
     if not gate.acquire_live(wait_timeout):
         wait_ms = _wait_ms()
@@ -243,9 +295,11 @@ def _run_fn_holding_slot(fn: Callable[[], object], timeout_sec: float) -> tuple[
         if released:
             return
         released = True
+        _mark_io_end()
         _read_local.active = False
         gate.release_live()
 
+    _mark_io_start()
     try:
         if timeout_sec <= 0:
             try:
@@ -297,23 +351,24 @@ def effective_band_workers(n_bands: int, scene_workers: int = 1) -> int:
         scene_workers = max(1, int(scene_workers))
     except (TypeError, ValueError):
         scene_workers = 1
+    # Only scenes that can actually be in IO at once share the slot cap.
+    concurrent = max(1, min(scene_workers, scene_max_inflight()))
     if n_bands == 1:
         return 1
-    per_scene = min(n_bands, cap)
-    if scene_workers <= 1:
-        return per_scene
-    # 场景线程进入计算或发布阶段时允许少量线程超配，真正打开数仍受信号量约束。
-    thread_budget = cap * 2
-    nested = max(1, thread_budget // scene_workers)
-    return max(1, min(per_scene, nested))
+    # Do not oversubscribe above the slot cap: extra waiters used to hit
+    # GDAL_SLOT_WAIT_SEC and starve a started scene.
+    return max(1, min(n_bands, cap, cap // concurrent))
 
 
 def reset_band_gdal_limit() -> None:
-    """Drop the cached slot gate (tests that change the env cap)."""
-    global _gdal_limit, _gdal_limit_n
+    """Drop the cached slot and scene-inflight gates (tests that change env caps)."""
+    global _gdal_limit, _gdal_limit_n, _scene_inflight, _scene_inflight_n
     with _gdal_limit_lock:
         _gdal_limit = None
         _gdal_limit_n = 0
+    with _scene_inflight_lock:
+        _scene_inflight = None
+        _scene_inflight_n = 0
 
 
 class _GdalSlotGate:
@@ -407,8 +462,105 @@ def gdal_read_slot(timeout: float | None = None):
         gate.release_live()
 
 
+class _SceneInflightGate:
+    """Process-wide FIFO cap on scenes doing windowed IO."""
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self._cond = threading.Condition()
+        self.live = 0
+        self.waiting = 0
+
+    def acquire(self, abandon_event: threading.Event | None = None) -> bool:
+        with self._cond:
+            self.waiting += 1
+            try:
+                while self.live >= self.cap:
+                    if abandon_event is not None and abandon_event.is_set():
+                        return False
+                    self._cond.wait(0.5)
+                if abandon_event is not None and abandon_event.is_set():
+                    return False
+                self.live += 1
+                return True
+            finally:
+                self.waiting -= 1
+
+    def release(self) -> None:
+        with self._cond:
+            self.live -= 1
+            self._cond.notify_all()
+
+    def snapshot(self) -> tuple[int, int, int]:
+        with self._cond:
+            return self.cap, self.live, self.waiting
+
+
+def _scene_inflight_gate() -> _SceneInflightGate:
+    global _scene_inflight, _scene_inflight_n
+    n = scene_max_inflight()
+    with _scene_inflight_lock:
+        if _scene_inflight is None or _scene_inflight_n != n:
+            _scene_inflight = _SceneInflightGate(n)
+            _scene_inflight_n = n
+        return _scene_inflight
+
+
+def scene_inflight_snapshot() -> tuple[int, int, int]:
+    """Return ``(cap, live, waiting)`` for the scene-inflight gate."""
+    return _scene_inflight_gate().snapshot()
+
+
+@contextmanager
+def scene_inflight_slot(abandon_event: threading.Event | None = None):
+    """Admit one scene into windowed IO; nested reuse on the same thread.
+
+    Extra scenes wait (FIFO) until a started scene releases the slot.
+    Yields True if admitted, False if ``abandon_event`` fired while waiting.
+    """
+    if getattr(_scene_local, "active", False):
+        yield True
+        return
+    gate = _scene_inflight_gate()
+    t0 = time.perf_counter()
+    admitted = gate.acquire(abandon_event)
+    wait_ms = int((time.perf_counter() - t0) * 1000)
+    if not admitted:
+        cap, live, waiting = gate.snapshot()
+        _band_log(
+            "scene_inflight_abandoned",
+            level="warning",
+            wait_ms=wait_ms,
+            cap=cap,
+            live=live,
+            waiting=waiting,
+        )
+        yield False
+        return
+    cap, live, waiting = gate.snapshot()
+    _band_log(
+        "scene_inflight_acquired",
+        wait_ms=wait_ms,
+        cap=cap,
+        live=live,
+        waiting=waiting,
+    )
+    _scene_local.active = True
+    try:
+        yield True
+    finally:
+        _scene_local.active = False
+        gate.release()
+        _band_log("scene_inflight_released", wait_ms=wait_ms, cap=cap)
+
+
 class _SceneGuard:
-    """Fail-fast remaining bands after N timeouts or a scene wall budget."""
+    """Fail-fast remaining bands after N *read* timeouts or an in-slot IO budget.
+
+    ``GdalSlotWaitTimeout`` is an admission failure and must not increment
+    the timeout counter or start this fail-fast path. The budget clock only
+    advances while at least one band of the scene holds an HTTP/GDAL slot.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -416,6 +568,31 @@ class _SceneGuard:
         self.timeouts = 0
         self.skipped = 0
         self.reason: str | None = None
+        self._io_elapsed = 0.0
+        self._io_holders = 0
+        self._io_started: float | None = None
+
+    def begin_io(self) -> None:
+        with self._lock:
+            if self._io_holders == 0:
+                self._io_started = time.monotonic()
+            self._io_holders += 1
+
+    def end_io(self) -> None:
+        with self._lock:
+            if self._io_holders <= 0:
+                return
+            self._io_holders -= 1
+            if self._io_holders == 0 and self._io_started is not None:
+                self._io_elapsed += time.monotonic() - self._io_started
+                self._io_started = None
+
+    def io_elapsed(self) -> float:
+        with self._lock:
+            extra = 0.0
+            if self._io_holders > 0 and self._io_started is not None:
+                extra = time.monotonic() - self._io_started
+            return self._io_elapsed + extra
 
     def note_timeout(self) -> None:
         with self._lock:
@@ -432,11 +609,13 @@ class _SceneGuard:
             if max_timeouts > 0 and self.timeouts >= max_timeouts:
                 self.reason = "timeouts"
                 return self.reason
-            budget = band_scene_budget_sec()
-            if budget > 0 and (time.monotonic() - self.started) >= budget:
-                self.reason = "budget"
+        budget = band_scene_budget_sec()
+        if budget > 0 and self.io_elapsed() >= budget:
+            with self._lock:
+                if self.reason is None:
+                    self.reason = "budget"
                 return self.reason
-            return None
+        return None
 
     def note_skip(self) -> None:
         with self._lock:
@@ -489,6 +668,7 @@ def run_parallel_band_jobs(
         slot_wait_sec=gdal_slot_wait_sec(),
         scene_max_timeouts=band_scene_max_timeouts(),
         scene_budget_sec=band_scene_budget_sec(),
+        scene_max_inflight=scene_max_inflight(),
     )
 
     def _call(key: K, value: V) -> R:
@@ -508,6 +688,7 @@ def run_parallel_band_jobs(
                     timeouts=guard.timeouts,
                     skipped=guard.skipped,
                     budget_sec=band_scene_budget_sec(),
+                    io_elapsed_ms=int(guard.io_elapsed() * 1000),
                     attempt=attempt,
                 )
                 raise SceneFailFastError(
@@ -530,7 +711,12 @@ def run_parallel_band_jobs(
                     finally:
                         timing["read_ms"] = int((time.perf_counter() - t_read) * 1000)
 
-                raw_result, wait_ms = _run_fn_holding_slot(_read, timeout_sec)
+                raw_result, wait_ms = _run_fn_holding_slot(
+                    _read,
+                    timeout_sec,
+                    on_io_start=guard.begin_io,
+                    on_io_end=guard.end_io,
+                )
                 read_ms = timing.get("read_ms", 0)
                 if isinstance(raw_result, BandReadResult):
                     result = raw_result.value
@@ -588,7 +774,8 @@ def run_parallel_band_jobs(
                 else:
                     read_ms = read_ms or max(0, elapsed_ms - wait_ms)
                     io_ms = read_ms
-                timed_out = _is_timeout_error(exc)
+                # Only real in-slot read timeouts; slot-wait is admission, not IO.
+                timed_out = wall_timeout
                 retryable = (retry_if or _is_retryable_band_error)(exc)
                 # Hard I/O timeout does not retry the same connection; hedging
                 # already raced a second connection. Slot-wait may retry.
@@ -689,9 +876,8 @@ def run_parallel_band_jobs(
             timeout_retries=timeout_retries,
         )
 
-    t0 = time.perf_counter()
-    results: dict[K, R] = {}
-    try:
+    def _run_pool() -> dict[K, R]:
+        results: dict[K, R] = {}
         if n == 1 or workers == 1:
             for key, value in items.items():
                 try:
@@ -720,6 +906,14 @@ def run_parallel_band_jobs(
                 )
                 key, exc = preferred
                 raise RuntimeError(f"band read failed: {key}") from exc
+        return results
+
+    t0 = time.perf_counter()
+    try:
+        with scene_inflight_slot() as admitted:
+            if not admitted:
+                raise RuntimeError("band read failed: scene admission abandoned")
+            results = _run_pool()
     except Exception:
         _log_summary(int((time.perf_counter() - t0) * 1000), "failed")
         raise
@@ -743,4 +937,7 @@ __all__ = [
     "gdal_slot_wait_sec",
     "reset_band_gdal_limit",
     "run_parallel_band_jobs",
+    "scene_inflight_slot",
+    "scene_inflight_snapshot",
+    "scene_max_inflight",
 ]

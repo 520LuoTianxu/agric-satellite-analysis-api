@@ -59,6 +59,7 @@ Receipt / `public_url` hosts stay on the ordinary regional virtual-host domain
 | satellite Celery concurrency | `6` | `docker-compose.download-machine.yml` command |
 | ingest / decloud / storage concurrency | `2` | compose command |
 | `INGEST_SCENE_MAX_WORKERS` | `8` (decloud override `2`) | compose env |
+| `INGEST_SCENE_MAX_INFLIGHT` | `1` | compose / `.env` (scenes in windowed IO per worker) |
 | `INGEST_SCENE_STRAGGLER_TIMEOUT_SEC` | `180` | compose / `.env` |
 | `BAND_READ_TIMEOUT_SEC` | `20` | compose / `.env` (HTTP read/total + parent wall) |
 | `BAND_READ_HEDGE_AFTER_SEC` | `5` | compose / `.env` (second connection if first byte is late) |
@@ -84,7 +85,7 @@ started and the first success wins, unless a recent window already has a high
 timeout rate (hedge circuit). rasterio/GDAL only decode the fetched header and
 tiles. A global cap of 8 slots stays in place; waiting for a slot times out at
 20s, and a timeout immediately frees the slot so a later 1-2s job can run.
-Two band timeouts (or a 60s scene budget) skip the rest of that scene. The
+Two real hung-read timeouts (not slot-wait admission failures) or 60s of in-slot IO skip the rest of that scene. `INGEST_SCENE_MAX_INFLIGHT=1` admits one scene at a time per worker so its bands can finish. The
 existing scene-window cache is on by default in compose so retries do not
 re-hit AWS.
 
