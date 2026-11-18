@@ -35,7 +35,7 @@ class WindowedGdalTests(unittest.TestCase):
         self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
         self.assertEqual(env["CPL_VSIL_CURL_USE_HEAD"], "NO")
         self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "YES")
-        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "20")
+        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "45")
         self.assertEqual(env["GDAL_HTTP_LOW_SPEED_TIME"], "15")
         self.assertIn(".tif", env["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"])
 
