@@ -116,9 +116,9 @@ def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
     connect_timeout = _pick_str(
         "GDAL_HTTP_CONNECTTIMEOUT", default="10"
     )
-    http_timeout = _pick_str("GDAL_HTTP_TIMEOUT", default="60")
+    http_timeout = _pick_str("GDAL_HTTP_TIMEOUT", default="20")
     low_speed_limit = _pick_str("GDAL_HTTP_LOW_SPEED_LIMIT", default="1")
-    low_speed_time = _pick_str("GDAL_HTTP_LOW_SPEED_TIME", default="30")
+    low_speed_time = _pick_str("GDAL_HTTP_LOW_SPEED_TIME", default="15")
     # Keep GDAL-internal retries low; band_parallel already retries.
     max_retry = _pick_str("GDAL_HTTP_MAX_RETRY", default="1")
     retry_delay = _pick_str("GDAL_HTTP_RETRY_DELAY", default="1")

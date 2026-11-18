@@ -30,6 +30,7 @@ services:
     profiles: ["local-db"]
   redis:
     profiles: ["local-redis"]
+    restart: always
   api:
     profiles: ["api"]
   web:
@@ -40,7 +41,7 @@ services:
   ingest:
     network_mode: host
     depends_on: !reset []
-    restart: unless-stopped
+    restart: always
     environment:
       # D2: prefer internal HTTP reads when set (writes still use DATABASE_URL until D3)
       API_BASE_URL: ${API_BASE_URL:-}
@@ -71,7 +72,10 @@ services:
       SYNC_DB_POOL_RECYCLE: "300"
       SYNC_DB_APP_NAME: "download-ingest"
       INGEST_SCENE_MAX_WORKERS: "8"
-      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-600}
+      INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-60}
+      BAND_READ_TIMEOUT_SEC: ${BAND_READ_TIMEOUT_SEC:-20}
+      GDAL_HTTP_TIMEOUT: ${GDAL_HTTP_TIMEOUT:-20}
+      GDAL_HTTP_LOW_SPEED_TIME: ${GDAL_HTTP_LOW_SPEED_TIME:-15}
       SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC: ${SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC:-720}
       SATELLITE_BATCH_TIME_LIMIT_SEC: ${SATELLITE_BATCH_TIME_LIMIT_SEC:-780}
       SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES: ${SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES:-6}
@@ -108,7 +112,7 @@ services:
       dockerfile: services/ingest/Dockerfile
     network_mode: host
     depends_on: !reset []
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     environment:
@@ -148,7 +152,7 @@ services:
   storage:
     network_mode: host
     depends_on: !reset []
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     command: >
@@ -162,7 +166,7 @@ services:
   beat:
     network_mode: host
     depends_on: !reset []
-    restart: unless-stopped
+    restart: always
     environment:
       REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379/0}
       CLOUDAMQP_RESULT_PUBLISH: ${CLOUDAMQP_RESULT_PUBLISH:-0}
@@ -174,7 +178,7 @@ services:
   mq_consumer:
     network_mode: host
     depends_on: !reset []
-    restart: unless-stopped
+    restart: always
     environment:
       # Claim mode (WORK_QUEUE_MODE=claim): poll API; REDIS_URL stays localhost Celery.
       API_BASE_URL: ${API_BASE_URL:-}

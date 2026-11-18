@@ -12,6 +12,7 @@ from app.core.band_parallel import (
     BandReadResult,
     band_max_workers,
     band_read_max_attempts,
+    band_read_timeout_sec,
     effective_band_workers,
     gdal_read_slot,
     reset_band_gdal_limit,
@@ -224,6 +225,95 @@ class RunParallelBandJobsTests(unittest.TestCase):
         self.assertEqual(attempts[1]["io_ms"], 12)
         self.assertEqual(attempts[1]["reproject_ms"], 3)
         self.assertEqual(attempts[1]["job_id"], "job")
+
+    def test_band_read_timeout_default_and_disable(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BAND_READ_TIMEOUT_SEC", None)
+            self.assertEqual(band_read_timeout_sec(), 20.0)
+        with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "0"}):
+            self.assertEqual(band_read_timeout_sec(), 0.0)
+        with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "nope"}):
+            self.assertEqual(band_read_timeout_sec(), 20.0)
+
+
+class BandReadWallTimeoutTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        reset_band_gdal_limit()
+
+    def test_wall_clock_timeout_skips_without_retry(self) -> None:
+        calls = 0
+        release_hang = threading.Event()
+        logs: list[tuple[str, dict]] = []
+
+        def _fn(_key: str, _value: str) -> int:
+            nonlocal calls
+            calls += 1
+            release_hang.wait(5)
+            return 1
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INGEST_BAND_MAX_WORKERS": "1",
+                    "BAND_READ_MAX_ATTEMPTS": "3",
+                    "BAND_READ_TIMEOUT_SEC": "0.2",
+                },
+            ),
+            patch(
+                "app.core.band_parallel._band_log",
+                side_effect=lambda event, **fields: logs.append((event, fields)),
+            ),
+        ):
+            reset_band_gdal_limit()
+            t0 = time.perf_counter()
+            with self.assertRaises(RuntimeError) as ctx:
+                run_parallel_band_jobs({"B04": "https://example.test/red.tif"}, _fn)
+            wall = time.perf_counter() - t0
+
+        release_hang.set()
+        self.assertIn("B04", str(ctx.exception))
+        self.assertIsInstance(ctx.exception.__cause__, TimeoutError)
+        self.assertLess(wall, 1.0)
+        self.assertEqual(calls, 1)
+        attempts = [fields for event, fields in logs if event == "band_read_attempt_done"]
+        self.assertEqual([row["outcome"] for row in attempts], ["failed"])
+        self.assertTrue(attempts[0]["timed_out"])
+        self.assertEqual(attempts[0]["timeout_sec"], 0.2)
+
+    def test_timeout_keeps_gdal_slot_until_orphan_finishes(self) -> None:
+        started = threading.Event()
+        release_hang = threading.Event()
+        acquired_after_timeout = threading.Event()
+
+        def _fn(_key: str, _value: int) -> int:
+            started.set()
+            release_hang.wait(5)
+            return 1
+
+        def _probe() -> None:
+            with gdal_read_slot():
+                acquired_after_timeout.set()
+
+        with patch.dict(
+            os.environ,
+            {
+                "INGEST_BAND_MAX_WORKERS": "1",
+                "BAND_READ_MAX_ATTEMPTS": "1",
+                "BAND_READ_TIMEOUT_SEC": "0.2",
+            },
+        ):
+            reset_band_gdal_limit()
+            with self.assertRaises(RuntimeError):
+                run_parallel_band_jobs({"B08": 1}, _fn)
+            self.assertTrue(started.wait(1))
+            probe = threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            self.assertFalse(acquired_after_timeout.wait(0.3))
+            release_hang.set()
+            self.assertTrue(acquired_after_timeout.wait(2))
+            probe.join(timeout=2)
+
 
 
 if __name__ == "__main__":

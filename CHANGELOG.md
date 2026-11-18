@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fair and poor cloud-removed scenes are saved next to the raw scene whenever the reconstruction produced usable pixels, so those dates no longer disappear from the field history. Drought and other official land metrics still ignore them.
 
 ### Changed
+- Band window reads now have a 20s wall-clock timeout (`BAND_READ_TIMEOUT_SEC`). A hung AWS COG Range read skips that scene instead of stalling the job; the blocked GDAL thread is orphaned and keeps its read slot until it returns. Default `GDAL_HTTP_TIMEOUT` is 20s (was 60s), `GDAL_HTTP_LOW_SPEED_TIME` is 15s (was 30s), and `INGEST_SCENE_STRAGGLER_TIMEOUT_SEC` is 60s on the download-machine path (was 600s).
 - Default `INGEST_SCENE_MAX_WORKERS` is now `8` (stable-fast sweet spot from AWS windowed-COG bench; was 16).
 - CloudAMQP publish connections set `socket_timeout` / `stack_timeout` (default 30s) so a hung publish cannot block the process-wide publish lock forever.
 - Optional cloud-removal now waits until nearby field windows (optical and radar) for that job are downloaded, then cleans cloudy dates in one batch. It no longer tries to clean a single cloudy date the moment that date finishes, which often lacked nearby scenes and produced empty or poor results. Raw scenes are still saved as they complete. Only high-quality cloud-removed products are used for official drought numbers. Fair and poor cloud-removed products are still saved and labelled as possibly unreliable.
