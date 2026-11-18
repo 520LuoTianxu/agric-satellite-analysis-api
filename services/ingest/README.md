@@ -25,13 +25,17 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 | Env | Default | Meaning |
 |---|---|---|
 | `INGEST_SCENE_MAX_WORKERS` | `8` | Thread pool size for per-scene download+process (bench stable-fast default). Independent of Celery `--concurrency` (compose satellite default is 4). Override via env; avoid >8 unless measured. |
-| `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent GDAL/rasterio band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 2 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. |
-| `S1_GDAL_CURL_CHUNK_SIZE` / `WINDOWED_GDAL_CURL_CHUNK_SIZE` | `262144` | vsicurl Range chunk (bytes) inside `rasterio.Env(**windowed_cog_gdal_env())` for S2 and S1. S1_* overrides win for S1 Env. |
-| `WINDOWED_GDAL_*` / `S1_GDAL_*` caches | `64MiB` | Per-Env curl/VSI caches for windowed COG reads (S2+S1). |
-| `S1_GDAL_HTTP_VERSION` | `2` | Prefer HTTP/2 multiplexing for Azure Range GETs; set `1.1` if the image curl lacks HTTP/2. |
-| `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the GDAL semaphore. |
-| `BAND_READ_TIMEOUT_SEC` | `60` | Wall-clock cap for one band-read attempt. On timeout the scene is skipped and the blocked GDAL thread is orphaned; orphans may occupy at most half the GDAL cap so live reads keep reserved slots. Do not use 60s as a whole-scene or whole-job budget. |
-| `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `45` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=15` also aborts stalled Range responses. |
+| `INGEST_BAND_MAX_WORKERS` | `8` | Process-wide cap on concurrent windowed band reads. Nested under the scene pool: per-scene threads are `min(n_bands, cap, (cap * 2) // scene_workers)`. With 8 scene workers that is 2 band threads per scene, not 1. A lone scene uses `min(cap, n_bands)`. Cap stays at 8: timeouts now free the slot immediately, and hedging may open one extra connection per in-flight read. |
+| `GDAL_SLOT_WAIT_SEC` | `20` | Fail a band immediately if no slot is free in time, so later 1-2s jobs are not stuck behind a stalled queue. |
+| `S1_GDAL_CURL_CHUNK_SIZE` / `WINDOWED_GDAL_CURL_CHUNK_SIZE` | `262144` | Block size for leftover GDAL HTTP and for the httpx Range cache. S1_* overrides win for S1 Env. |
+| `WINDOWED_GDAL_*` / `S1_GDAL_*` caches | `64MiB` | Per-Env VSI caches for local decode (S2+S1). |
+| `S1_GDAL_HTTP_VERSION` / `GDAL_HTTP_VERSION` | `1.1` | Conservative leftover GDAL HTTP (multiplex off, `GDAL_HTTP_MULTIRANGE=SERIAL`). Windowed Range I/O itself uses httpx, not vsicurl. |
+| `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the slot. Hard HTTP timeouts are not retried on the same connection. |
+| `BAND_READ_TIMEOUT_SEC` | `20` | Per-request HTTP read/total timeout and parent wall for one band attempt. Timeouts cancel and free the slot immediately. Do not use 20s as a whole-scene or whole-job budget. |
+| `BAND_READ_HEDGE_AFTER_SEC` | `5` | If the first Range request has not succeeded, start a second connection and keep the first success. Skipped when a recent window already has a high timeout rate. `0` disables hedging. |
+| `BAND_SCENE_MAX_TIMEOUTS` / `BAND_SCENE_BUDGET_SEC` | `2` / `60` | Skip remaining bands of a scene after N timeouts, or once the scene wall budget is exhausted, so S2 does not queue 13 doomed reads. |
+| `BAND_WINDOW_CACHE` | `1` in compose | Shared already-reprojected scene-window cache so retries/reruns do not reopen remote COGs. Code default is off when the env var is unset. |
+| `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `20` | Leftover GDAL/libcurl connect and per-request timeouts. Windowed reads use `BAND_READ_*` via httpx instead. |
 | `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |
 | `INDEX_BACKFILL_CHUNK_DAYS` | `90` | Historical task window. Keep 90 initially; switch to 30-45 only if measured tails still require a smaller failure domain. |
 | `SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC` / `SATELLITE_BATCH_TIME_LIMIT_SEC` | `1500` / `1800` | Optional whole-task guard. Configure `540` / `600` for a strict ten-minute ceiling; the hard limit recycles a stuck Celery prefork child. |
@@ -46,10 +50,12 @@ serially. Scene-level threads overlap HTTP/GDAL I/O across dates in one
 chunk. Each scene thread opens its own SQLAlchemy session; do not share the
 parent task session across workers. Band threads do not open DB sessions.
 
-Nested scene x band pools share one process-wide semaphore of size
+Nested scene x band pools share one process-wide slot cap of size
 `INGEST_BAND_MAX_WORKERS`, so 8 scenes x 7 bands does not become 56
-simultaneous GDAL opens. `GDAL_NUM_THREADS` stays 1; each band worker
-opens its own `rasterio.Env()`.
+simultaneous Range downloads. HTTP Range I/O uses httpx (cancellable
+timeouts, optional hedged retry); rasterio/GDAL only decode the fetched
+bytes. `GDAL_NUM_THREADS` stays 1; each band worker opens its own
+`rasterio.Env()`.
 
 Look for `TIMING stage=` (grep-friendly wall clocks), then
 `scene_parallel_start` / `scene_parallel_done` / `lonlat_upserted`

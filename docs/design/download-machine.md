@@ -60,14 +60,33 @@ Receipt / `public_url` hosts stay on the ordinary regional virtual-host domain
 | ingest / decloud / storage concurrency | `2` | compose command |
 | `INGEST_SCENE_MAX_WORKERS` | `8` (decloud override `2`) | compose env |
 | `INGEST_SCENE_STRAGGLER_TIMEOUT_SEC` | `180` | compose / `.env` |
-| `BAND_READ_TIMEOUT_SEC` | `60` | compose / `.env` |
-| `GDAL_HTTP_TIMEOUT` | `45` | compose / `.env` |
+| `BAND_READ_TIMEOUT_SEC` | `20` | compose / `.env` (HTTP read/total + parent wall) |
+| `BAND_READ_HEDGE_AFTER_SEC` | `5` | compose / `.env` (second connection if first byte is late) |
+| `GDAL_SLOT_WAIT_SEC` | `20` | compose / `.env` (fail a band if no slot is free) |
+| `BAND_SCENE_MAX_TIMEOUTS` / `BAND_SCENE_BUDGET_SEC` | `2` / `60` | compose / `.env` (skip remaining doomed bands) |
+| `BAND_WINDOW_CACHE` | `1` | compose / `.env` (shared scene-window cache) |
+| `GDAL_HTTP_VERSION` / `MULTIRANGE` | `1.1` / `SERIAL` | compose / `.env` (leftover GDAL HTTP) |
+| `GDAL_HTTP_TIMEOUT` | `20` | compose / `.env` |
 | `WORK_CLAIM_*` timeouts / retries / watchdog | see `.env.example` | `mq_consumer` |
 | `INTERNAL_API_HTTP_*` TLS retries | 30s / 5s connect / 3 retries | ingest+satellite |
 | `INTERNAL_API_MAX_INFLIGHT` | `2` | gateway concurrency cap |
 | `INTERNAL_API_MAX_CONNECTIONS` / `KEEPALIVE` | `4` / `4` | httpx pool |
 | `INTERNAL_API_PROGRESS_MIN_INTERVAL_SEC` | `45` | progress PATCH throttle |
 | `INTERNAL_API_CACHE_BUFFER` / `FLUSH_MAX` / `FLUSH_SEC` | `1` / `8` / `2` | coalesce results/cache POSTs |
+
+## Windowed COG downloads
+
+Windowed S2/S1 band reads no longer send HTTP Range traffic through GDAL
+`/vsicurl/` / libcurl, whose timeouts often failed to cancel on the long path
+to `us-west-2`. `httpx` issues the Range GETs (connect 10s, read/total 20s).
+If the first request has not succeeded after 5s, a second connection is
+started and the first success wins, unless a recent window already has a high
+timeout rate (hedge circuit). rasterio/GDAL only decode the fetched header and
+tiles. A global cap of 8 slots stays in place; waiting for a slot times out at
+20s, and a timeout immediately frees the slot so a later 1-2s job can run.
+Two band timeouts (or a 60s scene budget) skip the rest of that scene. The
+existing scene-window cache is on by default in compose so retries do not
+re-hit AWS.
 
 ## What must stay out of git
 

@@ -1,8 +1,11 @@
-"""Shared windowed-COG GDAL/HTTP tunables + grep-friendly TIMING logs.
+"""Shared windowed-COG GDAL tunables + grep-friendly TIMING logs.
 
-Bench (Element84 AWS, 2026-11-02): windowed /vsicurl + these Env knobs beat
-default GDAL ~4.5× on single-band S2 reads. Apply via ``rasterio.Env(**env)``
-for both S2 and S1 so process-level OSS/GDAL work is not permanently mutated.
+Windowed HTTP Range traffic now goes through ``app.core.cog_http`` (httpx),
+not GDAL/libcurl ``/vsicurl/``. These Env knobs still apply to local decode
+and any leftover GDAL HTTP. Defaults are conservative on the long path to
+``us-west-2``: HTTP/1.1, multiplex off, ``GDAL_HTTP_MULTIRANGE=SERIAL``.
+Apply via ``rasterio.Env(**env)`` for both S2 and S1 so process-level
+OSS/GDAL work is not permanently mutated.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ def _positive_int_env(name: str, default: int, *, minimum: int) -> int:
 
 
 def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
-    """Winning AWS windowed-COG vsicurl Env (bench B3 / full pull).
+    """Conservative leftover GDAL HTTP Env for windowed COG decode.
 
     ``prefix`` selects optional env overrides:
     - ``None`` / ``""``: ``WINDOWED_GDAL_*`` then bare ``GDAL_*`` / ``CPL_*``
@@ -76,10 +79,13 @@ def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
             minimum=1024 * 1024,
         )
         http_version = _pick_str(
-            "S1_GDAL_HTTP_VERSION", "WINDOWED_GDAL_HTTP_VERSION", default="2"
+            "S1_GDAL_HTTP_VERSION", "WINDOWED_GDAL_HTTP_VERSION", default="1.1"
+        )
+        multiplex = _pick_str(
+            "S1_GDAL_HTTP_MULTIPLEX", "WINDOWED_GDAL_HTTP_MULTIPLEX", default="NO"
         )
         multirange = _pick_str(
-            "S1_GDAL_HTTP_MULTIRANGE", "WINDOWED_GDAL_HTTP_MULTIRANGE", default="YES"
+            "S1_GDAL_HTTP_MULTIRANGE", "WINDOWED_GDAL_HTTP_MULTIRANGE", default="SERIAL"
         )
     else:
         chunk = _pick_int(
@@ -101,10 +107,13 @@ def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
             minimum=1024 * 1024,
         )
         http_version = _pick_str(
-            "WINDOWED_GDAL_HTTP_VERSION", "GDAL_HTTP_VERSION", default="2"
+            "WINDOWED_GDAL_HTTP_VERSION", "GDAL_HTTP_VERSION", default="1.1"
+        )
+        multiplex = _pick_str(
+            "WINDOWED_GDAL_HTTP_MULTIPLEX", "GDAL_HTTP_MULTIPLEX", default="NO"
         )
         multirange = _pick_str(
-            "WINDOWED_GDAL_HTTP_MULTIRANGE", "GDAL_HTTP_MULTIRANGE", default="YES"
+            "WINDOWED_GDAL_HTTP_MULTIRANGE", "GDAL_HTTP_MULTIRANGE", default="SERIAL"
         )
 
     ingested = _pick_int(
@@ -116,7 +125,7 @@ def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
     connect_timeout = _pick_str(
         "GDAL_HTTP_CONNECTTIMEOUT", default="10"
     )
-    http_timeout = _pick_str("GDAL_HTTP_TIMEOUT", default="45")
+    http_timeout = _pick_str("GDAL_HTTP_TIMEOUT", default="20")
     low_speed_limit = _pick_str("GDAL_HTTP_LOW_SPEED_LIMIT", default="1")
     low_speed_time = _pick_str("GDAL_HTTP_LOW_SPEED_TIME", default="15")
     # Keep GDAL-internal retries low; band_parallel already retries.
@@ -129,7 +138,7 @@ def windowed_cog_gdal_env(*, prefix: str | None = None) -> dict[str, str]:
         "CPL_VSIL_CURL_USE_HEAD": "NO",
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.TIF,.tiff,.TIFF",
         "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
-        "GDAL_HTTP_MULTIPLEX": "YES",
+        "GDAL_HTTP_MULTIPLEX": multiplex,
         "GDAL_HTTP_MULTIRANGE": multirange,
         "GDAL_HTTP_VERSION": http_version,
         "GDAL_INGESTED_BYTES_AT_OPEN": str(ingested),

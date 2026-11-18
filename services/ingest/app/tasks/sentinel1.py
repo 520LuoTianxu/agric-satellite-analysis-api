@@ -48,6 +48,7 @@ from app.core.band_parallel import (
     gdal_read_slot,
     run_parallel_band_jobs,
 )
+from app.core.cog_http import open_windowed_cog
 from app.core.config import settings, scene_max_workers
 from app.core.geo import geojson_to_shape
 from app.core.index_cogs import write_index_cogs_enabled
@@ -782,8 +783,8 @@ def _read_band_windowed_db_profiled(
     s3_path = s1_open_path(href)
     dst = np.full(target_shape, np.nan, dtype=np.float32)
     t_io = time.perf_counter()
-    with gdal_read_slot(), rasterio.Env(**s1_gdal_env()):
-        with rasterio.open(s3_path) as src:
+    with gdal_read_slot():
+        with open_windowed_cog(s3_path, env=s1_gdal_env()) as src:
             source_gcps, gcp_crs = src.gcps
             window = _source_window_for_target_grid(
                 src,

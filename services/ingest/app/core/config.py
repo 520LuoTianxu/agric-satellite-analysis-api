@@ -115,3 +115,49 @@ def scene_straggler_timeout_sec() -> float:
     except (TypeError, ValueError):
         n = 180.0
     return max(1.0, n)
+
+# Windowed COG HTTP / slot knobs are env-driven (see app.core.cog_http) so tests
+# can patch os.environ without constructing a new Settings instance. Helpers
+# below re-export the canonical parsers.
+
+
+def band_read_timeout_sec() -> float:
+    """Parent wall and HTTP read/total timeout for one band attempt. Default 20s."""
+    from app.core.cog_http import band_read_timeout_sec as _impl
+
+    return _impl()
+
+
+def band_read_connect_timeout_sec() -> float:
+    from app.core.cog_http import band_read_connect_timeout_sec as _impl
+
+    return _impl()
+
+
+def band_read_hedge_after_sec() -> float:
+    """Seconds before a second Range connection is started. Default 5s; 0 disables."""
+    from app.core.cog_http import band_read_hedge_after_sec as _impl
+
+    return _impl()
+
+
+def gdal_slot_wait_sec() -> float:
+    """Seconds to wait for a free windowed-read slot. Default 20s."""
+    from app.core.cog_http import gdal_slot_wait_sec as _impl
+
+    return _impl()
+
+
+def band_scene_max_timeouts() -> int:
+    """Skip remaining bands after this many timeouts in one scene. Default 2."""
+    from app.core.cog_http import band_scene_max_timeouts as _impl
+
+    return _impl()
+
+
+def band_scene_budget_sec() -> float:
+    """Skip remaining bands once a scene has run this long. Default 60s."""
+    from app.core.cog_http import band_scene_budget_sec as _impl
+
+    return _impl()
+

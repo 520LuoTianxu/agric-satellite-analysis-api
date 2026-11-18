@@ -53,14 +53,22 @@ class S1StacTests(unittest.TestCase):
                 "S1_VSI_CACHE_SIZE",
                 "S1_GDAL_HTTP_VERSION",
                 "S1_GDAL_HTTP_MULTIRANGE",
+                "S1_GDAL_HTTP_MULTIPLEX",
+                "WINDOWED_GDAL_HTTP_VERSION",
+                "WINDOWED_GDAL_HTTP_MULTIPLEX",
+                "WINDOWED_GDAL_HTTP_MULTIRANGE",
+                "GDAL_HTTP_VERSION",
+                "GDAL_HTTP_MULTIPLEX",
+                "GDAL_HTTP_MULTIRANGE",
             ):
                 os.environ.pop(key, None)
             env = s1_gdal_env()
         self.assertEqual(env["GDAL_DISABLE_READDIR_ON_OPEN"], "EMPTY_DIR")
         self.assertEqual(env["CPL_VSIL_CURL_USE_HEAD"], "NO")
         self.assertEqual(env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"], "YES")
-        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "YES")
-        self.assertEqual(env["GDAL_HTTP_VERSION"], "2")
+        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "NO")
+        self.assertEqual(env["GDAL_HTTP_VERSION"], "1.1")
+        self.assertEqual(env["GDAL_HTTP_MULTIRANGE"], "SERIAL")
         self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
         self.assertEqual(env["GDAL_HTTP_MAX_RETRY"], "1")
         self.assertNotIn("AWS_REQUEST_PAYER", env)
