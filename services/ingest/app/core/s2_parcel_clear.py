@@ -75,9 +75,10 @@ def probe_parcel_clear(
         from shapely.geometry import mapping, shape
         from shapely.ops import unary_union
 
-        from app.core.band_parallel import gdal_read_slot
+        from app.core.band_parallel import gdal_read_slot, scene_inflight_slot
+        from app.core.cog_http import open_windowed_cog
 
-        with gdal_read_slot(), rasterio.Env(), rasterio.open(scl_href) as ds:
+        with scene_inflight_slot(), gdal_read_slot(), open_windowed_cog(scl_href) as ds:
             projected = {
                 land_id: shape(transform_geom("EPSG:4326", ds.crs, mapping(geom)))
                 for land_id, geom in geoms_wgs84.items()

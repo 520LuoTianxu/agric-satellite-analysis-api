@@ -26,7 +26,7 @@ from agric_satellite_analysis_common.internal_api import (
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
 )
-from app.core.band_parallel import band_max_workers, run_parallel_band_jobs
+from app.core.band_parallel import band_max_workers, run_parallel_band_jobs, scene_inflight_slot, scene_max_inflight
 from app.core.band_window_cache import (
     read_scene_window,
     window_cache_enabled,
@@ -1202,132 +1202,138 @@ def _process_one_batch_scene(
                 scene_id=scene.get("id"),
             )
 
-    scene_date = scene["date"]
-
-    # 季外高云景的地块晴空预判含网络读取，必须在状态锁外完成。
-    try:
-        _prefetch_parcel_clear(scene, selected_lands, sensor)
-    except Exception as exc:
-        logger.warning(
-            "s2_parcel_clear_prefetch_failed",
-            job_id=job_id,
-            scene_id=scene.get("id"),
-            error=str(exc)[:300],
-        )
-
-    with state_lock:
-        if abandon_event.is_set():
+    # Probe + windowed download share one scene-inflight slot so a pile of
+    # SCL probes cannot starve a started scene's band reads. Publish after
+    # release so the next scene can start IO.
+    with scene_inflight_slot(abandon_event=abandon_event) as admitted:
+        if not admitted:
             return
-        selected = _scene_lands(scene, selected_lands, sensor)
-        # 同日多景并发时先占位，避免重复下载；成功保留，失败再释放。
-        for land in selected:
-            land["existing"].add(scene_date)
-        reserved = list(selected)
-        if reserved:
-            # 同步保留本景已成功发布地块，超时补偿只回收仍未完成的占位。
-            active_reservations[reservation_key()] = (
-                scene_date,
-                list(reserved),
-                set(),
+        scene_date = scene["date"]
+
+        # 季外高云景的地块晴空预判含网络读取，必须在状态锁外完成。
+        try:
+            _prefetch_parcel_clear(scene, selected_lands, sensor)
+        except Exception as exc:
+            logger.warning(
+                "s2_parcel_clear_prefetch_failed",
+                job_id=job_id,
+                scene_id=scene.get("id"),
+                error=str(exc)[:300],
             )
 
-    if not reserved:
         with state_lock:
             if abandon_event.is_set():
                 return
-            progress["failed_land_ids"] = sorted(failed_land_ids)
-            progress["failed_scene_ids"] = sorted(failed_scene_ids)
-            progress["scenes_done"] += 1
-            completed_scene_keys.add(reservation_key())
-            progress_revision["value"] += 1
-        patch_progress()
-        return
+            selected = _scene_lands(scene, selected_lands, sensor)
+            # 同日多景并发时先占位，避免重复下载；成功保留，失败再释放。
+            for land in selected:
+                land["existing"].add(scene_date)
+            reserved = list(selected)
+            if reserved:
+                # 同步保留本景已成功发布地块，超时补偿只回收仍未完成的占位。
+                active_reservations[reservation_key()] = (
+                    scene_date,
+                    list(reserved),
+                    set(),
+                )
 
-    scene_products: list[tuple[dict, list, dict, np.ndarray | None]] = []
-    primary_error: Exception | None = None
-    try:
-        shared_bands, scl = _download_scene(
-            scene, sensor, grid, job_id=job_id, scene_workers=scene_workers
-        )
-        scene_products.append((scene, reserved, shared_bands, scl))
-        unresolved: dict[str, dict] = {}
-    except Exception as exc:
-        primary_error = exc
-        unresolved = {str(land["meta"]["land_id"]): land for land in reserved}
-        if sensor == "S2" and scene.get("source_catalog") != "planetary_computer":
-            try:
-                fallback_scenes = _search_s2_scene_fallback(scene, processing_geom)
-            except Exception as fallback_error:
-                fallback_scenes = []
-                logger.warning(
-                    "s2_planetary_computer_cog_fallback_search_failed",
-                    job_id=job_id,
-                    scene_id=scene.get("id"),
-                    error=str(fallback_error),
-                )
-            def _fallback_cover_count(candidate: dict) -> int:
-                footprint = (
-                    shape(candidate["geometry"]) if candidate.get("geometry") else None
-                )
-                n = 0
-                for land in unresolved.values():
-                    if footprint is not None and not footprint.covers(land["geom"]):
-                        continue
-                    filtered, _ = filter_scenes_outside_season_high_cloud(
-                        [candidate], season_months=land["season_months"]
-                    )
-                    if filtered:
-                        n += 1
-                return n
+        if not reserved:
+            with state_lock:
+                if abandon_event.is_set():
+                    return
+                progress["failed_land_ids"] = sorted(failed_land_ids)
+                progress["failed_scene_ids"] = sorted(failed_scene_ids)
+                progress["scenes_done"] += 1
+                completed_scene_keys.add(reservation_key())
+                progress_revision["value"] += 1
+            patch_progress()
+            return
 
-            fallback_scenes.sort(
-                key=lambda candidate: (
-                    -_fallback_cover_count(candidate),
-                    float(candidate.get("cloud_cover") or 100),
-                    str(candidate.get("id") or ""),
-                )
+        scene_products: list[tuple[dict, list, dict, np.ndarray | None]] = []
+        primary_error: Exception | None = None
+        try:
+            shared_bands, scl = _download_scene(
+                scene, sensor, grid, job_id=job_id, scene_workers=scene_workers
             )
-            for fallback_scene in fallback_scenes:
-                # 占位已在 land["existing"]；fallback 覆盖判定用 unresolved 列表。
-                fallback_selected = []
-                footprint = (
-                    shape(fallback_scene["geometry"])
-                    if fallback_scene.get("geometry")
-                    else None
-                )
-                for land in list(unresolved.values()):
-                    if footprint is not None and not footprint.covers(land["geom"]):
-                        continue
-                    filtered, _ = filter_scenes_outside_season_high_cloud(
-                        [fallback_scene], season_months=land["season_months"]
-                    )
-                    if not filtered:
-                        continue
-                    fallback_selected.append(land)
-                if not fallback_selected:
-                    continue
+            scene_products.append((scene, reserved, shared_bands, scl))
+            unresolved: dict[str, dict] = {}
+        except Exception as exc:
+            primary_error = exc
+            unresolved = {str(land["meta"]["land_id"]): land for land in reserved}
+            if sensor == "S2" and scene.get("source_catalog") != "planetary_computer":
                 try:
-                    fallback_bands, fallback_scl = _download_scene(
-                        fallback_scene,
-                        sensor,
-                        grid,
-                        job_id=job_id,
-                        scene_workers=scene_workers,
-                    )
+                    fallback_scenes = _search_s2_scene_fallback(scene, processing_geom)
                 except Exception as fallback_error:
+                    fallback_scenes = []
                     logger.warning(
-                        "s2_planetary_computer_cog_fallback_failed",
+                        "s2_planetary_computer_cog_fallback_search_failed",
                         job_id=job_id,
-                        primary_scene_id=scene.get("id"),
-                        fallback_scene_id=fallback_scene.get("id"),
+                        scene_id=scene.get("id"),
                         error=str(fallback_error),
                     )
-                    continue
-                scene_products.append(
-                    (fallback_scene, fallback_selected, fallback_bands, fallback_scl)
+                def _fallback_cover_count(candidate: dict) -> int:
+                    footprint = (
+                        shape(candidate["geometry"]) if candidate.get("geometry") else None
+                    )
+                    n = 0
+                    for land in unresolved.values():
+                        if footprint is not None and not footprint.covers(land["geom"]):
+                            continue
+                        filtered, _ = filter_scenes_outside_season_high_cloud(
+                            [candidate], season_months=land["season_months"]
+                        )
+                        if filtered:
+                            n += 1
+                    return n
+
+                fallback_scenes.sort(
+                    key=lambda candidate: (
+                        -_fallback_cover_count(candidate),
+                        float(candidate.get("cloud_cover") or 100),
+                        str(candidate.get("id") or ""),
+                    )
                 )
-                for land in fallback_selected:
-                    unresolved.pop(str(land["meta"]["land_id"]), None)
+                for fallback_scene in fallback_scenes:
+                    # 占位已在 land["existing"]；fallback 覆盖判定用 unresolved 列表。
+                    fallback_selected = []
+                    footprint = (
+                        shape(fallback_scene["geometry"])
+                        if fallback_scene.get("geometry")
+                        else None
+                    )
+                    for land in list(unresolved.values()):
+                        if footprint is not None and not footprint.covers(land["geom"]):
+                            continue
+                        filtered, _ = filter_scenes_outside_season_high_cloud(
+                            [fallback_scene], season_months=land["season_months"]
+                        )
+                        if not filtered:
+                            continue
+                        fallback_selected.append(land)
+                    if not fallback_selected:
+                        continue
+                    try:
+                        fallback_bands, fallback_scl = _download_scene(
+                            fallback_scene,
+                            sensor,
+                            grid,
+                            job_id=job_id,
+                            scene_workers=scene_workers,
+                        )
+                    except Exception as fallback_error:
+                        logger.warning(
+                            "s2_planetary_computer_cog_fallback_failed",
+                            job_id=job_id,
+                            primary_scene_id=scene.get("id"),
+                            fallback_scene_id=fallback_scene.get("id"),
+                            error=str(fallback_error),
+                        )
+                        continue
+                    scene_products.append(
+                        (fallback_scene, fallback_selected, fallback_bands, fallback_scl)
+                    )
+                    for land in fallback_selected:
+                        unresolved.pop(str(land["meta"]["land_id"]), None)
 
     published_land_ids: set[str] = set()
     for product_scene, product_lands, shared_bands, scl in scene_products:
@@ -1780,6 +1786,7 @@ def process_satellite_batch(
             workers=workers,
             publish_workers=publish_workers,
             band_gdal_cap=band_max_workers(),
+            scene_max_inflight=scene_max_inflight(),
             straggler_timeout_sec=straggler_timeout,
         )
         log_timing(
@@ -1790,6 +1797,7 @@ def process_satellite_batch(
             scene_workers=workers,
             publish_workers=publish_workers,
             band_gdal_cap=band_max_workers(),
+            scene_max_inflight=scene_max_inflight(),
             straggler_timeout_sec=straggler_timeout,
         )
         t_batch = time.perf_counter()

@@ -24,18 +24,23 @@ class WindowedGdalTests(unittest.TestCase):
                 "GDAL_INGESTED_BYTES_AT_OPEN",
                 "GDAL_HTTP_TIMEOUT",
                 "GDAL_HTTP_LOW_SPEED_TIME",
+                "GDAL_HTTP_MULTIPLEX",
+                "GDAL_HTTP_MULTIRANGE",
+                "WINDOWED_GDAL_HTTP_MULTIPLEX",
+                "WINDOWED_GDAL_HTTP_MULTIRANGE",
             ):
                 os.environ.pop(key, None)
             env = windowed_cog_gdal_env()
         self.assertEqual(env["GDAL_DISABLE_READDIR_ON_OPEN"], "EMPTY_DIR")
-        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "YES")
+        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "NO")
         self.assertEqual(env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"], "YES")
-        self.assertEqual(env["GDAL_HTTP_VERSION"], "2")
+        self.assertEqual(env["GDAL_HTTP_MULTIRANGE"], "SERIAL")
+        self.assertEqual(env["GDAL_HTTP_VERSION"], "1.1")
         self.assertEqual(env["GDAL_INGESTED_BYTES_AT_OPEN"], "32768")
         self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
         self.assertEqual(env["CPL_VSIL_CURL_USE_HEAD"], "NO")
         self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "YES")
-        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "45")
+        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "20")
         self.assertEqual(env["GDAL_HTTP_LOW_SPEED_TIME"], "15")
         self.assertIn(".tif", env["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"])
 
@@ -118,7 +123,7 @@ class WindowedGdalTests(unittest.TestCase):
                 os.environ.pop(key, None)
             env = s1_gdal_env()
         self.assertEqual(env["GDAL_INGESTED_BYTES_AT_OPEN"], "32768")
-        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "YES")
+        self.assertEqual(env["GDAL_HTTP_MULTIPLEX"], "NO")
         self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "YES")
 
 

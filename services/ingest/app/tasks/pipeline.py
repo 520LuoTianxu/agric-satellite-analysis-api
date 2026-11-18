@@ -36,6 +36,7 @@ from app.core.band_parallel import (
     gdal_read_slot,
     run_parallel_band_jobs,
 )
+from app.core.cog_http import open_windowed_cog
 from app.core.config import scene_max_workers
 from app.core.stac_client import open_stac_client
 from app.core.windowed_gdal import (
@@ -69,9 +70,9 @@ STAC_COLLECTION = "sentinel-2-l2a"
 # product skip (parcel_cloud_cover_pct / drought display). Keep search
 # conservative unless decloud raises the cap (see DECLOUD_STAC_CLOUD_MAX_PCT).
 MAX_CLOUD_COVER = 20
-# Windowed COG: process-level setdefault + explicit rasterio.Env(**windowed_cog_gdal_env()).
-# 远程窗口很小，长尾主要来自连接或 Range 请求挂起。由 GDAL/curl 在 C 调用内部
-# 中断阻塞；Python Future 超时无法安全终止正在执行的 rasterio/GDAL 调用。
+# Windowed COG: HTTP Range I/O is owned by app.core.cog_http (httpx timeouts
+# actually cancel). rasterio/GDAL only decode already-fetched bytes. Leftover
+# GDAL HTTP knobs are conservative (HTTP/1.1, SERIAL ranges).
 apply_process_windowed_gdal_defaults()
 
 # Serialize job.progress_json updates. SQLAlchemy Session and the Job row
@@ -617,9 +618,9 @@ def _read_band_windowed_profiled(
     而 ``windows.transform`` 仍用小数偏移，二者不一致会造成最多 1 像元的错位。
     默认关闭以保持既有产品输出不变（项目 COG 开启）。"""
     # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
-    with gdal_read_slot(), rasterio.Env(**windowed_cog_gdal_env()):
+    with gdal_read_slot():
         t_io = time.perf_counter()
-        with rasterio.open(href) as src:
+        with open_windowed_cog(href, env=windowed_cog_gdal_env()) as src:
             src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
             window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
             if snap_window:
@@ -727,29 +728,28 @@ def read_rgb_windowed(
     Element84 ``visual`` is typically uint8 RGB; values are preserved.
     """
     # SCL 与 RGB 直读也必须占用进程内名额，不能绕过波段池的并发限制。
-    with gdal_read_slot(), rasterio.Env(**windowed_cog_gdal_env()):
-        with rasterio.open(href) as src:
-            if src.count < 3:
-                return None
-            src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
-            window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
-            # RGB预览同样屏蔽景幅外像元，避免边缘黑边被平滑扩散进地块。
-            data = src.read([1, 2, 3], window=window, boundless=True, masked=True)
-            data = data.astype(np.float32).filled(np.nan)
-            dst = np.full((3, *target_shape), np.nan, dtype=np.float32)
-            for i in range(3):
-                reproject(
-                    source=data[i],
-                    destination=dst[i],
-                    src_transform=rasterio.windows.transform(window, src.transform),
-                    src_crs=src.crs,
-                    dst_transform=target_transform,
-                    dst_crs=target_crs,
-                    src_nodata=np.nan,
-                    dst_nodata=np.nan,
-                    resampling=resampling,
-                )
-            return np.transpose(dst, (1, 2, 0))
+    with gdal_read_slot(), open_windowed_cog(href, env=windowed_cog_gdal_env()) as src:
+        if src.count < 3:
+            return None
+        src_bounds = transform_bounds("EPSG:4326", src.crs, *bounds)
+        window = rasterio.windows.from_bounds(*src_bounds, transform=src.transform)
+        # RGB预览同样屏蔽景幅外像元，避免边缘黑边被平滑扩散进地块。
+        data = src.read([1, 2, 3], window=window, boundless=True, masked=True)
+        data = data.astype(np.float32).filled(np.nan)
+        dst = np.full((3, *target_shape), np.nan, dtype=np.float32)
+        for i in range(3):
+            reproject(
+                source=data[i],
+                destination=dst[i],
+                src_transform=rasterio.windows.transform(window, src.transform),
+                src_crs=src.crs,
+                dst_transform=target_transform,
+                dst_crs=target_crs,
+                src_nodata=np.nan,
+                dst_nodata=np.nan,
+                resampling=resampling,
+            )
+        return np.transpose(dst, (1, 2, 0))
 
 
 # ── COG writing ──────────────────────────────────────────────────────
