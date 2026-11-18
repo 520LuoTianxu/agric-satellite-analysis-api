@@ -59,7 +59,9 @@ Receipt / `public_url` hosts stay on the ordinary regional virtual-host domain
 | satellite Celery concurrency | `6` | `docker-compose.download-machine.yml` command |
 | ingest / decloud / storage concurrency | `2` | compose command |
 | `INGEST_SCENE_MAX_WORKERS` | `8` (decloud override `2`) | compose env |
-| `INGEST_SCENE_STRAGGLER_TIMEOUT_SEC` | `600` | compose / `.env` |
+| `INGEST_SCENE_STRAGGLER_TIMEOUT_SEC` | `60` | compose / `.env` |
+| `BAND_READ_TIMEOUT_SEC` | `20` | compose / `.env` |
+| `GDAL_HTTP_TIMEOUT` | `20` | compose / `.env` |
 | `WORK_CLAIM_*` timeouts / retries / watchdog | see `.env.example` | `mq_consumer` |
 | `INTERNAL_API_HTTP_*` TLS retries | 30s / 5s connect / 3 retries | ingest+satellite |
 | `INTERNAL_API_MAX_INFLIGHT` | `2` | gateway concurrency cap |

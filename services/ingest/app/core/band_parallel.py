@@ -122,6 +122,104 @@ def _is_timeout_error(exc: Exception) -> bool:
     return isinstance(exc, TimeoutError) or "timeout" in text or "timed out" in text
 
 
+def band_read_timeout_sec() -> float:
+    """Wall-clock seconds for one band-read attempt. Default 20; ``<= 0`` disables the watchdog."""
+    raw = os.environ.get("BAND_READ_TIMEOUT_SEC", "20")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 20.0
+    if value <= 0:
+        return 0.0
+    return value
+
+
+def _unwrap_thread_result(box: dict[str, object]) -> object:
+    if "exc" in box:
+        raise box["exc"]  # type: ignore[misc]
+    return box["value"]
+
+
+def _spawn_timed_call(
+    fn: Callable[[], object], timeout_sec: float
+) -> tuple[threading.Thread, dict[str, object], bool]:
+    """Run ``fn`` in a daemon thread; return (thread, box, timed_out)."""
+    box: dict[str, object] = {}
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:
+            box["exc"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(
+        target=_target, daemon=True, name="ingest-band-watchdog"
+    )
+    thread.start()
+    if not done.wait(timeout_sec):
+        return thread, box, True
+    thread.join(timeout=1)
+    return thread, box, False
+
+
+def _run_fn_holding_slot(fn: Callable[[], object], timeout_sec: float) -> object:
+    """Hold a GDAL slot while ``fn`` runs.
+
+    On wall-clock timeout the blocked GDAL/curl call cannot be killed, so the
+    slot stays reserved until that thread finishes and a reaper releases it.
+    That avoids letting a new read overlap an in-flight GDAL call.
+    """
+    if getattr(_read_local, "active", False):
+        if timeout_sec <= 0:
+            return fn()
+        thread, box, timed_out = _spawn_timed_call(fn, timeout_sec)
+        if timed_out:
+            raise TimeoutError(f"band read exceeded {timeout_sec:g}s")
+        return _unwrap_thread_result(box)
+
+    if timeout_sec <= 0:
+        with gdal_read_slot():
+            return fn()
+
+    slot = _gdal_band_limit()
+    slot.acquire()
+    _read_local.active = True
+    released = False
+
+    def _release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        _read_local.active = False
+        slot.release()
+
+    try:
+        thread, box, timed_out = _spawn_timed_call(fn, timeout_sec)
+        if timed_out:
+            def _reap() -> None:
+                thread.join()
+                slot.release()
+
+            threading.Thread(
+                target=_reap, daemon=True, name="ingest-band-slot-reap"
+            ).start()
+            released = True
+            _read_local.active = False
+            raise TimeoutError(f"band read exceeded {timeout_sec:g}s")
+        try:
+            return _unwrap_thread_result(box)
+        finally:
+            _release()
+    except Exception:
+        if not released:
+            _release()
+        raise
+
+
 def _percentile(values: list[int], pct: float) -> int:
     if not values:
         return 0
@@ -212,6 +310,7 @@ def run_parallel_band_jobs(
         **dict(log_context or {}),
     }
     max_attempts = band_read_max_attempts()
+    timeout_sec = band_read_timeout_sec()
     retry_delays = _retry_delays()
     resolve_host = host_resolver or _host_from_value
     attempt_stats: list[dict[str, object]] = []
@@ -238,14 +337,23 @@ def run_parallel_band_jobs(
             t0 = time.perf_counter()
             t_wait = time.perf_counter()
             try:
-                # 退避位于 with 块之外，避免失败请求睡眠时占住全局 GDAL 名额。
-                with gdal_read_slot():
-                    wait_ms = int((time.perf_counter() - t_wait) * 1000)
+                # 退避位于槽位之外，避免失败请求睡眠时占住全局 GDAL 名额。
+                # 墙钟超时后无法打断已在跑的 GDAL/HTTP，名额由收割线程延后释放。
+                wait_ms = 0
+                read_ms = 0
+                timing: dict[str, int] = {}
+
+                def _read() -> R | BandReadResult[R]:
+                    timing["wait_ms"] = int((time.perf_counter() - t_wait) * 1000)
                     t_read = time.perf_counter()
                     try:
-                        raw_result = fn(key, value)
+                        return fn(key, value)
                     finally:
-                        read_ms = int((time.perf_counter() - t_read) * 1000)
+                        timing["read_ms"] = int((time.perf_counter() - t_read) * 1000)
+
+                raw_result = _run_fn_holding_slot(_read, timeout_sec)
+                wait_ms = timing.get("wait_ms", int((time.perf_counter() - t_wait) * 1000))
+                read_ms = timing.get("read_ms", 0)
                 if isinstance(raw_result, BandReadResult):
                     result = raw_result.value
                     io_ms = max(0, int(raw_result.io_ms))
@@ -289,8 +397,11 @@ def run_parallel_band_jobs(
                 io_ms = read_ms
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 retryable = (retry_if or _is_retryable_band_error)(exc)
-                will_retry = retryable and attempt < max_attempts
                 timed_out = _is_timeout_error(exc)
+                wall_timeout = isinstance(exc, TimeoutError)
+                # Wall-clock timeout leaves a blocked GDAL thread behind; do not
+                # retry and stack more hung reads. Finished curl timeouts still retry.
+                will_retry = retryable and attempt < max_attempts and not wall_timeout
                 outcome = "retry" if will_retry else "failed"
                 row = {
                     "band": str(key),
@@ -322,6 +433,7 @@ def run_parallel_band_jobs(
                     read_ms=read_ms,
                     error_type=type(exc).__name__,
                     error=str(exc)[:500],
+                    timeout_sec=timeout_sec,
                 )
                 if not will_retry:
                     break
@@ -381,7 +493,10 @@ def run_parallel_band_jobs(
     try:
         if n == 1 or workers == 1:
             for key, value in items.items():
-                results[key] = _call(key, value)
+                try:
+                    results[key] = _call(key, value)
+                except Exception as exc:
+                    raise RuntimeError(f"band read failed: {key}") from exc
         else:
             errors: list[tuple[K, Exception]] = []
             with ThreadPoolExecutor(
@@ -412,6 +527,7 @@ __all__ = [
     "BandReadResult",
     "band_max_workers",
     "band_read_max_attempts",
+    "band_read_timeout_sec",
     "effective_band_workers",
     "gdal_read_slot",
     "reset_band_gdal_limit",

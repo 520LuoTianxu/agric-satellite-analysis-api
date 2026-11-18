@@ -30,7 +30,8 @@ reads also overlap (S2 optical typically 7 unique bands; index calculations
 | `WINDOWED_GDAL_*` / `S1_GDAL_*` caches | `64MiB` | Per-Env curl/VSI caches for windowed COG reads (S2+S1). |
 | `S1_GDAL_HTTP_VERSION` | `2` | Prefer HTTP/2 multiplexing for Azure Range GETs; set `1.1` if the image curl lacks HTTP/2. |
 | `BAND_READ_MAX_ATTEMPTS` | `3` | Application-level total attempts per band. Backoff (`BAND_READ_RETRY_DELAYS_SEC`, default `1,3`) happens after releasing the GDAL semaphore. |
-| `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `60` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=30` also aborts stalled Range responses. |
+| `BAND_READ_TIMEOUT_SEC` | `20` | Wall-clock cap for one band-read attempt. On timeout the scene is skipped and the blocked GDAL thread is orphaned (it still holds a read slot until it returns). Do not use 20s as a whole-scene or whole-job budget. |
+| `GDAL_HTTP_CONNECTTIMEOUT` / `GDAL_HTTP_TIMEOUT` | `10` / `20` | libcurl connect and per-request total timeout in seconds. `GDAL_HTTP_LOW_SPEED_LIMIT=1` plus `GDAL_HTTP_LOW_SPEED_TIME=15` also aborts stalled Range responses. |
 | `GDAL_HTTP_MAX_RETRY` | `1` | At most one GDAL-internal retry; keep at `0-1` because the application layer already tries three times. |
 | `INDEX_BACKFILL_CHUNK_DAYS` | `90` | Historical task window. Keep 90 initially; switch to 30-45 only if measured tails still require a smaller failure domain. |
 | `SATELLITE_BATCH_SOFT_TIME_LIMIT_SEC` / `SATELLITE_BATCH_TIME_LIMIT_SEC` | `1500` / `1800` | Optional whole-task guard. Configure `540` / `600` for a strict ten-minute ceiling; the hard limit recycles a stuck Celery prefork child. |

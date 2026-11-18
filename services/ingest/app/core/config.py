@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # Rolling grace (seconds) after the last parallel scene completion before
     # abandoning still in-flight scenes so a stuck COG/HTTP call cannot block
     # batch finalize forever. Also applied from parallel start if zero scenes finish.
-    ingest_scene_straggler_timeout_sec: float = 30.0
+    ingest_scene_straggler_timeout_sec: float = 60.0
     # Process-wide cap on concurrent windowed band reads (GDAL/rasterio).
     # Nested under the scene pool; see app.core.band_parallel.
     ingest_band_max_workers: int = 8
@@ -113,5 +113,5 @@ def scene_straggler_timeout_sec() -> float:
     try:
         n = float(settings.ingest_scene_straggler_timeout_sec)
     except (TypeError, ValueError):
-        n = 30.0
+        n = 60.0
     return max(1.0, n)

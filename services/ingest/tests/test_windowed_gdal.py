@@ -22,6 +22,8 @@ class WindowedGdalTests(unittest.TestCase):
                 "S1_GDAL_CURL_CHUNK_SIZE",
                 "GDAL_HTTP_VERSION",
                 "GDAL_INGESTED_BYTES_AT_OPEN",
+                "GDAL_HTTP_TIMEOUT",
+                "GDAL_HTTP_LOW_SPEED_TIME",
             ):
                 os.environ.pop(key, None)
             env = windowed_cog_gdal_env()
@@ -33,7 +35,8 @@ class WindowedGdalTests(unittest.TestCase):
         self.assertEqual(env["CPL_VSIL_CURL_CHUNK_SIZE"], "262144")
         self.assertEqual(env["CPL_VSIL_CURL_USE_HEAD"], "NO")
         self.assertEqual(env["AWS_NO_SIGN_REQUEST"], "YES")
-        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "60")
+        self.assertEqual(env["GDAL_HTTP_TIMEOUT"], "20")
+        self.assertEqual(env["GDAL_HTTP_LOW_SPEED_TIME"], "15")
         self.assertIn(".tif", env["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"])
 
     def test_s1_prefix_honors_s1_overrides(self) -> None:
