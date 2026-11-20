@@ -34,6 +34,7 @@ from typing import Callable, Generic, Mapping, TypeVar
 from urllib.parse import urlsplit
 
 from app.core.cog_http import (
+    AttemptContext,
     BandReadTimeout,
     GdalSlotWaitTimeout,
     SceneFailFastError,
@@ -42,6 +43,7 @@ from app.core.cog_http import (
     band_scene_budget_sec,
     band_scene_max_timeouts,
     gdal_slot_wait_sec,
+    use_attempt_context,
 )
 from app.core.windowed_gdal import log_timing
 
@@ -178,18 +180,38 @@ def _unwrap_thread_result(box: dict[str, object]) -> object:
 
 
 def _spawn_timed_call(
-    fn: Callable[[], object], timeout_sec: float, cancel: threading.Event | None = None
+    fn: Callable[[], object],
+    timeout_sec: float,
+    cancel: threading.Event | None = None,
+    *,
+    attempt_ctx: AttemptContext | None = None,
+    inherit_slot: bool = False,
 ) -> tuple[threading.Thread, dict[str, object], bool]:
-    """Run ``fn`` in a daemon thread; return (thread, box, timed_out)."""
+    """Run ``fn`` in a daemon thread; return (thread, box, timed_out).
+
+    硬超时由父线程计时，实际读取在子线程。槽位占用标记和 attempt 上下文
+    都是 thread-local，必须在子线程启动时显式继承：否则子线程会再占一个
+    GDAL 槽，取消也到不了 Range I/O，造成自造超时和孤儿读取。子线程只复用
+    父线程已持有的槽，超时或返回时仍由父线程释放。
+    """
     box: dict[str, object] = {}
     done = threading.Event()
 
     def _target() -> None:
+        inherited = False
         try:
-            box["value"] = fn()
-        except BaseException as exc:
-            box["exc"] = exc
+            if inherit_slot and not getattr(_read_local, "active", False):
+                _read_local.active = True
+                inherited = True
+            with use_attempt_context(attempt_ctx):
+                try:
+                    box["value"] = fn()
+                except BaseException as exc:
+                    box["exc"] = exc
         finally:
+            if inherited:
+                # 只清子线程标记，不释放进程槽；槽仍由父线程释放。
+                _read_local.active = False
             done.set()
 
     thread = threading.Thread(
@@ -254,7 +276,13 @@ def _run_fn_holding_slot(
             if timeout_sec <= 0:
                 return fn(), wait_ms
             with band_attempt_context(timeout_sec) as ctx:
-                thread, box, timed_out = _spawn_timed_call(fn, timeout_sec, ctx.cancel)
+                thread, box, timed_out = _spawn_timed_call(
+                    fn,
+                    timeout_sec,
+                    ctx.cancel,
+                    attempt_ctx=ctx,
+                    inherit_slot=True,
+                )
                 if timed_out:
                     ctx.cancel.set()
                     ctx.close_inflight()
@@ -308,7 +336,13 @@ def _run_fn_holding_slot(
                 _release_live()
 
         with band_attempt_context(timeout_sec) as ctx:
-            thread, box, timed_out = _spawn_timed_call(fn, timeout_sec, ctx.cancel)
+            thread, box, timed_out = _spawn_timed_call(
+                    fn,
+                    timeout_sec,
+                    ctx.cancel,
+                    attempt_ctx=ctx,
+                    inherit_slot=True,
+                )
             if timed_out:
                 ctx.cancel.set()
                 ctx.close_inflight()
@@ -369,6 +403,8 @@ def reset_band_gdal_limit() -> None:
     with _scene_inflight_lock:
         _scene_inflight = None
         _scene_inflight_n = 0
+    _read_local.active = False
+    _scene_local.active = False
 
 
 class _GdalSlotGate:

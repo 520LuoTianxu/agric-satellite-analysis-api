@@ -247,6 +247,22 @@ def current_attempt() -> AttemptContext | None:
 
 
 @contextmanager
+def use_attempt_context(ctx: AttemptContext | None) -> Iterator[AttemptContext | None]:
+    """Bind an attempt context to this thread (does not create or close it).
+
+    硬超时计时在父线程，Range I/O 在 watchdog 子线程。thread-local 上下文
+    不会自动跟上，必须在子线程显式绑定同一个 ``AttemptContext``，取消和
+    closer 才能作用到实际读取。
+    """
+    previous = getattr(_attempt, "ctx", None)
+    _attempt.ctx = ctx
+    try:
+        yield ctx
+    finally:
+        _attempt.ctx = previous
+
+
+@contextmanager
 def band_attempt_context(timeout_sec: float) -> Iterator[AttemptContext]:
     deadline = (
         float("inf")
@@ -259,14 +275,12 @@ def band_attempt_context(timeout_sec: float) -> Iterator[AttemptContext]:
         _closers=[],
         _lock=threading.Lock(),
     )
-    previous = getattr(_attempt, "ctx", None)
-    _attempt.ctx = ctx
-    try:
-        yield ctx
-    finally:
-        ctx.cancel.set()
-        ctx.close_inflight()
-        _attempt.ctx = previous
+    with use_attempt_context(ctx):
+        try:
+            yield ctx
+        finally:
+            ctx.cancel.set()
+            ctx.close_inflight()
 
 
 def reset_cog_http_state() -> None:
@@ -278,6 +292,7 @@ def reset_cog_http_state() -> None:
         _size_cache = {}
     with _header_lock:
         _header_cache = {}
+    _attempt.ctx = None
     client = getattr(_tls, "client", None)
     if client is not None:
         try:
@@ -851,4 +866,5 @@ __all__ = [
     "reset_cog_http_state",
     "timed_range_opener",
     "unwrap_raster_href",
+    "use_attempt_context",
 ]

@@ -153,12 +153,27 @@ def _active_compensation_attempt(progress: dict) -> int | None:
 
 
 
+def _failed_scene_count(progress: dict) -> int:
+    """Count failed *scenes*, not failed lands.
+
+    ``scenes_done`` 在成功、下载失败、worker 崩溃和 straggler 放弃时都会加一，
+    表示“已处理景数”。失败景必须以 ``failed_scene_ids`` 为准；``failed`` 在
+    主下载路径上按地块累加，不能当作完成率的分母或分子。
+    """
+    failed_ids = progress.get("failed_scene_ids") or []
+    if isinstance(failed_ids, (list, tuple, set)):
+        return len(set(failed_ids))
+    return 0
+
+
 def _partial_complete_ok(progress: dict) -> bool:
-    """True when nearly all scenes finished — prefer complete over another compensation pass.
+    """True when nearly all scenes succeeded — prefer complete over another compensation pass.
 
     Compensation re-runs the whole window and was getting stuck in "第N次补偿"
     with high scenes_done after SSL/publish hangs. Accepting a high-ratio partial
     releases workers immediately; failed land ids stay in progress_json.
+
+    完成率按成功景数 / 总景数计算。``scenes_done`` 含失败景，不可直接当成功数。
     """
     try:
         total = int(progress.get("scenes_total") or 0)
@@ -173,8 +188,9 @@ def _partial_complete_ok(progress: dict) -> bool:
         abandoned_n = len(abandoned) if isinstance(abandoned, (list, tuple, set)) else 0
     except TypeError:
         abandoned_n = 0
+    failed_scenes = _failed_scene_count(progress)
     # Only straggler abandons counted as failures → finish without compensation.
-    if abandoned_n > 0 and failed <= abandoned_n:
+    if abandoned_n > 0 and failed <= abandoned_n and failed_scenes <= abandoned_n:
         return True
     try:
         threshold = float(
@@ -183,7 +199,9 @@ def _partial_complete_ok(progress: dict) -> bool:
     except (TypeError, ValueError):
         threshold = 0.85
     threshold = min(0.99, max(0.5, threshold))
-    return (done / float(total)) >= threshold
+    # scenes_done includes failures; success is processed minus failed scenes.
+    succeeded = max(0, done - failed_scenes)
+    return (succeeded / float(total)) >= threshold
 
 
 def _is_assessment_batch_child(job: dict) -> bool:

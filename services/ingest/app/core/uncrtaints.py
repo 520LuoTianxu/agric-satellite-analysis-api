@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -375,36 +376,9 @@ class UncrtainTSInferencer:
         self.model = self._load()
 
     def _load(self) -> Any:
-        try:
-            import torch
-        except ImportError as exc:
-            raise DecloudUnavailable(
-                "torch is not installed; install it on GPU hosts or set "
-                "DECLOUD_BACKEND=dummy for smoke tests"
-            ) from exc
+        import torch
 
-        home = uncrtaints_home()
-        if home:
-            import sys
-
-            home_path = str(Path(home).resolve())
-            if home_path not in sys.path:
-                sys.path.insert(0, home_path)
-            model_dir = str(Path(home) / "model")
-            if Path(model_dir).is_dir() and model_dir not in sys.path:
-                sys.path.insert(0, model_dir)
-
-        try:
-            from src.backbones.uncrtaints import UNCRTAINTS  # type: ignore
-        except ImportError:
-            try:
-                from model.src.backbones.uncrtaints import UNCRTAINTS  # type: ignore
-            except ImportError as exc:
-                raise DecloudUnavailable(
-                    "UnCRtainTS package not importable. Clone "
-                    "https://github.com/PatrickTUM/UnCRtainTS and set UNCRTAINTS_HOME"
-                ) from exc
-
+        UNCRTAINTS = _import_uncrtaints_class()
         ckpt_path = _resolve_checkpoint_file()
         conf = _load_conf_json(ckpt_path)
         s1_bands = 2 if decloud_use_sar() else 0
@@ -499,9 +473,102 @@ def _resolve_checkpoint_file() -> Path:
     )
 
 
+def _import_uncrtaints_class() -> Any:
+    """Import the UnCRtainTS generator class or raise DecloudUnavailable.
+
+    只做 torch / 包导入，不加载权重。供预检和真正构建模型共用，避免两套逻辑分叉。
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError as exc:
+        raise DecloudUnavailable(
+            "torch is not installed; install it on GPU hosts or set "
+            "DECLOUD_BACKEND=dummy for smoke tests"
+        ) from exc
+
+    home = uncrtaints_home()
+    if home:
+        import sys
+
+        home_path = str(Path(home).resolve())
+        if home_path not in sys.path:
+            sys.path.insert(0, home_path)
+        model_dir = str(Path(home) / "model")
+        if Path(model_dir).is_dir() and model_dir not in sys.path:
+            sys.path.insert(0, model_dir)
+
+    try:
+        from src.backbones.uncrtaints import UNCRTAINTS  # type: ignore
+    except ImportError:
+        try:
+            from model.src.backbones.uncrtaints import UNCRTAINTS  # type: ignore
+        except ImportError as exc:
+            raise DecloudUnavailable(
+                "UnCRtainTS package not importable. Clone "
+                "https://github.com/PatrickTUM/UnCRtainTS and set UNCRTAINTS_HOME"
+            ) from exc
+    return UNCRTAINTS
+
+
+_inferencer_lock = threading.RLock()
+_inferencer: Inferencer | None = None
+_inferencer_error: DecloudUnavailable | None = None
+_probe_ok = False
+_probe_error: DecloudUnavailable | None = None
+
+
+def reset_inferencer_cache() -> None:
+    """Drop the process-level inferencer and probe cache (tests / env changes)."""
+    global _inferencer, _inferencer_error, _probe_ok, _probe_error
+    with _inferencer_lock:
+        _inferencer = None
+        _inferencer_error = None
+        _probe_ok = False
+        _probe_error = None
+
+
+def probe_decloud_backend() -> None:
+    """Raise DecloudUnavailable if the configured backend cannot run.
+
+    dummy 后端视为可用。真实后端只检查 torch、包导入和权重路径，不把
+    权重加载进内存。结果按进程缓存，避免每个目标日重复探测和刷日志。
+    不改变 ``DECLOUD_ENABLED`` / ``DECLOUD_BACKEND`` 开关。
+    """
+    global _probe_ok, _probe_error
+    with _inferencer_lock:
+        if _probe_ok:
+            return
+        if _probe_error is not None:
+            raise DecloudUnavailable(str(_probe_error)) from _probe_error
+        try:
+            if decloud_backend() == "dummy":
+                _probe_ok = True
+                return
+            _import_uncrtaints_class()
+            _resolve_checkpoint_file()
+            _probe_ok = True
+        except DecloudUnavailable as exc:
+            _probe_error = exc
+            raise
+
+
 def get_inferencer() -> Inferencer:
-    backend = decloud_backend()
-    if backend == "dummy":
-        logger.info("decloud_backend_dummy", device=pick_device())
-        return DummyInferencer()
-    return UncrtainTSInferencer(device=pick_device())
+    """Return a process-wide inferencer; cache successes and unavailability."""
+    global _inferencer, _inferencer_error
+    probe_decloud_backend()
+    with _inferencer_lock:
+        if _inferencer_error is not None:
+            raise DecloudUnavailable(str(_inferencer_error)) from _inferencer_error
+        if _inferencer is not None:
+            return _inferencer
+        try:
+            if decloud_backend() == "dummy":
+                logger.info("decloud_backend_dummy", device=pick_device())
+                inst: Inferencer = DummyInferencer()
+            else:
+                inst = UncrtainTSInferencer(device=pick_device())
+            _inferencer = inst
+            return inst
+        except DecloudUnavailable as exc:
+            _inferencer_error = exc
+            raise

@@ -580,6 +580,89 @@ class BandReadWallTimeoutTests(unittest.TestCase):
 
 
 
+    def test_watchdog_child_reuses_parent_slot_when_fn_acquires_again(self) -> None:
+        """生产路径：父线程占槽后再开读取子线程，fn 内 gdal_read_slot 必须复用。
+
+        cap=2 且两波段并行时，若子线程再占一次槽，两个子线程会一起卡在
+        GDAL_SLOT_WAIT_SEC，即使实际读取远短于硬超时也会失败。
+        """
+        peak = 0
+        in_slot = 0
+        lock = threading.Lock()
+        saw_attempt: list[bool] = []
+
+        def _fn(_key: str, value: int) -> int:
+            nonlocal peak, in_slot
+            from app.core.cog_http import current_attempt
+
+            saw_attempt.append(current_attempt() is not None)
+            with gdal_read_slot():
+                with lock:
+                    in_slot += 1
+                    peak = max(peak, in_slot)
+                time.sleep(0.05)
+                with lock:
+                    in_slot -= 1
+            return value
+
+        with patch.dict(
+            os.environ,
+            {
+                "INGEST_BAND_MAX_WORKERS": "2",
+                "BAND_READ_MAX_ATTEMPTS": "1",
+                "BAND_READ_TIMEOUT_SEC": "2",
+                "GDAL_SLOT_WAIT_SEC": "0.3",
+                "BAND_SCENE_MAX_TIMEOUTS": "9",
+                "BAND_SCENE_BUDGET_SEC": "30",
+            },
+        ):
+            reset_band_gdal_limit()
+            out = run_parallel_band_jobs({"a": 1, "b": 2}, _fn, scene_workers=1)
+        self.assertEqual(out, {"a": 1, "b": 2})
+        self.assertLessEqual(peak, 2)
+        self.assertEqual(peak, 2)
+        self.assertEqual(saw_attempt, [True, True])
+        _cap, live, waiting = gdal_slot_snapshot()
+        self.assertEqual(live, 0)
+        self.assertEqual(waiting, 0)
+
+    def test_attempt_cancel_is_visible_in_watchdog_child(self) -> None:
+        saw_ctx = threading.Event()
+        saw_cancel = threading.Event()
+
+        def _fn(_key: str, _value: int) -> int:
+            from app.core.cog_http import current_attempt
+
+            ctx = current_attempt()
+            if ctx is None:
+                time.sleep(2)
+                return 1
+            saw_ctx.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if ctx.cancel.is_set():
+                    saw_cancel.set()
+                    raise BandReadTimeout("cancelled by parent")
+                time.sleep(0.01)
+            return 1
+
+        with patch.dict(
+            os.environ,
+            {
+                "INGEST_BAND_MAX_WORKERS": "1",
+                "BAND_READ_MAX_ATTEMPTS": "1",
+                "BAND_READ_TIMEOUT_SEC": "0.2",
+                "GDAL_SLOT_WAIT_SEC": "1",
+            },
+        ):
+            reset_band_gdal_limit()
+            with self.assertRaises(RuntimeError):
+                run_parallel_band_jobs({"a": 1}, _fn)
+        self.assertTrue(saw_ctx.is_set())
+        self.assertTrue(saw_cancel.wait(1), "parent timeout must cancel the child context")
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
