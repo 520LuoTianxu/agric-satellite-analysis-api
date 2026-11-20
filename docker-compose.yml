@@ -219,6 +219,9 @@ services:
       DECLOUD_INPUT_T: ${DECLOUD_INPUT_T:-3}
       DECLOUD_USE_SAR: ${DECLOUD_USE_SAR:-1}
       DECLOUD_CACHE_DIR: ${DECLOUD_CACHE_DIR:-}
+      DECLOUD_CACHE_ONLY: ${DECLOUD_CACHE_ONLY:-1}
+      DECLOUD_GDAL_CACHEMAX: ${DECLOUD_GDAL_CACHEMAX:-64}
+      DECLOUD_MAX_MEMORY_PER_CHILD_KB: ${DECLOUD_MAX_MEMORY_PER_CHILD_KB:-1000000}
       UNCRTAINTS_CHECKPOINT_DIR: ${UNCRTAINTS_CHECKPOINT_DIR:-}
       UNCRTAINTS_HOME: ${UNCRTAINTS_HOME:-}
       UNCRTAINTS_CHECKPOINT_NAME: ${UNCRTAINTS_CHECKPOINT_NAME:-diagonal_1}
@@ -267,7 +270,8 @@ services:
       -Q satellite_download
       -n satellite@%h
       --loglevel=info
-      --concurrency=2
+      --concurrency=${SATELLITE_CONCURRENCY:-4}
+      --max-memory-per-child=${SATELLITE_MAX_MEMORY_PER_CHILD_KB:-2500000}
 
   # ── Celery storage (Aliyun OSS uploads only) ──────────────────────
   storage:

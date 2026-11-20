@@ -124,7 +124,7 @@ services:
       -Q satellite_download
       -n satellite@%h
       --loglevel=info
-      --concurrency=${SATELLITE_CONCURRENCY:-3}
+      --concurrency=${SATELLITE_CONCURRENCY:-4}
       --max-memory-per-child=${SATELLITE_MAX_MEMORY_PER_CHILD_KB:-2500000}
 
   # Separate queue so UnCRtainTS runs while optical shards keep downloading.
@@ -159,6 +159,13 @@ services:
       CELERY_REDIS_RETRY_ON_TIMEOUT: ${CELERY_REDIS_RETRY_ON_TIMEOUT:-true}
       CELERY_REDIS_HEALTH_CHECK_INTERVAL: ${CELERY_REDIS_HEALTH_CHECK_INTERVAL:-25}
       CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-0}
+      # Cache-only inference: no STAC/COG; consume satellite-written window cache.
+      DECLOUD_CACHE_ONLY: ${DECLOUD_CACHE_ONLY:-1}
+      GDAL_CACHEMAX: ${DECLOUD_GDAL_CACHEMAX:-64}
+      OMP_NUM_THREADS: ${DECLOUD_OMP_NUM_THREADS:-1}
+      MKL_NUM_THREADS: ${DECLOUD_OMP_NUM_THREADS:-1}
+      OPENBLAS_NUM_THREADS: ${DECLOUD_OMP_NUM_THREADS:-1}
+      TORCH_NUM_THREADS: ${DECLOUD_TORCH_NUM_THREADS:-1}
       OPENFARM_LOG_FILE: ${OPENFARM_LOG_DIR:-/data/logs}/decloud.log
     volumes:
       - scratch:/data/scratch
@@ -171,6 +178,7 @@ services:
       -n decloud@%h
       --loglevel=info
       --concurrency=2
+      --max-memory-per-child=${DECLOUD_MAX_MEMORY_PER_CHILD_KB:-1000000}
 
   storage:
     network_mode: host

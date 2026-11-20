@@ -35,6 +35,7 @@ from app.core.decloud import (
     DecloudQualityResult,
     batch_neighbors_ready,
     cloudy_targets_from_raw,
+    decloud_cache_only,
     decloud_cloud_min_pct,
     decloud_drought_exclusion_flags,
     decloud_enabled,
@@ -262,12 +263,17 @@ def cache_optical_s2_window(
     缓存键同时绑定地块掩膜与目标网格，避免边界变化后把旧网格数组当成新数据使用。
     """
     hrefs = {k: v for k, v in (band_hrefs or {}).items() if k != "SCL" and v}
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
     radiometry_meta = {
         key: value
         for key, value in {
             "band_radiometry": band_radiometry,
             "band_radiometry_source": band_radiometry_source,
             "band_radiometry_sources": band_radiometry_sources,
+            "grid_key": grid_key,
+            "window_grid_key": grid_key,
         }.items()
         if value is not None
     }
@@ -283,12 +289,10 @@ def cache_optical_s2_window(
     if not bands:
         return
     from app.core.uncrtaints import stack_s2_13
-    from app.core.decloud_cache import window_grid_key
 
     stack = stack_s2_13(bands)
     # 质量回退需要按反射率计算历史NDVI，缓存时从未裁剪的原始数组预先生成。
     ndvi = _ndvi_from_raw_window(bands, band_radiometry)
-    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
     try:
         write_window_array(
             str(land_id),
@@ -306,6 +310,423 @@ def cache_optical_s2_window(
             date=date_str,
             error=str(exc),
         )
+
+
+
+def cache_optical_s1_window(
+    *,
+    land_id: str,
+    date_str: str,
+    vv: np.ndarray,
+    vh: np.ndarray,
+    target_shape: tuple[int, int],
+    target_transform,
+    target_crs: str,
+    field_mask: np.ndarray,
+    stac_id: str | None = None,
+    radiometric_calibration: dict[str, Any] | None = None,
+    band_hrefs: dict[str, str] | None = None,
+) -> bool:
+    """Atomically cache a parcel-window Sigma0 VV/VH stack on the S1 acquisition date.
+
+    The grid fingerprint matches ``cache_optical_s2_window`` / ``_land_context``
+    (crs, shape, affine, field_mask). The array is the un-nan-masked window so
+    UnCRtainTS sees the same radiometry as a windowed COG read; the mask is
+    stored alongside the stack.
+    """
+    from app.core.decloud_cache import window_grid_key
+
+    if vv is None or vh is None:
+        return False
+    stack = np.stack(
+        [np.asarray(vv, dtype=np.float32), np.asarray(vh, dtype=np.float32)],
+        axis=0,
+    )
+    shape = (int(target_shape[0]), int(target_shape[1]))
+    if tuple(stack.shape[-2:]) != shape or tuple(np.asarray(field_mask).shape) != shape:
+        logger.warning(
+            "decloud_s1_cache_shape_mismatch",
+            land_id=str(land_id),
+            date=str(date_str)[:10],
+            stack_shape=tuple(stack.shape),
+            target_shape=shape,
+            mask_shape=tuple(np.asarray(field_mask).shape),
+        )
+        return False
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
+    iso = str(date_str)[:10]
+    extra = {"grid_key": grid_key, "window_grid_key": grid_key}
+    if radiometric_calibration:
+        extra["radiometric_calibration"] = radiometric_calibration
+    put_window_meta(
+        land_id=str(land_id),
+        date_str=iso,
+        sensor="S1",
+        stac_id=stac_id,
+        band_hrefs={k: v for k, v in (band_hrefs or {}).items() if v} or None,
+        extra=extra,
+    )
+    try:
+        write_window_array(
+            str(land_id),
+            iso,
+            "S1",
+            grid_key=grid_key,
+            stack=stack,
+            field_mask=np.asarray(field_mask),
+        )
+    except OSError as exc:
+        logger.warning(
+            "decloud_s1_cache_array_write_failed",
+            land_id=str(land_id),
+            date=iso,
+            error=str(exc),
+        )
+        return False
+    logger.info(
+        "decloud_s1_cache_written",
+        land_id=str(land_id),
+        date=iso,
+        stac_id=stac_id,
+        shape=tuple(stack.shape),
+    )
+    return True
+
+
+def flush_ready_decloud_targets(
+    land_id: str,
+    *,
+    expected_grid_key: str | None = None,
+) -> dict[str, Any]:
+    """Enqueue only those pending cloudy dates whose local S2/S1 cache is ready."""
+    from app.core.decloud_ready import (
+        mark_pending_status,
+        pop_ready_pending_targets,
+    )
+
+    ready = pop_ready_pending_targets(
+        str(land_id), expected_grid_key=expected_grid_key
+    )
+    if not ready:
+        return {"dispatched": 0, "groups": 0}
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for item in ready:
+        key = (
+            str(item.get("date_from") or ""),
+            str(item.get("date_to") or ""),
+            item.get("mq_task_id"),
+            tuple(item.get("season_months") or []),
+        )
+        groups.setdefault(key, []).append(item)
+    dispatched = 0
+    for (date_from, date_to, mq_task_id, months), items in groups.items():
+        targets = [
+            {
+                "date": item["date"],
+                "raw_scene_id": item.get("raw_scene_id"),
+                "stac_cloud": item.get("stac_cloud"),
+                "parcel_cloud": item.get("parcel_cloud"),
+            }
+            for item in items
+        ]
+        window_from = date_from or min(t["date"] for t in targets)
+        window_to = date_to or max(t["date"] for t in targets)
+        try:
+            ok = enqueue_decloud_parcel_batch(
+                land_id=str(land_id),
+                date_from=window_from,
+                date_to=window_to,
+                targets=targets,
+                mq_task_id=mq_task_id,
+                season_months=list(months) if months else None,
+            )
+        except Exception:
+            ok = False
+            logger.exception(
+                "decloud_ready_enqueue_failed",
+                land_id=str(land_id),
+                dates=[t["date"] for t in targets],
+            )
+        if not ok:
+            for item in items:
+                mark_pending_status(
+                    str(land_id),
+                    item["date"],
+                    "pending",
+                    held_reason="enqueue_failed",
+                )
+            continue
+        dispatched += len(items)
+        logger.info(
+            "decloud_pending_flushed",
+            land_id=str(land_id),
+            dispatched=len(items),
+            dates=[t["date"] for t in targets],
+        )
+    return {"dispatched": dispatched, "groups": len(groups)}
+
+
+def notify_cache_and_flush_ready(
+    land_id: str,
+    *,
+    target_crs: str,
+    target_shape: tuple[int, int],
+    target_transform,
+    field_mask: np.ndarray,
+) -> dict[str, Any]:
+    from app.core.decloud_cache import window_grid_key
+
+    grid_key = window_grid_key(target_crs, target_shape, target_transform, field_mask)
+    return flush_ready_decloud_targets(str(land_id), expected_grid_key=grid_key)
+
+
+def _held_result(target: date | str, reason: str, **extra: Any) -> dict[str, Any]:
+    payload = {
+        "date": str(target)[:10] if not isinstance(target, date) else target.isoformat(),
+        "status": "held",
+        "reason": "waiting_cache",
+        "waiting": reason,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _s1_by_date_from_cache(
+    land_id: str,
+    picked_dates: list[date],
+    *,
+    expected_grid_key: str,
+    height: int,
+    width: int,
+) -> dict[date, np.ndarray] | None:
+    """Load at most one S1 stack per picked S2 date (or confirmed zeros)."""
+    from app.core.decloud_ready import find_s1_for_s2_date
+
+    out: dict[date, np.ndarray] = {}
+    for s2_date in picked_dates:
+        match = find_s1_for_s2_date(
+            str(land_id), s2_date, expected_grid_key=expected_grid_key
+        )
+        if not match.get("ready"):
+            return None
+        if match.get("kind") == "confirmed_zero" or match.get("s1_date") is None:
+            out[s2_date] = np.zeros((2, height, width), dtype=np.float32)
+            continue
+        packed = read_window_array(
+            str(land_id),
+            match["s1_date"],
+            "S1",
+            expected_grid_key=expected_grid_key,
+        )
+        stack = None if packed is None else packed.get("stack")
+        if stack is None:
+            return None
+        out[s2_date] = stack
+    return out
+
+
+def _decloud_parcel_batch_from_cache(
+    land_id: str,
+    date_from: str,
+    date_to: str,
+    targets: list[dict[str, Any]] | None,
+    mq_task_id: str | None,
+    season_months: list[int] | None,
+    *,
+    session=None,
+) -> dict[str, Any]:
+    """Consume local window cache only: meta scan, load 3 S2 + ≤3 S1, no STAC/COG."""
+    from app.core.decloud import date_in_decloud_season, normalize_season_months
+    from app.core.decloud_cache import window_grid_key
+    from app.core.decloud_ready import (
+        assess_target_ready,
+        list_array_dates,
+        mark_pending_status,
+        upsert_pending_targets,
+    )
+
+    season_months = normalize_season_months(season_months=season_months)
+    start = date.fromisoformat(str(date_from)[:10])
+    end = date.fromisoformat(str(date_to)[:10])
+    if start > end:
+        start, end = end, start
+
+    ctx = _land_context(session, land_id)
+    if ctx is None:
+        return {"status": "error", "detail": "land_missing"}
+    grid_key = window_grid_key(
+        ctx["target_crs"], ctx["target_shape"], ctx["target_transform"], ctx["land_mask"]
+    )
+
+    wanted = list(targets or [])
+    if not wanted:
+        raw_like = []
+        for sc in list_array_dates(str(land_id), "S2", start, end):
+            raw_like.append(
+                {
+                    "date": sc["date"],
+                    "scene_id": sc.get("stac_id") or sc.get("id"),
+                    "cloud_cover": sc.get("cloud_cover"),
+                    "parcel_cloud_cover_pct": sc.get("parcel_cloud"),
+                    "cloud_cover_over_30": None,
+                }
+            )
+        wanted = cloudy_targets_from_raw(raw_like, season_months=season_months)
+
+    wanted = [
+        t
+        for t in wanted
+        if t
+        and t.get("date")
+        and date_in_decloud_season(str(t.get("date") or "")[:10], season_months)
+    ]
+    if not wanted:
+        return {
+            "status": "skipped",
+            "reason": "no_in_season_cloudy_targets",
+            "season_months": list(season_months),
+            "cache_only": True,
+        }
+
+    upsert_pending_targets(
+        str(land_id),
+        wanted,
+        date_from=start.isoformat(),
+        date_to=end.isoformat(),
+        mq_task_id=mq_task_id,
+        season_months=list(season_months) if season_months is not None else None,
+    )
+
+    assessments: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for item in wanted:
+        target = date.fromisoformat(str(item.get("date"))[:10])
+        if target < start or target > end:
+            continue
+        if not should_trigger_decloud(
+            cloud_cover_over_30=item.get("cloud_over_30"),
+            parcel_cloud_cover_pct=item.get("parcel_cloud"),
+            cloud_cover=item.get("stac_cloud"),
+            cloud_min_pct=decloud_cloud_min_pct(),
+        ):
+            assessments.append((item, {"ready": False, "reason": "below_cloud_threshold"}))
+            continue
+        assessments.append(
+            (
+                item,
+                assess_target_ready(
+                    str(land_id), target, expected_grid_key=grid_key
+                ),
+            )
+        )
+
+    ready_items = [
+        (item, info)
+        for item, info in assessments
+        if info.get("ready") and info.get("reason") != "below_cloud_threshold"
+    ]
+    if ready_items:
+        # Only load the model when at least one target can actually run.
+        probe_decloud_backend()
+
+    results: list[dict[str, Any]] = []
+    for item, info in assessments:
+        target = date.fromisoformat(str(item.get("date"))[:10])
+        if info.get("reason") == "below_cloud_threshold":
+            results.append(
+                {
+                    "date": target.isoformat(),
+                    "status": "skipped",
+                    "reason": "below_cloud_threshold",
+                }
+            )
+            continue
+        if not info.get("ready"):
+            mark_pending_status(
+                str(land_id),
+                target,
+                "pending",
+                held_reason=info.get("reason") or "waiting_cache",
+            )
+            results.append(_held_result(target, str(info.get("reason") or "waiting_cache")))
+            continue
+        picked_dates = [date.fromisoformat(str(d)[:10]) for d in (info.get("picked") or [])]
+        buffered_s2 = [{"date": d} for d in picked_dates]
+        # Height/width come from the land grid; load S1 first so we can skip
+        # before stacking S2 if a race dropped a cache file.
+        s1_by_date: dict[date, np.ndarray] = {}
+        if decloud_use_sar():
+            loaded = _s1_by_date_from_cache(
+                str(land_id),
+                picked_dates,
+                expected_grid_key=grid_key,
+                height=int(ctx["target_shape"][0]),
+                width=int(ctx["target_shape"][1]),
+            )
+            if loaded is None:
+                mark_pending_status(str(land_id), target, "pending", held_reason="waiting_s1")
+                results.append(_held_result(target, "waiting_s1"))
+                continue
+            s1_by_date = loaded
+        try:
+            one = _decloud_one_from_buffer(
+                session=session,
+                land_meta=ctx["land_meta"],
+                land_geom_geojson=ctx["land_geom_geojson"],
+                target_transform=ctx["target_transform"],
+                target_crs=ctx["target_crs"],
+                land_mask=ctx["land_mask"],
+                target=target,
+                buffered_s2=buffered_s2,
+                s1_by_date=s1_by_date,
+                raw_scene_id=item.get("raw_scene_id"),
+                stac_cloud=item.get("stac_cloud"),
+                parcel_cloud=item.get("parcel_cloud"),
+                mq_task_id=mq_task_id,
+            )
+        except DecloudUnavailable:
+            raise
+        except Exception:
+            mark_pending_status(str(land_id), target, "failed", held_reason="infer_error")
+            raise
+        finally:
+            s1_by_date.clear()
+        one["date"] = target.isoformat()
+        if one.get("status") in {"ok", "no_pixels"} or one.get("published"):
+            mark_pending_status(str(land_id), target, "done")
+        elif one.get("reason") in {"neighbors_not_ready", "window_missing", "no_s2_context"}:
+            mark_pending_status(
+                str(land_id),
+                target,
+                "pending",
+                held_reason=one.get("reason"),
+            )
+            one = _held_result(target, str(one.get("reason")))
+        results.append(one)
+
+    published = [r for r in results if r.get("status") == "ok"]
+    held = [r for r in results if r.get("reason") == "waiting_cache" or r.get("status") == "held"]
+    logger.info(
+        "decloud_batch_done",
+        land_id=str(land_id),
+        date_from=start.isoformat(),
+        date_to=end.isoformat(),
+        cache_only=True,
+        buffered="meta_only",
+        targets=len(results),
+        published=len(published),
+        held=len(held),
+        waiting_cache=len(held),
+    )
+    return {
+        "status": "ok",
+        "cache_only": True,
+        "buffered": 0,
+        "targets": len(results),
+        "published": len(published),
+        "held": len(held),
+        "waiting_cache": len(held),
+        "results": results,
+    }
 
 
 def schedule_decloud_after_raw(
@@ -342,6 +763,61 @@ def schedule_decloud_after_raw(
     by_date = {
         str(r["date"])[:10]: r for r in (raw_results or []) if r and r.get("date")
     }
+    if decloud_cache_only():
+        from app.core.decloud_ready import upsert_pending_targets
+
+        pending_targets = list(plan.batch_targets)
+        seen = {str(t.get("date"))[:10] for t in pending_targets if t.get("date")}
+        for date_str in list(plan.per_scene_dates) + list(plan.hold_decloud_dates):
+            if date_str in seen:
+                continue
+            row = by_date.get(date_str) or {}
+            pending_targets.append(
+                {
+                    "date": date_str,
+                    "raw_scene_id": row.get("scene_id"),
+                    "stac_cloud": row.get("cloud_cover"),
+                    "parcel_cloud": row.get("parcel_cloud_cover_pct"),
+                    "cloud_over_30": row.get("cloud_cover_over_30"),
+                }
+            )
+            seen.add(date_str)
+        if pending_targets:
+            upsert_pending_targets(
+                str(land_id),
+                pending_targets,
+                date_from=str(date_from)[:10],
+                date_to=str(date_to)[:10],
+                mq_task_id=mq_task_id,
+                season_months=list(months) if months is not None else None,
+            )
+        flushed = flush_ready_decloud_targets(str(land_id))
+        logger.info(
+            "decloud_scheduled_after_raw",
+            land_id=str(land_id),
+            mode=decloud_mode(),
+            cache_only=True,
+            season_months=list(months),
+            per_scene=[],
+            batch=False,
+            pending=len(pending_targets),
+            flushed=flushed.get("dispatched", 0),
+            hold=list(plan.hold_decloud_dates),
+            raw_stored=plan.store_raw,
+        )
+        return {
+            "enabled": True,
+            "mode": decloud_mode(),
+            "cache_only": True,
+            "store_raw": plan.store_raw,
+            "per_scene": [],
+            "batch": False,
+            "pending": len(pending_targets),
+            "flushed": flushed.get("dispatched", 0),
+            "hold_decloud_dates": list(plan.hold_decloud_dates),
+            "targets": len(plan.batch_targets),
+            "season_months": list(months),
+        }
     for date_str in plan.per_scene_dates:
         row = by_date.get(date_str) or {}
         enqueue_parcel_decloud(
@@ -1339,6 +1815,46 @@ def process_parcel_decloud(
     target = date.fromisoformat(str(date_str)[:10])
     session = None
     try:
+        if decloud_cache_only():
+            from app.core.decloud_ready import upsert_pending_targets
+
+            upsert_pending_targets(
+                str(land_id),
+                [
+                    {
+                        "date": target.isoformat(),
+                        "raw_scene_id": raw_scene_id,
+                        "stac_cloud": stac_cloud,
+                        "parcel_cloud": parcel_cloud,
+                        "cloud_over_30": cloud_over_30,
+                    }
+                ],
+                date_from=target.isoformat(),
+                date_to=target.isoformat(),
+                mq_task_id=mq_task_id,
+            )
+            if not _decloud_http_only():
+                session = get_db_session()
+            result = _decloud_parcel_batch_from_cache(
+                str(land_id),
+                target.isoformat(),
+                target.isoformat(),
+                [
+                    {
+                        "date": target.isoformat(),
+                        "raw_scene_id": raw_scene_id,
+                        "stac_cloud": stac_cloud,
+                        "parcel_cloud": parcel_cloud,
+                        "cloud_over_30": cloud_over_30,
+                    }
+                ],
+                mq_task_id,
+                None,
+                session=session,
+            )
+            if result.get("results"):
+                return result["results"][0]
+            return result
         # 先预检模型/权重，避免先拉邻景窗口再发现无法推理。
         probe_decloud_backend()
         if not _decloud_http_only():
@@ -1458,6 +1974,18 @@ def decloud_parcel_batch(
     pad = decloud_lookback_days()
     session = None
     try:
+        if decloud_cache_only():
+            if not _decloud_http_only():
+                session = get_db_session()
+            return _decloud_parcel_batch_from_cache(
+                str(land_id),
+                start.isoformat(),
+                end.isoformat(),
+                targets,
+                mq_task_id,
+                season_months,
+                session=session,
+            )
         # 先预检，再缓冲邻景，避免模型不可用时仍拉取窗口并返回 status=ok。
         probe_decloud_backend()
         if not _decloud_http_only():

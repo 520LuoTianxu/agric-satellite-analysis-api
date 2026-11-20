@@ -116,6 +116,7 @@ class DecloudHttpDataPlaneTests(unittest.TestCase):
         }
         with (
             patch.object(decloud, "decloud_enabled", return_value=True),
+            patch.object(decloud, "decloud_cache_only", return_value=False),
             patch.object(decloud, "probe_decloud_backend"),
             patch.object(decloud, "_decloud_http_only", return_value=True),
             patch.object(decloud, "get_db_session") as get_db,
@@ -146,6 +147,7 @@ class DecloudHttpDataPlaneTests(unittest.TestCase):
 
         with (
             patch.object(decloud, "decloud_enabled", return_value=True),
+            patch.object(decloud, "decloud_cache_only", return_value=False),
             patch.object(
                 decloud,
                 "probe_decloud_backend",
