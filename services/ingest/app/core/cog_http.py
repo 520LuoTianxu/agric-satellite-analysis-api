@@ -99,6 +99,36 @@ def band_read_timeout_sec() -> float:
     return value
 
 
+_DEFAULT_S1_TIMEOUT_SEC = 40.0
+
+
+def s1_band_read_timeout_sec() -> float:
+    """Wall-clock budget for one Sentinel-1 GRD band attempt.
+
+    Default 40s. ``BAND_READ_TIMEOUT_SEC`` (20s) stays the S2 / HTTP-range
+    default; a 10 km native S1 window is not oversized but often needs more
+    than 20s on this path. ``<= 0`` disables the parent watchdog, same as
+    ``band_read_timeout_sec``.
+    """
+    raw = os.environ.get("S1_BAND_READ_TIMEOUT_SEC")
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_S1_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_S1_TIMEOUT_SEC
+    if value <= 0:
+        return 0.0
+    return value
+
+
+def band_read_timeout_for_sensor(sensor: object | None = None) -> float:
+    """Parent wall for one band attempt. HTTP per-range still uses 20s."""
+    if sensor is not None and str(sensor).strip().upper() == "S1":
+        return s1_band_read_timeout_sec()
+    return band_read_timeout_sec()
+
+
 def band_read_connect_timeout_sec() -> float:
     raw = os.environ.get("BAND_READ_CONNECT_TIMEOUT_SEC")
     if raw is None or str(raw).strip() == "":
@@ -853,7 +883,9 @@ __all__ = [
     "band_attempt_context",
     "band_read_connect_timeout_sec",
     "band_read_hedge_after_sec",
+    "band_read_timeout_for_sensor",
     "band_read_timeout_sec",
+    "s1_band_read_timeout_sec",
     "band_scene_budget_sec",
     "band_scene_max_timeouts",
     "current_attempt",

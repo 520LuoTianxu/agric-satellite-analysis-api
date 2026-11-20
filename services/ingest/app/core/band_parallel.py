@@ -39,7 +39,9 @@ from app.core.cog_http import (
     GdalSlotWaitTimeout,
     SceneFailFastError,
     band_attempt_context,
+    band_read_timeout_for_sensor,
     band_read_timeout_sec,
+    s1_band_read_timeout_sec,
     band_scene_budget_sec,
     band_scene_max_timeouts,
     gdal_slot_wait_sec,
@@ -686,7 +688,7 @@ def run_parallel_band_jobs(
         **dict(log_context or {}),
     }
     max_attempts = band_read_max_attempts()
-    timeout_sec = band_read_timeout_sec()
+    timeout_sec = band_read_timeout_for_sensor(context.get("sensor"))
     retry_delays = _retry_delays()
     resolve_host = host_resolver or _host_from_value
     attempt_stats: list[dict[str, object]] = []
@@ -966,7 +968,9 @@ __all__ = [
     "SceneFailFastError",
     "band_max_workers",
     "band_read_max_attempts",
+    "band_read_timeout_for_sensor",
     "band_read_timeout_sec",
+    "s1_band_read_timeout_sec",
     "effective_band_workers",
     "gdal_read_slot",
     "gdal_slot_snapshot",
