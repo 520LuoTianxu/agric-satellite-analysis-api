@@ -109,12 +109,14 @@ class DecloudHttpDataPlaneTests(unittest.TestCase):
             "land_meta": {"land_id": "L1", "tile_id": "T1", "land_name": "L1"},
             "land_geom_geojson": mapping(box(110.0, 35.0, 110.01, 35.01)),
             "target_transform": "transform",
+            "target_crs": "EPSG:4326",
             "target_shape": (1, 1),
             "land_mask": np.ones((1, 1), dtype=bool),
             "bounds": (110.0, 35.0, 110.01, 35.01),
         }
         with (
             patch.object(decloud, "decloud_enabled", return_value=True),
+            patch.object(decloud, "probe_decloud_backend"),
             patch.object(decloud, "_decloud_http_only", return_value=True),
             patch.object(decloud, "get_db_session") as get_db,
             patch.object(decloud, "_land_context", return_value=context),
@@ -137,6 +139,40 @@ class DecloudHttpDataPlaneTests(unittest.TestCase):
         get_db.assert_not_called()
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["published"], 1)
+
+    def test_batch_unavailable_fails_before_buffering(self) -> None:
+        from app.core.uncrtaints import DecloudUnavailable
+        from app.tasks import decloud_uncrtaints as decloud
+
+        with (
+            patch.object(decloud, "decloud_enabled", return_value=True),
+            patch.object(
+                decloud,
+                "probe_decloud_backend",
+                side_effect=DecloudUnavailable(
+                    "UnCRtainTS package not importable. Clone "
+                    "https://github.com/PatrickTUM/UnCRtainTS and set UNCRTAINTS_HOME"
+                ),
+            ),
+            patch.object(decloud, "_decloud_http_only", return_value=True),
+            patch.object(decloud, "get_db_session") as get_db,
+            patch.object(decloud, "_land_context") as land_context,
+            patch.object(decloud, "_buffer_s2_windows") as buffer_s2,
+            patch.object(decloud, "_decloud_one_from_buffer") as one,
+        ):
+            with self.assertRaises(DecloudUnavailable):
+                decloud.decloud_parcel_batch.run(
+                    "L1",
+                    "2026-07-01",
+                    "2026-07-31",
+                    targets=[{"date": "2026-07-15", "stac_cloud": 80.0}],
+                    season_months=[7],
+                )
+
+        get_db.assert_not_called()
+        land_context.assert_not_called()
+        buffer_s2.assert_not_called()
+        one.assert_not_called()
 
     def test_published_product_uses_http_result_cache(self) -> None:
         from app.tasks import decloud_uncrtaints as decloud

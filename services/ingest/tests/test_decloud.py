@@ -1029,6 +1029,67 @@ def _stub_optional_modules() -> list[str]:
         added.append("structlog")
     return added
 
+class DecloudBackendProbeTests(unittest.TestCase):
+    """进程级预检/缓存：模型不可用应被记住，且 dummy 后端可直接通过。"""
+
+    def setUp(self) -> None:
+        from app.core.uncrtaints import reset_inferencer_cache
+
+        reset_inferencer_cache()
+
+    def tearDown(self) -> None:
+        from app.core.uncrtaints import reset_inferencer_cache
+
+        reset_inferencer_cache()
+
+    def test_dummy_backend_probe_and_inferencer_are_cached(self) -> None:
+        from app.core.uncrtaints import (
+            DummyInferencer,
+            get_inferencer,
+            probe_decloud_backend,
+        )
+
+        with patch.dict(os.environ, {"DECLOUD_BACKEND": "dummy"}):
+            probe_decloud_backend()
+            first = get_inferencer()
+            second = get_inferencer()
+        self.assertIsInstance(first, DummyInferencer)
+        self.assertIs(first, second)
+
+    def test_missing_package_is_cached_and_reraised(self) -> None:
+        from app.core.uncrtaints import (
+            DecloudUnavailable,
+            get_inferencer,
+            probe_decloud_backend,
+        )
+
+        calls = {"n": 0}
+
+        def _boom():
+            calls["n"] += 1
+            raise DecloudUnavailable(
+                "UnCRtainTS package not importable. Clone "
+                "https://github.com/PatrickTUM/UnCRtainTS and set UNCRTAINTS_HOME"
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DECLOUD_BACKEND": "uncrtaints", "UNCRTAINTS_HOME": ""},
+                clear=False,
+            ),
+            patch("app.core.uncrtaints._import_uncrtaints_class", side_effect=_boom),
+        ):
+            with self.assertRaises(DecloudUnavailable):
+                probe_decloud_backend()
+            with self.assertRaises(DecloudUnavailable):
+                probe_decloud_backend()
+            with self.assertRaises(DecloudUnavailable):
+                get_inferencer()
+        self.assertEqual(calls["n"], 1)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

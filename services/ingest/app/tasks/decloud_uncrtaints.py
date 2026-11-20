@@ -69,6 +69,7 @@ from app.core.uncrtaints import (
     S2_L2A_NO_B10,
     DecloudUnavailable,
     get_inferencer,
+    probe_decloud_backend,
     stack_s2_13,
 )
 from app.tasks.agri_lonlat import (
@@ -1179,14 +1180,9 @@ def _decloud_one_from_buffer(
                 for sc in picked
             ],
         )
-    except DecloudUnavailable as exc:
-        logger.warning(
-            "decloud_unavailable",
-            land_id=land_id,
-            date=target.isoformat(),
-            error=str(exc),
-        )
-        return {"status": "skipped", "reason": "unavailable", "detail": str(exc)}
+    except DecloudUnavailable:
+        # 模型不可用是进程级问题，不能当成单日 skipped，否则批次仍会报成功。
+        raise
 
     # Sample/publish without pre-masking so weak reconstructions still store.
     # 重建结果已是物理反射率，直接传入可避免把EVI/SAVI常数放大一万倍。
@@ -1343,6 +1339,8 @@ def process_parcel_decloud(
     target = date.fromisoformat(str(date_str)[:10])
     session = None
     try:
+        # 先预检模型/权重，避免先拉邻景窗口再发现无法推理。
+        probe_decloud_backend()
         if not _decloud_http_only():
             session = get_db_session()
         ctx = _land_context(session, land_id)
@@ -1387,6 +1385,15 @@ def process_parcel_decloud(
             parcel_cloud=parcel_cloud,
             mq_task_id=mq_task_id,
         )
+    except DecloudUnavailable as exc:
+        logger.error(
+            "decloud_unavailable",
+            land_id=land_id,
+            date=date_str,
+            error=str(exc),
+        )
+        # 缺包/缺权重不会在重试间隔内自行恢复，避免空转占队列。
+        raise
     except Exception as exc:
         logger.error("decloud_failed", land_id=land_id, date=date_str, error=str(exc))
         retry_num = self.request.retries
@@ -1451,6 +1458,8 @@ def decloud_parcel_batch(
     pad = decloud_lookback_days()
     session = None
     try:
+        # 先预检，再缓冲邻景，避免模型不可用时仍拉取窗口并返回 status=ok。
+        probe_decloud_backend()
         if not _decloud_http_only():
             session = get_db_session()
         ctx = _land_context(session, land_id)
@@ -1560,6 +1569,15 @@ def decloud_parcel_batch(
             "held": len(held),
             "results": results,
         }
+    except DecloudUnavailable as exc:
+        logger.error(
+            "decloud_unavailable",
+            land_id=land_id,
+            date_from=str(date_from),
+            date_to=str(date_to),
+            error=str(exc),
+        )
+        raise
     except Exception as exc:
         logger.error(
             "decloud_batch_failed",

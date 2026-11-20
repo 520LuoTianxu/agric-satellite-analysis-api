@@ -1,2 +1,7 @@
 **/__pycache__
 .git
+.env
+.env.*
+logs/
+*.log
+.env.bak*

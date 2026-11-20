@@ -190,6 +190,28 @@ class SharedWindowTests(unittest.TestCase):
                     "scenes_done": 10,
                     "failed": 1,
                     "straggler_abandoned_scene_ids": ["s1"],
+                    "failed_scene_ids": ["s1"],
+                }
+            )
+        )
+        # scenes_done 含失败景时，不能把 20/20 当成全部成功。
+        self.assertFalse(
+            batch._partial_complete_ok(
+                {
+                    "scenes_total": 20,
+                    "scenes_done": 20,
+                    "failed": 10,
+                    "failed_scene_ids": [f"s{i}" for i in range(10)],
+                }
+            )
+        )
+        self.assertTrue(
+            batch._partial_complete_ok(
+                {
+                    "scenes_total": 20,
+                    "scenes_done": 20,
+                    "failed": 2,
+                    "failed_scene_ids": ["s1", "s2"],
                 }
             )
         )
