@@ -128,6 +128,18 @@ def band_read_timeout_sec() -> float:
     return _impl()
 
 
+def s1_band_read_timeout_sec() -> float:
+    from app.core.cog_http import s1_band_read_timeout_sec as _impl
+
+    return _impl()
+
+
+def band_read_timeout_for_sensor(sensor: object | None = None) -> float:
+    from app.core.cog_http import band_read_timeout_for_sensor as _impl
+
+    return _impl(sensor)
+
+
 def band_read_connect_timeout_sec() -> float:
     from app.core.cog_http import band_read_connect_timeout_sec as _impl
 

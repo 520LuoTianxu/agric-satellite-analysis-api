@@ -75,6 +75,7 @@ services:
       INGEST_SCENE_MAX_INFLIGHT: ${INGEST_SCENE_MAX_INFLIGHT:-1}
       INGEST_SCENE_STRAGGLER_TIMEOUT_SEC: ${INGEST_SCENE_STRAGGLER_TIMEOUT_SEC:-180}
       BAND_READ_TIMEOUT_SEC: ${BAND_READ_TIMEOUT_SEC:-20}
+      S1_BAND_READ_TIMEOUT_SEC: ${S1_BAND_READ_TIMEOUT_SEC:-40}
       BAND_READ_CONNECT_TIMEOUT_SEC: ${BAND_READ_CONNECT_TIMEOUT_SEC:-10}
       BAND_READ_HEDGE_AFTER_SEC: ${BAND_READ_HEDGE_AFTER_SEC:-5}
       GDAL_SLOT_WAIT_SEC: ${GDAL_SLOT_WAIT_SEC:-20}
@@ -95,6 +96,9 @@ services:
       SATELLITE_BATCH_TIME_LIMIT_SEC: ${SATELLITE_BATCH_TIME_LIMIT_SEC:-780}
       SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES: ${SATELLITE_BATCH_SOFT_TIMEOUT_MAX_RETRIES:-6}
       SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC: ${SATELLITE_BATCH_SOFT_TIMEOUT_RETRY_COUNTDOWN_SEC:-30}
+      # GDAL block cache: values < 10000 are treated as MiB. Cap per process so
+      # prefork workers do not each take a large fraction of the 16GiB host.
+      GDAL_CACHEMAX: ${GDAL_CACHEMAX:-256}
     volumes:
       - scratch:/data/scratch
       - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs
@@ -112,12 +116,16 @@ services:
     extends:
       service: ingest
     depends_on: !reset []
+    # Peak control on ~16GiB hosts: 6 workers each reached ~1.7-2.0GiB anon-RSS
+    # and, together with decloud (~2GiB) and host processes, triggered global OOM.
+    # Recycle a child only after it finishes a task if it exceeded ~2.4GiB.
     command: >
       celery -A app.worker worker
       -Q satellite_download
       -n satellite@%h
       --loglevel=info
-      --concurrency=6
+      --concurrency=${SATELLITE_CONCURRENCY:-3}
+      --max-memory-per-child=${SATELLITE_MAX_MEMORY_PER_CHILD_KB:-2500000}
 
   # Separate queue so UnCRtainTS runs while optical shards keep downloading.
   # Same image as ingest; env comes from compose base + .env (no secrets here).

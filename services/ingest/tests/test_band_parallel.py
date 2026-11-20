@@ -15,7 +15,9 @@ from app.core.band_parallel import (
     SceneFailFastError,
     band_max_workers,
     band_read_max_attempts,
+    band_read_timeout_for_sensor,
     band_read_timeout_sec,
+    s1_band_read_timeout_sec,
     effective_band_workers,
     gdal_read_slot,
     gdal_slot_snapshot,
@@ -259,6 +261,22 @@ class RunParallelBandJobsTests(unittest.TestCase):
         with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "nope"}):
             self.assertEqual(band_read_timeout_sec(), 20.0)
 
+    def test_s1_timeout_is_isolated_from_s2_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BAND_READ_TIMEOUT_SEC", None)
+            os.environ.pop("S1_BAND_READ_TIMEOUT_SEC", None)
+            self.assertEqual(band_read_timeout_sec(), 20.0)
+            self.assertEqual(s1_band_read_timeout_sec(), 40.0)
+            self.assertEqual(band_read_timeout_for_sensor("S1"), 40.0)
+            self.assertEqual(band_read_timeout_for_sensor("s1"), 40.0)
+            self.assertEqual(band_read_timeout_for_sensor("S2"), 20.0)
+        with patch.dict(
+            os.environ,
+            {"BAND_READ_TIMEOUT_SEC": "20", "S1_BAND_READ_TIMEOUT_SEC": "40"},
+        ):
+            self.assertEqual(band_read_timeout_for_sensor("S2"), 20.0)
+            self.assertEqual(band_read_timeout_for_sensor("S1"), 40.0)
+
     def test_new_slot_hedge_and_fail_fast_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             for key in (
@@ -320,6 +338,74 @@ class BandReadWallTimeoutTests(unittest.TestCase):
         self.assertEqual([row["outcome"] for row in attempts], ["failed"])
         self.assertTrue(attempts[0]["timed_out"])
         self.assertEqual(attempts[0]["timeout_sec"], 0.2)
+
+    def test_s1_wall_timeout_does_not_change_s2_and_still_skips_retry(self) -> None:
+        """S1 uses its own wall; S2 keeps 20s. Timeout still does not retry."""
+        s1_calls = 0
+        s2_calls = 0
+        release_hang = threading.Event()
+        logs: list[tuple[str, dict]] = []
+
+        def _s1(_key: str, _value: str) -> int:
+            nonlocal s1_calls
+            s1_calls += 1
+            release_hang.wait(5)
+            return 1
+
+        def _s2(_key: str, _value: str) -> int:
+            nonlocal s2_calls
+            s2_calls += 1
+            time.sleep(0.05)
+            return 7
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "INGEST_BAND_MAX_WORKERS": "1",
+                    "BAND_READ_MAX_ATTEMPTS": "3",
+                    "BAND_READ_TIMEOUT_SEC": "2",
+                    "S1_BAND_READ_TIMEOUT_SEC": "0.2",
+                },
+            ),
+            patch(
+                "app.core.band_parallel._band_log",
+                side_effect=lambda event, **fields: logs.append((event, fields)),
+            ),
+        ):
+            reset_band_gdal_limit()
+            t0 = time.perf_counter()
+            with self.assertRaises(RuntimeError):
+                run_parallel_band_jobs(
+                    {"vv": "s3://sentinel-s1-l1c/vv.tif"},
+                    _s1,
+                    log_context={"sensor": "S1"},
+                )
+            s1_wall = time.perf_counter() - t0
+            s2 = run_parallel_band_jobs(
+                {"B04": "https://example.test/red.tif"},
+                _s2,
+                log_context={"sensor": "S2"},
+            )
+
+        release_hang.set()
+        self.assertLess(s1_wall, 1.0)
+        self.assertEqual(s1_calls, 1)
+        self.assertEqual(s2, {"B04": 7})
+        self.assertEqual(s2_calls, 1)
+        s1_attempts = [
+            fields
+            for event, fields in logs
+            if event == "band_read_attempt_done" and fields.get("sensor") == "S1"
+        ]
+        self.assertEqual([row["outcome"] for row in s1_attempts], ["failed"])
+        self.assertTrue(s1_attempts[0]["timed_out"])
+        self.assertEqual(s1_attempts[0]["timeout_sec"], 0.2)
+        starts = [fields for event, fields in logs if event == "band_parallel_start"]
+        s1_starts = [row for row in starts if row.get("sensor") == "S1"]
+        s2_starts = [row for row in starts if row.get("sensor") == "S2"]
+        self.assertEqual(s1_starts[0]["timeout_sec"], 0.2)
+        self.assertEqual(s2_starts[0]["timeout_sec"], 2.0)
 
     def test_timeout_releases_slot_immediately(self) -> None:
         started = threading.Event()

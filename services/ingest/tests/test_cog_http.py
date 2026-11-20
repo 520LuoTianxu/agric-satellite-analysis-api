@@ -20,7 +20,9 @@ from app.core.cog_http import (
     BandReadTimeout,
     TimedRangeFile,
     band_read_hedge_after_sec,
+    band_read_timeout_for_sensor,
     band_read_timeout_sec,
+    s1_band_read_timeout_sec,
     fetch_byte_range,
     gdal_slot_wait_sec,
     hedge_circuit_open,
@@ -166,13 +168,23 @@ class DefaultKnobTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             for key in (
                 "BAND_READ_TIMEOUT_SEC",
+                "S1_BAND_READ_TIMEOUT_SEC",
                 "BAND_READ_HEDGE_AFTER_SEC",
                 "GDAL_SLOT_WAIT_SEC",
             ):
                 os.environ.pop(key, None)
             self.assertEqual(band_read_timeout_sec(), 20.0)
+            self.assertEqual(s1_band_read_timeout_sec(), 40.0)
+            self.assertEqual(band_read_timeout_for_sensor("S1"), 40.0)
+            self.assertEqual(band_read_timeout_for_sensor("S2"), 20.0)
+            self.assertEqual(band_read_timeout_for_sensor(None), 20.0)
             self.assertEqual(band_read_hedge_after_sec(), 5.0)
             self.assertEqual(gdal_slot_wait_sec(), 20.0)
+            with patch.dict(os.environ, {"BAND_READ_TIMEOUT_SEC": "15", "S1_BAND_READ_TIMEOUT_SEC": "45"}):
+                self.assertEqual(band_read_timeout_sec(), 15.0)
+                self.assertEqual(band_read_timeout_for_sensor("S2"), 15.0)
+                self.assertEqual(band_read_timeout_for_sensor("S1"), 45.0)
+                self.assertEqual(s1_band_read_timeout_sec(), 45.0)
 
     def test_compose_defaults_are_on(self) -> None:
         compose = (REPO_ROOT / "docker-compose.yml").read_text()
@@ -197,6 +209,21 @@ class DefaultKnobTests(unittest.TestCase):
         self.assertIn("GDAL_HTTP_VERSION=1.1", example)
         self.assertIn("GDAL_HTTP_MULTIRANGE=SERIAL", example)
         self.assertIn("BAND_WINDOW_CACHE=1", example)
+        self.assertIn("--concurrency=${SATELLITE_CONCURRENCY:-3}", download)
+        self.assertIn(
+            "--max-memory-per-child=${SATELLITE_MAX_MEMORY_PER_CHILD_KB:-2500000}",
+            download,
+        )
+        self.assertIn("GDAL_CACHEMAX: ${GDAL_CACHEMAX:-256}", download)
+        self.assertIn("SATELLITE_CONCURRENCY=3", example)
+        self.assertIn("SATELLITE_MAX_MEMORY_PER_CHILD_KB=2500000", example)
+        self.assertIn("GDAL_CACHEMAX=256", example)
+        self.assertNotIn("--concurrency=6", download)
+        self.assertIn("S1_BAND_READ_TIMEOUT_SEC: ${S1_BAND_READ_TIMEOUT_SEC:-40}", compose)
+        self.assertIn("S1_BAND_READ_TIMEOUT_SEC: ${S1_BAND_READ_TIMEOUT_SEC:-40}", download)
+        self.assertIn("S1_BAND_READ_TIMEOUT_SEC=40", example)
+        self.assertIn("BAND_READ_TIMEOUT_SEC=20", example)
+
 
 
 class TimedRangeTests(unittest.TestCase):

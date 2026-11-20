@@ -805,6 +805,15 @@ def _read_band_windowed_db_profiled(
                 return BandReadResult(_dn_to_db(dst), io_ms=io_ms, reproject_ms=0)
 
             # 直接从云优化GeoTIFF读取地块覆盖的原始像元，并保留源NoData掩膜。
+            logger.info(
+                "s1_source_window",
+                width=int(window.width),
+                height=int(window.height),
+                row_off=int(window.row_off),
+                col_off=int(window.col_off),
+                target_height=int(target_shape[0]),
+                target_width=int(target_shape[1]),
+            )
             data = src.read(1, window=window, masked=True)
             data = np.asarray(data.astype(np.float32).filled(np.nan))
             if source_gcps and gcp_crs is not None:
