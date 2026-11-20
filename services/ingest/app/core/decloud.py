@@ -131,6 +131,19 @@ def decloud_use_sar() -> bool:
     return True if explicit is None else explicit
 
 
+DEFAULT_CACHE_ONLY = True
+
+
+def decloud_cache_only() -> bool:
+    """When True, decloud consumes the shared window cache and never hits STAC/COG.
+
+    Production default is on (``DECLOUD_CACHE_ONLY=1``). Set the env to 0 to
+    restore the legacy remote-search path used by older workers and tests.
+    """
+    explicit = _parse_bool_env("DECLOUD_CACHE_ONLY")
+    return DEFAULT_CACHE_ONLY if explicit is None else explicit
+
+
 def decloud_mode() -> DecloudMode:
     """When enabled, default is batch-after-buffer (not per-scene STAC scrape)."""
     raw = (os.environ.get("DECLOUD_MODE") or DEFAULT_MODE).strip().lower()

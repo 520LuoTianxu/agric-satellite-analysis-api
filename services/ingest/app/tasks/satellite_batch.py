@@ -986,6 +986,51 @@ def _publish_land(
     # 同组多个地块同一天的结果必须具有不同结果编号，否则缓存/入库端会去重丢数据。
     land_task_id = f"{parent_id}:{meta['land_id']}"
     if sensor == "S1":
+        if decloud_enabled():
+            from app.tasks.decloud_uncrtaints import (
+                cache_optical_s1_window,
+                notify_cache_and_flush_ready,
+            )
+
+            try:
+                # Cache the cropped Sigma0 window before NaN-masking so the
+                # shared decloud key matches windowed COG reads / S2 grid_key.
+                cache_ok = cache_optical_s1_window(
+                    land_id=str(meta["land_id"]),
+                    date_str=scene["date"].isoformat()
+                    if hasattr(scene["date"], "isoformat")
+                    else str(scene["date"])[:10],
+                    vv=bands["vv"],
+                    vh=bands["vh"],
+                    target_shape=target_shape,
+                    target_transform=target_transform,
+                    target_crs=target_crs,
+                    field_mask=field_mask,
+                    stac_id=str(scene.get("id") or "") or None,
+                    radiometric_calibration=_s1_radiometric_calibration(scene),
+                    band_hrefs=scene.get("band_hrefs"),
+                )
+                if cache_ok:
+                    try:
+                        notify_cache_and_flush_ready(
+                            str(meta["land_id"]),
+                            target_crs=target_crs,
+                            target_shape=target_shape,
+                            target_transform=target_transform,
+                            field_mask=field_mask,
+                        )
+                    except Exception as flush_exc:
+                        logger.warning(
+                            "satellite_batch_decloud_s1_flush_failed",
+                            land_id=meta["land_id"],
+                            error=str(flush_exc),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "satellite_batch_decloud_s1_cache_failed",
+                    land_id=meta["land_id"],
+                    error=str(exc),
+                )
         for band in bands.values():
             band[~field_mask] = np.nan
         pixels = _sample_s1_lonlat(
@@ -1056,6 +1101,22 @@ def _publish_land(
                 band_radiometry_source=scene.get("band_radiometry_source"),
                 band_radiometry_sources=scene.get("band_radiometry_sources"),
             )
+            try:
+                from app.tasks.decloud_uncrtaints import notify_cache_and_flush_ready
+
+                notify_cache_and_flush_ready(
+                    str(meta["land_id"]),
+                    target_crs=target_crs,
+                    target_shape=target_shape,
+                    target_transform=target_transform,
+                    field_mask=field_mask,
+                )
+            except Exception as flush_exc:
+                logger.warning(
+                    "satellite_batch_decloud_s2_flush_failed",
+                    land_id=meta["land_id"],
+                    error=str(flush_exc),
+                )
         except Exception as exc:
             # 去云缓存与旧光学流程一样尽力保存，缓存失败不能阻断原始地块结果。
             logger.warning(
@@ -1246,6 +1307,12 @@ def _process_one_batch_scene(
             # 同日多景并发时先占位，避免重复下载；成功保留，失败再释放。
             for land in selected:
                 land["existing"].add(scene_date)
+                if sensor == "S1":
+                    land.setdefault("s1_attempted_dates", set()).add(
+                        scene_date.isoformat()
+                        if hasattr(scene_date, "isoformat")
+                        else str(scene_date)[:10]
+                    )
             reserved = list(selected)
             if reserved:
                 # 同步保留本景已成功发布地块，超时补偿只回收仍未完成的占位。
@@ -1397,6 +1464,12 @@ def _process_one_batch_scene(
                         reservation = active_reservations.get(reservation_key())
                         if reservation is not None:
                             reservation[2].add(land_id)
+                        if sensor == "S1":
+                            land.setdefault("s1_ok_dates", set()).add(
+                                product_scene["date"].isoformat()
+                                if hasattr(product_scene["date"], "isoformat")
+                                else str(product_scene["date"])[:10]
+                            )
                         if sensor == "S2" and raw_result is not None:
                             land["raw_results"].append(raw_result)
                             schedule_late_decloud = bool(
@@ -2081,6 +2154,59 @@ def process_satellite_batch(
                             job_id=job_id,
                             land_id=land["meta"]["land_id"],
                         )
+        if sensor == "S1" and decloud_enabled():
+            from app.core.decloud_cache import window_grid_key
+            from app.core.decloud_ready import record_s1_coverage
+            from app.tasks.decloud_uncrtaints import flush_ready_decloud_targets
+
+            for land in selected_lands:
+                land_id = str(land["meta"]["land_id"])
+                ok_dates = {
+                    str(d)[:10] for d in (land.get("s1_ok_dates") or set())
+                }
+                attempted = {
+                    str(d)[:10] for d in (land.get("s1_attempted_dates") or set())
+                }
+                failed_dates = sorted(attempted - ok_dates)
+                try:
+                    record_s1_coverage(
+                        land_id,
+                        d0,
+                        d1,
+                        failed_dates=failed_dates,
+                        source="satellite_batch",
+                        job_id=job_id,
+                    )
+                    logger.info(
+                        "decloud_s1_coverage_recorded",
+                        land_id=land_id,
+                        date_from=str(d0),
+                        date_to=str(d1),
+                        ok=len(ok_dates),
+                        failed=len(failed_dates),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "decloud_s1_coverage_record_failed",
+                        land_id=land_id,
+                        error=str(exc),
+                    )
+                try:
+                    grid = land.get("grid")
+                    grid_crs = land.get("grid_crs")
+                    expected = None
+                    if grid is not None and grid_crs is not None:
+                        target_transform, target_shape, field_mask, _ = grid
+                        expected = window_grid_key(
+                            grid_crs, target_shape, target_transform, field_mask
+                        )
+                    flush_ready_decloud_targets(land_id, expected_grid_key=expected)
+                except Exception as exc:
+                    logger.warning(
+                        "decloud_s1_coverage_flush_failed",
+                        land_id=land_id,
+                        error=str(exc),
+                    )
         patch_progress(force=True)
         status_progress = progress_snapshot()
         status = "failed" if status_progress["failed"] else "completed"

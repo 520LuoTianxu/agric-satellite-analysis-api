@@ -209,13 +209,14 @@ class DefaultKnobTests(unittest.TestCase):
         self.assertIn("GDAL_HTTP_VERSION=1.1", example)
         self.assertIn("GDAL_HTTP_MULTIRANGE=SERIAL", example)
         self.assertIn("BAND_WINDOW_CACHE=1", example)
-        self.assertIn("--concurrency=${SATELLITE_CONCURRENCY:-3}", download)
+        self.assertIn("--concurrency=${SATELLITE_CONCURRENCY:-4}", compose)
+        self.assertIn("--concurrency=${SATELLITE_CONCURRENCY:-4}", download)
         self.assertIn(
             "--max-memory-per-child=${SATELLITE_MAX_MEMORY_PER_CHILD_KB:-2500000}",
             download,
         )
         self.assertIn("GDAL_CACHEMAX: ${GDAL_CACHEMAX:-256}", download)
-        self.assertIn("SATELLITE_CONCURRENCY=3", example)
+        self.assertIn("SATELLITE_CONCURRENCY=4", example)
         self.assertIn("SATELLITE_MAX_MEMORY_PER_CHILD_KB=2500000", example)
         self.assertIn("GDAL_CACHEMAX=256", example)
         self.assertNotIn("--concurrency=6", download)
