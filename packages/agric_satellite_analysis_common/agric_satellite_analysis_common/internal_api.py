@@ -1479,3 +1479,47 @@ def data_readiness(
         return _do(client)
     with internal_client() as c:
         return _do(c)
+
+
+
+def get_biweekly_report_inputs(
+    job_id: str,
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """GET /v1/internal/biweekly/jobs/{id}/inputs."""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = request_with_retry(c, "GET", _ipath(f"/internal/biweekly/jobs/{job_id}/inputs"))
+        _raise_for_status(r, context="biweekly/inputs")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("biweekly/inputs returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    return _call_with_cached_client(_do)
+
+
+def complete_biweekly_report(
+    job_id: str,
+    body: dict[str, Any],
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """POST /v1/internal/biweekly/jobs/{id}/complete."""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = request_with_retry(
+            c, "POST", _ipath(f"/internal/biweekly/jobs/{job_id}/complete"), json=body
+        )
+        _raise_for_status(r, context="biweekly/complete")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("biweekly/complete returned non-object")
+        return data
+
+    if client is not None:
+        return _do(client)
+    return _call_with_cached_client(_do)
