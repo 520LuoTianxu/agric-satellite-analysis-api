@@ -25,6 +25,7 @@ from agric_satellite_analysis_common.internal_api import (
 )
 from agric_satellite_analysis_common.scheduled_land_filter import (
     is_scheduled_land_allowed,
+    should_bypass_schedule_land_filter,
 )
 from app.core.band_parallel import band_max_workers, run_parallel_band_jobs, scene_inflight_slot, scene_max_inflight
 from app.core.band_window_cache import (
@@ -358,6 +359,7 @@ def _load_lands(
     date_to: date | None = None,
     target_dates_by_land: dict[str, list[str]] | None = None,
     existing_algorithm_version: str | None = None,
+    bypass_schedule_land_filter: bool = False,
 ):
     """分批通过 Internal HTTP 读取地块和已处理日期，避免逐地块请求放大网络开销。"""
     land_ids = list(dict.fromkeys(str(item).strip() for item in land_ids))
@@ -396,7 +398,8 @@ def _load_lands(
                     continue
                 remote = remote_by_id[land_id]
                 # 入队后规则可能变化；执行前再过滤，避免已排除地块访问卫星数据。
-                if not is_scheduled_land_allowed(
+                # 用户触发的双周报补数可带 bypass 标志，仅这些任务跳过基地排除名单。
+                if not bypass_schedule_land_filter and not is_scheduled_land_allowed(
                     remote.get("base_id"), remote.get("land_area_mu")
                 ):
                     logger.info(
@@ -1631,6 +1634,7 @@ def process_satellite_batch(
             date_to=d1,
             target_dates_by_land=target_dates_by_land,
             existing_algorithm_version=params.get("existing_algorithm_version"),
+            bypass_schedule_land_filter=should_bypass_schedule_land_filter(params),
         )
         if not lands:
             patch_job(

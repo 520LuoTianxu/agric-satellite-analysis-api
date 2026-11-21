@@ -25,7 +25,7 @@ from .phase_policy import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-STATES = ("queued", "running", "ready", "failed", "evidence_limited")
+STATES = ("queued", "running", "dispatched", "ready", "failed", "evidence_limited")
 
 
 def _repo_root() -> Path:
@@ -93,7 +93,14 @@ class TriggerService:
             raise ReportError("ARTIFACT_CORRUPT")
         return artifact.get("filename") or path.name, data, artifact.get("mime") or "application/pdf"
 
-    def request_backfill(self, land_id: str, season_id: str, period_id: str) -> dict:
+    def request_backfill(
+        self,
+        land_id: str,
+        season_id: str,
+        period_id: str,
+        *,
+        evaluate_local_fixture: bool | None = None,
+    ) -> dict:
         period = self.catalog.period(land_id, season_id, period_id)
         periods = self.catalog.periods(land_id, season_id)
         window = bounded_backfill_window(periods, period["period_id"])
@@ -114,11 +121,66 @@ class TriggerService:
             land_id=land_id,
             season_id=season_id,
             period=period,
-            payload={"planned_batch": planned},
+            payload={"planned_batch": planned, "scope": "period"},
         )
-        if self.auto_run:
+        should_evaluate = self.auto_run if evaluate_local_fixture is None else evaluate_local_fixture
+        if should_evaluate:
             job = self.run_job(job["job_id"])
         return job
+
+    def request_season_backfill(self, land_id: str, season_id: str) -> dict:
+        """Queue a season-scoped backfill job without evaluating local fixtures."""
+        periods = self.catalog.periods(land_id, season_id)
+        if not periods:
+            raise ReportError("SEASON_NOT_FOUND")
+        windows = []
+        for row in periods:
+            window = bounded_backfill_window(periods, row["period_id"])
+            windows.append({"period_id": row["period_id"], "window": window})
+        first, last = periods[0], periods[-1]
+        job = self._create(
+            kind="backfill_season",
+            land_id=land_id,
+            season_id=season_id,
+            period={
+                "period_id": None,
+                "start": first["start"],
+                "end_inclusive": last["end_inclusive"],
+                "end_exclusive": last["end_exclusive"],
+            },
+            payload={
+                "scope": "season",
+                "windows": windows,
+                "period_ids": [row["period_id"] for row in periods],
+            },
+        )
+        # Never auto-run the local snapshot evaluation for a season fill.
+        return job
+
+    def record_backfill_dispatch(self, job_id: str, dispatch: dict) -> dict:
+        """Persist production dispatch outcome. Do not evaluate local snapshots."""
+        job = self.get_job(job_id)
+        dispatched = bool(dispatch.get("dispatched"))
+        payload = dict(job.get("payload") or {})
+        planned = dict(payload.get("planned_batch") or {})
+        if planned:
+            planned["dispatch"] = "satellite_batch" if dispatched else "dispatch_failed"
+            payload["planned_batch"] = planned
+        job["payload"] = payload
+        result = dict(job.get("result") or {})
+        result.update(dispatch)
+        result["mode"] = "production_dispatch"
+        result["dispatched_to_production"] = dispatched
+        result["satellite_batch_job_ids"] = list(dispatch.get("job_ids") or [])
+        if planned:
+            result["planned_batch"] = planned
+        status = "dispatched" if dispatched else "failed"
+        error = None if dispatched else (dispatch.get("reason") or "DISPATCH_FAILED")
+        self._transition(job, status, result=result, error_code=error)
+        job["dispatched_to_production"] = dispatched
+        job["satellite_batch_job_ids"] = list(dispatch.get("job_ids") or [])
+        self._write(job)
+        return self.get_job(job_id)
 
     def request_generate(
         self,

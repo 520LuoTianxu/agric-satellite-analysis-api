@@ -260,8 +260,18 @@ class BiweeklyRouterTests(unittest.TestCase):
             self.assertEqual(backfill.status_code, 200, backfill.text)
             body = backfill.json()
             self.assertEqual(body["kind"], "backfill")
+            self.assertEqual(body["status"], "dispatched")
             self.assertTrue(body["dispatched_to_production"])
             self.assertEqual(body["satellite_batch_job_ids"], ["batch-job-1"])
+            self.assertNotEqual(
+                (body.get("result") or {}).get("planned_batch", {}).get("dispatch"),
+                "plan_only_local_fixture",
+            )
+            self.assertEqual(
+                (body.get("result") or {}).get("planned_batch", {}).get("dispatch"),
+                "satellite_batch",
+            )
+            self.assertNotEqual(body.get("error_code"), "SNAPSHOT_NOT_FOUND")
             self.assertEqual(captured["land_id"], "6417")
             self.assertEqual(captured["window"]["date_from"], "2025-11-01")
             self.assertIsNone(captured["window"]["years"])
@@ -276,6 +286,7 @@ class BiweeklyRouterTests(unittest.TestCase):
                 json={},
             )
             self.assertEqual(refused.status_code, 200, refused.text)
+            self.assertEqual(refused.json()["status"], "dispatched")
             self.assertTrue(refused.json()["dispatched_to_production"])
             self.assertEqual(captured["window"]["date_from"], "2026-03-21")
             self.assertEqual(captured["window"]["date_to_inclusive"], "2026-04-17")
@@ -326,6 +337,15 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertFalse(kwargs["force"])
         self.assertTrue(kwargs["durable_dispatch"])
         self.assertEqual(create.await_args.args[1][0].land_id, "6417")
+        self.assertTrue(kwargs["extra_params"]["bypass_schedule_land_filter"])
+        self.assertTrue(kwargs["extra_params"]["biweekly_user_backfill"])
+        self.assertEqual(kwargs["job_type"], "biweekly_period_backfill")
+        self.assertEqual(kwargs["extra_params"]["display_type"], "biweekly_period_backfill")
+        self.assertEqual(kwargs["extra_params"]["display_name"], "双周报本期数据补齐")
+        self.assertEqual(result["claim_type"], "satellite_batch")
+        self.assertEqual(result["job_type"], "biweekly_period_backfill")
+        self.assertEqual(result["display_name"], "双周报本期数据补齐")
+        self.assertNotEqual(result["display_name"], "卫星数据分块处理")
         # generate is not part of this helper
         self.assertNotIn("generate", result)
 
@@ -435,6 +455,200 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in periods.json()["stages"]], stage_names)
         self.assertIsNotNone(periods.json().get("native_plan"))
 
+
+
+    def test_smart_backfill_status_follows_dispatch_when_snapshot_is_missing(self):
+        from tests.test_biweekly_plans import _batch, _task
+        from app.services.biweekly_plans import build_seasons_from_rows
+
+        self._enable_dev(lands="19994")
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        calendar = build_seasons_from_rows(
+            "19994",
+            [_batch(land_id=19994, batch_id=9001, name="小麦2025/26")],
+            [
+                _task(
+                    plan_id=9001,
+                    name="出苗期",
+                    start="2025-11-13",
+                    finish="2026-02-04",
+                    task_id=1,
+                ),
+            ],
+        )
+        season = calendar["seasons"][0]
+        period = season["periods"][4] if len(season["periods"]) >= 5 else season["periods"][0]
+        self.assertIsNone(period.get("snapshot"))
+
+        async def fake_dispatch(land_id, window):
+            return {
+                "dispatched": True,
+                "dispatched_to_production": True,
+                "job_ids": ["prod-19994"],
+                "job_count": 1,
+                "date_from": window["date_from"],
+                "date_to": window["date_to_inclusive"],
+                "reason": None,
+            }
+
+        headers = self._auth(self._token(land_ids=("19994",)))
+        with patch(
+            "app.routers.biweekly.load_smart_planting_calendar",
+            new=AsyncMock(return_value=calendar),
+        ), patch("app.routers.biweekly.dispatch_bounded_backfill", new=fake_dispatch):
+            response = self.client.post(
+                f"/v1/lands/19994/biweekly/periods/{period['period_id']}/backfill"
+                f"?season={season['season_id']}",
+                headers=headers,
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "dispatched")
+        self.assertTrue(body["dispatched_to_production"])
+        self.assertNotEqual(body.get("error_code"), "SNAPSHOT_NOT_FOUND")
+        self.assertNotEqual(body["status"], "failed")
+        self.assertEqual(body["satellite_batch_job_ids"], ["prod-19994"])
+        self.assertNotIn("plan_only_local_fixture", str(body.get("result")))
+
+    def test_season_backfill_dispatches_bounded_windows_and_does_not_autogenerate(self):
+        self._enable_dev()
+        headers = self._auth(self._token())
+        captured = {"windows": [], "generate": False}
+
+        async def fake_dispatch(land_id, window, **kwargs):
+            captured["windows"].append({"land_id": land_id, **window})
+            captured.setdefault("job_types", []).append(kwargs.get("job_type"))
+            captured.setdefault("display_names", []).append(kwargs.get("display_name"))
+            return {
+                "dispatched": True,
+                "dispatched_to_production": True,
+                "job_ids": [f"batch-{window['current_period_id']}"],
+                "job_count": 1,
+                "date_from": window["date_from"],
+                "date_to": window["date_to_inclusive"],
+                "reason": None,
+            }
+
+        with patch(
+            "app.services.biweekly_dispatch.dispatch_bounded_backfill",
+            new=fake_dispatch,
+        ), patch(
+            "app.routers.biweekly.dispatch_bounded_backfill",
+            new=fake_dispatch,
+        ), patch(
+            "app.routers.biweekly.build_trigger_service"
+        ) as build:
+            service = __import__(
+                "app.services.biweekly_trigger", fromlist=["build_trigger_service"]
+            ).build_trigger_service()
+            original_generate = service.request_generate
+
+            def wrapped_generate(*args, **kwargs):
+                captured["generate"] = True
+                return original_generate(*args, **kwargs)
+
+            service.request_generate = wrapped_generate
+            build.return_value = service
+            denied = self.client.post(
+                "/v1/lands/6417/biweekly/backfill-season?season=2025/26",
+                json={},
+            )
+            self.assertEqual(denied.status_code, 401)
+            response = self.client.post(
+                "/v1/lands/6417/biweekly/backfill-season?season=2025/26",
+                headers=headers,
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["kind"], "backfill_season")
+        self.assertEqual(body["status"], "dispatched")
+        self.assertTrue(body["dispatched_to_production"])
+        self.assertGreaterEqual(len(captured["windows"]), 2)
+        self.assertEqual(len(captured["windows"]), 18)
+        spans = [item["span_days"] for item in captured["windows"]]
+        self.assertTrue(all(0 < span < 43 for span in spans))
+        self.assertTrue(all(item.get("years") is None for item in captured["windows"]))
+        self.assertTrue(all(item.get("months") is None for item in captured["windows"]))
+        starts = {item["date_from"] for item in captured["windows"]}
+        ends = {item["date_to_inclusive"] for item in captured["windows"]}
+        self.assertGreater(len(starts), 1)
+        # Never a single season-long or three-year window.
+        from datetime import date
+        season_span = (
+            date.fromisoformat(max(ends)) - date.fromisoformat(min(starts))
+        ).days + 1
+        self.assertGreater(season_span, 42)
+        self.assertFalse(captured["generate"])
+        self.assertEqual(body["kind"], "backfill_season")
+        self.assertNotIn("plan_only_local_fixture", str(body.get("result")))
+        self.assertTrue(captured["job_types"])
+        self.assertTrue(all(item == "biweekly_season_backfill" for item in captured["job_types"]))
+        self.assertTrue(all(item == "双周报全季数据补齐" for item in captured["display_names"]))
+        self.assertEqual(body.get("result", {}).get("display_name") or body.get("display_name") or "双周报全季数据补齐", "双周报全季数据补齐")
+
+    def test_season_dispatch_helper_sets_bypass_flag_on_each_period(self):
+        from datetime import date
+        from app.services.biweekly_dispatch import dispatch_season_bounded_backfill
+
+        periods = [
+            {
+                "period_id": "1",
+                "start": "2025-11-13",
+                "end_inclusive": "2025-11-26",
+                "end_exclusive": "2025-11-27",
+                "days": 14,
+            },
+            {
+                "period_id": "2",
+                "start": "2025-11-27",
+                "end_inclusive": "2025-12-10",
+                "end_exclusive": "2025-12-11",
+                "days": 14,
+            },
+        ]
+        create = AsyncMock(
+            return_value=([], [type("Job", (), {"id": "job-season-1"})()], {})
+        )
+        ensure = AsyncMock(return_value=([type("Land", (), {"land_id": "19994"})()], {}))
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def commit(self):
+                self.committed = True
+
+        with patch("app.core.database.async_session", return_value=_Session()),              patch("app.services.smart_land_backfill.ensure_land_parcels", new=ensure),              patch("app.services.satellite_batch.create_satellite_batch_jobs", new=create):
+            import asyncio
+
+            result = asyncio.run(dispatch_season_bounded_backfill("19994", periods))
+        self.assertTrue(result["dispatched"])
+        self.assertEqual(result["scope"], "season")
+        self.assertEqual(len(result["period_results"]), 2)
+        self.assertEqual(create.await_count, 2)
+        for call in create.await_args_list:
+            self.assertTrue(call.kwargs["extra_params"]["bypass_schedule_land_filter"])
+            span = (call.kwargs["date_to"] - call.kwargs["date_from"]).days + 1
+            self.assertLessEqual(span, 42)
+            self.assertGreater(span, 0)
+        # Two bounded windows, not one merged season window.
+        windows = [
+            (call.kwargs["date_from"], call.kwargs["date_to"])
+            for call in create.await_args_list
+        ]
+        self.assertEqual(windows[0], (date(2025, 11, 13), date(2025, 11, 26)))
+        self.assertEqual(windows[1], (date(2025, 11, 13), date(2025, 12, 10)))
+        for call in create.await_args_list:
+            self.assertEqual(call.kwargs["job_type"], "biweekly_season_backfill")
+            self.assertEqual(call.kwargs["extra_params"]["display_type"], "biweekly_season_backfill")
+            self.assertEqual(call.kwargs["extra_params"]["display_name"], "双周报全季数据补齐")
+            self.assertNotEqual(call.kwargs["extra_params"]["display_name"], "卫星数据分块处理")
+        self.assertNotIn("generate", result)
 
 
 if __name__ == "__main__":

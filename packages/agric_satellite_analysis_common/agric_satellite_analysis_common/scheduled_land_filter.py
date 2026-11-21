@@ -24,6 +24,24 @@ def is_excluded_schedule_base_id(base_id: Any) -> bool:
     return str(base_id).strip() in EXCLUDED_SCHEDULE_BASE_IDS
 
 
+
+BYPASS_SCHEDULE_LAND_FILTER_PARAM = "bypass_schedule_land_filter"
+
+
+def should_bypass_schedule_land_filter(params: Any) -> bool:
+    """Return whether a job payload asked to skip the scheduled-land exclusion.
+
+    Only user-triggered biweekly dispatch may set this flag. Automatic daily
+    or scheduled sync, weather, and report jobs must not pass it.
+    """
+    if not isinstance(params, dict):
+        return False
+    return bool(
+        params.get(BYPASS_SCHEDULE_LAND_FILTER_PARAM)
+        or params.get("allow_excluded_bases")
+    )
+
+
 def is_scheduled_land_allowed(base_id: Any, land_area_mu: Any) -> bool:
     """判断地块是否允许进入自动化任务队列。"""
     if is_excluded_schedule_base_id(base_id):
@@ -71,8 +89,10 @@ def scheduled_date_window(
 __all__ = [
     "EXCLUDED_SCHEDULE_BASE_IDS",
     "MAX_SCHEDULE_LAND_AREA_MU",
+    "BYPASS_SCHEDULE_LAND_FILTER_PARAM",
     "is_excluded_schedule_base_id",
     "is_scheduled_land_allowed",
+    "should_bypass_schedule_land_filter",
     "scheduled_date_window",
     "scheduled_land_sql",
 ]

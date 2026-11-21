@@ -120,3 +120,71 @@ class TriggerServiceTests(unittest.TestCase):
         self.assertTrue(job["result"]["eligible_optics_found"])
         # 28 days must never be expanded to a three-year request
         self.assertNotIn(1095, [planned["window"]["span_days"]])
+
+
+    def test_api_backfill_records_dispatch_without_local_fixture(self):
+        class NoSnapshotCatalog(LocalPackCatalog):
+            def period(self, land_id, season_id, period_id):
+                row = dict(super().period(land_id, season_id, period_id))
+                row["snapshot"] = None
+                return row
+
+            def load_snapshot(self, relative):
+                raise ReportError("SNAPSHOT_NOT_FOUND")
+
+        service = TriggerService(Path(self.tmp.name) / "api-jobs", NoSnapshotCatalog())
+        queued = service.request_backfill(
+            "6417", "2025/26", "5", evaluate_local_fixture=False
+        )
+        self.assertEqual(queued["status"], "queued")
+        self.assertIsNone(queued.get("error_code"))
+        recorded = service.record_backfill_dispatch(
+            queued["job_id"],
+            {
+                "dispatched": True,
+                "job_ids": ["80e4d0fd-c2d3-4e76-a192-fa28424f643e"],
+                "job_count": 1,
+                "reason": None,
+            },
+        )
+        self.assertEqual(recorded["status"], "dispatched")
+        self.assertTrue(recorded["dispatched_to_production"])
+        self.assertEqual(
+            recorded["satellite_batch_job_ids"],
+            ["80e4d0fd-c2d3-4e76-a192-fa28424f643e"],
+        )
+        self.assertEqual(recorded["result"]["planned_batch"]["dispatch"], "satellite_batch")
+        self.assertNotEqual(
+            recorded["result"]["planned_batch"]["dispatch"], "plan_only_local_fixture"
+        )
+        failed = service.request_backfill(
+            "6417", "2025/26", "1", evaluate_local_fixture=False
+        )
+        failed = service.record_backfill_dispatch(
+            failed["job_id"],
+            {"dispatched": False, "reason": "DISPATCH_FAILED", "job_ids": []},
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error_code"], "DISPATCH_FAILED")
+        self.assertFalse(failed["dispatched_to_production"])
+
+    def test_season_backfill_job_lists_one_bounded_window_per_period(self):
+        job = self.service.request_season_backfill("6417", "2025/26")
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["kind"], "backfill_season")
+        windows = job["payload"]["windows"]
+        self.assertEqual(len(windows), 18)
+        spans = [item["window"]["span_days"] for item in windows]
+        self.assertTrue(all(0 < span <= MAX_BACKFILL_DAYS for span in spans))
+        self.assertTrue(all(item["window"].get("years") is None for item in windows))
+        starts = {item["window"]["date_from"] for item in windows}
+        ends = {item["window"]["date_to_inclusive"] for item in windows}
+        # The season itself is longer than one bounded window.
+        self.assertGreater(len(starts), 1)
+        self.assertNotEqual(min(starts), max(ends))
+        from datetime import date
+
+        season_days = (
+            date.fromisoformat(max(ends)) - date.fromisoformat(min(starts))
+        ).days + 1
+        self.assertGreater(season_days, MAX_BACKFILL_DAYS)
