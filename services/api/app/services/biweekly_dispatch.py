@@ -29,8 +29,10 @@ DispatchFn = Callable[[str, dict], Awaitable[dict[str, Any]]]
 
 BIWEEKLY_PERIOD_JOB_TYPE = "biweekly_period_backfill"
 BIWEEKLY_SEASON_JOB_TYPE = "biweekly_season_backfill"
+BIWEEKLY_REPORT_JOB_TYPE = "biweekly_report"
 BIWEEKLY_PERIOD_DISPLAY_NAME = "双周报本期数据补齐"
 BIWEEKLY_SEASON_DISPLAY_NAME = "双周报全季数据补齐"
+BIWEEKLY_REPORT_DISPLAY_NAME = "双周报正式出报"
 
 
 
@@ -198,3 +200,113 @@ async def dispatch_season_bounded_backfill(land_id: str, periods: list[dict]) ->
         "note": "已按双周报周期分别派发有界 satellite_batch 任务。不会自动出报。",
     }
 
+
+
+async def dispatch_biweekly_report(
+    land_id: str,
+    window: dict,
+    *,
+    extra_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Enqueue a download-machine report job. The API does not render the PDF.
+
+    The download machine later claims work_item type ``biweekly_report`` and
+    writes the official v8 PDF. This helper only creates the API Job and
+    stages the WorkItem / MQ task.
+    """
+    extras = dict(extra_params or {})
+    date_from = str(window.get("date_from") or extras.get("date_from") or "")
+    date_to = str(
+        window.get("date_to_inclusive")
+        or window.get("date_to")
+        or extras.get("date_to")
+        or ""
+    )
+    from app.core.database import async_session
+    from app.models.tables import Job
+    from app.mq_publish import publish_api_task
+    from app.services.work_items import should_enqueue_work_items, should_publish_mq
+
+    try:
+        from agric_satellite_analysis_common.task_priority import INTERACTIVE_REPORT_PRIORITY
+
+        from app.services.smart_land_backfill import LandSelectionError, ensure_land_parcels
+
+        async with async_session() as db:
+            try:
+                await ensure_land_parcels(
+                    db, [str(land_id)], max_lands=1, allow_partial=False
+                )
+            except LandSelectionError as exc:
+                return {
+                    "dispatched": False,
+                    "dispatched_to_production": False,
+                    "reason": "LAND_NOT_AVAILABLE",
+                    "detail": str(exc),
+                    "job_ids": [],
+                    "job_count": 0,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "land_id": str(land_id),
+                    "job_type": BIWEEKLY_REPORT_JOB_TYPE,
+                }
+            job = Job(
+                land_id=str(land_id),
+                type=BIWEEKLY_REPORT_JOB_TYPE,
+                status="pending",
+                params_json={
+                    "kind": "biweekly_official_report",
+                    "display_type": BIWEEKLY_REPORT_JOB_TYPE,
+                    "display_name": BIWEEKLY_REPORT_DISPLAY_NAME,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    **extras,
+                },
+            )
+            db.add(job)
+            await db.commit()
+            await db.refresh(job)
+            job_id = str(job.id)
+        task_extras = {
+            "job_id": job_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            **extras,
+        }
+        mq_task_id = publish_api_task(
+            type=BIWEEKLY_REPORT_JOB_TYPE,
+            land_id=str(land_id),
+            extras=task_extras,
+            priority=INTERACTIVE_REPORT_PRIORITY,
+        )
+        return {
+            "dispatched": True,
+            "dispatched_to_production": True,
+            "reason": None,
+            "job_ids": [job_id],
+            "job_count": 1,
+            "job_id": job_id,
+            "mq_task_id": mq_task_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            "land_id": str(land_id),
+            "job_type": BIWEEKLY_REPORT_JOB_TYPE,
+            "display_name": BIWEEKLY_REPORT_DISPLAY_NAME,
+            "claim_type": BIWEEKLY_REPORT_JOB_TYPE,
+            "staged_work_items": should_enqueue_work_items(),
+            "staged_mq": should_publish_mq(),
+            "note": "已下发出报任务给下载机。API 机不渲染 PDF。",
+        }
+    except Exception as exc:  # noqa: BLE001 — do not render a local fallback PDF
+        return {
+            "dispatched": False,
+            "dispatched_to_production": False,
+            "reason": "DISPATCH_FAILED",
+            "detail": type(exc).__name__,
+            "job_ids": [],
+            "job_count": 0,
+            "date_from": date_from,
+            "date_to": date_to,
+            "land_id": str(land_id),
+            "job_type": BIWEEKLY_REPORT_JOB_TYPE,
+        }

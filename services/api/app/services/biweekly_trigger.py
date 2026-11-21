@@ -134,7 +134,7 @@ def build_trigger_service(
     smart: SmartPlantingCatalog | None = None,
     *,
     pdf_renderer=None,
-    use_official_pdf: bool = True,
+    use_official_pdf: bool = False,
 ) -> TriggerService:
     work_dir = Path(settings.biweekly_work_dir or DEFAULT_WORK_DIR)
     work_dir.mkdir(parents=True, exist_ok=True)
