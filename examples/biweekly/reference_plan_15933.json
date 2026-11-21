@@ -1,0 +1,26 @@
+{
+  "planting_instance_id": "15933",
+  "name": "2026小麦广宗分支新农人项目01",
+  "field_id_of_proxy": "18507",
+  "tenant_id": 38,
+  "species_code": "2000000005002",
+  "stage_model": "QX/T 88-2008",
+  "shift": "calendar year minus one",
+  "disclosure": "参照计划，不是6417本田已关联方案，也不是实地确认物候",
+  "coverage": "partial-known-window-only",
+  "mapping_version": "wheat-smart-pilot-1",
+  "intervals": [
+    {
+      "stage_code": "JT",
+      "start": "2026-04-04",
+      "end_exclusive": "2026-04-16",
+      "source": "v8 phenology_reference after year shift; start of JT before 2026-04-04 is not in this fixture"
+    },
+    {
+      "stage_code": "HA",
+      "start": "2026-04-16",
+      "end_exclusive": "2026-05-02",
+      "source": "v8: issue window 2026-04-16–17 and next-week guidance 2026-04-18–2026-05-01 inclusive"
+    }
+  ]
+}

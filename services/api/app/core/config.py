@@ -117,5 +117,21 @@ class Settings(BaseSettings):
     work_claim_default_limit: int = 1
     work_reaper_on_claim: bool = True
 
+    # Winter-wheat biweekly trigger APIs, served by this API machine.
+    # Default on. Set BIWEEKLY_API_ENABLED=0 or false to disable.
+    # BIWEEKLY_DEV_AUTH is a local/internal switch only and
+    # must not be shipped as-is to production (不能原样上生产).
+    # These routes never use AUTH_DISABLED / anonymous get_current_user.
+    biweekly_api_enabled: bool = True
+    biweekly_dev_auth: bool = False
+    biweekly_jwt_secret: str = ""
+    biweekly_allowed_lands: str = ""
+    biweekly_allowed_tenants: str = ""
+    biweekly_pack_root: str = ""
+    biweekly_work_dir: str = ""
+    # Stay false until a real, local-safe download-host claim path exists.
+    # Setting this true does not publish to production MQ; the router refuses.
+    biweekly_dispatch_to_production: bool = False
+
 
 settings = Settings()
