@@ -10,9 +10,11 @@ from app.services.biweekly_plans import (
     MISSING_NOTE,
     SOURCE_UNAVAILABLE_NOTE,
     SmartPlantingCatalog,
+    attach_public_stages,
     build_seasons_from_rows,
     exact_land_id,
     load_smart_planting_calendar,
+    public_stage_intervals,
 )
 
 
@@ -98,6 +100,45 @@ class SmartPlanTests(unittest.TestCase):
         with self.assertRaises(ReportError) as ctx:
             catalog.native_plan("6417", "2027/28")
         self.assertEqual(ctx.exception.code, "SEASON_NOT_FOUND")
+
+    def test_public_stages_keep_not_applicable_pre_monitoring(self):
+        tasks = [
+            _task(plan_id=8801, name="播种前准备", start="2026-09-20", finish="2026-10-05", task_id=1),
+            _task(plan_id=8801, name="播种期", start="2026-10-06", finish="2026-10-15", task_id=2),
+            _task(plan_id=8801, name="出苗期", start="2026-10-16", finish="2026-10-31", task_id=3),
+            _task(plan_id=8801, name="拔节孕穗期", start="2027-03-20", finish="2027-04-10", task_id=4),
+            _task(plan_id=8801, name="成熟期", start="2027-05-20", finish="2027-06-05", task_id=5),
+        ]
+        calendar = build_seasons_from_rows(
+            "18509", [_batch(land_id=18509, batch_id=8801, name="小麦2026/27")], tasks
+        )
+        season = calendar["seasons"][0]
+        by_source = {row["source_stage_name"]: row for row in season["native_plan"]["intervals"]}
+        self.assertEqual(by_source["播种前准备"]["mapping_status"], "NOT_APPLICABLE")
+        self.assertIsNone(by_source["播种前准备"]["phase_label"])
+        self.assertEqual(by_source["播种期"]["mapping_status"], "NOT_APPLICABLE")
+        self.assertEqual(by_source["出苗期"]["phase_label"], "S1")
+        self.assertEqual(by_source["拔节孕穗期"]["phase_label"], "S2")
+        self.assertEqual(by_source["成熟期"]["phase_label"], "S3")
+
+        payload = attach_public_stages(
+            {"land_id": "18509", "seasons": [dict(season)], "season_id": season["season_id"], "periods": season["periods"]},
+            calendar,
+        )
+        names = [row["name"] for row in payload["seasons"][0]["stages"]]
+        self.assertEqual(names, ["播种前准备", "播种期", "出苗期", "拔节孕穗期", "成熟期"])
+        pre = payload["seasons"][0]["stages"][0]
+        self.assertEqual(pre["mapping_status"], "NOT_APPLICABLE")
+        self.assertIsNone(pre["phase_label"])
+        self.assertFalse(pre["monitored"])
+        self.assertEqual(pre["start"], "2026-09-20")
+        self.assertEqual(pre["end_inclusive"], "2026-10-05")
+        self.assertEqual(payload["stages"], payload["seasons"][0]["stages"])
+        self.assertEqual(payload["native_plan"]["batch_id"], "8801")
+        self.assertEqual(len(public_stage_intervals(None)), 0)
+        self.assertNotIn("孕穗", names)
+        # Aliases stay on the plan only when present; this land has official 拔节孕穗期, not 起身期.
+        self.assertNotIn("起身期", names)
 
     def test_mysql_disabled_is_documented(self):
         saved_enabled = settings.mysql_source_enabled

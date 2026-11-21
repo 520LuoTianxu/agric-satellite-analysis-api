@@ -396,6 +396,45 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertEqual(body["phase_mapping"]["mapping_version"], "wheat-smart-pilot-1")
         self.assertNotEqual(body["phase_mapping"]["source"], "prec_agric.crop_remote_phase_mapping")
 
+    def test_seasons_and_periods_expose_not_applicable_stages(self):
+        from tests.test_biweekly_plans import _batch, _task
+        from app.services.biweekly_plans import build_seasons_from_rows
+
+        self._enable_dev(lands="18509")
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        calendar = build_seasons_from_rows(
+            "18509",
+            [_batch(land_id=18509, batch_id=8801, name="小麦2026/27")],
+            [
+                _task(plan_id=8801, name="播种前准备", start="2026-09-20", finish="2026-10-05", task_id=1),
+                _task(plan_id=8801, name="播种期", start="2026-10-06", finish="2026-10-15", task_id=2),
+                _task(plan_id=8801, name="出苗期", start="2026-10-16", finish="2026-10-31", task_id=3),
+                _task(plan_id=8801, name="拔节孕穗期", start="2027-03-20", finish="2027-04-10", task_id=4),
+                _task(plan_id=8801, name="成熟期", start="2027-05-20", finish="2027-06-05", task_id=5),
+            ],
+        )
+        headers = self._auth(self._token(land_ids=("18509",)))
+        with patch(
+            "app.routers.biweekly.load_smart_planting_calendar",
+            new=AsyncMock(return_value=calendar),
+        ):
+            seasons = self.client.get("/v1/lands/18509/biweekly/seasons", headers=headers)
+            periods = self.client.get(
+                "/v1/lands/18509/biweekly/periods?season=2026/27", headers=headers
+            )
+        self.assertEqual(seasons.status_code, 200, seasons.text)
+        self.assertEqual(periods.status_code, 200, periods.text)
+        stage_names = [row["name"] for row in seasons.json()["seasons"][0]["stages"]]
+        self.assertEqual(stage_names, ["播种前准备", "播种期", "出苗期", "拔节孕穗期", "成熟期"])
+        pre = seasons.json()["seasons"][0]["stages"][0]
+        self.assertEqual(pre["mapping_status"], "NOT_APPLICABLE")
+        self.assertIsNone(pre["phase_label"])
+        self.assertFalse(pre["monitored"])
+        self.assertEqual(pre["end_inclusive"], "2026-10-05")
+        self.assertEqual(seasons.json()["seasons"][0]["native_plan"]["intervals"][0]["source_stage_name"], "播种前准备")
+        self.assertEqual([row["name"] for row in periods.json()["stages"]], stage_names)
+        self.assertIsNotNone(periods.json().get("native_plan"))
+
 
 
 if __name__ == "__main__":

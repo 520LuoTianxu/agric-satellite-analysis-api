@@ -25,6 +25,7 @@ from agric_satellite_analysis_common.biweekly.phase_policy import (
     CROP_ID,
     CROP_NAME,
     MAPPING_VERSION,
+    PHASE_LABELS,
     resolve_wheat_stage,
 )
 from sqlalchemy import text
@@ -69,6 +70,65 @@ def _empty(*, land_id: str, plan_status: str, note: str) -> dict[str, Any]:
         "auto_publish": False,
         "note": note,
     }
+
+
+
+def public_stage_intervals(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Stable public phenology windows from a Smart native plan.
+
+    Keeps NOT_APPLICABLE pre-monitoring stages (播种前准备, 播种期) even when
+    phase_label is null. Does not invent stages that are not on the plan.
+    """
+    stages: list[dict[str, Any]] = []
+    for row in (plan or {}).get("intervals") or []:
+        name = str(row.get("source_stage_name") or row.get("stage_code") or "").strip()
+        start = row.get("start")
+        end_inclusive = row.get("end_inclusive")
+        end_exclusive = row.get("end_exclusive")
+        if not name or not start or not end_inclusive:
+            continue
+        phase_label = row.get("phase_label") or None
+        status = str(row.get("mapping_status") or "")
+        stages.append(
+            {
+                "name": name,
+                "source_stage_name": name,
+                "stage_code": row.get("stage_code"),
+                "start": start,
+                "end_inclusive": end_inclusive,
+                "end_exclusive": end_exclusive,
+                "mapping_status": status or None,
+                "phase_label": phase_label,
+                "phase_code": row.get("phase_code") or None,
+                "phase_name": PHASE_LABELS.get(phase_label) if phase_label else None,
+                "monitored": status != "NOT_APPLICABLE" and bool(phase_label),
+                "tags": list(row.get("tags") or []),
+            }
+        )
+    return stages
+
+
+def attach_public_stages(payload: dict[str, Any], calendar: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Expose `stages` (and native_plan on period lists) for the frontend timeline."""
+    calendar_by_id = {
+        str(row["season_id"]): row
+        for row in (calendar or {}).get("seasons") or []
+        if row.get("season_id")
+    }
+    for season in payload.get("seasons") or []:
+        plan = season.get("native_plan") or (calendar_by_id.get(str(season.get("season_id"))) or {}).get(
+            "native_plan"
+        )
+        if plan and not season.get("native_plan"):
+            season["native_plan"] = plan
+        season["stages"] = public_stage_intervals(plan)
+    if "periods" in payload:
+        season_id = str(payload.get("season_id") or "")
+        plan = payload.get("native_plan") or (calendar_by_id.get(season_id) or {}).get("native_plan")
+        if plan:
+            payload["native_plan"] = plan
+        payload["stages"] = public_stage_intervals(plan)
+    return payload
 
 
 class SmartPlantingCatalog:
