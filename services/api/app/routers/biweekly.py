@@ -24,7 +24,7 @@ from agric_satellite_analysis_common.biweekly.models import ReportError
 from app.middleware.biweekly_auth import BiweeklyPrincipal, require_biweekly_access
 from app.services.biweekly_dispatch import dispatch_bounded_backfill
 from app.services.biweekly_mapping import load_wheat_phase_mapping
-from app.services.biweekly_plans import SmartPlantingCatalog, load_smart_planting_calendar
+from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
 from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service
 
@@ -111,7 +111,7 @@ def _with_plan(payload: dict, mapping: dict, calendar: dict) -> dict:
         payload["note"] = calendar["note"]
     elif calendar.get("note") and "note" not in payload:
         payload["note"] = calendar["note"]
-    return payload
+    return attach_public_stages(payload, calendar)
 
 
 def _season_for(service, land_id: str, season: str | None) -> str:
