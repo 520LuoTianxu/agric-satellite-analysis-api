@@ -65,7 +65,7 @@ class HealthLightTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("db")
 
         with patch.object(dbmod, "engine", _NoEngine()), \
-             patch.object(main.aioredis, "from_url", side_effect=AssertionError("redis")):
+             patch.object(main, "create_async_redis_client", side_effect=AssertionError("redis")):
             client = TestClient(main.app)  # 不进入 lifespan
             r = client.get("/health")
             self.assertEqual(r.status_code, 200)

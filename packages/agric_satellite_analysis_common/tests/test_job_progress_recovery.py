@@ -19,7 +19,7 @@ def test_startup_failure_recovers_once_after_cooldown():
     client = MagicMock()
     with (
         patch(
-            "redis.Redis.from_url", side_effect=[OSError("offline"), client]
+            "agric_satellite_analysis_common.job_progress_redis.create_sync_redis_client", side_effect=[OSError("offline"), client]
         ) as connect,
         patch.object(progress.time, "monotonic", return_value=10) as clock,
     ):
@@ -39,7 +39,7 @@ def test_runtime_failure_enters_cooldown_then_recovers():
     broken.hgetall.side_effect = OSError("disconnected")
     healthy.hgetall.return_value = {"done": "2"}
     with (
-        patch("redis.Redis.from_url", side_effect=[broken, healthy]) as connect,
+        patch("agric_satellite_analysis_common.job_progress_redis.create_sync_redis_client", side_effect=[broken, healthy]) as connect,
         patch.object(progress.time, "monotonic", return_value=10) as clock,
     ):
         assert progress.read_progress("job") is None

@@ -7,6 +7,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.core.config import settings
+from app.core.redis_client import REDIS_RESP2_PROTOCOL
 
 
 def _key_func(request: Request) -> str:
@@ -34,4 +35,6 @@ limiter = Limiter(
     key_func=_key_func,
     default_limits=["120/minute"],
     storage_uri=settings.redis_url,
+    # limits uses sync redis.from_url; pin RESP2 so AUTH does not send HELLO.
+    storage_options={"protocol": REDIS_RESP2_PROTOCOL},
 )

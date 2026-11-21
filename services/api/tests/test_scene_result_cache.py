@@ -23,7 +23,7 @@ class _FakeRedis:
 class SceneResultCacheTests(unittest.TestCase):
     def test_enqueue_uses_one_day_ttl_and_deduplicating_script(self) -> None:
         fake = _FakeRedis()
-        with patch.object(cache.aioredis, "from_url", return_value=fake):
+        with patch.object(cache, "create_async_redis_client", return_value=fake):
             result = asyncio.run(
                 cache.enqueue_scene_result(
                     {
