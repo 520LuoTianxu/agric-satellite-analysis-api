@@ -134,7 +134,19 @@ class BiweeklyRouterTests(unittest.TestCase):
         ):
             self.assertIn(path, paths)
 
-    def test_disabled_by_default(self):
+    def test_enabled_by_default_and_explicit_zero_disables(self):
+        from app.core.config import Settings
+
+        field = Settings.model_fields["biweekly_api_enabled"]
+        self.assertIs(field.default, True)
+        self.assertFalse(
+            Settings.model_validate({"biweekly_api_enabled": "0"}).biweekly_api_enabled
+        )
+        self.assertFalse(
+            Settings.model_validate({"biweekly_api_enabled": "false"}).biweekly_api_enabled
+        )
+
+    def test_disabled_when_flag_is_false(self):
         settings.biweekly_api_enabled = False
         settings.biweekly_dev_auth = True
         settings.biweekly_jwt_secret = SECRET

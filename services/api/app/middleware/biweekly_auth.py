@@ -16,7 +16,7 @@ Two modes, both requiring a signed tenant JWT (Authorization: Bearer):
   BIWEEKLY_ALLOWED_LANDS. 不能原样上生产. Do not enable this flag in
   production environments.
 
-Default BIWEEKLY_API_ENABLED=0 fails closed with 503.
+Default BIWEEKLY_API_ENABLED=1 (on). Set 0/false to disable; that path returns 503.
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ def require_biweekly_access(
         raise _error(
             503,
             "BIWEEKLY_API_DISABLED",
-            "BIWEEKLY_API_ENABLED 未打开。默认关闭，避免误接到生产流量。",
+            "BIWEEKLY_API_ENABLED 已显式关闭（设为 0/false）。",
         )
 
     token = _bearer_token(authorization)

@@ -237,7 +237,7 @@ app.include_router(internal_results.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)
 app.include_router(admin_ops.router, prefix=PREFIX)
 app.include_router(internal_admin.router, prefix=PREFIX)
-# Biweekly trigger APIs: default disabled (BIWEEKLY_API_ENABLED=0).
+# Biweekly trigger APIs: enabled by default (BIWEEKLY_API_ENABLED=1); set 0/false to disable.
 # Auth is app.middleware.biweekly_auth, not the AUTH_DISABLED anonymous bypass.
 app.include_router(biweekly.router, prefix=PREFIX)
 

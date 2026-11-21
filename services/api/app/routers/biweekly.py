@@ -1,6 +1,6 @@
 """Winter-wheat biweekly trigger routes on the API machine.
 
-Mounted under /v1. Default disabled (BIWEEKLY_API_ENABLED=0).
+Mounted under /v1. Enabled by default (BIWEEKLY_API_ENABLED=1); set 0/false to disable.
 Auth is the dedicated biweekly dependency — not AUTH_DISABLED.
 
 Backfill creates bounded satellite_batch jobs through

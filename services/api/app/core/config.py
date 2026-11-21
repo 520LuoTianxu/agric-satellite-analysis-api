@@ -118,10 +118,11 @@ class Settings(BaseSettings):
     work_reaper_on_claim: bool = True
 
     # Winter-wheat biweekly trigger APIs, served by this API machine.
-    # Default off. BIWEEKLY_DEV_AUTH is a local/internal switch only and
+    # Default on. Set BIWEEKLY_API_ENABLED=0 or false to disable.
+    # BIWEEKLY_DEV_AUTH is a local/internal switch only and
     # must not be shipped as-is to production (不能原样上生产).
     # These routes never use AUTH_DISABLED / anonymous get_current_user.
-    biweekly_api_enabled: bool = False
+    biweekly_api_enabled: bool = True
     biweekly_dev_auth: bool = False
     biweekly_jwt_secret: str = ""
     biweekly_allowed_lands: str = ""

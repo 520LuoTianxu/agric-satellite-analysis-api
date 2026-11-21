@@ -16,8 +16,8 @@ and do not enable BIWEEKLY_DEV_AUTH in production (不能原样上生产).
     uvicorn app.biweekly_dev_app:app --host 127.0.0.1 --port 8000
 
 The canonical production-shaped entry remains `app.main:app` (full API
-machine). Leave BIWEEKLY_API_ENABLED=0 there unless a review explicitly
-enables it, and never turn on BIWEEKLY_DEV_AUTH in that environment.
+machine). BIWEEKLY_API_ENABLED defaults on there; set 0/false to disable.
+Never turn on BIWEEKLY_DEV_AUTH in that environment.
 scripts/biweekly_local_api.py is not the trigger entry.
 """
 
