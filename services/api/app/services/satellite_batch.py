@@ -118,6 +118,7 @@ def build_satellite_batch_jobs(
     job_land_id: str | None = None,
     max_jobs: int | None = None,
     extra_params: Mapping[str, Any] | None = None,
+    job_type: str | None = None,
 ) -> tuple[list[SatelliteBatchGroup], list[Job]]:
     """构造临时空间组任务；相同组/日期/传感器只读一次共享 COG 窗口。"""
     if date_from > date_to:
@@ -131,6 +132,7 @@ def build_satellite_batch_jobs(
     )
     date_windows = {str(key): value for key, value in (land_date_windows or {}).items()}
     extra = dict(extra_params or {})
+    resolved_job_type = str(job_type or "satellite_batch").strip() or "satellite_batch"
     target_dates_by_land: dict[str, list[date]] = {}
     targeted_dates = "target_dates_by_land" in extra
     if targeted_dates:
@@ -255,7 +257,7 @@ def build_satellite_batch_jobs(
                 job = Job(
                     id=job_id,
                     land_id=job_land_id or group.anchor_land_id,
-                    type="satellite_batch",
+                    type=resolved_job_type,
                     status="pending",
                     parent_job_id=parent_job_id,
                     params_json=params,

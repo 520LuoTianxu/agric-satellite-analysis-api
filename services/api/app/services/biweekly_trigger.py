@@ -144,7 +144,14 @@ def annotate_dispatch(job: dict, dispatch: dict | None = None) -> dict:
         result["dispatched_to_production"] = bool(dispatch.get("dispatched"))
         result["satellite_batch_job_ids"] = list(dispatch.get("job_ids") or [])
         if planned:
+            planned = dict(planned)
+            if planned.get("dispatch") == "plan_only_local_fixture":
+                planned["dispatch"] = "satellite_batch" if dispatch.get("dispatched") else "dispatch_failed"
             result["planned_batch"] = planned
+            payload = dict(out.get("payload") or {})
+            if payload:
+                payload["planned_batch"] = planned
+                out["payload"] = payload
         out["dispatched_to_production"] = bool(dispatch.get("dispatched"))
         out["satellite_batch_job_ids"] = list(dispatch.get("job_ids") or [])
     elif "dispatched_to_production" not in result:

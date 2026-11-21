@@ -22,7 +22,7 @@ from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_w
 from agric_satellite_analysis_common.biweekly.models import ReportError
 
 from app.middleware.biweekly_auth import BiweeklyPrincipal, require_biweekly_access
-from app.services.biweekly_dispatch import dispatch_bounded_backfill
+from app.services.biweekly_dispatch import dispatch_bounded_backfill, dispatch_season_bounded_backfill
 from app.services.biweekly_mapping import load_wheat_phase_mapping
 from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
@@ -184,11 +184,52 @@ async def request_backfill(
         chosen = _season_for(service, land_id, (body.season if body else None) or season)
         periods = service.catalog.periods(land_id, chosen)
         window = bounded_backfill_window(periods, period_id)
-        # Local job record first so status is queryable even if dispatch is mocked.
-        job = service.request_backfill(land_id, chosen, period_id)
-        # Real linkage: API-machine create_satellite_batch_jobs + outbox/WorkItem.
-        dispatch = await dispatch_bounded_backfill(land_id, window)
+        # Queue a job record, but do not evaluate a local pack snapshot.
+        # Smart periods have snapshot=None; running the fixture would false-fail.
+        job = service.request_backfill(
+            land_id, chosen, period_id, evaluate_local_fixture=False
+        )
+        try:
+            dispatch = await dispatch_bounded_backfill(land_id, window)
+        except ReportError as exc:
+            service.record_backfill_dispatch(
+                job["job_id"],
+                {"dispatched": False, "reason": exc.code, "job_ids": []},
+            )
+            raise
+        job = service.record_backfill_dispatch(job["job_id"], dispatch)
         # Explicitly do not call request_generate here.
+        return _public(job, principal, dispatch=dispatch)
+    except ReportError as exc:
+        return _http_for(exc)
+
+
+@router.post("/backfill-season")
+async def request_season_backfill(
+    land_id: str,
+    principal: Annotated[BiweeklyPrincipal, Depends(require_biweekly_access)],
+    body: BackfillBody | None = None,
+    season: Annotated[str | None, Query()] = None,
+):
+    """Dispatch bounded satellite_batch jobs for every period in the season.
+
+    Each period uses its own window (period plus prior comparison). Never
+    sends one unbounded or three-year window, and never auto-generates.
+    """
+    try:
+        service, _mapping, _calendar = await _smart_context(land_id)
+        chosen = _season_for(service, land_id, (body.season if body else None) or season)
+        periods = service.catalog.periods(land_id, chosen)
+        job = service.request_season_backfill(land_id, chosen)
+        try:
+            dispatch = await dispatch_season_bounded_backfill(land_id, periods)
+        except ReportError as exc:
+            service.record_backfill_dispatch(
+                job["job_id"],
+                {"dispatched": False, "reason": exc.code, "job_ids": []},
+            )
+            raise
+        job = service.record_backfill_dispatch(job["job_id"], dispatch)
         return _public(job, principal, dispatch=dispatch)
     except ReportError as exc:
         return _http_for(exc)
@@ -248,8 +289,8 @@ async def get_job(
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
         kind = job.get("kind")
-        dispatch = job.get("result") if kind == "backfill" else None
-        return _public(job, principal, dispatch=dispatch if kind == "backfill" else None)
+        dispatch = job.get("result") if kind in {"backfill", "backfill_season"} else None
+        return _public(job, principal, dispatch=dispatch if kind in {"backfill", "backfill_season"} else None)
     except ReportError as exc:
         return _http_for(exc)
 

@@ -917,12 +917,24 @@ def _to_job_detail_out(
     )
 
 
+
+def _work_item_display_type(item: WorkItem) -> str:
+    """Prefer a user-visible type from extras when the claim type stays satellite_batch."""
+    payload = _json_dict(item.payload_json)
+    extras = _json_dict(payload.get("extras"))
+    for key in ("display_type", "job_type"):
+        value = extras.get(key) or payload.get(key)
+        if value:
+            return str(value)
+    return item.type
+
+
 def _to_work_item_monitor_out(
     item: WorkItem, parent_job_id: uuid.UUID | None = None
 ) -> WorkItemMonitorOut:
     return WorkItemMonitorOut(
         id=item.id,
-        type=item.type,
+        type=_work_item_display_type(item),
         status=item.status,
         parent_job_id=parent_job_id,
         priority=int(item.priority or 0),

@@ -2,6 +2,7 @@ from agric_satellite_analysis_common.scheduled_land_filter import (
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
     scheduled_land_sql,
+    should_bypass_schedule_land_filter,
 )
 
 
@@ -25,3 +26,12 @@ def test_sql_filter_contains_both_schedule_rules():
     assert "p.base_id" in sql
     assert "p.land_area_mu" in sql
     assert ":max_schedule_area_mu" in sql
+
+def test_user_triggered_biweekly_flag_bypasses_filter_decision():
+    assert not should_bypass_schedule_land_filter(None)
+    assert not should_bypass_schedule_land_filter({})
+    assert not should_bypass_schedule_land_filter({"force": True})
+    assert should_bypass_schedule_land_filter({"bypass_schedule_land_filter": True})
+    assert should_bypass_schedule_land_filter({"allow_excluded_bases": True})
+    # Scheduled jobs without the flag stay subject to the exclusion list.
+    assert not is_scheduled_land_allowed("10", 105.41)

@@ -72,6 +72,36 @@ class LandInputBatchTests(unittest.TestCase):
         self.assertEqual([land["meta"]["land_id"] for land in lands], land_ids)
 
 
+    def test_load_lands_honors_biweekly_bypass_for_excluded_base(self):
+        def inputs(**kwargs):
+            return [
+                {
+                    **remote_land(land_id),
+                    "base_id": "10",
+                    "land_area_mu": 105.41,
+                    "existing_dates": [],
+                }
+                for land_id in kwargs["land_ids"]
+            ]
+
+        with (
+            patch.object(batch, "internal_client", return_value=nullcontext(object())),
+            patch.object(batch, "agri_satellite_batch_inputs", side_effect=inputs),
+        ):
+            filtered = batch._load_lands(["19994"], "S2", False)
+            allowed = batch._load_lands(
+                ["19994"], "S2", False, bypass_schedule_land_filter=True
+            )
+            still_filtered = batch._load_lands(
+                ["19994"], "S2", False, bypass_schedule_land_filter=False
+            )
+
+        self.assertEqual(filtered, [])
+        self.assertEqual(still_filtered, [])
+        self.assertEqual([land["meta"]["land_id"] for land in allowed], ["19994"])
+
+
+
 class SharedWindowTests(unittest.TestCase):
     def test_scl_is_read_with_spectral_bands_from_remote_cog(self):
         from rasterio.transform import from_origin
