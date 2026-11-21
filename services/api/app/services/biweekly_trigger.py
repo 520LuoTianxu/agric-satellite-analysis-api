@@ -4,65 +4,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agric_satellite_analysis_common.biweekly.calendar import iter_periods, planting_season_label
 from agric_satellite_analysis_common.biweekly.catalog import LocalPackCatalog
 from agric_satellite_analysis_common.biweekly.models import ReportError
 from agric_satellite_analysis_common.biweekly.trigger import TriggerService
 
 from app.core.config import settings
+from app.services.biweekly_plans import SmartPlantingCatalog
 from app.services.biweekly_scenes import is_maize_crop
 
 DEFAULT_PACK_ROOT = Path("/workspace/reports/field6417-2025-2026")
 DEFAULT_WORK_DIR = Path("/tmp/biweekly-api-jobs")
 
-WHEAT_SEASON_START = "2025-11-01"
-WHEAT_SEASON_END_INCLUSIVE = "2026-06-30"
+class EmptyCalendarCatalog:
+    """Used when no Smart plan and no local pack is available."""
 
-
-class CalendarCatalog:
-    """14-day wheat calendar for lands that are not the local 6417 pack."""
+    def __init__(self, payload: dict | None = None):
+        self.payload = payload or {}
 
     def list_seasons(self, land_id: str) -> list[dict]:
-        label = planting_season_label(WHEAT_SEASON_START, WHEAT_SEASON_END_INCLUSIVE)
-        return [
-            {
-                "season_id": label,
-                "label": f"{label} 种植季",
-                "land_id": str(land_id),
-                "crop": "winter_wheat",
-                "crop_name": "冬小麦",
-                "start": WHEAT_SEASON_START,
-                "end_inclusive": WHEAT_SEASON_END_INCLUSIVE,
-                "end_exclusive": "2026-07-01",
-                "cadence_days": 14,
-                "note": "冬小麦默认种植季窗。不是玉米季，也不把玉米假数据写入该地块。",
-            }
-        ]
+        return []
 
     def periods(self, land_id: str, season_id: str) -> list[dict]:
-        seasons = {row["season_id"]: row for row in self.list_seasons(land_id)}
-        season = seasons.get(season_id)
-        if season is None:
-            raise ReportError("SEASON_NOT_FOUND")
-        rows = []
-        for item in iter_periods(season["start"], season["end_inclusive"]):
-            rows.append(
-                {
-                    **item,
-                    "snapshot": None,
-                    "pack_pdf": None,
-                    "optical_descriptive_days": 0,
-                    "s1_products": 0,
-                    "has_eligible_optics": False,
-                    "plan_status": "unknown",
-                }
-            )
-        return rows
+        raise ReportError("SEASON_NOT_FOUND")
 
     def period(self, land_id: str, season_id: str, period_id: str) -> dict:
-        for row in self.periods(land_id, season_id):
-            if row["period_id"] == str(period_id):
-                return row
         raise ReportError("PERIOD_NOT_FOUND")
 
     def load_snapshot(self, relative: str) -> dict:
@@ -71,7 +36,7 @@ class CalendarCatalog:
     def v8_optical_metrics(self) -> dict | None:
         return None
 
-    def v8_pdf(self) -> Path | None:
+    def v8_pdf(self):
         return None
 
     def v8_prior_period(self) -> dict | None:
@@ -79,36 +44,49 @@ class CalendarCatalog:
 
 
 class CompositeCatalog:
-    def __init__(self, local: LocalPackCatalog | None, calendar: CalendarCatalog):
+    """Prefer a Smart native plan when present; otherwise the local 6417 pack."""
+
+    def __init__(self, local: LocalPackCatalog | None, smart: SmartPlantingCatalog | EmptyCalendarCatalog | None):
         self.local = local
-        self.calendar = calendar
+        self.smart = smart or EmptyCalendarCatalog()
+
+    def _smart_has_plan(self, land_id: str) -> bool:
+        if isinstance(self.smart, SmartPlantingCatalog):
+            return self.smart.plan_available and str(land_id) == self.smart.land_id
+        return False
 
     def list_seasons(self, land_id: str) -> list[dict]:
+        if self._smart_has_plan(land_id):
+            return self.smart.list_seasons(land_id)
         if self.local is not None:
             try:
                 return self.local.list_seasons(land_id)
             except ReportError as exc:
                 if exc.code != "LAND_NOT_IN_LOCAL_CATALOG":
                     raise
-        return self.calendar.list_seasons(land_id)
+        return self.smart.list_seasons(land_id)
 
     def periods(self, land_id: str, season_id: str) -> list[dict]:
+        if self._smart_has_plan(land_id):
+            return self.smart.periods(land_id, season_id)
         if self.local is not None:
             try:
                 return self.local.periods(land_id, season_id)
             except ReportError as exc:
                 if exc.code not in {"LAND_NOT_IN_LOCAL_CATALOG", "SEASON_NOT_FOUND"}:
                     raise
-        return self.calendar.periods(land_id, season_id)
+        return self.smart.periods(land_id, season_id)
 
     def period(self, land_id: str, season_id: str, period_id: str) -> dict:
+        if self._smart_has_plan(land_id):
+            return self.smart.period(land_id, season_id, period_id)
         if self.local is not None:
             try:
                 return self.local.period(land_id, season_id, period_id)
             except ReportError as exc:
                 if exc.code not in {"LAND_NOT_IN_LOCAL_CATALOG", "SEASON_NOT_FOUND", "PERIOD_NOT_FOUND"}:
                     raise
-        return self.calendar.period(land_id, season_id, period_id)
+        return self.smart.period(land_id, season_id, period_id)
 
     def load_snapshot(self, relative: str) -> dict:
         if self.local is not None:
@@ -118,11 +96,19 @@ class CompositeCatalog:
     def v8_optical_metrics(self) -> dict | None:
         return self.local.v8_optical_metrics() if self.local is not None else None
 
-    def v8_pdf(self) -> Path | None:
+    def v8_pdf(self):
         return self.local.v8_pdf() if self.local is not None else None
 
     def v8_prior_period(self) -> dict | None:
         return self.local.v8_prior_period() if self.local is not None else None
+
+    def native_plan(self, land_id: str, season_id: str) -> dict | None:
+        if isinstance(self.smart, SmartPlantingCatalog):
+            try:
+                return self.smart.native_plan(land_id, season_id)
+            except ReportError:
+                return None
+        return None
 
 
 def _local_pack() -> LocalPackCatalog | None:
@@ -135,12 +121,12 @@ def _local_pack() -> LocalPackCatalog | None:
         return None
 
 
-def build_trigger_service() -> TriggerService:
+def build_trigger_service(smart: SmartPlantingCatalog | None = None) -> TriggerService:
     work_dir = Path(settings.biweekly_work_dir or DEFAULT_WORK_DIR)
     work_dir.mkdir(parents=True, exist_ok=True)
     return TriggerService(
         work_dir=work_dir,
-        catalog=CompositeCatalog(_local_pack(), CalendarCatalog()),
+        catalog=CompositeCatalog(_local_pack(), smart or EmptyCalendarCatalog()),
         auto_run=True,
     )
 

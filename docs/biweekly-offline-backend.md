@@ -49,7 +49,7 @@ SQLite只是本地单进程/多连接测试的**API控制面模拟实现**。此
 
 `examples/biweekly/synthetic-wheat.json`是唯一随仓库提供的示例，明确`data_kind=mock`。完整输入包含：tenant_id、field_id（用户确认等于landId）、season_id、crop、geometry_fingerprint、source_revision、plan_version、processing_versions（mask/grid/aggregation/calibration）、14天`[start,end)`、资产ID、计划窗口、采样质量和紧凑证据。
 
-- SourcePort必须在API侧、授权后装配输入。此轮没有声称存在可用的prec_agric生育期查询API。真实适配器负责查找种植实例/组件/版本及规范化stage_key；未知作物/映射拒绝，不按文字猜阶段。
+- SourcePort必须在API侧、授权后装配输入。生育期映射与种植日历只读 Smart（smart_agric），通过 API 机 MYSQL_SOURCE_URL。映射表为 crop_remote_phase_mapping；本田方案从 crop_batch_land_scheme + agriculture_crop_batch + agriculture_plant_task 读取。未知作物/映射拒绝，不按文字猜阶段，也不再使用 prec_agric。
 - 冬小麦/玉米映射为版本化**离线草案**。BTU排期仅为`planned_btu_not_observed`，不是卫星实测。计划窗口禁止重叠；空缺明确标记，不补满。跨期按报告起始日主归属、覆盖期分别计天，不重复建报。
 - 证据只能为小型聚合字段；数值必须有限、单位/范围/时间窗口匹配，缺失必须null、不补零，不接像元大数组。源资产/方法、几何与处理版本参与快照身份。
 - NDVI等仅在输入质量满足离线试验阈值（有效观测至少2日、有效像元至少0.5、最大间隔至多10天）时进入`facts`。这些是验证流程的草案数值，不是已批准的农学发布阈值；正式使用须确认。

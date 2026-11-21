@@ -10,19 +10,31 @@ from agric_satellite_analysis_common.biweekly.phase_policy import (
 
 class PhasePolicyTests(unittest.TestCase):
     def test_official_wheat_mapping(self):
+        self.assertEqual(resolve_wheat_stage("拔节孕穗期")["phase_label"], "S2")
+        self.assertEqual(resolve_wheat_stage("起身期")["phase_label"], "S2")
+        self.assertEqual(resolve_wheat_stage("起身期")["stage_code"], "拔节孕穗期")
         self.assertEqual(resolve_wheat_stage("RS")["phase_label"], "S2")
         self.assertEqual(resolve_wheat_stage("rising")["phase_label"], "S2")
+        self.assertEqual(resolve_wheat_stage("越冬期")["tags"], ["DORMANCY"])
         self.assertEqual(resolve_wheat_stage("OW")["tags"], ["DORMANCY"])
-        self.assertIsNone(resolve_wheat_stage("SG")["phase_label"])
+        self.assertIsNone(resolve_wheat_stage("播种期")["phase_label"])
+        self.assertEqual(resolve_wheat_stage("播种前准备")["status"], "NOT_APPLICABLE")
         self.assertEqual(resolve_wheat_stage("SG")["status"], "NOT_APPLICABLE")
         with self.assertRaises(ReportError) as ctx:
             resolve_wheat_stage("booting")
         self.assertEqual(ctx.exception.code, "STAGE_MAPPING_UNAVAILABLE")
+        with self.assertRaises(ReportError):
+            resolve_wheat_stage("孕穗")
         phases = wheat_snapshot_phases()
+        self.assertEqual(phases["拔节孕穗期"], "S2")
+        self.assertEqual(phases["起身期"], "S2")
         self.assertEqual(phases["rising"], "S2")
+        self.assertEqual(phases["返青期"], "S1")
         self.assertEqual(phases["GR"], "S1")
+        self.assertIsNone(phases["播种期"])
         self.assertIsNone(phases["SG"])
         self.assertNotIn("booting", phases)
+        self.assertNotIn("孕穗", phases)
 
     def test_issue12_observations_stay_in_s2_and_next_week_is_s3(self):
         intervals = [
@@ -41,9 +53,9 @@ class PhasePolicyTests(unittest.TestCase):
         self.assertEqual(result["transitions"], [
             {
                 "on": "2026-04-16",
-                "from_stage": "JT",
+                "from_stage": "拔节孕穗期",
                 "from_phase": "S2",
-                "to_stage": "HA",
+                "to_stage": "抽穗期",
                 "to_phase": "S3",
             }
         ])

@@ -10,7 +10,7 @@ Two modes, both requiring a signed tenant JWT (Authorization: Bearer):
   secret; claims must include sub, tenant_id, and this land in land_ids.
   This is still not a finished production authorizer — membership is taken
   from the signed token rather than a live tenant-land query — and must be
-  replaced with verified prec_agric membership before any production cutover.
+  replaced with a verified Smart/tenant land-membership query before any production cutover.
 - Dev switch (BIWEEKLY_DEV_AUTH=1): still requires a signed JWT and a
   non-placeholder BIWEEKLY_JWT_SECRET; the path land must be in
   BIWEEKLY_ALLOWED_LANDS. 不能原样上生产. Do not enable this flag in

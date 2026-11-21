@@ -1,7 +1,13 @@
 """Winter-wheat S1/S2/S3 display policy aligned with the v8 report and design.md.
 
-This is a pending agronomy-review pilot (wheat-qxt88-pilot-1). It is not
+This is a pending agronomy-review pilot (wheat-smart-pilot-1). It is not
 observed phenology and is not an approved mapping for other crops.
+
+Official keys are the Smart wheat stage names used by
+agriculture_standard_job.job_name and crop_remote_phase_mapping.stage_name.
+Observed agriculture_plant_task.task_name values and older fixture codes are
+aliases onto those official names only. 起身期 aliases to S2 (via 拔节孕穗期),
+never S1. There is no official 孕穗 or booting row.
 """
 
 from __future__ import annotations
@@ -11,77 +17,78 @@ from typing import Any
 
 from .models import ReportError
 
-MAPPING_VERSION = "wheat-qxt88-pilot-1"
+MAPPING_VERSION = "wheat-smart-pilot-1"
 POLICY_VERSION = "biweekly-wheat-display-v8-1"
-SPECIES_CODE = "2000000005002"
-STAGE_MODEL = "QX/T 88-2008"
+CROP_ID = 4
+CROP_NAME = "小麦"
+STAGE_MODEL = "smart_agric wheat job_name / plant_task.task_name"
 
-# Official QX/T 88-2008 codes only. There is no 孕穗 / booting row in the dictionary.
+# Official Smart dictionary / mapping-table names only. No invented 孕穗 row.
 WHEAT_STAGES: dict[str, dict[str, Any]] = {
-    "SG": {
-        "name": "整地播种期",
+    "播种前准备": {
+        "name": "播种前准备",
         "status": "NOT_APPLICABLE",
         "phase_code": None,
         "phase_label": None,
         "tags": (),
     },
-    "E3": {
-        "name": "出苗至三叶期",
+    "播种期": {
+        "name": "播种期",
+        "status": "NOT_APPLICABLE",
+        "phase_code": None,
+        "phase_label": None,
+        "tags": (),
+    },
+    "出苗期": {
+        "name": "出苗期",
         "status": "MAPPED",
         "phase_code": "VEG",
         "phase_label": "S1",
         "tags": (),
     },
-    "PT": {
-        "name": "冬前分蘖期",
+    "分蘖期": {
+        "name": "分蘖期",
         "status": "MAPPED",
         "phase_code": "VEG",
         "phase_label": "S1",
         "tags": (),
     },
-    "OW": {
+    "越冬期": {
         "name": "越冬期",
         "status": "MAPPED",
         "phase_code": "VEG",
         "phase_label": "S1",
         "tags": ("DORMANCY",),
     },
-    "GR": {
+    "返青期": {
         "name": "返青期",
         "status": "MAPPED",
         "phase_code": "VEG",
         "phase_label": "S1",
         "tags": (),
     },
-    "RS": {
-        "name": "起身期",
+    "拔节孕穗期": {
+        "name": "拔节孕穗期",
         "status": "MAPPED",
         "phase_code": "TRANS",
         "phase_label": "S2",
         "tags": (),
     },
-    "JT": {
-        "name": "拔节期",
-        "status": "MAPPED",
-        "phase_code": "TRANS",
-        "phase_label": "S2",
-        "tags": (),
-    },
-    "HA": {
-        "name": "抽穗至开花期",
+    "抽穗期": {
+        "name": "抽穗期",
         "status": "MAPPED",
         "phase_code": "REPRO",
         "phase_label": "S3",
         "tags": (),
     },
-    "GF": {
+    "灌浆期": {
         "name": "灌浆期",
         "status": "MAPPED",
         "phase_code": "REPRO",
         "phase_label": "S3",
         "tags": (),
     },
-    "MT": {
+    "成熟期": {
         "name": "成熟期",
         "status": "MAPPED",
         "phase_code": "REPRO",
@@ -90,20 +97,39 @@ WHEAT_STAGES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Friendly aliases used by older offline fixtures. "booting" is intentionally absent.
+# Read-time aliases onto official names. These are not extra mapping-table rows.
+# Plant-task names below were observed on live Smart wheat batches (crop_id=4).
 WHEAT_ALIASES = {
-    "sowing": "SG",
-    "seedling": "E3",
-    "tillering": "PT",
-    "winter": "OW",
-    "green": "GR",
-    "green_up": "GR",
-    "rising": "RS",
-    "jointing": "JT",
-    "heading": "HA",
-    "flowering": "HA",
-    "filling": "GF",
-    "maturity": "MT",
+    # Observed agriculture_plant_task.task_name values
+    "整地播种期": "播种期",
+    "出苗至三叶期": "出苗期",
+    "冬前分蘖期": "分蘖期",
+    "起身期": "拔节孕穗期",
+    "拔节期": "拔节孕穗期",
+    "抽穗至开花期": "抽穗期",
+    # Older offline fixtures / explicit 15933 reference intervals
+    "SG": "播种期",
+    "E3": "出苗期",
+    "PT": "分蘖期",
+    "OW": "越冬期",
+    "GR": "返青期",
+    "RS": "拔节孕穗期",
+    "JT": "拔节孕穗期",
+    "HA": "抽穗期",
+    "GF": "灌浆期",
+    "MT": "成熟期",
+    "sowing": "播种期",
+    "seedling": "出苗期",
+    "tillering": "分蘖期",
+    "winter": "越冬期",
+    "green": "返青期",
+    "green_up": "返青期",
+    "rising": "拔节孕穗期",
+    "jointing": "拔节孕穗期",
+    "heading": "抽穗期",
+    "flowering": "抽穗期",
+    "filling": "灌浆期",
+    "maturity": "成熟期",
 }
 
 PLAIN_NAMES = {
@@ -131,8 +157,51 @@ def canonical_stage_code(key: str) -> str:
     raise ReportError("STAGE_MAPPING_UNAVAILABLE")
 
 
-def resolve_wheat_stage(key: str) -> dict[str, Any]:
-    code = canonical_stage_code(key)
+def _blank_to_none(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def apply_mapping_rows(rows: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """Index crop_remote_phase_mapping rows by official or source stage name."""
+    indexed: dict[str, dict[str, Any]] = {}
+    for raw in rows or []:
+        name = str(raw.get("stage_name") or raw.get("stage_code") or "").strip()
+        if not name:
+            continue
+        status = str(raw.get("mapping_status") or raw.get("status") or "UNMAPPED")
+        tags = raw.get("context_tags") or raw.get("tags") or ()
+        if isinstance(tags, str):
+            tags = tuple(item for item in tags.split(",") if item)
+        indexed[name] = {
+            "stage_code": name,
+            "name": name,
+            "status": status,
+            "phase_code": _blank_to_none(raw.get("phase_code")),
+            "phase_label": _blank_to_none(raw.get("phase_label") or raw.get("phase")),
+            "tags": list(tags),
+            "mapping_version": raw.get("mapping_version") or MAPPING_VERSION,
+            "review_status": raw.get("review_status") or "PENDING_AGRONOMY_REVIEW",
+        }
+    return indexed
+
+
+def resolve_wheat_stage(key: str, mapping_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    name = str(key or "").strip()
+    if not name:
+        raise ReportError("STAGE_MAPPING_UNAVAILABLE")
+    indexed = apply_mapping_rows(mapping_rows)
+    if name in indexed:
+        return indexed[name]
+    official = WHEAT_ALIASES.get(name, name if name in WHEAT_STAGES else None)
+    if official and official in indexed:
+        row = dict(indexed[official])
+        row["source_stage_name"] = name
+        return row
+    code = canonical_stage_code(name)
     row = WHEAT_STAGES[code]
     return {
         "stage_code": code,
@@ -143,6 +212,7 @@ def resolve_wheat_stage(key: str) -> dict[str, Any]:
         "tags": list(row["tags"]),
         "mapping_version": MAPPING_VERSION,
         "review_status": "PENDING_AGRONOMY_REVIEW",
+        "source_stage_name": name if name != code else None,
     }
 
 

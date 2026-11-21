@@ -56,7 +56,7 @@ class BiweeklyRouterTests(unittest.TestCase):
                 return_value={
                     "source": "in_code_pilot",
                     "review_status": "PENDING_AGRONOMY_REVIEW",
-                    "mapping_version": "wheat-qxt88-pilot-1",
+                    "mapping_version": "wheat-smart-pilot-1",
                     "table_available": False,
                     "rows": [],
                 }
@@ -369,6 +369,21 @@ class BiweeklyRouterTests(unittest.TestCase):
         )
         # land 0000 is not allowlisted in dev mode
         self.assertEqual(foreign.status_code, 403)
+
+    def test_missing_smart_plan_is_explicit_when_pack_disabled(self):
+        self._enable_dev()
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        headers = self._auth(self._token())
+        response = self.client.get("/v1/lands/6417/biweekly/seasons", headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["seasons"], [])
+        self.assertFalse(body["plan_available"])
+        self.assertIn(body["plan_status"], {"smart_source_unavailable", "missing", "query_failed"})
+        self.assertIn("不会改用其他地块的方案", body["note"])
+        self.assertEqual(body["phase_mapping"]["mapping_version"], "wheat-smart-pilot-1")
+        self.assertNotEqual(body["phase_mapping"]["source"], "prec_agric.crop_remote_phase_mapping")
+
 
 
 if __name__ == "__main__":

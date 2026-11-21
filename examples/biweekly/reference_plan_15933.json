@@ -8,7 +8,7 @@
   "shift": "calendar year minus one",
   "disclosure": "参照计划，不是6417本田已关联方案，也不是实地确认物候",
   "coverage": "partial-known-window-only",
-  "mapping_version": "wheat-qxt88-pilot-1",
+  "mapping_version": "wheat-smart-pilot-1",
   "intervals": [
     {
       "stage_code": "JT",

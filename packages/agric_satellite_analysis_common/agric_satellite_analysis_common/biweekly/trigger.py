@@ -314,7 +314,7 @@ class TriggerService:
                 window_start=period["start"],
                 end_exclusive=period["end_exclusive"],
             )
-            phase["phenology_basis"] = "PLAN_DERIVED_FROM_BTU_NATIVE"
+            phase["phenology_basis"] = native.get("phenology_basis") or "PLAN_DERIVED_FROM_SMART_PLANT_TASK"
             phase["plan_source"] = "native"
             phase["plan_label"] = "本田方案"
         elif reference:

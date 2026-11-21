@@ -15,10 +15,11 @@ from .models import ReportError, Snapshot, canonical, digest
 from .phase_policy import wheat_snapshot_phases
 
 POLICY_VERSION = "biweekly-crop-policy-offline-draft-v1"
-MAPPING_VERSION = "wheat-qxt88-pilot-1"
-# Winter wheat phases come from the QX/T 88-2008 pilot (起身=RS=S2, no 孕穗).
+MAPPING_VERSION = "wheat-smart-pilot-1"
+# Winter wheat phases come from the Smart wheat-smart-pilot-1 mapping
+# (拔节孕穗期=S2; observed 起身期 aliases to S2, never S1; no invented 孕穗 row).
 # Maize keys below remain an unpublished trial fixture for older tests only;
-# they are not an approved production mapping and must not be written to prec_agric.
+# they are not an approved production mapping and must not be written to Smart business tables.
 STAGES = {
     "winter_wheat": wheat_snapshot_phases(),
     "maize": {

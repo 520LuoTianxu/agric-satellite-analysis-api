@@ -24,6 +24,7 @@ from agric_satellite_analysis_common.biweekly.models import ReportError
 from app.middleware.biweekly_auth import BiweeklyPrincipal, require_biweekly_access
 from app.services.biweekly_dispatch import dispatch_bounded_backfill
 from app.services.biweekly_mapping import load_wheat_phase_mapping
+from app.services.biweekly_plans import SmartPlantingCatalog, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
 from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service
 
@@ -56,6 +57,8 @@ HTTP_ERRORS = {
     "CUTOFF_TIMEZONE_INVALID": 422,
     "JOB_KIND_UNSUPPORTED": 400,
     "UNSUPPORTED_CROP": 422,
+    "LAND_ID_INVALID": 422,
+    "PLAN_NOT_FOUND": 404,
 }
 
 
@@ -91,6 +94,26 @@ def _public(payload: dict, principal: BiweeklyPrincipal, *, dispatch: dict | Non
     return out
 
 
+
+async def _smart_context(land_id: str) -> tuple[object, dict, dict]:
+    mapping = await load_wheat_phase_mapping()
+    calendar = await load_smart_planting_calendar(land_id, mapping_rows=mapping.get("rows"))
+    service = build_trigger_service(SmartPlantingCatalog(calendar))
+    return service, mapping, calendar
+
+
+def _with_plan(payload: dict, mapping: dict, calendar: dict) -> dict:
+    payload["phase_mapping"] = mapping
+    payload["plan_available"] = bool(calendar.get("plan_available"))
+    payload["plan_status"] = calendar.get("plan_status")
+    payload["plan_source"] = calendar.get("plan_source")
+    if calendar.get("note") and not payload.get("seasons"):
+        payload["note"] = calendar["note"]
+    elif calendar.get("note") and "note" not in payload:
+        payload["note"] = calendar["note"]
+    return payload
+
+
 def _season_for(service, land_id: str, season: str | None) -> str:
     if season:
         return season
@@ -106,9 +129,8 @@ async def list_seasons(
     principal: Annotated[BiweeklyPrincipal, Depends(require_biweekly_access)],
 ):
     try:
-        service = build_trigger_service()
-        payload = _public(service.list_seasons(land_id), principal)
-        payload["phase_mapping"] = await load_wheat_phase_mapping()
+        service, mapping, calendar = await _smart_context(land_id)
+        payload = _with_plan(_public(service.list_seasons(land_id), principal), mapping, calendar)
         return payload
     except ReportError as exc:
         return _http_for(exc)
@@ -121,9 +143,9 @@ async def list_periods(
     season: Annotated[str | None, Query()] = None,
 ):
     try:
-        service = build_trigger_service()
+        service, mapping, calendar = await _smart_context(land_id)
         chosen = _season_for(service, land_id, season)
-        payload = _public(service.list_periods(land_id, chosen), principal)
+        payload = _with_plan(_public(service.list_periods(land_id, chosen), principal), mapping, calendar)
         # Enrich empty calendar periods with ingested scene counts when available.
         for row in payload.get("periods") or []:
             counts = await _scene_counts(land_id, row["start"], row["end_exclusive"])
@@ -158,7 +180,7 @@ async def request_backfill(
 ):
     """Create a bounded satellite_batch plan and dispatch it. Never auto-generates."""
     try:
-        service = build_trigger_service()
+        service, _mapping, _calendar = await _smart_context(land_id)
         chosen = _season_for(service, land_id, (body.season if body else None) or season)
         periods = service.catalog.periods(land_id, chosen)
         window = bounded_backfill_window(periods, period_id)
@@ -182,7 +204,7 @@ async def request_generate(
 ):
     """Generate only when explicitly requested. Reference plans are never implied."""
     try:
-        service = build_trigger_service()
+        service, mapping, calendar = await _smart_context(land_id)
         payload = body or GenerateBody()
         chosen = _season_for(service, land_id, payload.season or season)
         period = service.catalog.period(land_id, chosen, period_id)
@@ -194,6 +216,9 @@ async def request_generate(
                 land_id, previous["start"], previous["end_exclusive"]
             )
         ref = payload.reference_planting_instance_id
+        native = payload.native_plan
+        if native is None and hasattr(service.catalog, "native_plan"):
+            native = service.catalog.native_plan(land_id, chosen)
         job = service.request_generate(
             land_id,
             chosen,
@@ -201,7 +226,7 @@ async def request_generate(
             reference_planting_instance_id=None if ref in (None, "") else str(ref),
             observations_override=observations,
             prior_observations_override=prior_obs,
-            native_plan=payload.native_plan,
+            native_plan=native,
             observation_source=(
                 "parcel_scene_products" if observations is not None else "pack_snapshot_or_empty"
             ),
