@@ -44,13 +44,21 @@ def _now() -> str:
 class TriggerService:
     """In-process, file-backed job store for the local trigger API."""
 
-    def __init__(self, work_dir: Path, catalog: LocalPackCatalog | None = None, *, auto_run=True):
+    def __init__(
+        self,
+        work_dir: Path,
+        catalog: LocalPackCatalog | None = None,
+        *,
+        auto_run=True,
+        pdf_renderer=None,
+    ):
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         (self.work_dir / "jobs").mkdir(exist_ok=True)
         (self.work_dir / "artifacts").mkdir(exist_ok=True)
         self.catalog = catalog or LocalPackCatalog()
         self.auto_run = auto_run
+        self.pdf_renderer = pdf_renderer
 
     def list_seasons(self, land_id: str) -> dict:
         seasons = self.catalog.list_seasons(land_id)
@@ -182,6 +190,81 @@ class TriggerService:
         self._write(job)
         return self.get_job(job_id)
 
+    def record_generate_backfill(self, job_id: str, dispatch: dict) -> dict:
+        """Record the backfill stage of a generate job. Do not run generate here."""
+        job = self.get_job(job_id)
+        reason = dispatch.get("reason")
+        job_ids = list(dispatch.get("job_ids") or [])
+        dispatched = bool(dispatch.get("dispatched")) and bool(job_ids)
+        hard_fail = reason in {"DISPATCH_FAILED", "LAND_NOT_AVAILABLE", "BACKFILL_WINDOW_UNBOUNDED"} or (
+            not dispatched and reason not in {None, "NO_JOBS_CREATED"}
+        )
+        result = dict(job.get("result") or {})
+        result["stage"] = "backfill"
+        result["backfill"] = {
+            "status": "failed" if hard_fail else ("dispatched" if dispatched else "not_needed"),
+            "error_code": (reason or "BACKFILL_FAILED") if hard_fail else None,
+            "reason": reason,
+            "job_ids": job_ids,
+            "date_from": dispatch.get("date_from"),
+            "date_to": dispatch.get("date_to"),
+        }
+        result["dispatched_to_production"] = dispatched
+        result["satellite_batch_job_ids"] = job_ids
+        result["generate"] = {"status": "pending", "error_code": None}
+        if hard_fail:
+            result["note"] = "补数失败，尚未出报。失败发生在补数阶段，不是因为没有可用光学，也不是出报本身失败。"
+            self._transition(job, "failed", result=result, error_code="BACKFILL_FAILED")
+        elif dispatched:
+            result["note"] = "本期补数已派发，出报将在补数完成后自动进行。"
+            self._transition(job, "dispatched", result=result)
+        else:
+            result["note"] = "本期没有新的补数任务需要派发，进入出报阶段。"
+            self._transition(job, "queued", result=result)
+        job["satellite_batch_job_ids"] = job_ids
+        job["dispatched_to_production"] = dispatched
+        self._write(job)
+        return self.get_job(job_id)
+
+    def fail_stage(self, job_id: str, error_code: str, *, note: str | None = None) -> dict:
+        job = self.get_job(job_id)
+        result = dict(job.get("result") or {})
+        if error_code == "BACKFILL_FAILED":
+            result["stage"] = "backfill"
+            backfill = dict(result.get("backfill") or {})
+            backfill["status"] = "failed"
+            backfill["error_code"] = error_code
+            result["backfill"] = backfill
+        else:
+            result["stage"] = "generate"
+            generate = dict(result.get("generate") or {})
+            generate["status"] = "failed"
+            generate["error_code"] = error_code
+            result["generate"] = generate
+        if note:
+            result["note"] = note
+        self._transition(job, "failed", result=result, error_code=error_code)
+        return self.get_job(job_id)
+
+    def merge_result(self, job_id: str, patch: dict, *, status: str | None = None) -> dict:
+        job = self.get_job(job_id)
+        result = dict(job.get("result") or {})
+        result.update(patch)
+        if status:
+            self._transition(job, status, result=result)
+        else:
+            job["result"] = result
+            self._write(job)
+        return self.get_job(job_id)
+
+    def set_payload_fields(self, job_id: str, **fields) -> dict:
+        job = self.get_job(job_id)
+        payload = dict(job.get("payload") or {})
+        payload.update(fields)
+        job["payload"] = payload
+        self._write(job)
+        return self.get_job(job_id)
+
     def request_generate(
         self,
         land_id: str,
@@ -193,6 +276,13 @@ class TriggerService:
         prior_observations_override: list | None = None,
         native_plan: dict | None = None,
         observation_source: str | None = None,
+        land_name: str | None = None,
+        weather_daily: list | None = None,
+        weather_period: dict | None = None,
+        weather_antecedent: dict | None = None,
+        s1_count: int | None = None,
+        parent_season_job_id: str | None = None,
+        defer_run: bool = False,
     ) -> dict:
         period = self.catalog.period(land_id, season_id, period_id)
         reference = self._load_reference(reference_planting_instance_id)
@@ -210,15 +300,23 @@ class TriggerService:
                 "prior_observations_override": prior_observations_override,
                 "native_plan": native_plan,
                 "observation_source": observation_source,
+                "land_name": land_name,
+                "weather_daily": weather_daily,
+                "weather_period": weather_period,
+                "weather_antecedent": weather_antecedent,
+                "s1_count": s1_count,
+                "parent_season_job_id": parent_season_job_id,
             },
         )
-        if self.auto_run:
+        if self.auto_run and not defer_run:
             job = self.run_job(job["job_id"])
         return job
 
     def run_job(self, job_id: str) -> dict:
         job = self.get_job(job_id)
-        if job["status"] not in {"queued", "running"}:
+        if job["status"] not in {"queued", "running", "dispatched"}:
+            return job
+        if job["status"] == "dispatched" and job.get("kind") != "generate":
             return job
         self._transition(job, "running")
         try:
@@ -321,7 +419,7 @@ class TriggerService:
         optical = [
             row
             for row in snapshot.get("observations") or []
-            if row.get("sensor") == "S2" and row.get("quality_status") == "eligible_descriptive"
+            if str(row.get("sensor") or "").strip().upper() == "S2" and row.get("quality_status") == "eligible_descriptive"
         ]
         return {
             "mode": "local_fixture_evaluation",
@@ -356,7 +454,7 @@ class TriggerService:
             day = str(row.get("date"))[:10]
             if day >= period["end_exclusive"] or day < period["start"]:
                 continue
-            if row.get("sensor") != "S2":
+            if str(row.get("sensor") or "").strip().upper() != "S2":
                 continue
             if row.get("quality_status") != "eligible_descriptive":
                 continue
@@ -414,21 +512,42 @@ class TriggerService:
         if enriched and prior_rows:
             prior_cmp = compare_to_prior(enriched, prior_rows, metrics_for_compare)
 
+        payload = job.get("payload") or {}
+        s1_count = payload.get("s1_count")
+        if s1_count is None:
+            s1_count = int(period.get("s1_products") or 0)
         facts = {
             "schema_version": "biweekly-trigger-snapshot-v1",
             "land_id": job["land_id"],
+            "land_name": payload.get("land_name"),
             "season_id": job["season_id"],
             "period": period,
             "policy_version": POLICY_VERSION,
             "cutoff": cutoff,
             "optical_days": [row["date"][:10] for row in enriched],
+            "observations": [
+                {
+                    "date": row["date"][:10],
+                    "sensor": row.get("sensor"),
+                    "ndvi_avg": row.get("ndvi_avg"),
+                    "evi_avg": row.get("evi_avg"),
+                    "ndre_avg": row.get("ndre_avg"),
+                    "ndmi_avg": row.get("ndmi_avg"),
+                }
+                for row in enriched
+            ],
             "phase": phase,
             "prior_comparison": prior_cmp,
-            "weather_summary": snapshot.get("weather_summary"),
+            "weather_summary": snapshot.get("weather_summary") or payload.get("weather_summary"),
+            "weather_daily": payload.get("weather_daily"),
+            "weather_period": payload.get("weather_period"),
+            "weather_antecedent": payload.get("weather_antecedent"),
+            "s1_count": s1_count,
+            "in_period_radar": int(s1_count or 0) > 0,
             "science_limits": snapshot.get("science_limits"),
             "forbidden_metrics_omitted": sorted(FORBIDDEN_REPORT_METRICS),
             "generated_at": _now(),
-            "observation_source": job.get("payload", {}).get("observation_source") or ("pack_snapshot" if snapshot else "none"),
+            "observation_source": payload.get("observation_source") or ("pack_snapshot" if snapshot else "none"),
         }
         if enriched and len(enriched) < 2 and prior_cmp:
             facts["quality_note"] = "仅1次有效观测，不能写成持续改善。"
@@ -443,6 +562,14 @@ class TriggerService:
             status = "ready"
             artifact = self._write_ready_artifact(job["job_id"], facts, period, reference is not None)
         facts["content_sha256"] = digest(canonical(facts))
+        facts["stage"] = "done"
+        facts["generate"] = {
+            "status": status,
+            "error_code": None,
+            "artifact_kind": artifact.get("kind"),
+        }
+        if status == "ready":
+            facts["brief"] = None
         return facts, artifact, status
 
     def _attach_v8_metrics(self, period, observations):
@@ -471,44 +598,48 @@ class TriggerService:
         if override is not None:
             rows = []
             for row in override:
-                if row.get("sensor") != "S2":
+                if str(row.get("sensor") or "").strip().upper() != "S2":
                     continue
                 if row.get("quality_status") != "eligible_descriptive":
                     continue
                 rows.append(row)
             return rows
         periods = self.catalog.periods(job["land_id"], job["season_id"])
-        window = bounded_backfill_window(periods, period["period_id"])
-        prior_id = window.get("prior_period_id")
-        if not prior_id:
-            return []
-        prior = self.catalog.period(job["land_id"], job["season_id"], prior_id)
-        if not prior.get("snapshot"):
-            return []
+        ids = [row["period_id"] for row in periods]
         try:
-            snap = self.catalog.load_snapshot(prior["snapshot"])
-        except ReportError:
+            index = ids.index(str(period["period_id"]))
+        except ValueError:
             return []
-        rows = [
-            row
-            for row in snap.get("observations") or []
-            if row.get("sensor") == "S2"
-            and row.get("quality_status") == "eligible_descriptive"
-            and prior["start"] <= str(row.get("date"))[:10] < prior["end_exclusive"]
-        ]
         extra = self.catalog.v8_optical_metrics() if period["start"] == "2026-04-04" else None
         dates = (extra or {}).get("dates") or {}
-        out = []
-        for row in rows:
-            item = dict(row)
-            day = item["date"][:10]
-            for metric in ("ndvi", "evi", "ndre", "ndmi"):
-                key = f"{metric}_avg"
-                if dates.get(day, {}).get(key) is not None:
-                    item[key] = dates[day][key]
-            item["date"] = day
-            out.append(item)
-        return out
+        for prior in reversed(periods[:index]):
+            if not prior.get("snapshot"):
+                continue
+            try:
+                snap = self.catalog.load_snapshot(prior["snapshot"])
+            except ReportError:
+                continue
+            rows = [
+                row
+                for row in snap.get("observations") or []
+                if str(row.get("sensor") or "").strip().upper() == "S2"
+                and row.get("quality_status") == "eligible_descriptive"
+                and prior["start"] <= str(row.get("date"))[:10] < prior["end_exclusive"]
+            ]
+            if not rows:
+                continue
+            out = []
+            for row in rows:
+                item = dict(row)
+                day = item["date"][:10]
+                for metric in ("ndvi", "evi", "ndre", "ndmi"):
+                    key = f"{metric}_avg"
+                    if dates.get(day, {}).get(key) is not None:
+                        item[key] = dates[day][key]
+                item["date"] = day
+                out.append(item)
+            return out
+        return []
 
     def _write_brief(self, job_id: str, facts: dict, period: dict) -> dict:
         name = f"biweekly-{period['period_id']}-evidence-limited.json"
@@ -526,39 +657,24 @@ class TriggerService:
         }
 
     def _write_ready_artifact(self, job_id, facts, period, used_reference: bool) -> dict:
-        v8_pdf = self.catalog.v8_pdf()
-        use_v8 = (
-            period["start"] == "2026-04-04"
-            and period["end_inclusive"] == "2026-04-17"
-            and used_reference
-            and v8_pdf is not None
-        )
         sidecar = self.work_dir / "artifacts" / f"{job_id}-facts.json"
         sidecar.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
-        if use_v8:
-            dest = self.work_dir / "artifacts" / f"{job_id}-{v8_pdf.name}"
-            shutil.copy2(v8_pdf, dest)
-            data = dest.read_bytes()
-            return {
-                "path": str(dest.relative_to(self.work_dir)),
-                "filename": v8_pdf.name,
-                "mime": "application/pdf",
-                "sha256": digest(data),
-                "size_bytes": len(data),
-                "kind": "v8_visual_artifact",
-                "facts_path": str(sidecar.relative_to(self.work_dir)),
-                "note": "视觉稿为已交付的 v8 PDF；阶段与指标取自本次冻结的 facts。",
-            }
-        name = f"biweekly-{period['period_id']}-facts.json"
+        if self.pdf_renderer is None:
+            raise ReportError("PDF_RENDERER_UNAVAILABLE")
+        start = period.get("start")
+        end = period.get("end_inclusive") or period.get("end_exclusive")
+        name = f"种植双周报_{facts.get('land_id')}_{start}_{end}.pdf"
         dest = self.work_dir / "artifacts" / f"{job_id}-{name}"
-        shutil.copy2(sidecar, dest)
+        self.pdf_renderer(facts, dest)
         data = dest.read_bytes()
         return {
             "path": str(dest.relative_to(self.work_dir)),
             "filename": name,
-            "mime": "application/json",
+            "mime": "application/pdf",
             "sha256": digest(data),
             "size_bytes": len(data),
-            "kind": "facts_snapshot",
-            "note": "本地生成冻结了阶段指标与对照事实；完整 v8 六页版式目前仅在第12期且显式传入参照实例时附带既有 PDF。",
+            "kind": "official_visual_artifact",
+            "facts_path": str(sidecar.relative_to(self.work_dir)),
+            "note": "正式六页 PDF。阶段指标按 S1/S2/S3 选定；参照方案仅在调用方明确传入时使用并已标注参照。",
+            "used_reference": bool(used_reference),
         }

@@ -39,7 +39,15 @@ class CalendarTests(unittest.TestCase):
 class TriggerServiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.service = TriggerService(Path(self.tmp.name), LocalPackCatalog())
+
+        def _stub_pdf(facts, dest):
+            Path(dest).write_bytes(b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n")
+
+        self.service = TriggerService(
+            Path(self.tmp.name),
+            LocalPackCatalog(),
+            pdf_renderer=_stub_pdf,
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -71,8 +79,8 @@ class TriggerServiceTests(unittest.TestCase):
         cmp_ = job["result"]["prior_comparison"]
         self.assertTrue(cmp_["all_compared_higher"])
         self.assertTrue(cmp_["can_claim_sustained_improvement"])
-        self.assertEqual(job["artifact"]["kind"], "v8_visual_artifact")
-        self.assertIn("v8", job["artifact"]["filename"])
+        self.assertEqual(job["artifact"]["kind"], "official_visual_artifact")
+        self.assertTrue(job["artifact"]["filename"].endswith(".pdf"))
         name, data, mime = self.service.download(job["job_id"])
         self.assertEqual(mime, "application/pdf")
         self.assertGreater(len(data), 1000)
@@ -110,6 +118,81 @@ class TriggerServiceTests(unittest.TestCase):
         self.assertEqual(brief["status"], "evidence_limited")
         self.assertIn("证据受限", brief["result"]["brief"])
         self.assertEqual(brief["artifact"]["kind"], "evidence_limited_brief")
+
+
+    def test_eligible_optics_override_is_ready_not_evidence_limited(self):
+        # Same window as 6417 period 1, which has no pack optics; live rows must win.
+        observations = [
+            {
+                "date": "2025-11-05",
+                "sensor": "S2",
+                "quality_status": "eligible_descriptive",
+                "ndvi_avg": 0.16,
+                "evi_avg": 0.11,
+                "ndre_avg": None,
+                "ndmi_avg": -0.09,
+            },
+            {
+                "date": "2025-11-08",
+                "sensor": "S1",
+                "quality_status": "excluded",
+            },
+        ]
+        job = self.service.request_generate(
+            "6417",
+            "2025/26",
+            "1",
+            observations_override=observations,
+        )
+        self.assertEqual(job["status"], "ready")
+        self.assertEqual(job["result"]["optical_days"], ["2025-11-05"])
+        self.assertNotEqual(job["artifact"]["kind"], "evidence_limited_brief")
+        name, data, mime = self.service.download(job["job_id"])
+        self.assertEqual(mime, "application/pdf")
+        self.assertTrue(data.startswith(b"%PDF"))
+        self.assertGreater(len(data), 1000)
+
+
+    def test_record_generate_backfill_separates_hard_failure_from_not_needed(self):
+        queued = self.service.request_generate("6417", "2025/26", "12", defer_run=True)
+        failed = self.service.record_generate_backfill(
+            queued["job_id"],
+            {"dispatched": False, "reason": "DISPATCH_FAILED", "job_ids": []},
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error_code"], "BACKFILL_FAILED")
+        self.assertEqual((failed.get("result") or {}).get("stage"), "backfill")
+        self.assertNotEqual(failed["status"], "evidence_limited")
+
+        queued = self.service.request_generate("6417", "2025/26", "1", defer_run=True)
+        recorded = self.service.record_generate_backfill(
+            queued["job_id"],
+            {"dispatched": False, "reason": "NO_JOBS_CREATED", "job_ids": [], "job_count": 0},
+        )
+        self.assertEqual(recorded["status"], "queued")
+        self.assertNotEqual(recorded["error_code"], "BACKFILL_FAILED")
+        self.assertEqual((recorded.get("result") or {}).get("backfill", {}).get("status"), "not_needed")
+
+    def test_missing_pdf_renderer_is_generate_failure_not_no_optics(self):
+        service = TriggerService(Path(self.tmp.name) / "no-renderer", LocalPackCatalog())
+        observations = [
+            {
+                "date": "2025-11-05",
+                "sensor": "S2",
+                "quality_status": "eligible_descriptive",
+                "ndvi_avg": 0.16,
+                "evi_avg": 0.11,
+            }
+        ]
+        job = service.request_generate(
+            "6417",
+            "2025/26",
+            "1",
+            observations_override=observations,
+        )
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["error_code"], "PDF_RENDERER_UNAVAILABLE")
+        self.assertNotEqual(job["status"], "evidence_limited")
 
     def test_issue12_backfill_covers_prior_window_only(self):
         job = self.service.request_backfill("6417", "2025/26", "12")

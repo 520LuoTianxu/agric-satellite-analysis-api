@@ -121,13 +121,31 @@ def _local_pack() -> LocalPackCatalog | None:
         return None
 
 
-def build_trigger_service(smart: SmartPlantingCatalog | None = None) -> TriggerService:
+def _default_pdf_renderer():
+    def _render(facts, dest):
+        from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
+
+        render_official_biweekly_pdf(facts, dest)
+
+    return _render
+
+
+def build_trigger_service(
+    smart: SmartPlantingCatalog | None = None,
+    *,
+    pdf_renderer=None,
+    use_official_pdf: bool = True,
+) -> TriggerService:
     work_dir = Path(settings.biweekly_work_dir or DEFAULT_WORK_DIR)
     work_dir.mkdir(parents=True, exist_ok=True)
+    renderer = pdf_renderer
+    if renderer is None and use_official_pdf:
+        renderer = _default_pdf_renderer()
     return TriggerService(
         work_dir=work_dir,
         catalog=CompositeCatalog(_local_pack(), smart or EmptyCalendarCatalog()),
         auto_run=True,
+        pdf_renderer=renderer,
     )
 
 

@@ -21,6 +21,19 @@ FORBIDDEN_IMPORTS = (
     "AUTH_DISABLED",
 )
 
+NO_JOBS_DISPATCH = {
+    "dispatched": False,
+    "dispatched_to_production": False,
+    "reason": "NO_JOBS_CREATED",
+    "job_ids": [],
+    "job_count": 0,
+}
+
+
+def _stub_official_pdf(facts, dest, **kwargs):
+    Path(dest).write_bytes(b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n")
+    return Path(dest)
+
 
 class BiweeklyRouterTests(unittest.TestCase):
     def setUp(self):
@@ -63,12 +76,42 @@ class BiweeklyRouterTests(unittest.TestCase):
             ),
         )
         self._map_patch.start()
+        self._flow_obs_patch = patch(
+            "app.services.biweekly_report_flow.load_scene_observations",
+            new=AsyncMock(return_value=None),
+        )
+        self._flow_obs_patch.start()
+        self._weather_patch = patch(
+            "app.services.biweekly_report_flow.load_weather_series",
+            new=AsyncMock(return_value=[]),
+        )
+        self._weather_patch.start()
+        self._land_patch = patch(
+            "app.services.biweekly_report_flow.load_land_meta",
+            new=AsyncMock(return_value={"land_name": "测试田"}),
+        )
+        self._land_patch.start()
+        self._dispatch_patch = patch(
+            "app.services.biweekly_report_flow.dispatch_bounded_backfill",
+            new=AsyncMock(return_value=dict(NO_JOBS_DISPATCH)),
+        )
+        self._dispatch_patch.start()
+        self._pdf_patch = patch(
+            "app.reports.biweekly.official_pdf.render_official_biweekly_pdf",
+            side_effect=_stub_official_pdf,
+        )
+        self._pdf_patch.start()
 
     def tearDown(self):
         for name, value in self._saved.items():
             setattr(settings, name, value)
         self._obs_patch.stop()
         self._map_patch.stop()
+        self._flow_obs_patch.stop()
+        self._weather_patch.stop()
+        self._land_patch.stop()
+        self._dispatch_patch.stop()
+        self._pdf_patch.stop()
         self.work.cleanup()
 
     def _enable_dev(self, lands="6417"):
@@ -373,7 +416,10 @@ class BiweeklyRouterTests(unittest.TestCase):
             json={},
         )
         self.assertEqual(bare.status_code, 200, bare.text)
+        self.assertEqual(bare.json()["status"], "ready")
         self.assertIsNone(bare.json()["payload"]["reference_planting_instance_id"])
+        self.assertEqual((bare.json().get("artifact") or {}).get("kind"), "official_visual_artifact")
+        self.assertEqual((bare.json().get("artifact") or {}).get("mime"), "application/pdf")
         with_ref = self.client.post(
             "/v1/lands/6417/biweekly/periods/12/generate?season=2025/26",
             headers=headers,
@@ -381,9 +427,12 @@ class BiweeklyRouterTests(unittest.TestCase):
         )
         self.assertEqual(with_ref.status_code, 200, with_ref.text)
         job = with_ref.json()
+        self.assertEqual(job["status"], "ready")
         self.assertEqual(job["payload"]["reference_planting_instance_id"], "15933")
         disclosure = job["payload"].get("reference_disclosure") or job.get("result", {})
         self.assertTrue(job["payload"]["reference_disclosure"] or disclosure)
+        self.assertEqual((job.get("artifact") or {}).get("kind"), "official_visual_artifact")
+        self.assertIn("参照", (job.get("result") or {}).get("phase", {}).get("reference", {}).get("disclosure") or "参照")
 
         fetched = self.client.get(
             f"/v1/lands/6417/biweekly/jobs/{job['job_id']}", headers=headers
@@ -394,6 +443,8 @@ class BiweeklyRouterTests(unittest.TestCase):
         )
         self.assertEqual(downloaded.status_code, 200)
         self.assertGreater(len(downloaded.content), 100)
+        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
+        self.assertTrue(downloaded.content.startswith(b"%PDF"))
 
         foreign = self.client.get(
             f"/v1/lands/0000/biweekly/jobs/{job['job_id']}",
@@ -511,15 +562,16 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertEqual(body["satellite_batch_job_ids"], ["prod-19994"])
         self.assertNotIn("plan_only_local_fixture", str(body.get("result")))
 
-    def test_season_backfill_dispatches_bounded_windows_and_does_not_autogenerate(self):
+    def test_season_one_click_dispatches_then_waits_to_generate(self):
         self._enable_dev()
         headers = self._auth(self._token())
-        captured = {"windows": [], "generate": False}
+        captured = {"windows": [], "extra": []}
 
         async def fake_dispatch(land_id, window, **kwargs):
             captured["windows"].append({"land_id": land_id, **window})
             captured.setdefault("job_types", []).append(kwargs.get("job_type"))
             captured.setdefault("display_names", []).append(kwargs.get("display_name"))
+            captured["extra"].append(kwargs.get("extra_params") or {})
             return {
                 "dispatched": True,
                 "dispatched_to_production": True,
@@ -530,26 +582,11 @@ class BiweeklyRouterTests(unittest.TestCase):
                 "reason": None,
             }
 
+        self._dispatch_patch.stop()
         with patch(
-            "app.services.biweekly_dispatch.dispatch_bounded_backfill",
+            "app.services.biweekly_report_flow.dispatch_bounded_backfill",
             new=fake_dispatch,
-        ), patch(
-            "app.routers.biweekly.dispatch_bounded_backfill",
-            new=fake_dispatch,
-        ), patch(
-            "app.routers.biweekly.build_trigger_service"
-        ) as build:
-            service = __import__(
-                "app.services.biweekly_trigger", fromlist=["build_trigger_service"]
-            ).build_trigger_service()
-            original_generate = service.request_generate
-
-            def wrapped_generate(*args, **kwargs):
-                captured["generate"] = True
-                return original_generate(*args, **kwargs)
-
-            service.request_generate = wrapped_generate
-            build.return_value = service
+        ):
             denied = self.client.post(
                 "/v1/lands/6417/biweekly/backfill-season?season=2025/26",
                 json={},
@@ -560,35 +597,94 @@ class BiweeklyRouterTests(unittest.TestCase):
                 headers=headers,
                 json={},
             )
+        self._dispatch_patch.start()
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual(body["kind"], "backfill_season")
         self.assertEqual(body["status"], "dispatched")
-        self.assertTrue(body["dispatched_to_production"])
-        self.assertGreaterEqual(len(captured["windows"]), 2)
         self.assertEqual(len(captured["windows"]), 18)
         spans = [item["span_days"] for item in captured["windows"]]
         self.assertTrue(all(0 < span < 43 for span in spans))
         self.assertTrue(all(item.get("years") is None for item in captured["windows"]))
-        self.assertTrue(all(item.get("months") is None for item in captured["windows"]))
         starts = {item["date_from"] for item in captured["windows"]}
         ends = {item["date_to_inclusive"] for item in captured["windows"]}
         self.assertGreater(len(starts), 1)
-        # Never a single season-long or three-year window.
         from datetime import date
         season_span = (
             date.fromisoformat(max(ends)) - date.fromisoformat(min(starts))
         ).days + 1
         self.assertGreater(season_span, 42)
-        self.assertFalse(captured["generate"])
-        self.assertEqual(body["kind"], "backfill_season")
-        self.assertNotIn("plan_only_local_fixture", str(body.get("result")))
-        self.assertTrue(captured["job_types"])
         self.assertTrue(all(item == "biweekly_season_backfill" for item in captured["job_types"]))
         self.assertTrue(all(item == "双周报全季数据补齐" for item in captured["display_names"]))
-        self.assertEqual(body.get("result", {}).get("display_name") or body.get("display_name") or "双周报全季数据补齐", "双周报全季数据补齐")
+        self.assertTrue(all(item.get("biweekly_generate_after") for item in captured["extra"]))
+        children = (body.get("result") or {}).get("period_results") or []
+        self.assertEqual(len(children), 18)
+        self.assertTrue(all(item.get("status") == "dispatched" for item in children))
+        # Waiting on backfill: official PDFs are not written yet.
+        self.assertTrue(all(not item.get("artifact_kind") for item in children))
+
+    def test_season_one_click_writes_official_pdfs_when_backfill_not_needed(self):
+        self._enable_dev()
+        headers = self._auth(self._token())
+        response = self.client.post(
+            "/v1/lands/6417/biweekly/backfill-season?season=2025/26",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["kind"], "backfill_season")
+        self.assertEqual(body["status"], "ready")
+        children = (body.get("result") or {}).get("period_results") or []
+        self.assertEqual(len(children), 18)
+        kinds = {item.get("artifact_kind") for item in children}
+        self.assertIn("official_visual_artifact", kinds)
+        self.assertIn("evidence_limited_brief", kinds)
+        self.assertNotIn("failed", {item.get("status") for item in children} - {"ready", "evidence_limited"})
+        period12 = next(item for item in children if str(item.get("period_id")) == "12")
+        self.assertEqual(period12["status"], "ready")
+        self.assertEqual(period12["artifact_kind"], "official_visual_artifact")
+        downloaded = self.client.get(
+            f"/v1/lands/6417/biweekly/jobs/{period12['generate_job_id']}/download",
+            headers=headers,
+        )
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
+        period1 = next(item for item in children if str(item.get("period_id")) == "1")
+        self.assertEqual(period1["status"], "evidence_limited")
+        self.assertEqual(period1["artifact_kind"], "evidence_limited_brief")
+
+    def test_generate_backfill_failure_is_not_reported_as_no_optics(self):
+        self._enable_dev()
+        headers = self._auth(self._token())
+        self._dispatch_patch.stop()
+        with patch(
+            "app.services.biweekly_report_flow.dispatch_bounded_backfill",
+            new=AsyncMock(
+                return_value={
+                    "dispatched": False,
+                    "reason": "DISPATCH_FAILED",
+                    "job_ids": [],
+                    "job_count": 0,
+                }
+            ),
+        ):
+            response = self.client.post(
+                "/v1/lands/6417/biweekly/periods/12/generate?season=2025/26",
+                headers=headers,
+                json={},
+            )
+        self._dispatch_patch.start()
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["error_code"], "BACKFILL_FAILED")
+        self.assertEqual((body.get("result") or {}).get("stage"), "backfill")
+        self.assertNotEqual(body["status"], "evidence_limited")
+        self.assertNotEqual((body.get("artifact") or {}).get("kind"), "official_visual_artifact")
 
     def test_season_dispatch_helper_sets_bypass_flag_on_each_period(self):
+
         from datetime import date
         from app.services.biweekly_dispatch import dispatch_season_bounded_backfill
 
@@ -649,6 +745,165 @@ class BiweeklyRouterTests(unittest.TestCase):
             self.assertEqual(call.kwargs["extra_params"]["display_name"], "双周报全季数据补齐")
             self.assertNotEqual(call.kwargs["extra_params"]["display_name"], "卫星数据分块处理")
         self.assertNotIn("generate", result)
+
+    def _calendar_19994(self):
+        from tests.test_biweekly_plans import _batch, _task
+        from app.services.biweekly_plans import build_seasons_from_rows
+
+        return build_seasons_from_rows(
+            "19994",
+            [_batch(land_id=19994, batch_id=9001, name="小麦2025/26")],
+            [
+                _task(
+                    plan_id=9001,
+                    name="出苗期",
+                    start="2025-11-13",
+                    finish="2026-02-04",
+                    task_id=1,
+                ),
+            ],
+        )
+
+    def test_smart_generate_with_eligible_s2_is_ready_not_evidence_limited(self):
+        from app.services.biweekly_scenes import _to_observation
+
+        self._enable_dev(lands="19994")
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        calendar = self._calendar_19994()
+        season = calendar["seasons"][0]
+        period = next(row for row in season["periods"] if row["start"] == "2025-11-27")
+        observations = [
+            _to_observation(
+                {
+                    "date": "2025-12-05",
+                    "sensor": "S2",
+                    "scene_id": "stac_bridge_2025-12-05_S2",
+                    "parcel_cloud_cover_pct": 0.0,
+                    "cloud_cover": 0.562652,
+                    "ndvi_avg": 0.163057,
+                    "evi_avg": 0.116352,
+                    "ndre_avg": None,
+                    "ndmi_avg": -0.094621,
+                }
+            ),
+            _to_observation(
+                {
+                    "date": "2025-12-07",
+                    "sensor": "S2",
+                    "scene_id": "stac_bridge_2025-12-07_S2",
+                    "parcel_cloud_cover_pct": 0.0,
+                    "cloud_cover": 2.918007,
+                    "ndvi_avg": 0.167545,
+                    "evi_avg": 0.111034,
+                    "ndre_avg": None,
+                    "ndmi_avg": -0.105551,
+                }
+            ),
+            _to_observation(
+                {
+                    "date": "2025-12-10",
+                    "sensor": "S2",
+                    "scene_id": "stac_bridge_2025-12-10_S2",
+                    "parcel_cloud_cover_pct": 0.0,
+                    "cloud_cover": 10.176522,
+                    "ndvi_avg": 0.144975,
+                    "evi_avg": 0.110558,
+                    "ndre_avg": None,
+                    "ndmi_avg": -0.12101,
+                }
+            ),
+            _to_observation(
+                {
+                    "date": "2025-12-02",
+                    "sensor": "S1",
+                    "scene_id": "s1",
+                    "vv_avg": -11.5,
+                    "vh_avg": -21.4,
+                }
+            ),
+        ]
+        headers = self._auth(self._token(land_ids=("19994",)))
+        with patch(
+            "app.routers.biweekly.load_smart_planting_calendar",
+            new=AsyncMock(return_value=calendar),
+        ), patch(
+            "app.services.biweekly_report_flow.load_scene_observations",
+            new=AsyncMock(return_value=observations),
+        ):
+            response = self.client.post(
+                f"/v1/lands/19994/biweekly/periods/{period['period_id']}/generate"
+                f"?season={season['season_id']}",
+                headers=headers,
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(
+            body["result"]["optical_days"],
+            ["2025-12-05", "2025-12-07", "2025-12-10"],
+        )
+        self.assertEqual((body.get("artifact") or {}).get("kind"), "official_visual_artifact")
+        downloaded = self.client.get(
+            f"/v1/lands/19994/biweekly/jobs/{body['job_id']}/download",
+            headers=headers,
+        )
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
+        self.assertTrue(downloaded.content.startswith(b"%PDF"))
+
+    def test_smart_generate_scene_query_failure_is_not_evidence_limited(self):
+        self._enable_dev(lands="19994")
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        calendar = self._calendar_19994()
+        season = calendar["seasons"][0]
+        period = next(row for row in season["periods"] if row["start"] == "2025-11-27")
+        headers = self._auth(self._token(land_ids=("19994",)))
+        with patch(
+            "app.routers.biweekly.load_smart_planting_calendar",
+            new=AsyncMock(return_value=calendar),
+        ), patch(
+            "app.services.biweekly_report_flow.load_scene_observations",
+            new=AsyncMock(return_value=None),
+        ):
+            response = self.client.post(
+                f"/v1/lands/19994/biweekly/periods/{period['period_id']}/generate"
+                f"?season={season['season_id']}",
+                headers=headers,
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["error_code"], "SCENE_QUERY_FAILED")
+        self.assertNotEqual(body["status"], "evidence_limited")
+        note = str((body.get("result") or {}).get("note") or "")
+        self.assertIn("不能当作本期没有可用光学", note)
+
+    def test_smart_generate_empty_scenes_is_evidence_limited(self):
+        self._enable_dev(lands="19994")
+        settings.biweekly_pack_root = str(Path(self.work.name) / "no-pack")
+        calendar = self._calendar_19994()
+        season = calendar["seasons"][0]
+        period = next(row for row in season["periods"] if row["start"] == "2025-11-27")
+        headers = self._auth(self._token(land_ids=("19994",)))
+        with patch(
+            "app.routers.biweekly.load_smart_planting_calendar",
+            new=AsyncMock(return_value=calendar),
+        ), patch(
+            "app.services.biweekly_report_flow.load_scene_observations",
+            new=AsyncMock(return_value=[]),
+        ):
+            response = self.client.post(
+                f"/v1/lands/19994/biweekly/periods/{period['period_id']}/generate"
+                f"?season={season['season_id']}",
+                headers=headers,
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "evidence_limited")
+        self.assertEqual((body.get("artifact") or {}).get("kind"), "evidence_limited_brief")
 
 
 if __name__ == "__main__":

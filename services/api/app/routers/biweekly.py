@@ -23,6 +23,11 @@ from agric_satellite_analysis_common.biweekly.models import ReportError
 
 from app.middleware.biweekly_auth import BiweeklyPrincipal, require_biweekly_access
 from app.services.biweekly_dispatch import dispatch_bounded_backfill, dispatch_season_bounded_backfill
+from app.services.biweekly_report_flow import (
+    maybe_finalize_biweekly_job,
+    start_period_generate,
+    start_season_generate,
+)
 from app.services.biweekly_mapping import load_wheat_phase_mapping
 from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
@@ -59,6 +64,11 @@ HTTP_ERRORS = {
     "UNSUPPORTED_CROP": 422,
     "LAND_ID_INVALID": 422,
     "PLAN_NOT_FOUND": 404,
+    "SCENE_QUERY_FAILED": 503,
+    "BACKFILL_FAILED": 503,
+    "GENERATE_FAILED": 500,
+    "FONT_MISSING": 503,
+    "PDF_RENDERER_UNAVAILABLE": 503,
 }
 
 
@@ -220,17 +230,13 @@ async def request_season_backfill(
         service, _mapping, _calendar = await _smart_context(land_id)
         chosen = _season_for(service, land_id, (body.season if body else None) or season)
         periods = service.catalog.periods(land_id, chosen)
-        job = service.request_season_backfill(land_id, chosen)
-        try:
-            dispatch = await dispatch_season_bounded_backfill(land_id, periods)
-        except ReportError as exc:
-            service.record_backfill_dispatch(
-                job["job_id"],
-                {"dispatched": False, "reason": exc.code, "job_ids": []},
-            )
-            raise
-        job = service.record_backfill_dispatch(job["job_id"], dispatch)
-        return _public(job, principal, dispatch=dispatch)
+        job = await start_season_generate(
+            service,
+            land_id=land_id,
+            season_id=chosen,
+            reference_planting_instance_id=None,
+        )
+        return _public(job, principal)
     except ReportError as exc:
         return _http_for(exc)
 
@@ -243,34 +249,22 @@ async def request_generate(
     body: GenerateBody | None = None,
     season: Annotated[str | None, Query()] = None,
 ):
-    """Generate only when explicitly requested. Reference plans are never implied."""
+    """Backfill the period first, then render an official PDF. Reference is never implied."""
     try:
         service, mapping, calendar = await _smart_context(land_id)
         payload = body or GenerateBody()
         chosen = _season_for(service, land_id, payload.season or season)
-        period = service.catalog.period(land_id, chosen, period_id)
-        observations = await load_scene_observations(land_id, period["start"], period["end_exclusive"])
-        prior_obs = None
-        previous = prior_period(service.catalog.periods(land_id, chosen), period_id)
-        if previous is not None:
-            prior_obs = await load_scene_observations(
-                land_id, previous["start"], previous["end_exclusive"]
-            )
         ref = payload.reference_planting_instance_id
         native = payload.native_plan
         if native is None and hasattr(service.catalog, "native_plan"):
             native = service.catalog.native_plan(land_id, chosen)
-        job = service.request_generate(
-            land_id,
-            chosen,
-            period_id,
+        job = await start_period_generate(
+            service,
+            land_id=land_id,
+            season_id=chosen,
+            period_id=period_id,
             reference_planting_instance_id=None if ref in (None, "") else str(ref),
-            observations_override=observations,
-            prior_observations_override=prior_obs,
             native_plan=native,
-            observation_source=(
-                "parcel_scene_products" if observations is not None else "pack_snapshot_or_empty"
-            ),
         )
         return _public(job, principal)
     except ReportError as exc:
@@ -288,6 +282,8 @@ async def get_job(
         job = service.get_job(job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
+        if job.get("status") == "dispatched":
+            job = (await maybe_finalize_biweekly_job(job_id, service=service)) or job
         kind = job.get("kind")
         dispatch = job.get("result") if kind in {"backfill", "backfill_season"} else None
         return _public(job, principal, dispatch=dispatch if kind in {"backfill", "backfill_season"} else None)
