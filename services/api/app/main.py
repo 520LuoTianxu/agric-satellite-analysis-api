@@ -46,6 +46,7 @@ from app.routers import (
     internal_decloud_schedules,
     internal_agri,
     internal_results,
+    internal_biweekly,
     internal_schedule,
     admin_ops,
     internal_admin,
@@ -234,6 +235,7 @@ app.include_router(internal_jobs.router, prefix=PREFIX)
 app.include_router(internal_decloud_schedules.router, prefix=PREFIX)
 app.include_router(internal_agri.router, prefix=PREFIX)
 app.include_router(internal_results.router, prefix=PREFIX)
+app.include_router(internal_biweekly.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)
 app.include_router(admin_ops.router, prefix=PREFIX)
 app.include_router(internal_admin.router, prefix=PREFIX)

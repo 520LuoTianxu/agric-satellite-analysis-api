@@ -433,6 +433,24 @@ class TriggerService:
         }
 
     def _run_generate(self, job: dict) -> tuple[dict, dict, str]:
+        facts, status = self._prepare_generate_facts(job)
+        period = self.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+        if status == "evidence_limited":
+            artifact = self._write_brief(job["job_id"], facts, period)
+        else:
+            artifact = self._write_ready_artifact(
+                job["job_id"], facts, period, bool(facts.get("used_reference"))
+            )
+        facts["content_sha256"] = digest(canonical(facts))
+        facts["generate"] = {
+            "status": status,
+            "error_code": None,
+            "artifact_kind": artifact.get("kind"),
+        }
+        return facts, artifact, status
+
+    def _prepare_generate_facts(self, job: dict) -> tuple[dict, str]:
+
         period = self.catalog.period(job["land_id"], job["season_id"], job["period_id"])
         snapshot = {}
         if period.get("snapshot"):
@@ -557,20 +575,23 @@ class TriggerService:
             if (period.get("s1_products") or 0) == 0:
                 facts["radar_note"] = "本期没有雷达影像，不对内涝风险作出偏低或偏高的结论。"
             status = "evidence_limited"
-            artifact = self._write_brief(job["job_id"], facts, period)
         else:
             status = "ready"
-            artifact = self._write_ready_artifact(job["job_id"], facts, period, reference is not None)
-        facts["content_sha256"] = digest(canonical(facts))
+            facts["brief"] = None
         facts["stage"] = "done"
         facts["generate"] = {
             "status": status,
             "error_code": None,
-            "artifact_kind": artifact.get("kind"),
+            "artifact_kind": (
+                "official_visual_artifact" if status == "ready" else "evidence_limited_brief"
+            ),
         }
-        if status == "ready":
-            facts["brief"] = None
-        return facts, artifact, status
+        facts["used_reference"] = bool(reference)
+        return facts, status
+
+    def prepare_generate_facts(self, job: dict) -> tuple[dict, str]:
+        """Build official-report facts without writing an artifact or rendering a PDF."""
+        return self._prepare_generate_facts(job)
 
     def _attach_v8_metrics(self, period, observations):
         optical = self.catalog.v8_optical_metrics() or {}
@@ -640,6 +661,59 @@ class TriggerService:
                 out.append(item)
             return out
         return []
+
+
+    def attach_remote_artifact(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        content: bytes,
+        filename: str,
+        mime: str,
+        kind: str,
+        facts: dict | None = None,
+        error_code: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Store an artifact produced on the download machine and move the job."""
+        job = self.get_job(job_id)
+        if job.get("kind") != "generate":
+            raise ReportError("JOB_KIND_UNSUPPORTED")
+        dest_dir = self.work_dir / "artifacts"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = filename or (
+            f"{job_id}.pdf" if kind == "official_visual_artifact" else f"{job_id}.json"
+        )
+        dest = dest_dir / f"{job_id}-{safe_name}"
+        dest.write_bytes(content)
+        artifact = {
+            "path": str(dest.relative_to(self.work_dir)),
+            "filename": safe_name,
+            "mime": mime,
+            "sha256": digest(content),
+            "size_bytes": len(content),
+            "kind": kind,
+        }
+        if facts:
+            sidecar = dest_dir / f"{job_id}-facts.json"
+            sidecar.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+            artifact["facts_path"] = str(sidecar.relative_to(self.work_dir))
+        result = dict(job.get("result") or {})
+        result.update(facts or {})
+        result["stage"] = "done"
+        result["generate"] = {
+            "status": status,
+            "error_code": error_code,
+            "artifact_kind": kind,
+        }
+        if note:
+            result["note"] = note
+        if status == "failed":
+            self._transition(job, "failed", result=result, artifact=artifact, error_code=error_code)
+        else:
+            self._transition(job, status, result=result, artifact=artifact, error_code=error_code)
+        return self.get_job(job_id)
 
     def _write_brief(self, job_id: str, facts: dict, period: dict) -> dict:
         name = f"biweekly-{period['period_id']}-evidence-limited.json"

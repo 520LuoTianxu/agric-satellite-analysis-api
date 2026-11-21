@@ -56,6 +56,7 @@ BASE_DATA_TYPES = [
 REPORT_TYPES = [
     "assessment_report",
     "season_growth_report",
+    "biweekly_report",
 ]
 BASE_DATA_TYPE_SET = frozenset(BASE_DATA_TYPES)
 REPORT_TYPE_SET = frozenset(REPORT_TYPES)
@@ -694,11 +695,26 @@ def _dispatch_report(
     if job_id:
         kwargs["job_id"] = str(job_id)
 
-    keys = (
-        ("crop_type", "crop_name_zh", "date_from", "date_to", "years")
-        if wtype == "assessment_report"
-        else ("start_date", "end_date", "crops", "label", "material_keys")
-    )
+    if wtype == "assessment_report":
+        keys = ("crop_type", "crop_name_zh", "date_from", "date_to", "years")
+        task_name = "app.tasks.assessment_report.generate_assessment_report"
+    elif wtype == "biweekly_report":
+        keys = (
+            "date_from",
+            "date_to",
+            "biweekly_job_id",
+            "wait_for_job_ids",
+            "reference_planting_instance_id",
+            "parent_season_job_id",
+            "biweekly_season_id",
+            "biweekly_period_id",
+        )
+        task_name = "app.tasks.biweekly_report.generate_biweekly_report"
+        if extras.get("job_id"):
+            kwargs["report_job_id"] = str(extras["job_id"])
+    else:
+        keys = ("start_date", "end_date", "crops", "label", "material_keys")
+        task_name = "app.tasks.season_growth_report.generate_season_growth_report"
     for key in keys:
         if extras.get(key) is not None:
             kwargs[key] = extras[key]
@@ -706,12 +722,6 @@ def _dispatch_report(
         kwargs["pull_data"] = bool(extras["pull_data"])
     if extras.get("wait_celery_ids"):
         kwargs["wait_celery_ids"] = list(extras["wait_celery_ids"])
-
-    task_name = (
-        "app.tasks.assessment_report.generate_assessment_report"
-        if wtype == "assessment_report"
-        else "app.tasks.season_growth_report.generate_season_growth_report"
-    )
     options: dict[str, Any] = {
         "kwargs": kwargs,
         "queue": task_queue_for(task_name, requested_queue=CPU_COMPUTE_QUEUE),
@@ -818,7 +828,7 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
 
     payload = dict(item.get("payload_json") or {})
     task_id = payload.get("task_id") or extras.get("task_id")
-    if wtype in ("assessment_report", "season_growth_report"):
+    if wtype in ("assessment_report", "season_growth_report", "biweekly_report"):
         return _dispatch_report(wtype, work_id, land_id, extras, priority)
     if wtype in COMPLETE_ON_DISPATCH_TYPES or wtype in DEFAULT_TYPES:
         return _dispatch_via_handler(

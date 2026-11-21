@@ -34,6 +34,7 @@ include = ["app*"]
 
 [tool.setuptools.package-data]
 "app.reports.land_assessment" = ["fonts/*.ttf", "assets/*.jpg"]
+"app.reports.biweekly" = ["assets/*.ttf"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

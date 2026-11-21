@@ -61,6 +61,7 @@ SUPPORTED_TYPES = {
     "land_bootstrap",
     "assessment_report",
     "season_growth_report",
+    "biweekly_report",
 }
 
 
@@ -498,6 +499,46 @@ def _dispatch_season_growth_report(
     }
 
 
+
+def _dispatch_biweekly_report(
+    task: "TaskMessage",
+    land_id: str,
+) -> dict[str, Any]:
+    """Dispatch official v8 biweekly PDF generation on the download machine."""
+    extras = dict(task.extras or {})
+    job_id = extras.get("job_id")
+    kwargs: dict[str, Any] = {
+        "mq_task_id": task.task_id,
+        "land_id": land_id,
+        "job_id": str(job_id) if job_id else None,
+        "report_job_id": str(job_id) if job_id else None,
+    }
+    for key in (
+        "biweekly_job_id",
+        "date_from",
+        "date_to",
+        "reference_planting_instance_id",
+        "wait_for_job_ids",
+        "parent_season_job_id",
+        "biweekly_season_id",
+        "biweekly_period_id",
+    ):
+        if extras.get(key) is not None:
+            kwargs[key] = extras[key]
+    async_result = _send_task(
+        "app.tasks.biweekly_report.generate_biweekly_report",
+        kwargs=kwargs,
+        queue="ingest",
+        priority=_task_priority(task),
+    )
+    return {
+        "dispatched": ["app.tasks.biweekly_report.generate_biweekly_report"],
+        "celery_ids": [async_result.id],
+        "job_id": str(job_id) if job_id else None,
+        "biweekly_job_id": extras.get("biweekly_job_id"),
+    }
+
+
 def handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
     """Validate and dispatch one canonical-land task message."""
     bind_trace_from_mapping(payload)
@@ -559,6 +600,8 @@ def _handle_task_message(payload: dict[str, Any], meta: dict[str, Any]) -> None:
             info = _dispatch_assessment_report(task, land_id)
         elif task.type == "season_growth_report":
             info = _dispatch_season_growth_report(task, land_id)
+        elif task.type == "biweekly_report":
+            info = _dispatch_biweekly_report(task, land_id)
         else:
             raise ValueError(f"unhandled type: {task.type}")
 
