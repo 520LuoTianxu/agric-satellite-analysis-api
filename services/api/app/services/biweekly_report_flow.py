@@ -20,6 +20,7 @@ from app.services.biweekly_dispatch import (
     BIWEEKLY_SEASON_DISPLAY_NAME,
     BIWEEKLY_SEASON_JOB_TYPE,
     dispatch_bounded_backfill,
+    dispatch_biweekly_report,
 )
 from app.services.biweekly_scenes import (
     load_land_meta,
@@ -44,7 +45,8 @@ def _pdf_renderer():
 
 
 def trigger_service(smart=None):
-    return build_trigger_service(smart, pdf_renderer=_pdf_renderer())
+    # API no longer renders official PDFs; the download machine does.
+    return build_trigger_service(smart, use_official_pdf=False)
 
 
 def _eligible(rows: list[dict] | None) -> list[dict]:
@@ -167,6 +169,50 @@ def backfill_is_hard_failure(dispatch: dict) -> bool:
     return reason not in {None, "NO_JOBS_CREATED"}
 
 
+
+async def _dispatch_official_report(service, job: dict) -> dict:
+    """Hand official PDF generation to the download machine. Never render locally."""
+    existing = ((job.get("result") or {}).get("report") or {})
+    if existing.get("dispatched") and existing.get("job_ids"):
+        return service.merge_result(job["job_id"], {"stage": "report"}, status="dispatched")
+    period = service.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+    payload = job.get("payload") or {}
+    backfill = (job.get("result") or {}).get("backfill") or {}
+    report = await dispatch_biweekly_report(
+        job["land_id"],
+        {
+            "date_from": period["start"],
+            "date_to_inclusive": period.get("end_inclusive") or period["end_exclusive"],
+        },
+        extra_params={
+            "biweekly_job_id": job["job_id"],
+            "biweekly_land_id": str(job["land_id"]),
+            "biweekly_season_id": job["season_id"],
+            "biweekly_period_id": str(job["period_id"]),
+            "reference_planting_instance_id": payload.get("reference_planting_instance_id"),
+            "parent_season_job_id": payload.get("parent_season_job_id"),
+            "wait_for_job_ids": list(backfill.get("job_ids") or []),
+        },
+    )
+    if not report.get("dispatched"):
+        reason = report.get("reason") or "DISPATCH_FAILED"
+        code = "LAND_NOT_AVAILABLE" if reason == "LAND_NOT_AVAILABLE" else "REPORT_DISPATCH_FAILED"
+        return service.fail_stage(
+            job["job_id"],
+            code,
+            note="出报任务下发失败。失败发生在把出报交给下载机时，不是因为没有可用光学，也不是本机出报渲染失败。",
+        )
+    return service.merge_result(
+        job["job_id"],
+        {
+            "stage": "report",
+            "report": report,
+            "note": "出报任务已下发给下载机。API 机不渲染 PDF。",
+        },
+        status="dispatched",
+    )
+
+
 async def start_period_generate(
     service,
     *,
@@ -208,8 +254,14 @@ async def start_period_generate(
     if job["status"] == "failed":
         return job
     if (job.get("result") or {}).get("backfill", {}).get("status") == "dispatched":
-        return job
-    return await finish_generate_job(service, job["job_id"])
+        return service.merge_result(
+            job["job_id"],
+            {
+                "note": "本期补数已派发到下载机；出报将在补数完成后由下载机进行。API 机不渲染 PDF。",
+            },
+            status="dispatched",
+        )
+    return await _dispatch_official_report(service, job)
 
 
 async def start_season_generate(
@@ -266,9 +318,9 @@ async def start_season_generate(
             (item.get("backfill") or {}).get("status") == "dispatched" for item in period_results
         ),
         "note": (
-            "全季已按期派发有界补数；各期将在补数完成后自动出正式 PDF。真正没有可用光学的期保留简报。"
+            "全季已按期派发有界补数；各期出报将由下载机在补数完成后进行。API 机不渲染 PDF。"
             if waiting
-            else "全季各期补数与出报已结束。有可用光学的期已出正式 PDF，没有可用光学的期为证据受限简报。"
+            else "全季各期任务已下发给下载机（补数与出报）。API 机不渲染 PDF。"
         ),
     }
     if all_backfill_failed and period_results:
@@ -344,7 +396,7 @@ async def maybe_finalize_biweekly_job(job_id: str, *, service=None) -> dict | No
                 "BACKFILL_FAILED",
                 note="补数任务全部失败或取消，尚未出报。失败发生在补数阶段，不是因为没有可用光学。",
             )
-    finished = await finish_generate_job(service, job["job_id"])
+    finished = await _dispatch_official_report(service, job)
     parent_id = (finished.get("payload") or {}).get("parent_season_job_id")
     if parent_id:
         await _roll_up_season(service, service.get_job(parent_id))
@@ -387,7 +439,7 @@ async def _roll_up_season(service, season_job: dict) -> dict:
     ):
         result["note"] = "全季各期补数均失败，尚未出报。失败发生在补数阶段。"
         return service.merge_result(season_job["job_id"], result, status="failed")
-    result["note"] = "全季各期补数与出报已结束。有可用光学的期已出正式 PDF，没有可用光学的期为证据受限简报。"
+    result["note"] = "全季各期任务已下发给下载机（补数与出报）。API 机不渲染 PDF。"
     return service.merge_result(season_job["job_id"], result, status="ready")
 
 

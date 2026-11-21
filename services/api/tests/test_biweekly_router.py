@@ -21,6 +21,17 @@ FORBIDDEN_IMPORTS = (
     "AUTH_DISABLED",
 )
 
+REPORT_DISPATCH = {
+    "dispatched": True,
+    "dispatched_to_production": True,
+    "reason": None,
+    "job_ids": ["report-job-1"],
+    "job_count": 1,
+    "job_id": "report-job-1",
+    "claim_type": "biweekly_report",
+    "job_type": "biweekly_report",
+}
+
 NO_JOBS_DISPATCH = {
     "dispatched": False,
     "dispatched_to_production": False,
@@ -96,6 +107,11 @@ class BiweeklyRouterTests(unittest.TestCase):
             new=AsyncMock(return_value=dict(NO_JOBS_DISPATCH)),
         )
         self._dispatch_patch.start()
+        self._report_patch = patch(
+            "app.services.biweekly_report_flow.dispatch_biweekly_report",
+            new=AsyncMock(return_value=dict(REPORT_DISPATCH)),
+        )
+        self._report_patch.start()
         self._pdf_patch = patch(
             "app.reports.biweekly.official_pdf.render_official_biweekly_pdf",
             side_effect=_stub_official_pdf,
@@ -111,6 +127,7 @@ class BiweeklyRouterTests(unittest.TestCase):
         self._weather_patch.stop()
         self._land_patch.stop()
         self._dispatch_patch.stop()
+        self._report_patch.stop()
         self._pdf_patch.stop()
         self.work.cleanup()
 
@@ -416,10 +433,10 @@ class BiweeklyRouterTests(unittest.TestCase):
             json={},
         )
         self.assertEqual(bare.status_code, 200, bare.text)
-        self.assertEqual(bare.json()["status"], "ready")
+        self.assertEqual(bare.json()["status"], "dispatched")
         self.assertIsNone(bare.json()["payload"]["reference_planting_instance_id"])
-        self.assertEqual((bare.json().get("artifact") or {}).get("kind"), "official_visual_artifact")
-        self.assertEqual((bare.json().get("artifact") or {}).get("mime"), "application/pdf")
+        self.assertNotEqual((bare.json().get("artifact") or {}).get("kind"), "official_visual_artifact")
+        self.assertEqual(((bare.json().get("result") or {}).get("report") or {}).get("job_type"), "biweekly_report")
         with_ref = self.client.post(
             "/v1/lands/6417/biweekly/periods/12/generate?season=2025/26",
             headers=headers,
@@ -427,24 +444,23 @@ class BiweeklyRouterTests(unittest.TestCase):
         )
         self.assertEqual(with_ref.status_code, 200, with_ref.text)
         job = with_ref.json()
-        self.assertEqual(job["status"], "ready")
+        self.assertEqual(job["status"], "dispatched")
         self.assertEqual(job["payload"]["reference_planting_instance_id"], "15933")
         disclosure = job["payload"].get("reference_disclosure") or job.get("result", {})
         self.assertTrue(job["payload"]["reference_disclosure"] or disclosure)
-        self.assertEqual((job.get("artifact") or {}).get("kind"), "official_visual_artifact")
-        self.assertIn("参照", (job.get("result") or {}).get("phase", {}).get("reference", {}).get("disclosure") or "参照")
+        self.assertNotEqual((job.get("artifact") or {}).get("kind"), "official_visual_artifact")
+        self.assertIn("下载机", (job.get("result") or {}).get("note") or "下载机")
 
         fetched = self.client.get(
             f"/v1/lands/6417/biweekly/jobs/{job['job_id']}", headers=headers
         )
         self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.json()["status"], "dispatched")
         downloaded = self.client.get(
             f"/v1/lands/6417/biweekly/jobs/{job['job_id']}/download", headers=headers
         )
-        self.assertEqual(downloaded.status_code, 200)
-        self.assertGreater(len(downloaded.content), 100)
-        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
-        self.assertTrue(downloaded.content.startswith(b"%PDF"))
+        self.assertEqual(downloaded.status_code, 409)
+        self.assertEqual(downloaded.json()["error"], "ARTIFACT_UNAVAILABLE")
 
         foreign = self.client.get(
             f"/v1/lands/0000/biweekly/jobs/{job['job_id']}",
@@ -623,7 +639,7 @@ class BiweeklyRouterTests(unittest.TestCase):
         # Waiting on backfill: official PDFs are not written yet.
         self.assertTrue(all(not item.get("artifact_kind") for item in children))
 
-    def test_season_one_click_writes_official_pdfs_when_backfill_not_needed(self):
+    def test_season_one_click_dispatches_reports_when_backfill_not_needed(self):
         self._enable_dev()
         headers = self._auth(self._token())
         response = self.client.post(
@@ -634,25 +650,12 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual(body["kind"], "backfill_season")
-        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["status"], "dispatched")
         children = (body.get("result") or {}).get("period_results") or []
         self.assertEqual(len(children), 18)
-        kinds = {item.get("artifact_kind") for item in children}
-        self.assertIn("official_visual_artifact", kinds)
-        self.assertIn("evidence_limited_brief", kinds)
-        self.assertNotIn("failed", {item.get("status") for item in children} - {"ready", "evidence_limited"})
-        period12 = next(item for item in children if str(item.get("period_id")) == "12")
-        self.assertEqual(period12["status"], "ready")
-        self.assertEqual(period12["artifact_kind"], "official_visual_artifact")
-        downloaded = self.client.get(
-            f"/v1/lands/6417/biweekly/jobs/{period12['generate_job_id']}/download",
-            headers=headers,
-        )
-        self.assertEqual(downloaded.status_code, 200)
-        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
-        period1 = next(item for item in children if str(item.get("period_id")) == "1")
-        self.assertEqual(period1["status"], "evidence_limited")
-        self.assertEqual(period1["artifact_kind"], "evidence_limited_brief")
+        self.assertTrue(all(item.get("status") == "dispatched" for item in children))
+        self.assertTrue(all(not item.get("artifact_kind") for item in children))
+        self.assertIn("下载机", (body.get("result") or {}).get("note") or "下载机")
 
     def test_generate_backfill_failure_is_not_reported_as_no_optics(self):
         self._enable_dev()
@@ -838,19 +841,15 @@ class BiweeklyRouterTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual(body["status"], "ready")
-        self.assertEqual(
-            body["result"]["optical_days"],
-            ["2025-12-05", "2025-12-07", "2025-12-10"],
-        )
-        self.assertEqual((body.get("artifact") or {}).get("kind"), "official_visual_artifact")
+        self.assertEqual(body["status"], "dispatched")
+        self.assertNotEqual(body["status"], "evidence_limited")
+        self.assertEqual(((body.get("result") or {}).get("report") or {}).get("job_type"), "biweekly_report")
+        self.assertNotEqual((body.get("artifact") or {}).get("kind"), "official_visual_artifact")
         downloaded = self.client.get(
             f"/v1/lands/19994/biweekly/jobs/{body['job_id']}/download",
             headers=headers,
         )
-        self.assertEqual(downloaded.status_code, 200)
-        self.assertIn("pdf", downloaded.headers.get("content-type", "").lower())
-        self.assertTrue(downloaded.content.startswith(b"%PDF"))
+        self.assertEqual(downloaded.status_code, 409)
 
     def test_smart_generate_scene_query_failure_is_not_evidence_limited(self):
         self._enable_dev(lands="19994")
@@ -874,11 +873,11 @@ class BiweeklyRouterTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual(body["status"], "failed")
-        self.assertEqual(body["error_code"], "SCENE_QUERY_FAILED")
+        # Optics judgment and PDF render move to the download machine.
+        self.assertEqual(body["status"], "dispatched")
         self.assertNotEqual(body["status"], "evidence_limited")
-        note = str((body.get("result") or {}).get("note") or "")
-        self.assertIn("不能当作本期没有可用光学", note)
+        self.assertNotEqual(body.get("error_code"), "SCENE_QUERY_FAILED")
+        self.assertEqual(((body.get("result") or {}).get("report") or {}).get("job_type"), "biweekly_report")
 
     def test_smart_generate_empty_scenes_is_evidence_limited(self):
         self._enable_dev(lands="19994")
@@ -902,8 +901,9 @@ class BiweeklyRouterTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual(body["status"], "evidence_limited")
-        self.assertEqual((body.get("artifact") or {}).get("kind"), "evidence_limited_brief")
+        self.assertEqual(body["status"], "dispatched")
+        self.assertNotEqual(body["status"], "evidence_limited")
+        self.assertNotEqual((body.get("artifact") or {}).get("kind"), "evidence_limited_brief")
 
 
 if __name__ == "__main__":

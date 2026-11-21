@@ -22,6 +22,7 @@ CLAIMABLE_TYPES = frozenset(
     {
         "assessment_report",
         "season_growth_report",
+        "biweekly_report",
         "land_bootstrap",
         "satellite_analysis",  # agri optical + S1 chunk wave via backfill
         "satellite_batch",  # 本次地块动态聚合10×10公里窗口，再裁剪写回单地块
