@@ -14,6 +14,8 @@ import time
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any
 
+from agric_satellite_analysis_common.redis_compat import create_sync_redis_client
+
 logger = logging.getLogger(__name__)
 
 DAILY_API_LIMIT_MESSAGE = (
@@ -75,9 +77,7 @@ def _get_client() -> Any | None:
         if _client_url == url and time.monotonic() < _client_failed_until:
             return None
         try:
-            import redis
-
-            client = redis.Redis.from_url(
+            client = create_sync_redis_client(
                 url,
                 decode_responses=True,
                 socket_connect_timeout=1.5,

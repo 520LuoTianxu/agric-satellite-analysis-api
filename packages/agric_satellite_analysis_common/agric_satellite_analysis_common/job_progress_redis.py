@@ -15,6 +15,8 @@ from typing import Any
 
 import structlog
 
+from agric_satellite_analysis_common.redis_compat import create_sync_redis_client
+
 logger = structlog.get_logger()
 
 KEY_TMPL = "openfarm:job:{job_id}:progress"
@@ -52,9 +54,7 @@ def _get_client():
         if _client is not None:
             return _client
         try:
-            import redis
-
-            client = redis.Redis.from_url(
+            client = create_sync_redis_client(
                 _redis_url(),
                 decode_responses=True,
                 socket_connect_timeout=1.5,

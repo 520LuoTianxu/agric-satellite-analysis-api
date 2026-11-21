@@ -6,7 +6,6 @@ import re
 from contextlib import asynccontextmanager
 from time import perf_counter
 
-import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,6 +15,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
 from app.core.rate_limit import limiter
+from app.core.redis_client import create_async_redis_client
 from app.middleware.trace import TraceIdMiddleware
 from app.routers import (
     agri,
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
 
     app.state.http_client = httpx.AsyncClient(timeout=30.0)
     # 回执入队与后台消费共用进程级Redis客户端，复用连接池并由应用生命周期统一释放。
-    app.state.redis_client = aioredis.from_url(
+    app.state.redis_client = create_async_redis_client(
         settings.redis_url,
         decode_responses=True,
         socket_connect_timeout=2.0,
@@ -316,7 +316,7 @@ async def healthz():
     redis_started_at = perf_counter()
     logger.info("health_check_redis_started")
     try:
-        r = aioredis.from_url(settings.redis_url)
+        r = create_async_redis_client(settings.redis_url)
         try:
             await asyncio.wait_for(r.ping(), timeout=2.0)
         finally:

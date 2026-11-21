@@ -7,10 +7,9 @@ import hashlib
 import json
 from typing import Any
 
-import redis.asyncio as aioredis
-
 from app.core.config import settings
 from app.core.logging import logger
+from app.core.redis_client import create_async_redis_client
 
 SCENE_RESULT_QUEUE = "openfarm:satellite:scene-result:queue"
 SCENE_RESULT_PROCESSING = "openfarm:satellite:scene-result:processing"
@@ -198,7 +197,7 @@ async def enqueue_scene_result(
     )
     owns_redis_client = redis_client is None
     if redis_client is None:
-        redis_client = aioredis.from_url(
+        redis_client = create_async_redis_client(
             settings.redis_url,
             decode_responses=True,
             socket_connect_timeout=2.0,
@@ -345,7 +344,7 @@ async def consume_cached_scene_results(redis_client: Any | None = None) -> None:
     """API 进程后台消费 Redis，并在 API 机执行 OSS 下载及 PostgreSQL 入库。"""
     owns_redis_client = redis_client is None
     if redis_client is None:
-        redis_client = aioredis.from_url(
+        redis_client = create_async_redis_client(
             settings.redis_url,
             decode_responses=True,
             socket_connect_timeout=2.0,
