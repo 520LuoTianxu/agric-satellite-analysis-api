@@ -53,6 +53,7 @@ async def dispatch_bounded_backfill(
     *,
     job_type: str = BIWEEKLY_PERIOD_JOB_TYPE,
     display_name: str = BIWEEKLY_PERIOD_DISPLAY_NAME,
+    extra_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create bounded satellite_batch jobs and stage them on this API machine.
 
@@ -98,6 +99,7 @@ async def dispatch_bounded_backfill(
                     "biweekly_user_backfill": True,
                     "display_type": job_type,
                     "display_name": display_name,
+                    **dict(extra_params or {}),
                 },
             )
             await db.commit()

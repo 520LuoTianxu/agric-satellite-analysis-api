@@ -18,7 +18,14 @@ class LocalApiTests(unittest.TestCase):
         self.env = os.environ.copy()
         os.environ["BIWEEKLY_LOCAL_API"] = "1"
         os.environ["BIWEEKLY_DEV_TOKEN"] = "local-test-token-6417"
-        service = TriggerService(Path(self.tmp.name), LocalPackCatalog())
+        def _stub_pdf(facts, dest):
+            Path(dest).write_bytes(b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n")
+
+        service = TriggerService(
+            Path(self.tmp.name),
+            LocalPackCatalog(),
+            pdf_renderer=_stub_pdf,
+        )
         self.httpd = serve("127.0.0.1", 0, service)
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

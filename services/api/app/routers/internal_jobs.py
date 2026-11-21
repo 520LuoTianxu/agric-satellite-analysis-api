@@ -269,4 +269,12 @@ async def patch_job(
 
     await db.commit()
     await db.refresh(job)
+    try:
+        import asyncio
+        from app.services.biweekly_report_flow import maybe_finalize_from_satellite_job
+
+        params = job.params_json if isinstance(job.params_json, dict) else {}
+        asyncio.create_task(maybe_finalize_from_satellite_job(params, job.status))
+    except Exception:
+        pass
     return _patch_out(job, include_progress=include_progress)
