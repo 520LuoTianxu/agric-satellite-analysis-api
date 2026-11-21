@@ -9,10 +9,10 @@ class SnapshotTests(unittest.TestCase):
     def test_cross_period_unique_primary_and_plan_not_observed(self):
         s = build_snapshot(source())
         d = s.data
-        self.assertEqual(d["primary_period_id"], "rising")
+        self.assertEqual(d["primary_period_id"], "green_up")
         self.assertEqual(
             [(x["period_id"], x["days"]) for x in d["covered_periods"]],
-            [("rising", 6), ("jointing", 8)],
+            [("green_up", 6), ("rising", 8)],
         )
         self.assertEqual(d["covered_periods"][0]["phase"], "S1")
         self.assertEqual(d["covered_periods"][1]["phase"], "S2")

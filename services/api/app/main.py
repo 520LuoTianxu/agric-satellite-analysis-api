@@ -50,6 +50,7 @@ from app.routers import (
     admin_ops,
     internal_admin,
     satellite_batch,
+    biweekly,
 )
 
 
@@ -236,6 +237,9 @@ app.include_router(internal_results.router, prefix=PREFIX)
 app.include_router(internal_schedule.router, prefix=PREFIX)
 app.include_router(admin_ops.router, prefix=PREFIX)
 app.include_router(internal_admin.router, prefix=PREFIX)
+# Biweekly trigger APIs: default disabled (BIWEEKLY_API_ENABLED=0).
+# Auth is app.middleware.biweekly_auth, not the AUTH_DISABLED anonymous bypass.
+app.include_router(biweekly.router, prefix=PREFIX)
 
 
 # ── Health Check ─────────────────────────────────────────────────────

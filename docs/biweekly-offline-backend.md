@@ -81,3 +81,8 @@ SQLite只是本地单进程/多连接测试的**API控制面模拟实现**。此
 5. 正式工作队列的租约心跳/取消/清理与事务性产物提交、源失效事件、产物保留期与部署审批。
 
 本轮不改现有采集/索引/作业状态系统，不执行生产SQL。以上适配器完成后，也必须等用户明确说「对接」才改前端运行数据源。
+
+
+## 本地可触发接口（2026-11-21）
+
+默认不出报。触发入口是 API 机 `/v1/lands/{land_id}/biweekly/*`（默认 `BIWEEKLY_API_ENABLED=0`）。前端走现有登录态与 `/satellite-api`；补数走 `create_satellite_batch_jobs` / 出站箱或 WorkItem；下载机复用已有 `satellite_batch` 领取；生成在 API 机读入库产品。不走 `AUTH_DISABLED` 匿名旁路。`scripts/biweekly_local_api.py` 不是入口。说明：`/workspace/reports/biweekly-persistent-feature/README.md`。

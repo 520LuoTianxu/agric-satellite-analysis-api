@@ -24,16 +24,16 @@ def source():
             "asset_ids": ["mock-scene-a", "mock-weather-a"],
             "stages": [
                 {
-                    "period_id": "rising",
-                    "stage_key": "rising",
-                    "name": "起身期",
+                    "period_id": "green_up",
+                    "stage_key": "green_up",
+                    "name": "返青期",
                     "start": "2027-03-15",
                     "end": "2027-03-21",
                 },
                 {
-                    "period_id": "jointing",
-                    "stage_key": "jointing",
-                    "name": "拔节期",
+                    "period_id": "rising",
+                    "stage_key": "rising",
+                    "name": "起身期",
                     "start": "2027-03-21",
                     "end": "2027-04-26",
                 },

@@ -12,22 +12,15 @@ from datetime import date
 
 from .models import ReportError, Snapshot, canonical, digest
 
+from .phase_policy import wheat_snapshot_phases
+
 POLICY_VERSION = "biweekly-crop-policy-offline-draft-v1"
-MAPPING_VERSION = "planned-three-phase-draft-v1"
+MAPPING_VERSION = "wheat-qxt88-pilot-1"
+# Winter wheat phases come from the QX/T 88-2008 pilot (起身=RS=S2, no 孕穗).
+# Maize keys below remain an unpublished trial fixture for older tests only;
+# they are not an approved production mapping and must not be written to prec_agric.
 STAGES = {
-    "winter_wheat": {
-        "seedling": "S1",
-        "tillering": "S1",
-        "winter": "S1",
-        "green_up": "S1",
-        "rising": "S1",
-        "jointing": "S2",
-        "booting": "S2",
-        "heading": "S3",
-        "flowering": "S3",
-        "filling": "S3",
-        "maturity": "S3",
-    },
+    "winter_wheat": wheat_snapshot_phases(),
     "maize": {
         "seedling": "S1",
         "jointing": "S1",
