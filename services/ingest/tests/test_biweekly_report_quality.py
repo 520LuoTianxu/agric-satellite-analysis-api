@@ -393,6 +393,67 @@ class StageMetricTests(unittest.TestCase):
         self.assertEqual(item["delta"], 0.02)
         self.assertEqual(item["direction"], "up")
 
+    def test_evidence_table_shows_latest_percentiles_even_if_series_uses_mean(self):
+        """An early mean-only date forces series means, but must not hide real latest p10/p90."""
+        from app.reports.biweekly.report_text import evidence_caption, evidence_table
+
+        facts = {
+            "report_metrics": {"primary": ["ndre", "evi"], "supporting": ["ndvi", "ndmi"]},
+            "metric_statistics": {"ndre": "mean", "evi": "mean", "ndvi": "mean", "ndmi": "mean"},
+            "comparison": {
+                "latest_date": "2026-03-31",
+                "baseline_date": "2026-03-19",
+                "metrics": {
+                    "ndre": {"statistic": "mean", "latest": 0.565933, "baseline": 0.395735, "delta": 0.17},
+                    "evi": {"statistic": "mean", "latest": 0.71017, "baseline": 0.453088, "delta": 0.26},
+                    "ndvi": {"statistic": "mean", "latest": 0.708331, "baseline": 0.574236, "delta": 0.14},
+                    "ndmi": {"statistic": "mean", "latest": 0.411788, "baseline": 0.196497, "delta": 0.21},
+                },
+            },
+            "metric_series": [
+                {
+                    "date": "2026-02-22",
+                    "in_period": False,
+                    "source": "field_mean",
+                    "metrics": {
+                        "ndre": {"status": "mean_only", "field_mean": 0.197459, "p10": None, "p90": None},
+                        "evi": {"status": "mean_only", "field_mean": 0.229067, "p10": None, "p90": None},
+                        "ndvi": {"status": "mean_only", "field_mean": 0.275168, "p10": None, "p90": None},
+                        "ndmi": {"status": "mean_only", "field_mean": 0.029255, "p10": None, "p90": None},
+                    },
+                },
+                {
+                    "date": "2026-03-19",
+                    "in_period": False,
+                    "source": "pixels",
+                    "metrics": {
+                        "ndre": {"status": "ok", "median": 0.4023715, "p10": 0.3415024, "p90": 0.4441943, "field_mean": 0.395735},
+                        "evi": {"status": "ok", "median": 0.4537015, "p10": 0.3728518, "p90": 0.5382044, "field_mean": 0.453088},
+                        "ndvi": {"status": "ok", "median": 0.5822055, "p10": 0.4923318, "p90": 0.647431, "field_mean": 0.574236},
+                        "ndmi": {"status": "ok", "median": 0.203001, "p10": 0.1329657, "p90": 0.2518124, "field_mean": 0.196497},
+                    },
+                },
+                {
+                    "date": "2026-03-31",
+                    "in_period": True,
+                    "source": "pixels",
+                    "metrics": {
+                        "ndre": {"status": "ok", "median": 0.579301, "p10": 0.5063956, "p90": 0.6044996, "field_mean": 0.565933},
+                        "evi": {"status": "ok", "median": 0.721904, "p10": 0.6419339, "p90": 0.766859, "field_mean": 0.71017},
+                        "ndvi": {"status": "ok", "median": 0.722792, "p10": 0.6587616, "p90": 0.7432993, "field_mean": 0.708331},
+                        "ndmi": {"status": "ok", "median": 0.4249015, "p10": 0.3420948, "p90": 0.4610775, "field_mean": 0.411788},
+                    },
+                },
+            ],
+        }
+        rows = {row[0]: row for row in evidence_table(facts)[1:]}
+        self.assertEqual(rows["NDRE（主要）"][4], "0.51 至 0.60")
+        self.assertEqual(rows["EVI（主要）"][4], "0.64 至 0.77")
+        caption = evidence_caption(facts)
+        self.assertIn("百分位来自最近一次观测的有效像元", caption)
+        self.assertNotIn("无像元级数据", caption)
+        self.assertNotIn("未提供百分位", caption)
+
 
 class DemoReportTests(unittest.TestCase):
     """Render the three demo cases through the official generate entry once."""

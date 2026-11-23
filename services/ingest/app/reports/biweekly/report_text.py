@@ -267,7 +267,7 @@ def evidence_table(facts: dict[str, Any]) -> list[list[str]] | None:
             item = (comparison.get("metrics") or {}).get(metric) or {}
             entry = (latest_row.get("metrics") or {}).get(metric) or {}
             spec = METRIC_SPECS[metric]
-            spread = f"{fmt_index(entry.get('p10'))} 至 {fmt_index(entry.get('p90'))}" if entry.get("status") == "ok" and item.get("statistic") == "median" else "—"
+            spread = _percentile_spread(entry) or "—"
             rows.append(
                 [
                     f"{spec.abbr}（{role}）",
@@ -280,14 +280,44 @@ def evidence_table(facts: dict[str, Any]) -> list[list[str]] | None:
     return rows
 
 
+def _percentile_spread(entry: dict[str, Any] | None) -> str | None:
+    """Show p10–p90 only when the latest observation actually has them.
+
+    Series values may still use field means when an earlier date lacks pixels;
+    that must not hide real percentiles of the date shown in the table.
+    """
+    if not entry or entry.get("status") != "ok":
+        return None
+    p10, p90 = entry.get("p10"), entry.get("p90")
+    if p10 is None or p90 is None:
+        return None
+    return f"{fmt_index(p10)} 至 {fmt_index(p90)}"
+
+
+def _latest_has_percentiles(facts: dict[str, Any]) -> bool:
+    comparison = facts.get("comparison") or {}
+    latest = _row_on(facts, comparison.get("latest_date"))
+    if not latest:
+        return False
+    plan = facts.get("report_metrics") or {}
+    metrics = (plan.get("primary") or []) + (plan.get("supporting") or [])
+    mets = latest.get("metrics") or {}
+    return any(_percentile_spread(mets.get(metric) or {}) for metric in metrics)
+
+
 def evidence_caption(facts: dict[str, Any]) -> str:
     plan = facts.get("report_metrics") or {}
     statistics = facts.get("metric_statistics") or {}
     kinds = {statistics.get(m) for m in (plan.get("primary") or []) + (plan.get("supporting") or [])} - {None}
+    has_spread = _latest_has_percentiles(facts)
     if kinds == {"median"}:
         basis = "数值为田块内有效像元的中位数"
+    elif kinds == {"mean"} and has_spread:
+        basis = "数值为田块均值（因部分日期只有田块均值，时间序列统一用均值以便各日期可比）；百分位来自最近一次观测的有效像元"
     elif kinds == {"mean"}:
         basis = "数值为田块均值（无像元级数据，未提供百分位）"
+    elif has_spread:
+        basis = "有像元统计的指标数值为田块内有效像元的中位数，其余为田块均值；百分位来自最近一次观测中确有像元统计的指标"
     else:
         basis = "数值为田块内有效像元的中位数；无像元级数据的指标为田块均值"
     return f"{basis}，指数均无量纲。变化量为最近一次观测减对比基准。“—”表示不适用，“{MISSING}”表示没有有效数据。"
