@@ -16,7 +16,7 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_window, prior_period
@@ -72,6 +72,20 @@ HTTP_ERRORS = {
     "GENERATE_FAILED": 500,
     "FONT_MISSING": 503,
     "PDF_RENDERER_UNAVAILABLE": 503,
+    "OFFICIAL_STORE_UNAVAILABLE": 503,
+    "ARTIFACT_URL_FORBIDDEN": 400,
+    "ARTIFACT_REF_INVALID": 400,
+    "ARTIFACT_KEY_MISMATCH": 400,
+    "ARTIFACT_BUCKET_MISMATCH": 400,
+    "ARTIFACT_SIZE_INVALID": 400,
+    "ARTIFACT_SIZE_MISMATCH": 409,
+    "ARTIFACT_CHECKSUM_INVALID": 400,
+    "ARTIFACT_CONFLICT": 409,
+    "ARTIFACT_LAND_INVALID": 400,
+    "ARTIFACT_JOB_INVALID": 400,
+    "ARTIFACT_KIND_INVALID": 400,
+    "ARTIFACT_INVALID": 400,
+    "ARTIFACT_MISSING": 400,
 }
 
 
@@ -98,6 +112,10 @@ def _http_for(exc: ReportError) -> JSONResponse:
 
 def _public(payload: dict, principal: BiweeklyPrincipal, *, dispatch: dict | None = None) -> dict:
     out = annotate_dispatch(payload, dispatch)
+    if out.get("artifact"):
+        from agric_satellite_analysis_common.biweekly.official_ref import public_artifact
+
+        out["artifact"] = public_artifact(out["artifact"])
     out["production_ready"] = False
     out["auto_publish"] = False
     out["auth"] = principal.public_auth()
@@ -327,11 +345,17 @@ async def download_job(
         job = service.get_job(job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
-        filename, data, mime = service.download(job_id)
-        return Response(
-            content=data,
+        filename, chunks, mime, size = service.iter_download(job_id)
+        headers = {
+            "Content-Disposition": _content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if size:
+            headers["Content-Length"] = str(int(size))
+        return StreamingResponse(
+            chunks,
             media_type=mime or "application/octet-stream",
-            headers={"Content-Disposition": _content_disposition(filename)},
+            headers=headers,
         )
     except ReportError as exc:
         return _http_for(exc)

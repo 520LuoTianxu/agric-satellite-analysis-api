@@ -17,6 +17,16 @@ from zoneinfo import ZoneInfo
 from .calendar import bounded_backfill_window
 from .catalog import ALLOWED_REFERENCE_IDS, LocalPackCatalog
 from .models import ReportError, canonical, digest
+from .official_ref import (
+    READY_STATUSES,
+    OfficialStoreNotMigrated,
+    OfficialStoreUnavailable,
+    inspect_official_object,
+    official_object_key,
+    public_artifact,
+    sha256_bytes,
+)
+from .official_store import latest_brief
 from .phase_policy import (
     FORBIDDEN_REPORT_METRICS,
     POLICY_VERSION,
@@ -25,7 +35,7 @@ from .phase_policy import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-STATES = ("queued", "running", "dispatched", "ready", "failed", "evidence_limited")
+STATES = ("queued", "running", "dispatched", "registration_pending", "ready", "failed", "evidence_limited")
 
 
 def _repo_root() -> Path:
@@ -65,6 +75,9 @@ class TriggerService:
         *,
         auto_run=True,
         pdf_renderer=None,
+        official_store=None,
+        object_storage=None,
+        expected_oss_bucket: str | None = None,
     ):
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +86,14 @@ class TriggerService:
         self.catalog = catalog or LocalPackCatalog()
         self.auto_run = auto_run
         self.pdf_renderer = pdf_renderer
+        self.official_store = official_store
+        self.object_storage = object_storage
+        if expected_oss_bucket:
+            self.expected_oss_bucket = expected_oss_bucket
+        elif object_storage is not None:
+            self.expected_oss_bucket = object_storage.bucket()
+        else:
+            self.expected_oss_bucket = None
 
     def list_seasons(self, land_id: str) -> dict:
         seasons = self.catalog.list_seasons(land_id)
@@ -96,24 +117,72 @@ class TriggerService:
         }
 
     def get_job(self, job_id: str) -> dict:
+        stored = self._store_get(job_id)
+        if stored is not None:
+            return self._sanitize_job(stored)
         path = self.work_dir / "jobs" / f"{job_id}.json"
         if not path.is_file():
             raise ReportError("JOB_NOT_FOUND")
-        return json.loads(path.read_text())
+        job = json.loads(path.read_text())
+        # Pre-migration file jobs are not claimed as moved into the official table.
+        job.setdefault("persistence", "legacy_work_dir")
+        job.setdefault("migrated", False)
+        return self._sanitize_job(job)
+
+    def _store_get(self, job_id: str) -> dict | None:
+        if self.official_store is None:
+            return None
+        try:
+            return self.official_store.get(job_id)
+        except OfficialStoreNotMigrated:
+            return None
+        except OfficialStoreUnavailable as exc:
+            raise ReportError("OFFICIAL_STORE_UNAVAILABLE") from exc
+
+    def _sanitize_job(self, job: dict) -> dict:
+        out = dict(job)
+        if out.get("artifact"):
+            out["artifact"] = public_artifact(out["artifact"])
+        return out
 
     def download(self, job_id: str) -> tuple[str, bytes, str]:
+        filename, chunks, mime, _size = self.iter_download(job_id)
+        return filename, b"".join(chunks), mime
+
+    def iter_download(self, job_id: str):
+        """Yield artifact bytes for a same-origin authenticated download.
+
+        OSS objects are streamed from the configured bucket; a signed URL is
+        never returned, so the frontend same-origin Bearer download stays valid.
+        """
         job = self.get_job(job_id)
-        if job["status"] not in {"ready", "evidence_limited"}:
+        if job["status"] not in READY_STATUSES:
             raise ReportError("ARTIFACT_UNAVAILABLE")
         artifact = job.get("artifact") or {}
+        filename = artifact.get("filename") or f"{job_id}.bin"
+        mime = artifact.get("mime") or artifact.get("content_type") or "application/octet-stream"
+        if artifact.get("key"):
+            return filename, self._iter_oss_artifact(job, artifact), mime, artifact.get("size_bytes")
         rel = artifact.get("path")
         if not rel:
             raise ReportError("ARTIFACT_UNAVAILABLE")
         path = self.work_dir / rel
         data = path.read_bytes()
-        if digest(data) != artifact.get("sha256"):
+        if artifact.get("sha256") and digest(data) != artifact.get("sha256"):
             raise ReportError("ARTIFACT_CORRUPT")
-        return artifact.get("filename") or path.name, data, artifact.get("mime") or "application/pdf"
+        return filename, iter((data,)), mime, len(data)
+
+    def _iter_oss_artifact(self, job: dict, artifact: dict):
+        if self.object_storage is None:
+            raise ReportError("ARTIFACT_UNAVAILABLE")
+        kind = artifact.get("kind") or "official_visual_artifact"
+        expected_key = official_object_key(job["land_id"], job["job_id"], kind=kind)
+        if artifact.get("key") != expected_key:
+            raise ReportError("ARTIFACT_KEY_MISMATCH")
+        if self.expected_oss_bucket and artifact.get("bucket") != self.expected_oss_bucket:
+            raise ReportError("ARTIFACT_BUCKET_MISMATCH")
+        for chunk in self.object_storage.iter_bytes(artifact["key"]):
+            yield chunk
 
     def request_backfill(
         self,
@@ -242,6 +311,10 @@ class TriggerService:
 
     def fail_stage(self, job_id: str, error_code: str, *, note: str | None = None) -> dict:
         job = self.get_job(job_id)
+        if job.get("status") in READY_STATUSES:
+            return job
+        if job.get("status") == "registration_pending" and (job.get("artifact") or {}).get("sha256"):
+            return job
         result = dict(job.get("result") or {})
         if error_code == "BACKFILL_FAILED":
             result["stage"] = "backfill"
@@ -374,12 +447,60 @@ class TriggerService:
         return job
 
     def _write(self, job: dict) -> None:
+        if self.official_store is not None:
+            try:
+                job["persistence"] = "database"
+                job.pop("migrated", None)
+                stored = self.official_store.upsert(job)
+                job.clear()
+                job.update(stored)
+            except OfficialStoreNotMigrated:
+                job["persistence"] = "legacy_work_dir"
+                job["migrated"] = False
+            except OfficialStoreUnavailable as exc:
+                raise ReportError("OFFICIAL_STORE_UNAVAILABLE") from exc
+        else:
+            job.setdefault("persistence", "legacy_work_dir")
+            job.setdefault("migrated", False)
         path = self.work_dir / "jobs" / f"{job['job_id']}.json"
         path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _transition(self, job, status, result=None, artifact=None, error_code=None):
         if status not in STATES:
             raise ReportError("STATE_INVALID")
+        if status == "failed" and job.get("status") in READY_STATUSES:
+            return job
+        if (
+            status == "failed"
+            and job.get("status") == "registration_pending"
+            and (job.get("artifact") or {}).get("sha256")
+        ):
+            return job
+        if self.official_store is not None:
+            event = dict(job)
+            event["status"] = status
+            if result is not None:
+                event["result"] = result
+            if artifact is not None:
+                event["artifact"] = artifact
+            if error_code is not None:
+                event["error_code"] = error_code
+            try:
+                stored, outcome = self.official_store.apply_event(job["job_id"], event)
+            except OfficialStoreNotMigrated:
+                stored, outcome = None, "legacy"
+            except OfficialStoreUnavailable as exc:
+                raise ReportError("OFFICIAL_STORE_UNAVAILABLE") from exc
+            else:
+                if outcome == "ignored_stale_fail":
+                    job.clear()
+                    job.update(stored)
+                    self._write_file_cache(job)
+                    return job
+                job.clear()
+                job.update(stored)
+                self._write(job)
+                return job
         job["status"] = status
         job["updated_at"] = _now()
         job["history"].append({"status": status, "at": job["updated_at"]})
@@ -390,9 +511,14 @@ class TriggerService:
         if error_code is not None:
             job["error_code"] = error_code
         self._write(job)
+        return job
+
+    def _write_file_cache(self, job: dict) -> None:
+        path = self.work_dir / "jobs" / f"{job['job_id']}.json"
+        path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _latest_for_period(self, land_id, season_id, period_id):
-        latest = None
+        file_latest = None
         for path in sorted((self.work_dir / "jobs").glob("bj-*.json")):
             job = json.loads(path.read_text())
             if (
@@ -401,13 +527,25 @@ class TriggerService:
                 and job.get("period_id") == str(period_id)
                 and job.get("kind") == "generate"
             ):
-                latest = {
-                    "job_id": job["job_id"],
-                    "status": job["status"],
-                    "created_at": job["created_at"],
-                    "reference": bool(job.get("payload", {}).get("reference_planting_instance_id")),
-                }
-        return latest
+                brief = latest_brief(job)
+                brief["persistence"] = job.get("persistence") or "legacy_work_dir"
+                file_latest = brief
+        store_latest = None
+        if self.official_store is not None:
+            try:
+                stored = self.official_store.latest_for_period(land_id, season_id, period_id)
+            except OfficialStoreNotMigrated:
+                stored = None
+            except OfficialStoreUnavailable as exc:
+                raise ReportError("OFFICIAL_STORE_UNAVAILABLE") from exc
+            else:
+                store_latest = latest_brief(stored)
+        if store_latest and file_latest and store_latest["job_id"] != file_latest["job_id"]:
+            # A leftover file job is not silently treated as migrated; pick the newer one.
+            store_ts = store_latest.get("created_at") or ""
+            file_ts = file_latest.get("created_at") or ""
+            return store_latest if store_ts >= file_ts else file_latest
+        return store_latest or file_latest
 
     def period_for_job(self, job: dict) -> dict:
         """Use dates persisted on the generate job; catalog.period is a fallback only.
@@ -758,6 +896,58 @@ class TriggerService:
         return []
 
 
+    def attach_oss_artifact(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        artifact: dict,
+        facts: dict | None = None,
+        error_code: str | None = None,
+        note: str | None = None,
+        inspect: bool = True,
+    ) -> dict:
+        """Register a pre-uploaded official OSS object and close the official job."""
+        job = self.get_job(job_id)
+        if job.get("kind") != "generate":
+            raise ReportError("JOB_KIND_UNSUPPORTED")
+        kind = artifact.get("kind") or (
+            "official_visual_artifact" if status == "ready" else "evidence_limited_brief"
+        )
+        ref = {
+            "storage": "oss",
+            "bucket": artifact["bucket"],
+            "key": artifact["key"],
+            "size_bytes": artifact["size_bytes"],
+            "sha256": artifact["sha256"],
+            "content_type": artifact.get("content_type") or artifact.get("mime"),
+            "mime": artifact.get("mime") or artifact.get("content_type"),
+            "filename": artifact.get("filename"),
+            "kind": kind,
+        }
+        if inspect:
+            if self.object_storage is None:
+                raise ReportError("ARTIFACT_UNAVAILABLE")
+            inspected = inspect_official_object(
+                self.object_storage,
+                ref,
+                expect_pdf=(kind == "official_visual_artifact"),
+            )
+            ref.update(inspected)
+            ref["mime"] = ref.get("mime") or ref.get("content_type")
+        result = dict(job.get("result") or {})
+        result.update(facts or {})
+        result["stage"] = "done"
+        result["generate"] = {
+            "status": status,
+            "error_code": error_code,
+            "artifact_kind": kind,
+        }
+        if note:
+            result["note"] = note
+        self._transition(job, status, result=result, artifact=public_artifact(ref), error_code=error_code)
+        return self.get_job(job_id)
+
     def attach_remote_artifact(
         self,
         job_id: str,
@@ -771,7 +961,7 @@ class TriggerService:
         error_code: str | None = None,
         note: str | None = None,
     ) -> dict:
-        """Store an artifact produced on the download machine and move the job."""
+        """Legacy complete path: accept raw bytes (old download machines still send base64)."""
         job = self.get_job(job_id)
         if job.get("kind") != "generate":
             raise ReportError("JOB_KIND_UNSUPPORTED")
@@ -786,10 +976,31 @@ class TriggerService:
             "path": str(dest.relative_to(self.work_dir)),
             "filename": safe_name,
             "mime": mime,
-            "sha256": digest(content),
+            "sha256": sha256_bytes(content),
             "size_bytes": len(content),
             "kind": kind,
+            "storage": "work_dir",
         }
+        if self.object_storage is not None and self.expected_oss_bucket:
+            key = official_object_key(job["land_id"], job_id, kind=kind)
+            try:
+                if hasattr(self.object_storage, "put_bytes"):
+                    self.object_storage.put_bytes(key, content, content_type=mime)
+                else:
+                    dest_tmp = dest
+                    self.object_storage.upload_file(key, str(dest_tmp), content_type=mime)
+                artifact.update(
+                    {
+                        "storage": "oss",
+                        "bucket": self.expected_oss_bucket,
+                        "key": key,
+                        "content_type": mime,
+                    }
+                )
+            except Exception:
+                # Keep the legacy local artifact so an old machine can still complete;
+                # restart-safe OSS registration will be missing until retried.
+                artifact["storage"] = "work_dir"
         if facts:
             sidecar = dest_dir / f"{job_id}-facts.json"
             sidecar.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -303,6 +303,46 @@ class Job(Base):
     )
 
 
+class BiweeklyOfficialJob(Base):
+    """Authoritative official generate job (bj-*) and OSS object reference.
+
+    Official ids are not UUIDs, so they cannot reuse agric_satellite.jobs.id.
+    Historical file-backed jobs are not implied to have been migrated here.
+    """
+
+    __tablename__ = "biweekly_official_jobs"
+    __table_args__ = (
+        Index(
+            "ix_biweekly_official_jobs_period",
+            "land_id",
+            "season_id",
+            "period_id",
+            "created_at",
+        ),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    land_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    season_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    period_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="generate")
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    report_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    artifact_json = mapped_column(JSONB, nullable=True)
+    job_json = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SatelliteJobProductReceipt(Base):
     """记录遥感任务已发布的地块场景，避免把增长中的回执历史塞进任务 JSON。"""
 
