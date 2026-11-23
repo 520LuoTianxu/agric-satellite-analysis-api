@@ -116,8 +116,12 @@ async def _last_optical_observations(land_id: str, periods: list[dict], period_i
     return collected
 
 
-async def _enrich_payload(land_id: str, period: dict, periods: list[dict]) -> dict[str, Any]:
-    observations = await load_scene_observations(land_id, period["start"], period["end_exclusive"])
+async def _enrich_payload(
+    land_id: str, period: dict, periods: list[dict], *, job_id: str | None = None
+) -> dict[str, Any]:
+    observations = await load_scene_observations(
+        land_id, period["start"], period["end_exclusive"], job_id=job_id
+    )
     if observations is None:
         if period.get("snapshot"):
             # Local pack periods can still generate from the fixture snapshot.
@@ -167,7 +171,7 @@ async def finish_generate_job(service, job_id: str) -> dict:
     period = service.period_for_job(job)
     periods = service.periods_for_job(job)
     try:
-        fields = await _enrich_payload(land_id, period, periods)
+        fields = await _enrich_payload(land_id, period, periods, job_id=job_id)
     except ReportError as exc:
         note = "读取已入库景失败，不能当作本期没有可用光学。"
         if exc.code == "SCENE_QUERY_FAILED":

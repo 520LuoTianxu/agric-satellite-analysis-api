@@ -193,7 +193,7 @@ class SmartInputsTests(unittest.TestCase):
 
         captured = []
 
-        async def enrich(land_id, period, periods):
+        async def enrich(land_id, period, periods, **_kwargs):
             captured.append({"land_id": land_id, "period": period, "periods": periods})
             return {
                 "observations_override": _observations(),
