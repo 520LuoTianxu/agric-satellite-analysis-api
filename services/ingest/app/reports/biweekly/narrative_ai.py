@@ -30,21 +30,21 @@ SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 
 
 请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。参数里有的指标、日期、田内部位、未采用观测、气象和周边对照都要写到；某个参数为空就不要编。不要写灌溉、施肥、打药这类处方。
 
-数值升高或降低只表示大小，不等于好坏。往好、往差、不足以判断由你阅读参数后决定，并且必须用下面的标记写在句子里面，不要每句末尾都机械地补同一个词。
+数值升高或降低只表示大小，不等于好坏。哪一句、哪个数字、哪个部位是重点，由你决定，再给那几个字加粗或上色。不要规定成某几个固定词，也不要每句末尾都补同一个词。
 
-版式只允许这些标记，正文是雅黑 10 磅：
-- 指标名、田内部位和关键数值加粗：<b>0.57</b>
-- 往好变化：<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">往好变化</font>
-- 往差变化：<font face="YaHei-Bold" color="#9C2B1B" backColor="#F8D6D2">往差变化</font>
-- 不足以判断：<font face="YaHei-Bold" color="#8A5A12" backColor="#F8E8C8">不足以判断</font>
-不要用别的颜色，不要用 Markdown。
+正文是雅黑 10 磅。你可以用这些标记，标记里面放你选中的字，不要把整句都包进去：
+- 加粗：<b>…</b>
+- 你认为往好处、值得注意的字：<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">…</font>
+- 你认为往差处、需要留意的字：<font face="YaHei-Bold" color="#9C2B1B" backColor="#F8D6D2">…</font>
+- 你认为还不能下判断的字：<font face="YaHei-Bold" color="#8A5A12" backColor="#F8E8C8">…</font>
+没有把握的地方保持正文。不要用别的颜色，不要用 Markdown。
 
-metric_notes 是「指标说明」：把每个指标的 full_name、meaning 和本期数值交给你之后，写成这个指标在本期说明了什么。不要复读定义原文，每个指标的写法不要相同。
-conclusion 是给种植户看的结论，里面要有带颜色的判断和加粗的数值。
+metric_notes 是「指标说明」：根据每个指标的 full_name、meaning 和本期数值，写成这个指标在本期说明了什么。不要复读定义原文，每个指标的写法不要相同，重点由你标。
+conclusion 是给种植户看的结论，重点由你用上面的标记标出来。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
 只输出 JSON：
 {"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"带标记的句子"}],"conclusion":["带标记的句子"],"field_notes":["带标记的句子"],"metric_notes":["带标记的句子"],"infield":[{"metric":"ndre","text":"带标记的句子"}],"surrounding":["带标记的句子"],"weather":["带标记的句子"]}
-changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear，并和句中的颜色用语一致。metric_notes 覆盖 metrics 里的每一个指标。
+changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。metric_notes 覆盖 metrics 里的每一个指标。
 """
 
 # 跟参数一起交给模型，只解释含义，不另给可以引用的数字。
@@ -434,16 +434,6 @@ def generate_metric_judgment(
             http.close()
 
 
-_EMPHASIS = {
-    "往好变化": ("#1F4D38", "#D9F2E3"),
-    "往差变化": ("#9C2B1B", "#F8D6D2"),
-    "不足以判断": ("#8A5A12", "#F8E8C8"),
-}
-_LABELS = {
-    "better": ("往好变化", "#1F4D38"),
-    "worse": ("往差变化", "#9C2B1B"),
-    "unclear": ("不足以判断", "#8A5A12"),
-}
 _FONT_OPEN = re.compile(
     r"<\s*font\b[^>]*color\s*=\s*['\"]#?(1F4D38|9C2B1B|8A5A12)['\"][^>]*>",
     re.IGNORECASE,
@@ -455,7 +445,6 @@ _BOLD_FACE = re.compile(
 _FONT_CLOSE = re.compile(r"<\s*/\s*font\s*>", re.IGNORECASE)
 _BOLD_OPEN = re.compile(r"<\s*b\s*>", re.IGNORECASE)
 _BOLD_CLOSE = re.compile(r"<\s*/\s*b\s*>", re.IGNORECASE)
-_DECIMAL = re.compile(r"\d+\.\d{2}")
 
 
 def _has_wording(narrative: dict[str, Any]) -> bool:
@@ -482,7 +471,7 @@ def infield_line(narrative: dict[str, Any] | None, metric: str) -> list[str]:
 
 
 def judgment_paragraphs(narrative: dict[str, Any] | None) -> list[str]:
-    """Show the model's own sentences. Add the color only when the model left it out."""
+    """Render the sentences the model wrote, including the emphasis it chose."""
     if not narrative:
         return []
     items: list[str] = []
@@ -490,24 +479,14 @@ def judgment_paragraphs(narrative: dict[str, Any] | None) -> list[str]:
     if summary:
         items.append(_present(summary))
     for row in narrative.get("changes") or []:
-        label = _LABELS.get(row.get("judgment"), _LABELS["unclear"])[0]
         sentence = str(row.get("sentence") or "").strip()
-        if label not in sentence:
-            name = metric_abbr(str(row.get("metric") or ""))
-            sentence = f"<b>{name}</b> {label}。{sentence}".strip()
-        items.append(_present(sentence))
+        if sentence:
+            items.append(_present(sentence))
     return items
 
 
-def _emphasis(phrase: str) -> str:
-    color, back = _EMPHASIS[phrase]
-    return (
-        f'<font face="YaHei-Bold" color="{color}" backColor="{back}">{phrase}</font>'
-    )
-
-
 def _present(value: str) -> str:
-    """Keep the model's bold, then make judgments and key numbers visible."""
+    """Keep bold and the three palette colors the model applied. Do not choose the words."""
     slots: list[str] = []
 
     def stash(html: str) -> str:
@@ -521,26 +500,4 @@ def _present(value: str) -> str:
     text = _BOLD_CLOSE.sub(lambda _match: stash("</b>"), text)
     text = re.sub(r"<[^>]+>", "", text)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"\u0000(\d+)\u0000", lambda match: slots[int(match.group(1))], text)
-    for phrase in _EMPHASIS:
-        wrapped = _emphasis(phrase)
-        parts = text.split(wrapped)
-        fixed = []
-        for part in parts:
-            chunks = part.split(wrapped)
-            part = wrapped.join(chunk.replace(phrase, wrapped) for chunk in chunks)
-            fixed.append(part)
-        text = wrapped.join(fixed)
-    pieces = re.split(r"(<[^>]+>)", text)
-    bolded = []
-    for piece in pieces:
-        if piece.startswith("<"):
-            bolded.append(piece)
-        else:
-            bolded.append(
-                _DECIMAL.sub(
-                    lambda match: f'<font face="YaHei-Bold">{match.group(0)}</font>',
-                    piece,
-                )
-            )
-    return "".join(bolded)
+    return re.sub(r"\u0000(\d+)\u0000", lambda match: slots[int(match.group(1))], text)
