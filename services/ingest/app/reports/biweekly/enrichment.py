@@ -12,19 +12,27 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from agric_satellite_analysis_common.biweekly.metric_specs import REPORT_METRIC_ORDER
+from agric_satellite_analysis_common.biweekly.phase_policy import (
+    FORBIDDEN_REPORT_METRICS,
+    PHASE_METRICS,
+    phase_metric_profile,
+)
 from app.reports.biweekly.context_maps import (
+    CLOUD_LIMIT_PCT,
     _as_day,
     _columns,
     _in_period_products,
-    last_prior_period_products,
-    _prior_products,
     bounds_from_field_pixels,
-    build_infield_variation,
     build_surrounding_comparison,
     classify_imagery_farmland,
     fetch_processing_window_truecolor,
+    is_eligible_optical,
+    last_prior_period_products,
     resolve_stac_item_id,
 )
+from app.reports.biweekly.infield_maps import build_infield_metric
+from app.reports.biweekly.metric_stats import field_stats
 from app.reports.biweekly.weather_fetch import fetch_period_weather, resolve_report_lat_lon
 
 _S2 = "S2"
@@ -197,11 +205,14 @@ def _latest_in_period(
 
 
 def _observation_from_product(product: dict[str, Any]) -> dict[str, Any]:
+    """Field-mean row for one product, in the same shape the API sends."""
     row = {
         "date": _as_day(product.get("date")),
         "sensor": str(product.get("sensor") or "S2"),
+        "cloud_cover": product.get("cloud_cover"),
+        "parcel_cloud_cover_pct": product.get("parcel_cloud_cover_pct"),
     }
-    for metric in ("ndvi", "evi", "ndre", "ndmi"):
+    for metric in REPORT_METRIC_ORDER:
         value = product.get(f"{metric}_avg")
         if value is None:
             columns = _columns(product)
@@ -212,6 +223,307 @@ def _observation_from_product(product: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             row[f"{metric}_avg"] = float(value)
     return row
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cloud_of(row: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Cloud percentage and which one it is: over the parcel, or the whole scene."""
+    parcel = _float_or_none(row.get("parcel_cloud_cover_pct"))
+    if parcel is not None:
+        return parcel, "parcel"
+    scene = _float_or_none(row.get("cloud_cover"))
+    if scene is not None:
+        return scene, "scene"
+    return None, None
+
+
+def report_metric_plan(phase: dict[str, Any] | None, latest_date: str | None = None) -> dict[str, Any]:
+    """Which metrics this report leads with, and why.
+
+    - 本期只落在一个阶段：用该阶段的主要/辅助指标；
+    - 本期跨两个阶段：按最近一次有效观测所在阶段取指标，并在报告中说明；
+    - 没有阶段代号但上游给了指标清单：照清单展示；
+    - 没有种植方案或阶段不适用：四项指标都列出，田内图用 NDVI，不作阶段判断。
+    """
+    phase = phase or {}
+    label = phase.get("display_phase") if phase.get("display_phase") in PHASE_METRICS else None
+    basis = "phase" if label else None
+    if label is None:
+        stages = [
+            row
+            for row in (phase.get("observation_stages") or [])
+            if row.get("phase_label") in PHASE_METRICS
+        ]
+        if latest_date:
+            exact = [row for row in stages if _as_day(row.get("date")) == latest_date]
+            stages = exact or stages
+        if stages:
+            label = stages[-1]["phase_label"]
+            basis = "latest_observation_phase"
+    if label is None:
+        # 上游只给了指标清单、没给阶段代号（旧版事实或人工指定）：照清单展示，不补阶段解释。
+        listed = [m for m in (phase.get("primary_metrics") or []) if m in REPORT_METRIC_ORDER]
+        if listed:
+            extra = [m for m in (phase.get("supporting_metrics") or []) if m in REPORT_METRIC_ORDER]
+            supporting = [m for m in extra if m not in listed] or [
+                m for m in REPORT_METRIC_ORDER if m not in listed
+            ]
+            return {
+                "phase_label": None,
+                "basis": "listed",
+                "formal_name": None,
+                "stage_span": None,
+                "rationale": None,
+                "primary": listed,
+                "supporting": supporting,
+            }
+        return {
+            "phase_label": None,
+            "basis": "default",
+            "formal_name": None,
+            "stage_span": None,
+            "rationale": None,
+            "primary": ["ndvi"],
+            "supporting": ["evi", "ndre", "ndmi"],
+        }
+    profile = phase_metric_profile(label)
+    return {
+        **profile,
+        "basis": basis,
+        "primary": [m for m in profile["primary"] if m not in FORBIDDEN_REPORT_METRICS],
+        "supporting": [m for m in profile["supporting"] if m not in FORBIDDEN_REPORT_METRICS],
+    }
+
+
+def _stage_by_date(phase: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for key in ("prior_observation_stages", "observation_stages"):
+        for row in phase.get(key) or []:
+            day = _as_day(row.get("date"))
+            if day:
+                out[day] = row
+    return out
+
+
+def build_metric_series(
+    facts: dict[str, Any],
+    products: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Per-date values for every report metric, prior dates first.
+
+    有像元产品的日期用晴空像元的稳健统计（中位数、P10–P90、有效像元占比）；
+    没有像元产品的日期只有接口下发的田块均值。缺测保持 None，不写成 0。
+    返回 (逐日序列, 日期 → 像元产品)。
+    """
+    period = _period(facts)
+    start = _as_day(period.get("start"))
+    end_exclusive = _as_day(period.get("end_exclusive"))
+    optical_days = facts.get("optical_days")
+    phase = facts.get("phase") or {}
+    stages = _stage_by_date(phase)
+
+    current = _in_period_products(products, start, end_exclusive, optical_days=optical_days)
+    prior = last_prior_period_products(products, start, optical_days=optical_days) if start else []
+    by_date: dict[str, dict[str, Any]] = {}
+    for product in prior + current:
+        if _columns(product):
+            by_date[_as_day(product.get("date"))] = product
+
+    fact_rows: dict[str, dict[str, Any]] = {}
+    for key in ("prior_observations", "observations"):
+        for row in facts.get(key) or []:
+            if isinstance(row, dict) and _as_day(row.get("date")):
+                fact_rows[_as_day(row.get("date"))] = row
+    for product in prior + current:
+        fact_rows.setdefault(_as_day(product.get("date")), _observation_from_product(product))
+
+    series: list[dict[str, Any]] = []
+    for day in sorted(fact_rows):
+        row = fact_rows[day]
+        product = by_date.get(day)
+        cloud, cloud_basis = _cloud_of(product or row)
+        if cloud is None:
+            cloud, cloud_basis = _cloud_of(row)
+        metrics: dict[str, dict[str, Any]] = {}
+        for metric in REPORT_METRIC_ORDER:
+            mean = _float_or_none(row.get(f"{metric}_avg"))
+            if mean is None and product is not None:
+                mean = _float_or_none(product.get(f"{metric}_avg"))
+            entry: dict[str, Any] = {"status": "missing", "field_mean": mean}
+            if product is not None:
+                stats = field_stats(product, metric)
+                entry.update({k: v for k, v in stats.items() if k != "status"})
+                entry["status"] = stats["status"]
+            elif mean is not None:
+                entry["status"] = "mean_only"
+            metrics[metric] = entry
+        stage = stages.get(day) or {}
+        series.append(
+            {
+                "date": day,
+                "in_period": bool(start and end_exclusive and start <= day < end_exclusive),
+                "source": "pixels" if product is not None else "field_mean",
+                "cloud_pct": cloud,
+                "cloud_basis": cloud_basis,
+                "stage_code": stage.get("stage_code"),
+                "phase_label": stage.get("phase_label"),
+                "metrics": metrics,
+            }
+        )
+    return series, by_date
+
+
+def series_statistic(series: list[dict[str, Any]], metric: str) -> str | None:
+    """One statistic per metric across all dates, so points on a line are comparable.
+
+    所有有数据的日期都有像元统计时用中位数；只要有一个日期只有田块均值，就全部用均值，
+    不把中位数和均值画在同一条线上。
+    """
+    kinds = {row["metrics"][metric]["status"] for row in series}
+    kinds -= {"missing", "missing_metric", "insufficient_valid_pixels"}
+    if not kinds:
+        return None
+    return "median" if kinds == {"ok"} else "mean"
+
+
+def series_value(row: dict[str, Any], metric: str, statistic: str | None) -> float | None:
+    entry = row["metrics"][metric]
+    if statistic == "median":
+        return entry.get("median") if entry.get("status") == "ok" else None
+    if statistic == "mean":
+        return entry.get("field_mean")
+    return None
+
+
+def build_comparison(series: list[dict[str, Any]], metrics: list[str]) -> dict[str, Any] | None:
+    """Latest in-period observation against the observation before it.
+
+    全报告只用这一对日期：结论、证据表和田内变化图都相同。
+    变化量为两次数值各保留两位小数后的差，差值为 0.00 记为持平。
+    """
+    statistics = {metric: series_statistic(series, metric) for metric in metrics}
+
+    def has_value(row: dict[str, Any]) -> bool:
+        return any(series_value(row, m, statistics[m]) is not None for m in metrics)
+
+    usable = [row for row in series if has_value(row)]
+    current = [row for row in usable if row["in_period"]]
+    if not current:
+        return None
+    latest = current[-1]
+    earlier = [row for row in usable if row["date"] < latest["date"]]
+    baseline = earlier[-1] if earlier else None
+    out: dict[str, Any] = {
+        "latest_date": latest["date"],
+        "baseline_date": baseline["date"] if baseline else None,
+        "baseline_in_period": bool(baseline and baseline["in_period"]),
+        "gap_days": None,
+        "metrics": {},
+    }
+    if baseline:
+        from datetime import date
+
+        out["gap_days"] = (date.fromisoformat(latest["date"]) - date.fromisoformat(baseline["date"])).days
+    for metric in metrics:
+        stat = statistics[metric]
+        now = series_value(latest, metric, stat)
+        before = series_value(baseline, metric, stat) if baseline else None
+        item: dict[str, Any] = {"statistic": stat, "latest": now, "baseline": before, "delta": None, "direction": None}
+        if now is not None and before is not None:
+            # 变化量按报告中印出的两位小数相减，保证表内「最近值 − 基准值 = 变化量」读者可自行核对；
+            # 若用未取整的数相减再取整，会出现 0.25 − 0.24 却写 +0.02 的情形。
+            delta = round(round(now, 2) - round(before, 2), 2)
+            item["delta"] = delta
+            item["direction"] = "up" if delta > 0 else ("down" if delta < 0 else "flat")
+        out["metrics"][metric] = item
+    return out
+
+
+def build_data_quality(
+    facts: dict[str, Any],
+    products: list[dict[str, Any]],
+    series: list[dict[str, Any]],
+    primary_metric: str,
+) -> dict[str, Any]:
+    """What was observed, what was dropped and how much of the field was usable."""
+    period = _period(facts)
+    start = _as_day(period.get("start"))
+    end_exclusive = _as_day(period.get("end_exclusive"))
+    used = [row for row in series if row["in_period"]]
+    used_days = {row["date"] for row in used}
+
+    rejected: dict[str, dict[str, Any]] = {}
+    for row in facts.get("rejected_optical") or []:
+        day = _as_day(row.get("date"))
+        if day and day not in used_days:
+            cloud, basis = _cloud_of(row)
+            rejected[day] = {"date": day, "reason": row.get("reason") or "excluded", "cloud_pct": cloud, "cloud_basis": basis}
+    for product in products or []:
+        if str(product.get("sensor") or "S2").upper() != _S2:
+            continue
+        day = _as_day(product.get("date"))
+        if not (start and end_exclusive and start <= day < end_exclusive) or day in used_days:
+            continue
+        if is_eligible_optical(product, optical_days=facts.get("optical_days")):
+            continue
+        cloud, basis = _cloud_of(product)
+        reason = "cloud_over_limit" if cloud is not None and cloud > CLOUD_LIMIT_PCT else "no_index_values"
+        rejected.setdefault(day, {"date": day, "reason": reason, "cloud_pct": cloud, "cloud_basis": basis})
+
+    fractions = [
+        row["metrics"][primary_metric].get("valid_fraction")
+        for row in used
+        if row["metrics"][primary_metric].get("valid_fraction") is not None
+    ]
+    return {
+        "used_dates": sorted(used_days),
+        "rejected": [rejected[day] for day in sorted(rejected)],
+        "cloud_limit_pct": CLOUD_LIMIT_PCT,
+        "pixel_dates": [row["date"] for row in used if row["source"] == "pixels"],
+        "mean_only_dates": [row["date"] for row in used if row["source"] == "field_mean"],
+        "valid_fraction_min": min(fractions) if fractions else None,
+        "valid_fraction_max": max(fractions) if fractions else None,
+        "radar_count": int((period.get("s1_products") or facts.get("s1_count") or 0) or 0),
+    }
+
+
+def attach_report_inputs(
+    facts: dict[str, Any], products: list[dict[str, Any]] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Fill the series, metric plan, comparison and quality blocks the PDF reads.
+
+    Mutates ``facts``; returns date → pixel product for the map step.
+    """
+    series, product_by_date = build_metric_series(facts, list(products or []))
+    in_period_days = [row["date"] for row in series if row["in_period"]]
+    plan = report_metric_plan(facts.get("phase"), in_period_days[-1] if in_period_days else None)
+    facts["report_metrics"] = plan
+    facts["metric_series"] = series
+    facts["metric_statistics"] = {m: series_statistic(series, m) for m in REPORT_METRIC_ORDER}
+    facts["comparison"] = build_comparison(series, plan["primary"] + plan["supporting"])
+    facts["data_quality"] = build_data_quality(facts, list(products or []), series, plan["primary"][0])
+    return product_by_date
+
+
+def ensure_report_inputs(facts: dict[str, Any]) -> dict[str, Any]:
+    """Facts ready for rendering; computes the blocks from observations if absent.
+
+    未经 enrich 的 facts（如证据受限简报）没有像元产品，此时只用接口下发的田块均值。
+    """
+    if facts.get("metric_series") is not None and facts.get("report_metrics"):
+        return facts
+    filled = dict(facts)
+    attach_report_inputs(filled, [])
+    filled.setdefault("infield", [])
+    return filled
 
 
 def _has_antecedent_daily(facts: dict[str, Any], start: str) -> bool:
@@ -245,6 +557,10 @@ def enrich_official_report_facts(
         earlier = last_prior_period_products(loaded, start, optical_days=filled.get("optical_days"))
         if earlier:
             filled["prior_observations"] = [_observation_from_product(item) for item in earlier]
+
+    product_by_date = attach_report_inputs(filled, loaded)
+    plan = filled["report_metrics"]
+    comparison = filled["comparison"]
     if start and end_inclusive and (not filled.get("weather_daily") or not _has_antecedent_daily(filled, start)):
         point = resolve_report_lat_lon(
             land_id=_land_id(filled) or None,
@@ -268,25 +584,68 @@ def enrich_official_report_facts(
                 weather = {"weather_error": f"{type(exc).__name__}"}
             filled.update({k: v for k, v in weather.items() if v is not None or k == "weather_error"})
 
-    infield_path = figures / "spatial_zones.png"
-    infield = build_infield_variation(
-        products=loaded,
-        period=period,
-        phase=filled.get("phase") or {},
-        dest=infield_path,
-        optical_days=filled.get("optical_days"),
+    # 田内图：每个主要指标一幅，日期与结论中的对比口径（comparison）一致。
+    infield: list[dict[str, Any]] = []
+    latest_product = product_by_date.get(comparison["latest_date"]) if comparison else None
+    baseline_product = (
+        product_by_date.get(comparison["baseline_date"]) if comparison and comparison.get("baseline_date") else None
     )
-    if infield and infield.get("image"):
-        filled["spatial_variation"] = infield.get("bullets") or infield["text"]
-        filled["spatial_variation_image"] = infield["image"]
-        filled["spatial_variation_meta"] = {k: v for k, v in infield.items() if k != "text"}
-        if infield.get("next_week"):
-            filled.setdefault("spatial_variation_meta", {})["next_week"] = infield["next_week"]
-    elif not filled.get("spatial_variation"):
-        filled["spatial_variation"] = (
-            "本期没有足够的本田像元分布，田内分区图标为缺失，不编造灾情面积。"
-        )
+    if latest_product is not None:
+        for metric in plan["primary"]:
+            try:
+                item = build_infield_metric(
+                    metric=metric,
+                    latest=latest_product,
+                    baseline=baseline_product,
+                    dest=figures / f"infield_{metric}.png",
+                )
+            except Exception:  # noqa: BLE001 — 单个指标出图失败不影响其余内容
+                item = None
+            if item is not None:
+                infield.append(item)
+    filled["infield"] = infield
+    if infield:
+        first = infield[0]
+        filled["spatial_variation_image"] = first.get("image")
+        filled["spatial_variation_meta"] = {
+            "metric": first["metric"],
+            "date": first["date"],
+            "prior_date": first.get("baseline_date"),
+            "pixel_count": first["stats"]["n_valid"],
+        }
 
+    try:
+        surrounding_error = _attach_surrounding(filled, loaded, period, figures, fetch_truecolor)
+    except Exception as exc:  # noqa: BLE001 — 周边对照是可选内容，失败时标为未提供，不影响正文
+        surrounding_error = f"surrounding_{type(exc).__name__}"
+    meta = filled.get("surrounding_comparison_meta") or {}
+    if not filled.get("surrounding_comparison_image") or not meta.get("comparisons"):
+        # 没有成图或没有可比较的数值时，整节按未提供处理，不留半截内容。
+        if surrounding_error is None:
+            surrounding_error = "classification_failed"
+        for key in (
+            "surrounding_comparison",
+            "surrounding_comparison_image",
+            "surrounding_contrast_image",
+            "surrounding_judgment",
+            "surrounding_comparison_meta",
+        ):
+            filled.pop(key, None)
+        filled["surrounding_error"] = surrounding_error or "unavailable"
+        filled["surrounding_missing_reason"] = SURROUNDING_MISSING_REASONS.get(
+            surrounding_error or "", "未能完成周边1—2公里农田对照"
+        )
+    return filled
+
+
+def _attach_surrounding(
+    filled: dict[str, Any],
+    loaded: list[dict[str, Any]],
+    period: dict[str, Any],
+    figures: Path,
+    fetch_truecolor: Any | None,
+) -> str | None:
+    """Add the 1–2 km imagery-farmland contrast. Returns an error code, or None."""
     surrounding_path = figures / "surrounding_farmland.png"
     latest = _latest_in_period(loaded, period, optical_days=filled.get("optical_days"))
     points = _field_points(loaded, period, optical_days=filled.get("optical_days"))
@@ -352,6 +711,7 @@ def enrich_official_report_facts(
             date=_as_day(latest.get("date")),
             by_date=by_date or None,
             contrast_dest=figures / "greenness_contrast.png",
+            basemap_note=filled.get("surrounding_basemap_note"),
         )
         if built:
             filled["surrounding_comparison"] = built["text"]
@@ -366,15 +726,13 @@ def enrich_official_report_facts(
             }
         else:
             surrounding_error = surrounding_error or "classification_failed"
-    if not filled.get("surrounding_comparison"):
-        reason = {
-            "no_in_period_field_pixels": "本期没有足够的本田像元，无法在真彩色底图上落下本田位置。",
-            "no_processing_window": "未能根据本田像元重建处理窗口，不能把已有预览图误当作 10 公里范围来用。",
-            "stac_item_unavailable": "未能在官方影像目录中找到覆盖本田的同期哨兵-2 景，1–2 公里对照不能改用项目登记地块。",
-            "truecolor_unavailable": "未能重新下载覆盖 1–2 公里的同期真彩色窗口。",
-        }.get(surrounding_error or "", "未能完成 1–2 公里影像农田对照。")
-        filled["surrounding_comparison"] = (
-            reason + "因此本期对照标为缺失。没有改用项目登记地块，也没有借用其他地块的图。"
-        )
-        filled["surrounding_error"] = surrounding_error
-    return filled
+    return surrounding_error
+
+
+SURROUNDING_MISSING_REASONS = {
+    "no_in_period_field_pixels": "本期没有足够的本田像元，无法在影像上确定本田位置",
+    "no_processing_window": "未能确定覆盖本田周边的影像范围",
+    "stac_item_unavailable": "未能在影像目录中找到覆盖本田的同期哨兵二号影像",
+    "truecolor_unavailable": "未能取得覆盖周边1—2公里的同期真彩色影像",
+    "classification_failed": "同期真彩色影像中未能识别出周边农田",
+}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
@@ -178,10 +177,13 @@ class ContextMapTests(unittest.TestCase):
         self.assertEqual(built["metric"], "ndre")
         self.assertEqual(built["date"], "2026-04-09")
         self.assertEqual(built["prior_date"], "2026-03-27")
-        joined = "。".join(built["text"]) if isinstance(built["text"], list) else built["text"]
-        self.assertEqual(built["metric"], "ndre")
-        self.assertIn("不换算受灾面积", joined)
-        self.assertTrue("偏低" in joined or "变差" in joined)
+        # 只有 NDRE 一列像元：EVI 不出图，也不拿别的指标顶替。
+        self.assertEqual([item["metric"] for item in built["metrics"]], ["ndre"])
+        first = built["metrics"][0]
+        self.assertEqual(first["stats"]["status"], "ok")
+        self.assertEqual(first["stats"]["n_valid"], 36)
+        self.assertAlmostEqual(first["change"]["median"], 0.02, places=3)
+        self.assertEqual(first["change"]["n_paired"], 36)
 
     def test_infield_skips_ineligible_cloudy_date(self):
         from app.reports.biweekly.context_maps import build_infield_variation
@@ -240,7 +242,8 @@ class ContextMapTests(unittest.TestCase):
         self.assertGreater(built["stats"]["field"]["n"], 0)
         self.assertGreater(built["stats"]["surrounding_1km"]["n"], 0)
         joined = "。".join(built["text"]) if isinstance(built["text"], list) else str(built["text"])
-        self.assertTrue("绿度" in joined or "周边" in joined)
+        self.assertIn("超绿指数（ExG）", joined)
+        self.assertNotIn("绿度", joined)
         self.assertIn("不是项目登记地块", joined)
 
 
@@ -295,9 +298,13 @@ class EnrichmentAndGenerateTests(unittest.TestCase):
         self.assertEqual(filled["weather_source"], "open-meteo")
         self.assertTrue(Path(filled["spatial_variation_image"]).is_file())
         self.assertTrue(Path(filled["surrounding_comparison_image"]).is_file())
-        spatial = filled["spatial_variation"]
-        spatial_txt = "。".join(spatial) if isinstance(spatial, list) else str(spatial)
-        self.assertTrue("偏低" in spatial_txt or "变差" in spatial_txt or "叶片营养" in spatial_txt)
+        self.assertEqual([item["metric"] for item in filled["infield"]], ["ndre"])
+        self.assertEqual(filled["report_metrics"]["primary"], ["ndre", "evi"])
+        self.assertEqual(filled["comparison"]["latest_date"], "2026-04-09")
+        self.assertEqual(filled["comparison"]["baseline_date"], "2026-03-27")
+        self.assertEqual(filled["comparison"]["metrics"]["ndre"]["direction"], "up")
+        # 产品里没有 EVI 列：保持缺测，不写成 0。
+        self.assertIsNone(filled["comparison"]["metrics"]["evi"]["latest"])
         surround = filled["surrounding_comparison"]
         surround_txt = "。".join(surround) if isinstance(surround, list) else str(surround)
         self.assertIn("项目登记地块", surround_txt)
@@ -380,16 +387,18 @@ class EnrichmentAndGenerateTests(unittest.TestCase):
         self.assertEqual(filled["weather_error"], "open_meteo_down")
         self.assertFalse(filled.get("weather_daily"))
         self.assertIsNone((filled.get("weather_period") or {}).get("precipitation_mm"))
-        self.assertIn("缺失", filled["surrounding_comparison"])
-        self.assertIn("缺失", filled["spatial_variation"])
+        self.assertNotIn("surrounding_comparison", filled)
+        self.assertTrue(filled["surrounding_missing_reason"])
+        self.assertEqual(filled["infield"], [])
+        self.assertNotIn("spatial_variation_image", filled)
 
     def test_generate_entry_renders_pdf_with_context_images(self):
         from app.reports.biweekly.generate import generate_official_biweekly_pdf
+        from app.reports.biweekly.infield_maps import build_infield_metric
 
         env = {key: value for key, value in os.environ.items() if not key.startswith("BIWEEKLY_FONT")}
         dest = Path(tempfile.mkdtemp()) / "official.pdf"
         figure = Path(tempfile.mkdtemp())
-        zone = _tiny_png(figure / "spatial_zones.png")
         surround = _tiny_png(figure / "surrounding_farmland.png")
         facts = {
             "land_id": "19994",
@@ -431,8 +440,14 @@ class EnrichmentAndGenerateTests(unittest.TestCase):
                 {"date": "2026-04-02", "precipitation_mm": 0.5, "min_c": 4, "max_c": 16, "et0_mm": 2.2}
             ]
             filled["weather_period"] = {"precipitation_mm": 0.5, "et0_mm": 2.2, "min_c": 4, "max_c": 16}
-            filled["spatial_variation"] = "田内叶片营养相对分布见图。"
-            filled["spatial_variation_image"] = str(zone)
+            filled["infield"] = [
+                build_infield_metric(
+                    metric="ndre",
+                    latest=_synthetic_product("2026-04-09"),
+                    baseline=_synthetic_product("2026-04-04", offset=-0.02),
+                    dest=figure / "infield_ndre.png",
+                )
+            ]
             filled["surrounding_comparison"] = "本田与周边 1 公里影像农田对照见图。"
             filled["surrounding_comparison_image"] = str(surround)
             return filled
@@ -485,8 +500,10 @@ class CoverAssetTests(unittest.TestCase):
         self.assertGreater(path.stat().st_size, 20000)
         self.assertEqual(compact_date_span(facts["period"]), "2026年4月2日—15日")
 
-    def test_judgment_highlights_comparison_without_claiming_improvement(self):
-        from app.reports.biweekly.official_pdf import _judgment_bullets, render_official_biweekly_pdf
+    def test_conclusion_states_direction_without_claiming_improvement(self):
+        from app.reports.biweekly.enrichment import ensure_report_inputs
+        from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
+        from app.reports.biweekly.report_text import conclusion_items, evidence_table
 
         facts = {
             "land_id": "19994",
@@ -510,26 +527,25 @@ class CoverAssetTests(unittest.TestCase):
                 {"date": "2026-03-20", "ndvi_avg": 0.17, "evi_avg": 0.08, "ndre_avg": 0.018, "ndmi_avg": 0.19},
                 {"date": "2026-03-27", "ndvi_avg": 0.11, "evi_avg": 0.066, "ndre_avg": 0.006, "ndmi_avg": 0.10},
             ],
-            "prior_comparison": {
-                "can_claim_sustained_improvement": False,
-                "all_compared_higher": False,
-                "metrics": {
-                    "ndre": {"status": "compared", "higher": True, "plain_name": "叶片营养"},
-                    "evi": {"status": "compared", "higher": True, "plain_name": "增强绿度"},
-                    "ndvi": {"status": "compared", "higher": False, "plain_name": "绿度"},
-                    "ndmi": {"status": "compared", "higher": False, "plain_name": "植被水分"},
-                },
-            },
             "weather_period": {"precipitation_mm": 3.3, "et0_mm": 64.7, "days": 14},
             "in_period_radar": True,
             "s1_count": 1,
         }
-        bullets = _judgment_bullets(facts)
-        joined = "\n".join(bullets)
-        self.assertIn("拔节孕穗期", joined)
-        self.assertIn("相对上一有可用光学的遥感期", joined)
-        self.assertIn("不能据此写成好转", joined)
-        self.assertIn("#1F4D38", joined)
+        filled = ensure_report_inputs(dict(facts))
+        # 文字、表格与图用同一对日期：本期最近一次观测对比它之前的那一次。
+        self.assertEqual(filled["comparison"]["latest_date"], "2026-04-09")
+        self.assertEqual(filled["comparison"]["baseline_date"], "2026-04-04")
+        self.assertEqual(filled["comparison"]["metrics"]["ndre"]["direction"], "down")
+        self.assertEqual(filled["comparison"]["metrics"]["evi"]["direction"], "up")
+        joined = "\n".join(conclusion_items(filled))
+        self.assertIn("NDRE", joined)
+        self.assertIn("4月9日", joined)
+        self.assertIn("田块均值", joined)
+        for banned in ("好转", "变差", "绿度", "叶片营养", "这两周"):
+            self.assertNotIn(banned, joined)
+        table = evidence_table(filled)
+        self.assertEqual(table[0][0], "指标")
+        self.assertEqual([row[0] for row in table[1:]], ["NDRE（主要）", "EVI（主要）", "NDVI（辅助）", "NDMI（辅助）"])
         dest = Path(tempfile.mkdtemp()) / "out.pdf"
         path = render_official_biweekly_pdf(facts, dest)
         self.assertTrue(path.read_bytes().startswith(b"%PDF"))

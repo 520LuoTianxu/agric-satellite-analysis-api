@@ -56,6 +56,21 @@ def _eligible_optical(row: dict[str, Any]) -> bool:
     )
 
 
+def _exclusion_reason(row: dict[str, Any]) -> str | None:
+    """为什么一景光学影像未被采用；雷达景不属于光学剔除，返回None。"""
+    if _as_sensor(row.get("sensor")) != "S2":
+        return None
+    cloud = row.get("parcel_cloud_cover_pct")
+    if cloud is None:
+        cloud = row.get("cloud_cover")
+    try:
+        if cloud is not None and float(cloud) > 30:
+            return "cloud_over_limit"
+    except (TypeError, ValueError):
+        return "cloud_unreadable"
+    return "no_index_values"
+
+
 def _to_observation(row: dict[str, Any]) -> dict[str, Any]:
     date_s = _as_day(row["date"])
     sensor = _as_sensor(row.get("sensor"))
@@ -69,6 +84,10 @@ def _to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "sensor": sensor,
         "scene_id": row.get("scene_id"),
         "quality_status": "eligible_descriptive" if eligible else "excluded",
+        "exclusion_reason": None if eligible else _exclusion_reason({**row, "sensor": sensor}),
+        # 云量随观测一并下发，报告据此说明数据质量；缺测保持None，不写成0。
+        "cloud_cover": _as_float(row.get("cloud_cover")),
+        "parcel_cloud_cover_pct": _as_float(row.get("parcel_cloud_cover_pct")),
         "ndvi_avg": ndvi,
         "evi_avg": evi,
         "ndre_avg": ndre,

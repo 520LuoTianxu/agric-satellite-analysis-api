@@ -27,6 +27,8 @@ dependencies = [
     "reportlab>=4.0.0",
     "matplotlib>=3.8.0",
     "pypdf>=4.0.0",
+    # 双周报周边农田识别用 scipy.ndimage（连通域、距离变换）；此前未声明，镜像里缺包时该节无法生成。
+    "scipy>=1.11.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -34,7 +36,7 @@ include = ["app*"]
 
 [tool.setuptools.package-data]
 "app.reports.land_assessment" = ["fonts/*.ttf", "assets/*.jpg"]
-"app.reports.biweekly" = ["assets/*.ttf"]
+"app.reports.biweekly" = ["assets/*.ttf", "assets/*.png"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

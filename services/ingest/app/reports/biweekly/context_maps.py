@@ -2,9 +2,12 @@
 
 In-field maps use the land's own parcel pixel JSON (NDVI/EVI/NDRE/NDMI).
 Surrounding contrast follows the official v8 imagery-farmland rules: same-day
-true-color, visible greenness, 1 km / 2 km rings outside the field pixels.
+true-color, excess green index (ExG), 1 km / 2 km rings outside the field pixels.
 Project-registered parcels are never the comparison set or map labels.
 Missing inputs are returned as missing; values are never invented.
+
+周边对照用的是真彩色影像算出的超绿指数（ExG = 2×绿 − 红 − 蓝，按 8 位影像除以 2.55），
+与本田的 NDVI 等指数不是同一指标，数值不能互相比较。
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from agric_satellite_analysis_common.biweekly.metric_specs import METRIC_SPECS
 
 # Official v8 imagery-farmland thresholds (true-color 8-bit).
 CLOUD_BRIGHT = 200
@@ -30,7 +35,6 @@ VALID_EXG_MAX = 100
 MIN_PATCH_PX = 25
 GREENNESS_SCALE = 2.55
 
-PLAIN = {"ndvi": "绿度", "evi": "增强绿度", "ndre": "叶片营养", "ndmi": "植被水分"}
 
 
 def _as_day(value: Any) -> str:
@@ -152,194 +156,40 @@ def last_prior_period_products(
     return list(reversed(chosen))
 
 
-def _finite_points(product: dict[str, Any], metric: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    columns = _columns(product)
-    key = _metric_key(columns, metric)
-    if not key:
-        return np.array([]), np.array([]), np.array([])
-    lons, lats, values = [], [], []
-    for lon, lat, value in zip(columns.get("lon") or [], columns.get("lat") or [], columns[key]):
-        if lon is None or lat is None or value is None:
-            continue
-        try:
-            values.append(float(value))
-        except (TypeError, ValueError):
-            continue
-        lons.append(float(lon))
-        lats.append(float(lat))
-    return np.asarray(lons), np.asarray(lats), np.asarray(values)
-
-
-def _match_change(
-    current: dict[str, Any], prior: dict[str, Any], metric: str
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    lon_a, lat_a, val_a = _finite_points(current, metric)
-    lon_b, lat_b, val_b = _finite_points(prior, metric)
-    if lon_a.size == 0 or lon_b.size == 0:
-        return None
-    index = {(round(float(lon), 6), round(float(lat), 6)): i for i, (lon, lat) in enumerate(zip(lon_b, lat_b))}
-    lons, lats, delta = [], [], []
-    for lon, lat, value in zip(lon_a, lat_a, val_a):
-        hit = index.get((round(float(lon), 6), round(float(lat), 6)))
-        if hit is None:
-            continue
-        lons.append(lon)
-        lats.append(lat)
-        delta.append(float(value) - float(val_b[hit]))
-    if not delta:
-        return None
-    return np.asarray(lons), np.asarray(lats), np.asarray(delta)
-
-
-
-def _to_local_meters(lons: np.ndarray, lats: np.ndarray):
-    lon0 = float(np.mean(lons))
-    lat0 = float(np.mean(lats))
-    try:
-        from pyproj import Transformer
-
-        tr = Transformer.from_crs(
-            "EPSG:4326",
-            f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m +no_defs",
-            always_xy=True,
-        )
-        xs, ys = tr.transform(lons, lats)
-        return np.asarray(xs), np.asarray(ys)
-    except Exception:  # noqa: BLE001
-        # Approximate meters around the centroid if pyproj is unavailable.
-        xs = (lons - lon0) * 111000.0 * max(0.2, abs(np.cos(np.radians(lat0))))
-        ys = (lats - lat0) * 111000.0
-        return xs, ys
-
-
-def _region_name(x: float, y: float, xmin: float, xmax: float, ymin: float, ymax: float) -> str:
-    fx = (x - xmin) / max(xmax - xmin, 1e-6)
-    fy = (y - ymin) / max(ymax - ymin, 1e-6)
-    ew = "西" if fx < 1 / 3 else ("东" if fx > 2 / 3 else "中")
-    ns = "南" if fy < 1 / 3 else ("北" if fy > 2 / 3 else "中")
-    table = {
-        ("中", "中"): "中部",
-        ("中", "东"): "中东部",
-        ("中", "西"): "中西部",
-        ("南", "中"): "南中部",
-        ("北", "中"): "北中部",
-        ("南", "东"): "南中部偏东",
-        ("南", "西"): "南中部偏西",
-        ("北", "东"): "北中部偏东",
-        ("北", "西"): "北中部偏西",
-    }
-    return table.get((ns, ew), f"{ns}{ew}部")
-
-
-def describe_infield_zones(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    values: np.ndarray,
+def comparison_pair(
+    products: list[dict[str, Any]],
+    period: dict[str, Any],
     *,
-    prior_values: np.ndarray | None = None,
-    deltas: np.ndarray | None = None,
-    name: str,
-    dates: list[str],
-) -> dict[str, Any]:
-    """Locate persistently low or declining patches in field-relative language."""
-    if xs.size < 10:
-        return {"bullets": [], "summary": "", "next_week": ""}
-    xmin, xmax, ymin, ymax = float(xs.min()), float(xs.max()), float(ys.min()), float(ys.max())
-    low_cut = float(np.percentile(values, 33))
-    mean = float(np.mean(values))
-    regions: dict[str, dict[str, list[int]]] = {}
-    for i, (x, y) in enumerate(zip(xs, ys)):
-        label = _region_name(float(x), float(y), xmin, xmax, ymin, ymax)
-        bucket = regions.setdefault(label, {"low": [], "down": [], "all": []})
-        bucket["all"].append(i)
-        if values[i] <= low_cut or values[i] < mean:
-            if values[i] <= low_cut:
-                bucket["low"].append(i)
-        if deltas is not None and i < len(deltas) and deltas[i] < 0:
-            bucket["down"].append(i)
-    bullets: list[str] = []
-    summary_bits: list[str] = []
-    n = len(values)
-    # Prefer larger, clearer zones first.
-    ranked = sorted(regions.items(), key=lambda item: len(item[1]["low"]) + len(item[1]["down"]), reverse=True)
-    for label, bucket in ranked[:3]:
-        low_n, down_n, all_n = len(bucket["low"]), len(bucket["down"]), len(bucket["all"])
-        if low_n < max(8, 0.08 * n) and down_n < max(8, 0.06 * n):
-            continue
-        share = 100.0 * low_n / n
-        # Compact size of a declining cluster, if it is spatially tight.
-        size_txt = ""
-        focus_idx = bucket["down"] or bucket["low"]
-        if focus_idx:
-            fx, fy = xs[focus_idx], ys[focus_idx]
-            width = float(fx.max() - fx.min())
-            height = float(fy.max() - fy.min())
-            side = max(width, height)
-            if 25 <= side <= 400:
-                size_txt = f"约{int(round(side / 10.0) * 10)}米见方的"
-        if down_n >= max(8, 0.06 * n) and size_txt:
-            already_low = 0
-            if prior_values is not None:
-                already_low = sum(1 for i in bucket["down"] if i < len(prior_values) and prior_values[i] <= low_cut)
-            extra = "多数点是在原本偏低的基础上继续走弱。" if already_low >= 0.5 * down_n and down_n else ""
-            bullets.append(f"{label}：{size_txt}集中变差斑块，{name}明显下降。{extra}".replace("。。", "。"))
-            summary_bits.append(f"{label}{size_txt}斑块明显变差")
-        elif low_n >= max(8, 0.08 * n):
-            persist = ""
-            if prior_values is not None:
-                persist_n = sum(1 for i in bucket["low"] if i < len(prior_values) and prior_values[i] <= low_cut)
-                if persist_n >= 0.6 * low_n:
-                    persist = "两次观测都明显低于本田平均，属于原来就偏低。"
-            bullets.append(
-                f"{label}：相对偏低的范围约占田内观测点的{share:.0f}%。{persist}".strip()
-            )
-            summary_bits.append(f"{label}偏低，约占田内观测点的{share:.0f}%")
-    if not bullets:
-        share = 100.0 * float(np.mean(values <= low_cut))
-        bullets.append(f"约 {share:.0f}% 的像元处于本期较低的三分之一，已在图上标出。")
-        summary_bits.append(f"约{share:.0f}%的像元处于本期较低的三分之一")
-    bullets.append("因此，相对上一周期的整体变化，不能理解为偏低或变差的部位已经好转。下图只用于标明位置，不换算受灾面积，也不推断病虫害或灌溉原因。")
-    summary = "；".join(summary_bits) + "。整体读数升高，不等于各处都已好转。"
-    place_bits = []
-    for bit in summary_bits[:2]:
-        if "偏低，约占" in bit:
-            place_bits.append(bit.split("偏低，约占", 1)[0])
-        elif "斑块明显变差" in bit:
-            place_bits.append(bit.replace("斑块明显变差", "").rstrip("的"))
-        else:
-            place_bits.append(bit)
-    if place_bits and all("约占" not in p and "像元" not in p for p in place_bits):
-        next_week = "核对" + "、".join(place_bits) + "的偏低或变差部位，并核对这些部位的墒情。"
-    elif summary_bits:
-        next_week = "核对" + "、".join(summary_bits[:2]) + "，并核对这些部位的墒情。"
-    else:
-        next_week = "核对田内偏低或变差的部位，并核对这些部位的墒情。"
-    return {"bullets": bullets, "summary": summary, "next_week": next_week, "dates": dates}
+    optical_days: list[str] | set[str] | None = None,
+    metric: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The latest usable in-period product and the usable observation before it.
 
+    对比口径全报告统一：本期最近一次有效观测，对比它之前最近的一次有效观测
+    （本期内有就取本期内的，否则取本期开始之前的）。图和文字都用这一对日期。
+    传入 metric 时，只把该指标有效像元足够的日期算作有效观测。
+    """
+    from app.reports.biweekly.metric_stats import field_stats
 
-def _style_field_ax(ax, xs, ys, title, cbar=None, ylabel: bool = False):
-    ax.set_title(title, fontsize=9, color="#1F4D38")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_aspect("equal", adjustable="box")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.text(0.02, 0.98, "N", transform=ax.transAxes, ha="left", va="top", fontsize=8, fontweight="bold")
-    # 100 m scale bar at the lower left.
-    xmin, xmax = ax.get_xlim()
-    ymin, ymax = ax.get_ylim()
-    x0 = xmin + 0.08 * (xmax - xmin)
-    y0 = ymin + 0.08 * (ymax - ymin)
-    ax.plot([x0, x0 + 100], [y0, y0], color="#222", lw=1.4)
-    ax.text(x0 + 50, y0 + 0.02 * (ymax - ymin), "100 m", ha="center", va="bottom", fontsize=7)
-    try:
-        from scipy.spatial import ConvexHull
+    def usable(product: dict[str, Any]) -> bool:
+        if metric is None:
+            return True
+        return field_stats(product, metric).get("status") == "ok"
 
-        hull = ConvexHull(np.column_stack([xs, ys]))
-        verts = np.append(hull.vertices, hull.vertices[0])
-        ax.plot(xs[verts], ys[verts], color="#7A3E2E", lw=0.8, alpha=0.8)
-    except Exception:
-        pass
+    start = _as_day((period or {}).get("start"))
+    end_exclusive = _as_day((period or {}).get("end_exclusive"))
+    current = [
+        row
+        for row in _in_period_products(products, start, end_exclusive, optical_days=optical_days)
+        if usable(row)
+    ]
+    if not current:
+        return None, None
+    latest = current[-1]
+    if len(current) >= 2:
+        return latest, current[-2]
+    earlier = [row for row in _prior_products(products, start, optical_days=optical_days) if usable(row)]
+    return latest, (earlier[-1] if earlier else None)
 
 
 def build_infield_variation(
@@ -349,147 +199,39 @@ def build_infield_variation(
     phase: dict[str, Any],
     dest: str | Path,
     optical_days: list[str] | set[str] | None = None,
+    metrics: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Build an in-field map of the period's primary metric, with location bullets."""
-    metrics = [m for m in (phase.get("primary_metrics") or ["ndvi"]) if m in PLAIN]
-    if not metrics:
-        metrics = ["ndvi"]
-    metric = metrics[0]
-    start = _as_day((period or {}).get("start"))
-    end_exclusive = _as_day((period or {}).get("end_exclusive"))
-    current = _in_period_products(products, start, end_exclusive, optical_days=optical_days)
-    if not current:
-        return None
-    latest = current[-1]
-    lons, lats, values = _finite_points(latest, metric)
-    if values.size < 10:
-        return None
+    """Build one in-field figure per primary metric of the period's stage.
+
+    每个主要指标各出一幅图（绝对值、变化量、相对本田差异），不再只画第一个指标。
+    dest 是图件路径模板：``spatial_zones.png`` 会生成 ``spatial_zones_ndvi.png`` 等。
+    """
+    from app.reports.biweekly.infield_maps import build_infield_metric
+
+    chosen = [m for m in (metrics or phase.get("primary_metrics") or ["ndvi"]) if m in METRIC_SPECS]
+    if not chosen:
+        chosen = ["ndvi"]
     dest_path = Path(dest)
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    name = PLAIN.get(metric, metric)
-    latest_day = _as_day(latest.get("date"))
-    xs, ys = _to_local_meters(lons, lats)
-
-    # Prefer intra-period change when two eligible dates exist; else vs last prior date.
-    earlier = current[-2] if len(current) >= 2 else None
-    prior_day = _as_day(earlier.get("date")) if earlier else None
-    change_vs = earlier
-    if change_vs is None:
-        prior_list = _prior_products(products, start, optical_days=optical_days)
-        if prior_list:
-            change_vs = prior_list[-1]
-            prior_day = _as_day(change_vs.get("date"))
-    change = _match_change(latest, change_vs, metric) if change_vs is not None else None
-
-    # Align prior values onto latest coordinates when possible.
-    prior_values = None
-    deltas = None
-    if change is not None:
-        clon, clat, cdelta = change
-        # Reindex deltas onto latest lon/lat by rounded coordinate.
-        index = {(round(float(x), 6), round(float(y), 6)): i for i, (x, y) in enumerate(zip(clon, clat))}
-        aligned = []
-        for lon, lat in zip(lons, lats):
-            hit = index.get((round(float(lon), 6), round(float(lat), 6)))
-            aligned.append(float(cdelta[hit]) if hit is not None else np.nan)
-        deltas = np.asarray(aligned)
-        # Prior values = current - delta where available.
-        prior_values = np.where(np.isfinite(deltas), values - deltas, np.nan)
-
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from app.reports.biweekly.fonts import resolve_yahei_fonts
-        from matplotlib import font_manager
-
-        regular, _bold = resolve_yahei_fonts()
-        font_manager.fontManager.addfont(str(regular))
-        plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(regular)).get_name()
-        plt.rcParams["axes.unicode_minus"] = False
-    except Exception:  # noqa: BLE001
+    built: list[dict[str, Any]] = []
+    for metric in chosen:
+        latest, baseline = comparison_pair(products, period, optical_days=optical_days, metric=metric)
+        if latest is None:
+            continue
+        target = dest_path.with_name(f"{dest_path.stem}_{metric}{dest_path.suffix or '.png'}")
+        item = build_infield_metric(metric=metric, latest=latest, baseline=baseline, dest=target)
+        if item is not None:
+            built.append(item)
+    if not built:
         return None
-
-    first = current[0] if len(current) >= 2 else None
-    panels: list[tuple[str, np.ndarray, str]] = []
-    if first is not None and first is not latest:
-        flons, flats, fvals = _finite_points(first, metric)
-        if fvals.size >= 10:
-            fxs, fys = _to_local_meters(flons, flats)
-            panels.append((_as_day(first.get("date")), fvals, "level"))
-            first_xy = (fxs, fys)
-        else:
-            first_xy = None
-    else:
-        first_xy = None
-    panels.append((latest_day, values, "level"))
-    if change is not None:
-        panels.append((f"这两周的变化" if first is not None else f"相对 {prior_day} 的变化", deltas, "delta"))
-        # Persistently low: low on latest and, if available, on the comparison date.
-        low_latest = values <= float(np.nanpercentile(values, 33))
-        persist = low_latest
-        if prior_values is not None and np.isfinite(prior_values).any():
-            finite = np.isfinite(prior_values)
-            persist = low_latest & finite & (prior_values <= np.nanpercentile(prior_values[finite], 33))
-        panels.append(("持续相对偏低的位置", persist.astype(float), "persist"))
-
-    nrows = 2 if len(panels) > 2 else 1
-    ncols = 2 if len(panels) > 1 else 1
-    fig, axes = plt.subplots(nrows, ncols, figsize=(8.6, 3.5 * nrows), dpi=150)
-    axes_list = np.atleast_1d(axes).ravel().tolist()
-    cmap_level = "YlGn"
-    for i, (title, data, kind) in enumerate(panels):
-        ax = axes_list[i]
-        if kind == "level":
-            if i == 0 and first_xy is not None:
-                px, py, pv = first_xy[0], first_xy[1], data
-            else:
-                px, py, pv = xs, ys, data
-            sc = ax.scatter(px, py, c=pv, s=7, cmap=cmap_level, linewidths=0, vmin=None)
-            _style_field_ax(ax, px, py, f"{title}  {name}" if kind == "level" and "变化" not in str(title) else title)
-            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03)
-        elif kind == "delta":
-            mask = np.isfinite(data)
-            sc = ax.scatter(xs[mask], ys[mask], c=data[mask], s=7, cmap="RdYlGn", linewidths=0)
-            ax.scatter(xs[mask & (data < 0)], ys[mask & (data < 0)], s=9, facecolors="none", edgecolors="#7A3E2E", linewidths=0.4)
-            _style_field_ax(ax, xs, ys, title)
-            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03)
-        else:
-            colors = np.where(data > 0.5, "#C9892D", "#E8E6E1")
-            ax.scatter(xs, ys, c=colors, s=7, linewidths=0)
-            ax.scatter([], [], c="#C9892D", s=12, label="两次都明显偏低")
-            ax.scatter([], [], c="#E8E6E1", s=12, label="其余观测")
-            _style_field_ax(ax, xs, ys, title)
-            ax.legend(frameon=False, fontsize=7, loc="lower right")
-    for ax in axes_list[len(panels):]:
-        ax.axis("off")
-    fig.suptitle(f"田内{name}分布与变化（真实观测点，不插值；偏低范围不作受灾面积）", fontsize=10, color="#1F4D38", y=0.995)
-    fig.tight_layout()
-    fig.savefig(dest_path, dpi=150, facecolor="white")
-    plt.close(fig)
-    if not dest_path.is_file():
-        return None
-
-    zone = describe_infield_zones(
-        xs,
-        ys,
-        values,
-        prior_values=prior_values,
-        deltas=deltas,
-        name=name,
-        dates=[_as_day(row.get("date")) for row in current],
-    )
+    first = built[0]
     return {
-        "text": zone["bullets"],
-        "image": str(dest_path),
-        "metric": metric,
-        "date": latest_day,
-        "prior_date": prior_day,
-        "pixel_count": int(values.size),
-        "summary": zone["summary"],
-        "next_week": zone["next_week"],
-        "bullets": zone["bullets"],
+        "metrics": built,
+        # 以下几个键保留给旧调用方：取第一个主要指标。
+        "image": first.get("image"),
+        "metric": first["metric"],
+        "date": first["date"],
+        "prior_date": first.get("baseline_date"),
+        "pixel_count": first["stats"]["n_valid"],
     }
 
 
@@ -569,7 +311,11 @@ def classify_imagery_farmland(
     if int(target.sum()) < 5:
         return None
 
-    from scipy import ndimage
+    try:
+        from scipy import ndimage
+    except ImportError:
+        # 没有 scipy 时不做周边识别，由调用方标记为缺失，不让整份报告失败。
+        return None
     from numpy.lib.stride_tricks import sliding_window_view
 
     window = SETTLE_WINDOW
@@ -641,6 +387,7 @@ def render_surrounding_map(
     bounds: tuple[float, float, float, float],
     field_lons: np.ndarray,
     field_lats: np.ndarray,
+    basemap_note: str | None = None,
 ) -> Path | None:
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -649,15 +396,18 @@ def render_surrounding_map(
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from app.reports.biweekly.fonts import resolve_yahei_fonts
         from matplotlib import font_manager
-        from matplotlib.patches import Patch, Circle
         from matplotlib.lines import Line2D
+        from matplotlib.patches import Ellipse, Patch
 
-        regular, _bold = resolve_yahei_fonts()
+        from app.reports.biweekly.fonts import resolve_yahei_fonts
+
+        regular, bold_path = resolve_yahei_fonts()
         font_manager.fontManager.addfont(str(regular))
+        font_manager.fontManager.addfont(str(bold_path))
         plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(regular)).get_name()
         plt.rcParams["axes.unicode_minus"] = False
+        bold = font_manager.FontProperties(fname=str(bold_path))
     except Exception:  # noqa: BLE001
         return None
 
@@ -683,7 +433,7 @@ def render_surrounding_map(
     r0, r1 = max(0, rows.min() - pad_r), min(overlay.shape[0], rows.max() + pad_r)
     c0, c1 = max(0, cols.min() - pad_c), min(overlay.shape[1], cols.max() + pad_c)
     view = np.clip(overlay[r0:r1, c0:c1], 0, 255).astype(np.uint8)
-    fig, ax = plt.subplots(figsize=(7.6, 6.4), dpi=150)
+    fig, ax = plt.subplots(figsize=(7.2, 6.3), dpi=200)
     ax.imshow(view)
     # Field outline in the cropped pixel space.
     tr = target[r0:r1, c0:c1]
@@ -701,26 +451,48 @@ def render_surrounding_map(
     cy, cx = float(np.mean(rows) - r0), float(np.mean(cols) - c0)
     for radius_m, ls in ((1000, "--"), (2000, ":")):
         rx, ry = radius_m / max(px, 1.0), radius_m / max(py, 1.0)
-        ellipse = plt.matplotlib.patches.Ellipse((cx, cy), 2 * rx, 2 * ry, fill=False, edgecolor="white", lw=1.1, ls=ls)
-        ax.add_patch(ellipse)
-    ax.text(cx, cy, "本田", color="white", ha="center", va="center", fontsize=8, fontweight="bold")
-    ax.text(0.04, 0.96, "N", transform=ax.transAxes, color="white", fontsize=9, fontweight="bold")
-    ax.set_title(f"周边约1—2公里田地长势对照（底图为{_cn_md_safe(date)}真实卫星影像）", fontsize=11, color="#1F4D38", pad=8)
+        ax.add_patch(Ellipse((cx, cy), 2 * rx, 2 * ry, fill=False, edgecolor="white", lw=1.2, ls=ls))
+    # 比例尺：1 公里，白底黑字，保证打印时在影像上可读。
+    view_h, view_w = view.shape[:2]
+    bar_px = 1000.0 / max(px, 1.0)
+    bx, by = 0.05 * view_w, 0.95 * view_h
+    box = {"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1.5}
+    ax.plot([bx, bx + bar_px], [by, by], color="white", lw=3.2, solid_capstyle="butt")
+    ax.plot([bx, bx + bar_px], [by, by], color="black", lw=1.4, solid_capstyle="butt")
+    ax.text(bx + bar_px / 2, by - 0.015 * view_h, "1 公里", ha="center", va="bottom", fontsize=8, bbox=box)
+    ax.annotate(
+        "北",
+        xy=(0.955 * view_w, 0.03 * view_h),
+        xytext=(0.955 * view_w, 0.11 * view_h),
+        ha="center",
+        va="center",
+        fontsize=8,
+        bbox=box,
+        arrowprops={"arrowstyle": "-|>", "color": "white", "lw": 1.4},
+    )
+    ax.set_xlim(0, view_w)
+    ax.set_ylim(view_h, 0)
+    note = basemap_note or f"底图为{_cn_md_safe(date)}哨兵二号真彩色影像"
+    ax.set_title(f"本田与周边1—2公里影像识别农田（{note}）", fontsize=10.5, color="#1F2A24", pad=8,
+                 fontproperties=bold)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.legend(
         handles=[
-            Patch(facecolor="#E6C200", label="本田"),
-            Patch(facecolor="#D2BE46", label="影像中识别的田地（1公里范围）"),
-            Line2D([0], [0], color="white", ls="--", label="1公里、2公里范围"),
+            Line2D([0], [0], color="#E6C200", lw=1.6, label="本田范围"),
+            Patch(facecolor="#D2BE46", label="周边1公里内影像识别农田"),
+            Patch(facecolor="#E8D260", alpha=0.6, label="周边1—2公里影像识别农田"),
+            Line2D([0], [0], color="#888888", ls="--", label="1公里范围"),
+            Line2D([0], [0], color="#888888", ls=":", label="2公里范围"),
         ],
         frameon=False,
         fontsize=8,
-        loc="lower left",
-        labelcolor="black",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=3,
     )
     fig.tight_layout()
-    fig.savefig(dest_path, dpi=150, facecolor="white")
+    fig.savefig(dest_path, dpi=200, facecolor="white")
     plt.close(fig)
     return dest_path if dest_path.is_file() else None
 
@@ -732,7 +504,24 @@ def _cn_md_safe(day: str) -> str:
     return f"{int(raw[5:7])}月{int(raw[8:10])}日"
 
 
+def _block_stats(block: Any) -> dict:
+    if not isinstance(block, dict):
+        return {}
+    return block.get("stats") or block
+
+
+def _central(stats: dict | None) -> float | None:
+    """Median when present (robust to bright roofs and bare patches), else mean."""
+    if not isinstance(stats, dict):
+        return None
+    value = stats.get("median")
+    if value is None:
+        value = stats.get("mean")
+    return None if value is None else float(value)
+
+
 def render_greenness_contrast(by_date: dict[str, dict], dest: str | Path) -> Path | None:
+    """Bar chart of ExG medians for the field and its 1 km / 2 km farmland rings."""
     if not by_date:
         return None
     dest_path = Path(dest)
@@ -742,68 +531,69 @@ def render_greenness_contrast(by_date: dict[str, dict], dest: str | Path) -> Pat
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from app.reports.biweekly.fonts import resolve_yahei_fonts
         from matplotlib import font_manager
 
-        regular, bold = resolve_yahei_fonts()
+        from app.reports.biweekly.fonts import resolve_yahei_fonts
+
+        regular, bold_path = resolve_yahei_fonts()
         font_manager.fontManager.addfont(str(regular))
+        font_manager.fontManager.addfont(str(bold_path))
         plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(regular)).get_name()
         plt.rcParams["axes.unicode_minus"] = False
+        bold = font_manager.FontProperties(fname=str(bold_path))
     except Exception:  # noqa: BLE001
         return None
-    def _stats(block: dict) -> dict:
-        if not isinstance(block, dict):
-            return {}
-        return block.get("stats") or block
 
     days: list[str] = []
     field: list[float] = []
     r1: list[float] = []
     r2: list[float | None] = []
     for day in sorted(by_date):
-        st = _stats(by_date[day])
-        fv = (st.get("field") or {}).get("mean")
-        n1 = (st.get("surrounding_1km") or {}).get("mean")
-        n2 = (st.get("surrounding_2km") or {}).get("mean")
+        st = _block_stats(by_date[day])
+        fv = _central(st.get("field"))
+        n1 = _central(st.get("surrounding_1km"))
+        n2 = _central(st.get("surrounding_2km"))
         if fv is None or n1 is None:
             continue
         days.append(day)
-        field.append(float(fv))
-        r1.append(float(n1))
-        r2.append(None if n2 is None else float(n2))
+        field.append(fv)
+        r1.append(n1)
+        r2.append(n2)
     if not days:
         return None
     x = np.arange(len(days))
     width = 0.24
-    fig, ax = plt.subplots(figsize=(8.4, 2.5), dpi=150)
+    fig, ax = plt.subplots(figsize=(7.2, 2.5), dpi=200)
     ax.bar(x - width, field, width, color="#1F4D38", label="本田")
-    ax.bar(x, r1, width, color="#7AA86D", label="周边1公里田地")
-    if any(v is not None for v in r2):
-        ax.bar(x + width, [0 if v is None else v for v in r2], width, color="#C5D5B8", label="周边2公里田地")
-    def _label(x_pos: float, value: float, color: str) -> None:
-        va = "top" if value < 0 else "bottom"
-        ax.text(x_pos, value, f"{value:.1f}", ha="center", va=va, fontsize=8, color=color)
+    ax.bar(x, r1, width, color="#7AA86D", label="周边1公里内农田")
+    # 2 公里范围缺测的日期不画柱，不用 0 代替。
+    have_r2 = [i for i, value in enumerate(r2) if value is not None]
+    if have_r2:
+        ax.bar(x[have_r2] + width, [r2[i] for i in have_r2], width, color="#C5D5B8", label="周边1—2公里农田")
 
-    ax.axhline(0, color="#D0D0D0", lw=0.6)
+    def _label(x_pos: float, value: float) -> None:
+        va = "top" if value < 0 else "bottom"
+        ax.text(x_pos, value, f"{value:.1f}", ha="center", va=va, fontsize=8, color="#1F2A24")
+
+    ax.axhline(0, color="#9AA39D", lw=0.6)
     for i, (fv, n1) in enumerate(zip(field, r1)):
-        _label(i - width, fv, "#1F4D38")
-        _label(i, n1, "#3E6B3C")
+        _label(i - width, fv)
+        _label(i, n1)
         if r2[i] is not None:
-            _label(i + width, r2[i], "#5A6A52")
-    ax.set_xticks(x, [_cn_md_safe(d) for d in days])
-    ax.set_ylabel("可见光绿度")
-    ax.set_title("本田与周边田地绿度对比（同一天影像，只比相对高低）", loc="left", color="#1F4D38", fontsize=11, pad=8)
-    diffs = []
-    for d, fv, n1 in zip(days, field, r1):
-        if fv is not None and n1 is not None:
-            diffs.append(f"{_cn_md_safe(d)} {fv-n1:+.1f}")
-    if diffs:
-        ax.text(1.0, 1.02, "本田减周边1公里：" + "，".join(diffs), transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color="#1F4D38")
-    ax.legend(frameon=False, ncol=3, fontsize=8)
+            _label(i + width, r2[i])
+        else:
+            ax.text(i + width, 0, "缺测", ha="center", va="bottom", fontsize=7.5, color="#7A7A7A")
+    ax.set_xticks(x, days)
+    ax.set_ylabel("超绿指数ExG（无量纲）", fontsize=8.5)
+    ax.tick_params(labelsize=8.5)
+    ax.set_title("本田与周边农田的超绿指数（ExG）中位数，同日影像", loc="left", color="#1F2A24",
+                 fontsize=10.5, pad=8, fontproperties=bold)
+    ax.margins(y=0.18)
+    ax.legend(frameon=False, ncol=3, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16))
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    fig.savefig(dest_path, dpi=150, facecolor="white")
+    fig.savefig(dest_path, dpi=200, facecolor="white")
     plt.close(fig)
     return dest_path if dest_path.is_file() else None
 
@@ -818,6 +608,7 @@ def build_surrounding_comparison(
     date: str,
     by_date: dict[str, dict] | None = None,
     contrast_dest: str | Path | None = None,
+    basemap_note: str | None = None,
 ) -> dict[str, Any] | None:
     classified = classify_imagery_farmland(
         rgb, bounds=bounds, field_lons=field_lons, field_lats=field_lats
@@ -831,14 +622,15 @@ def build_surrounding_comparison(
     if not field["n"] or not r1["n"]:
         return {
             "text": (
-                f"{_cn_md_safe(date)}的真彩色窗口未能识别出足够的周边影像农田像元，"
-                "因此本期不对「本田是否高于周边」作出判断。对照没有改用项目登记地块。"
+                f"{date}的真彩色影像中未能识别出足够的周边农田像元，"
+                "本期不作本田与周边农田的对照。对照未改用项目登记地块。"
             ),
             "image": None,
             "date": date,
             "stats": stats,
             "cover_1km": classified["cover_1km"],
             "cover_2km": classified["cover_2km"],
+            "comparisons": [],
         }
     image = render_surrounding_map(
         rgb,
@@ -848,29 +640,42 @@ def build_surrounding_comparison(
         bounds=bounds,
         field_lons=field_lons,
         field_lats=field_lats,
+        basemap_note=basemap_note,
     )
     series = dict(by_date or {})
     series.setdefault(date, {"stats": stats})
-    bits: list[str] = []
-    snippets = []
-    higher_all = True
+    comparisons: list[dict[str, Any]] = []
     for day, block in sorted(series.items()):
-        st = block.get("stats") or block
-        fmean = (st.get("field") or {}).get("mean")
-        rmean = (st.get("surrounding_1km") or {}).get("mean")
-        if fmean is None or rmean is None:
+        st = _block_stats(block)
+        fval = _central(st.get("field"))
+        rval = _central(st.get("surrounding_1km"))
+        if fval is None or rval is None:
+            # 任一侧缺测就不比较，不以 0 代入。
             continue
-        if fmean <= rmean:
-            higher_all = False
-        delta = fmean - rmean
-        word = "高出" if delta > 0 else "低于"
-        snippets.append(f"{_cn_md_safe(day)} {fmean:.1f} 对一公里 {rmean:.1f}（{word} {abs(delta):.1f}）")
-    if snippets:
-        lead = "本田绿度两次均高于周边田地：" if (higher_all and len(snippets) > 1) else (
-            "本田绿度高于周边田地：" if higher_all else "本田可见光绿度不高于周边田地："
+        comparisons.append(
+            {
+                "date": day,
+                "field": fval,
+                "surrounding_1km": rval,
+                "surrounding_2km": _central(st.get("surrounding_2km")),
+                "difference": fval - rval,
+            }
         )
-        bits.append(lead + "；".join(snippets) + "。此项与判断页的本田跨周期对比不是同一套数值。")
-    bits.append("黄色轮廓标出本田范围，浅黄色覆盖为同一天影像中识别出的周边田地，不是项目登记地块。作物类型未按本田已关联记录确认，不作同作物排名。")
+    bits: list[str] = []
+    if comparisons:
+        parts = []
+        for row in comparisons:
+            diff = row["difference"]
+            word = "高于" if diff > 0 else ("低于" if diff < 0 else "等于")
+            parts.append(
+                f"{row['date']}本田 {row['field']:.1f}，周边1公里内农田 {row['surrounding_1km']:.1f}，"
+                f"本田{word}周边" + (f" {abs(diff):.1f}" if diff else "")
+            )
+        bits.append("超绿指数（ExG）中位数：" + "；".join(parts) + "。")
+    bits.append(
+        "周边农田由同日真彩色影像自动识别，不是项目登记地块，作物类型未经确认；"
+        "对照只说明相对高低，不作同作物排名。"
+    )
     contrast = None
     if contrast_dest is not None and series:
         contrast = render_greenness_contrast(series, contrast_dest)
@@ -880,10 +685,11 @@ def build_surrounding_comparison(
         "contrast_image": str(contrast) if contrast else None,
         "date": date,
         "stats": stats,
-        "by_date": {d: (block.get("stats") or block) for d, block in series.items()},
+        "by_date": {d: _block_stats(block) for d, block in series.items()},
+        "comparisons": comparisons,
         "cover_1km": classified["cover_1km"],
         "cover_2km": classified["cover_2km"],
-        "judgment": bits[0] if bits else "",
+        "judgment": bits[0] if comparisons else "",
     }
 
 

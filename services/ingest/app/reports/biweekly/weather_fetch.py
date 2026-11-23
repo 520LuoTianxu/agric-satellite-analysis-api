@@ -61,6 +61,9 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "et0_mm": None,
             "min_c": None,
             "max_c": None,
+            "precipitation_days": 0,
+            "et0_days": 0,
+            "temperature_days": 0,
         }
     rains = [row["precipitation_mm"] for row in rows if row.get("precipitation_mm") is not None]
     et0s = [row["et0_mm"] for row in rows if row.get("et0_mm") is not None]
@@ -76,6 +79,10 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "max_c": max(maxs) if maxs else None,
         "missing_precipitation": len(rains) != len(rows),
         "missing_et0": len(et0s) != len(rows),
+        # 有记录的天数随合计一并给出：缺测日不计入合计，报告须写明合计覆盖了几天。
+        "precipitation_days": len(rains),
+        "et0_days": len(et0s),
+        "temperature_days": min(len(mins), len(maxs)),
     }
 
 
