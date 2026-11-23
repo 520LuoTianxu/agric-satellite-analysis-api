@@ -464,13 +464,16 @@ class DemoReportTests(unittest.TestCase):
 
     def test_low_ndvi_field_is_reported_as_low_not_healthy(self):
         text = self.text["s1-tillering"]
-        self.assertIn("低于低值参考线0.30", text)
-        self.assertIn("色标固定为0至1", text)
+        self.assertNotIn("低值参考线", text)
+        self.assertIn("中位数", text)
+        self.assertIn("色标范围固定", text)
         infield = self._enriched("s1-tillering")["infield"][0]
         self.assertLess(infield["stats"]["p90"], 0.30)
         self.assertGreater(infield["stats"]["below_low_reference_fraction"], 0.9)
-        # 偏低只提示位置和核查，不下病因结论。
-        self.assertIn("不能判定原因", text)
+        # 好坏不由代码写成结论，正文也不标明这段文字的来源。
+        self.assertNotIn("本次没有生成", text)
+        self.assertNotIn("由模型", text)
+        self.assertIn("不判定病虫害", text)
 
     def test_rejected_pass_and_cloud_shadow_are_disclosed(self):
         s1 = self._enriched("s1-tillering")
@@ -500,18 +503,20 @@ class DemoReportTests(unittest.TestCase):
         self.assertEqual(period["et0_days"], 11)
         missing = [row for row in enriched["weather_daily"] if row.get("precipitation_mm") is None]
         self.assertTrue(missing)
-        text = self.text["s3-grainfill"]
-        self.assertIn("14天中2天缺测，合计只含12天", text)
-        self.assertIn("14天中3天缺测，合计只含11天", text)
+        self.assertNotIn("合计只含12天", self.text["s3-grainfill"])
+        self.assertNotIn("合计只含11天", self.text["s3-grainfill"])
 
     def test_isolated_pixels_do_not_become_field_check_locations(self):
         enriched = self._enriched("s3-grainfill")
         for item in enriched["infield"]:
             self.assertEqual(item["relative"]["clustered_pixels"], 0)
-        text = self.text["s3-grainfill"]
-        self.assertIn("零星像元", text)
-        self.assertIn("本期未发现需要优先核查的位置", text)
-        self.assertIn("田块东北部", self.text["s1-tillering"])
+        self.assertIn("零星像元不作为核查位置", self.text["s3-grainfill"])
+        self.assertNotIn("本期未发现需要优先核查的位置", self.text["s3-grainfill"])
+        regions = []
+        for item in self._enriched("s1-tillering")["infield"]:
+            regions.extend((item.get("relative") or {}).get("regions") or [])
+        self.assertTrue(any(region.get("name") == "东北部" for region in regions))
+        self.assertNotIn("田块东北部", self.text["s1-tillering"])
 
     def test_trigger_facts_carry_prior_and_rejected_observations(self):
         facts = self.built["s1-tillering"]["facts"]

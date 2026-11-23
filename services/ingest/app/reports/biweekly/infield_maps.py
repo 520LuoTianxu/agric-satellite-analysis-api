@@ -148,7 +148,7 @@ def _frame(ax, xs, ys, *, half: float, title: str, bold):
     )
 
 
-def _colorbar(fig, ax, mappable, *, ticks, extend, label, reference: float | None = None):
+def _colorbar(fig, ax, mappable, *, ticks, extend, label):
     from matplotlib.ticker import FuncFormatter
 
     cbar = fig.colorbar(mappable, ax=ax, fraction=0.046, pad=0.03, extend=extend, ticks=ticks)
@@ -156,9 +156,6 @@ def _colorbar(fig, ax, mappable, *, ticks, extend, label, reference: float | Non
     cbar.ax.tick_params(labelsize=7.5, length=2)
     cbar.set_label(label, fontsize=7.5, color=INK)
     cbar.outline.set_linewidth(0.5)
-    if reference is not None:
-        # 低值参考线画在色标上，读图时能直接看出像元在参考线之上还是之下。
-        cbar.ax.axhline(reference, color=INK, lw=1.0, ls="--")
     return cbar
 
 
@@ -260,7 +257,6 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
     xs, ys = arrays["xs"], arrays["ys"]
     half = pixel_spacing_m(xs, ys) / 2.0
     scale = absolute_scale(metric)
-    reference = spec.low_reference if spec.scale_kind == "sequential" else None
     lo, hi = spec.display_range
     abs_label = f"{spec.abbr}（{spec.unit}）"
     fixed = f"色标固定 {lo:g} 至 {hi:g}"
@@ -289,7 +285,7 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
             _frame(ax, base["xs"], base["ys"], half=half, bold=bold,
                    title=f"{mark} {_short_day(analysis['baseline_date'])} {spec.abbr}（{fixed}）")
             _colorbar(fig, ax, mappable, ticks=scale["ticks"], extend=scale["extend"],
-                      label=abs_label, reference=reference)
+                      label=abs_label)
         elif kind == "latest":
             mappable = _draw_pixels(
                 ax, xs, ys, arrays["values"], half=half,
@@ -297,7 +293,7 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
             )
             _frame(ax, xs, ys, half=half, bold=bold, title=f"{mark} {_short_day(analysis['date'])} {spec.abbr}（{fixed}）")
             _colorbar(fig, ax, mappable, ticks=scale["ticks"], extend=scale["extend"],
-                      label=abs_label, reference=reference)
+                      label=abs_label)
         elif kind == "change":
             delta = arrays["delta"]
             cscale = change_scale(delta)
@@ -337,16 +333,11 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
     for ax in axes_list[len(panels):]:
         ax.axis("off")
 
-    from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
     handles = [Patch(facecolor=MISSING_COLOR, edgecolor="none", label="灰色：云、云影或缺测，不参与统计")]
     if spec.scale_kind == "sequential":
         handles.append(Patch(facecolor=BELOW_ZERO_COLOR, edgecolor="none", label="蓝灰色：小于 0（水体、积雪等非植被）"))
-        if reference is not None:
-            handles.append(
-                Line2D([0], [0], color=INK, lw=1.0, ls="--", label=f"色标虚线：低值参考线 {reference:g}")
-            )
     handles.append(
 Patch(
             facecolor="none",

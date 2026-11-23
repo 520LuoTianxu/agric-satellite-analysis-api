@@ -98,17 +98,45 @@ def _report_date_label(facts: dict[str, Any]) -> str:
     return f"{day.year}年{day.month}月{day.day}日"
 
 
+_CROP_DISPLAY = {
+    "wheat": "冬小麦",
+    "小麦": "冬小麦",
+    "冬小麦": "冬小麦",
+    "maize": "玉米",
+    "corn": "玉米",
+    "玉米": "玉米",
+}
+
+
+def _normalize_crop_name(raw: str) -> str:
+    text = raw.strip()
+    return _CROP_DISPLAY.get(text, _CROP_DISPLAY.get(text.lower(), text))
+
+
+def crop_badge_text(facts: dict[str, Any]) -> str | None:
+    """Crop name for the cover mark. Wheat stage groups imply 冬小麦 when unnamed."""
+    return _crop_label(facts)
+
+
 def _crop_label(facts: dict[str, Any]) -> str | None:
     phase = _phase(facts)
+    land = facts.get("land") or {}
     raw = (
         facts.get("crop_name")
+        or facts.get("crop_type")
         or facts.get("crop")
-        or (facts.get("land") or {}).get("crop_name")
+        or land.get("crop_name")
+        or land.get("crop_type")
         or phase.get("crop_name")
     )
     if not raw:
+        labels = [phase.get("display_phase")]
+        labels += [row.get("phase_label") for row in (phase.get("observation_stages") or [])]
+        if any(label in {"S1", "S2", "S3"} for label in labels):
+            raw = "冬小麦"
+    if not raw:
         return None
-    name = str(raw).strip()
+    name = _normalize_crop_name(str(raw))
     if not name:
         return None
     if name in {"小麦", "冬小麦"}:
@@ -475,6 +503,19 @@ def compose_official_cover(facts: dict[str, Any], dest: str | Path, *, land_titl
     draw.text((x0, ty + 170), title_name, font=fn, fill=PRIMARY)
     fp = ImageFont.truetype(str(regular), size=30)
     draw.text((x0, ty + 240), compact_date_span(period), font=fp, fill=PRIMARY)
+    crop = crop_badge_text(facts)
+    if crop:
+        badge_font = ImageFont.truetype(str(bold), size=28)
+        badge = f"作物  {crop}"
+        box = badge_font.getbbox(badge)
+        tw, th = box[2] - box[0], box[3] - box[1]
+        bx, by, pad_x, pad_y = x0, ty + 310, 16, 8
+        draw.rounded_rectangle(
+            (bx, by, bx + tw + pad_x * 2, by + th + pad_y * 2),
+            radius=12,
+            fill=PRIMARY,
+        )
+        draw.text((bx + pad_x - box[0], by + pad_y - box[1]), badge, font=badge_font, fill=(255, 255, 255))
 
     fl = ImageFont.truetype(str(regular), size=30)
     fv = ImageFont.truetype(str(bold), size=30)
