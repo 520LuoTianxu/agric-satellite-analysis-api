@@ -41,7 +41,14 @@ from agric_satellite_analysis_common.biweekly.metric_specs import METRIC_SPECS
 from agric_satellite_analysis_common.biweekly.models import ReportError
 from agric_satellite_analysis_common.biweekly.phase_policy import FORBIDDEN_REPORT_METRICS
 from app.reports.biweekly import report_text as text
-from app.reports.biweekly.cover import compact_date_span, compose_official_cover
+from app.reports.biweekly.cover import (
+    COVER_FOOTER_CONTACTS,
+    COVER_FOOTER_DISCLAIMER,
+    COVER_FOOTER_ORG,
+    compact_date_span,
+    compose_official_cover,
+    wrap_footer_text,
+)
 from app.reports.biweekly.enrichment import ensure_report_inputs, series_value
 from app.reports.biweekly.fonts import resolve_yahei_fonts
 
@@ -642,6 +649,49 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     return story
 
 
+
+def _draw_cover_footer_fallback(c) -> None:
+    """Typographic-only cover: same centred footer as the artwork path."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    heading_font, heading_size = "YaHei-Bold", 9
+    contact_font, contact_size = "YaHei", 8.5
+    disc_font, disc_size = "YaHei", 8
+    max_width = W - 2 * M
+    cx = W / 2
+
+    class _WidthFont:
+        def __init__(self, name, size):
+            self.name, self.size = name, size
+
+        def getbbox(self, text: str):
+            return (0, 0, stringWidth(text, self.name, self.size), self.size)
+
+    disc_lines = wrap_footer_text(COVER_FOOTER_DISCLAIMER, _WidthFont(disc_font, disc_size), max_width)
+    line_h = 11
+    gap = 6
+    height = line_h * (1 + len(COVER_FOOTER_CONTACTS) + len(disc_lines)) + gap
+    y = 16 * mm + height
+    c.setStrokeColor(DECOR)
+    c.setLineWidth(0.6)
+    c.line(cx - 45, y + 7, cx + 45, y + 7)
+    c.setFillColor(DECOR)
+    c.setFont(heading_font, heading_size)
+    c.drawCentredString(cx, y - heading_size, COVER_FOOTER_ORG)
+    y -= line_h
+    c.setFillColor(HexColor("#2D3E34"))
+    c.setFont(contact_font, contact_size)
+    for line in COVER_FOOTER_CONTACTS:
+        c.drawCentredString(cx, y - contact_size, line)
+        y -= line_h
+    y -= gap
+    c.setFillColor(HexColor("#666666"))
+    c.setFont(disc_font, disc_size)
+    for line in disc_lines:
+        c.drawCentredString(cx, y - disc_size, line)
+        y -= line_h
+
+
 def _draw_cover(c, doc) -> None:
     facts, cover_image = doc._cover_facts, doc._cover_image
     if cover_image and Path(cover_image).is_file():
@@ -665,6 +715,7 @@ def _draw_cover(c, doc) -> None:
         c.setFillColor(NOTICE)
         c.setFont("YaHei-Bold", 13)
         c.drawString(M, H - 90 * mm, text.DEMO_NOTICE)
+    _draw_cover_footer_fallback(c)
     c.restoreState()
 
 

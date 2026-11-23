@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+import re
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 BUNDLED_ASSET_DIR = Path(__file__).resolve().parent / "assets"
@@ -23,6 +24,12 @@ PRIMARY = (31, 77, 56)
 SUB = (122, 122, 122)
 LABEL = (140, 140, 140)
 VALUE = (35, 60, 48)
+# Footer / disclaimer ink: dark enough to read on the pale mint band, quieter than the title.
+FOOTER = (45, 72, 58)
+FOOTER_RULE = (31, 77, 56)
+FOOTER_HEADING_FILL = PRIMARY  # same dark green as the cover title
+FOOTER_CONTACT_FILL = (45, 62, 52)  # dark green-gray; never blue
+FOOTER_DISCLAIMER_FILL = (102, 102, 102)  # medium gray, readable on mint
 
 
 def bundled_asset_dir() -> Path:
@@ -188,6 +195,247 @@ def cover_meta_rows(facts: dict[str, Any]) -> list[tuple[str, str]]:
     return rows
 
 
+# Cover-footer wording is fixed by the issuing unit after user review.
+# Contacts sit above a short disclaimer in the lower information band.
+# Do not paraphrase, reorder, or change punctuation, names, or email addresses.
+COVER_FOOTER_ORG = "数字农业中心｜报告咨询"
+COVER_FOOTER_CONTACT_LIU = "刘伯恩：liuboen@chongho.net"
+COVER_FOOTER_CONTACT_LUO = "罗添煦：luotianxu@chongho.net"
+COVER_FOOTER_DISCLAIMER = "部分内容由 AI 辅助生成，仅供参考，地块实际情况以实地核查为准。"
+COVER_FOOTER_CONTACTS: tuple[str, ...] = (
+    COVER_FOOTER_CONTACT_LIU,
+    COVER_FOOTER_CONTACT_LUO,
+)
+# Display order: organisation heading, two contacts, then the short disclaimer.
+COVER_FOOTER_PARAGRAPHS: tuple[str, ...] = (
+    COVER_FOOTER_ORG,
+    COVER_FOOTER_CONTACT_LIU,
+    COVER_FOOTER_CONTACT_LUO,
+    COVER_FOOTER_DISCLAIMER,
+)
+
+# Layout at 200 dpi, compact but readable, pinned to the pale mint band.
+FOOTER_HEADING_SIZE = 30
+FOOTER_CONTACT_SIZE = 28
+FOOTER_DISCLAIMER_SIZE = 28
+FOOTER_FONT_SIZE = FOOTER_CONTACT_SIZE  # alias for tests / single-font fallback
+FOOTER_HEADING_GAP = 10
+FOOTER_CONTACT_GAP = 8
+FOOTER_GAP_BEFORE_DISCLAIMER = 18
+FOOTER_RULE_HEIGHT = 2
+FOOTER_RULE_GAP = 16
+FOOTER_RULE_WIDTH = 320
+FOOTER_BOTTOM_MARGIN = 72
+FOOTER_SIDE_MARGIN = 110
+FOOTER_PREFERRED_MIN_TOP = 2100
+
+_FOOTER_WRAP_UNIT = re.compile(r"[\x00-\x7F]+|.")
+# Prefer ending a line after these marks so CJK wording is not split mid-phrase.
+_FOOTER_BREAK_AFTER = set("，。；：、！？）》")
+
+
+def measure_text_width(font, text: str) -> float:
+    """Advance width of ``text`` in the given PIL font (no drawing)."""
+    left, _top, right, _bottom = font.getbbox(text or "")
+    return float(right - left)
+
+
+def centered_text_x(font, text: str, canvas_width: int) -> int:
+    """Left coordinate that centres ``text`` on the cover."""
+    width = measure_text_width(font, text)
+    return int(round((canvas_width - width) / 2))
+
+
+def wrap_footer_text(text: str, font, max_width: float) -> list[str]:
+    """Wrap without altering characters. ASCII runs (e.g. emails) stay together."""
+    if not text:
+        return [""]
+    units = _FOOTER_WRAP_UNIT.findall(text)
+    lines: list[str] = []
+    current = ""
+    for unit in units:
+        trial = current + unit
+        if current and measure_text_width(font, trial) > max_width:
+            break_at = max(
+                (i for i, ch in enumerate(current) if ch in _FOOTER_BREAK_AFTER),
+                default=-1,
+            )
+            if break_at >= 0 and break_at + 1 >= max(8, len(current) // 4):
+                lines.append(current[: break_at + 1])
+                current = current[break_at + 1 :] + unit
+            else:
+                lines.append(current)
+                current = unit
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    fitted: list[str] = []
+    for line in lines:
+        if measure_text_width(font, line) <= max_width or len(line) == 1:
+            fitted.append(line)
+            continue
+        buf = ""
+        for ch in line:
+            trial = buf + ch
+            if buf and measure_text_width(font, trial) > max_width:
+                fitted.append(buf)
+                buf = ch
+            else:
+                buf = trial
+        if buf:
+            fitted.append(buf)
+    return fitted or [""]
+
+
+def cover_footer_rows(contact_font, disclaimer_font, max_width: float) -> list[tuple[str, str]]:
+    """Return (kind, text) rows: heading, contacts, a blank, then the disclaimer.
+
+    Kind is one of heading / contact / blank / disclaimer. Disclaimer wording is
+    preserved; only line breaks may be inserted if the line is too long.
+    """
+    rows: list[tuple[str, str]] = [
+        ("heading", COVER_FOOTER_ORG),
+        ("contact", COVER_FOOTER_CONTACT_LIU),
+        ("contact", COVER_FOOTER_CONTACT_LUO),
+        ("blank", ""),
+    ]
+    for line in wrap_footer_text(COVER_FOOTER_DISCLAIMER, disclaimer_font, max_width):
+        rows.append(("disclaimer", line))
+    return rows
+
+
+def _row_advance(kind: str) -> int:
+    if kind == "blank":
+        return FOOTER_GAP_BEFORE_DISCLAIMER
+    if kind == "heading":
+        return FOOTER_HEADING_SIZE + FOOTER_HEADING_GAP
+    if kind == "contact":
+        return FOOTER_CONTACT_SIZE + FOOTER_CONTACT_GAP
+    return FOOTER_DISCLAIMER_SIZE + FOOTER_CONTACT_GAP
+
+
+def cover_footer_geometry(
+    font=None,
+    *,
+    heading_font=None,
+    contact_font=None,
+    disclaimer_font=None,
+    canvas_width: int = COVER_W,
+    canvas_height: int = COVER_H,
+) -> dict[str, Any]:
+    """Compute footer placement pinned to the bottom mint band, within the canvas."""
+    contact = contact_font or font
+    disclaimer = disclaimer_font or font
+    if contact is None or disclaimer is None:
+        raise ValueError("cover footer fonts are required")
+    x0 = FOOTER_SIDE_MARGIN
+    max_width = canvas_width - 2 * FOOTER_SIDE_MARGIN
+    rows = cover_footer_rows(contact, disclaimer, max_width)
+    content_h = sum(_row_advance(kind) for kind, _text in rows)
+    block_h = FOOTER_RULE_HEIGHT + FOOTER_RULE_GAP + content_h
+    bottom = FOOTER_BOTTOM_MARGIN
+    top = canvas_height - bottom - block_h
+    if top < 0:
+        top = 0
+    return {
+        "x": x0,
+        "max_width": max_width,
+        "top": int(top),
+        "bottom": int(top + block_h),
+        "rule_y": int(top),
+        "rows": rows,
+        "block_height": int(block_h),
+        "canvas_width": canvas_width,
+        "canvas_height": canvas_height,
+        "heading_font": heading_font or font,
+        "contact_font": contact,
+        "disclaimer_font": disclaimer,
+    }
+
+
+def draw_cover_footer(
+    draw,
+    font=None,
+    *,
+    heading_font=None,
+    contact_font=None,
+    disclaimer_font=None,
+    canvas_width: int = COVER_W,
+    canvas_height: int = COVER_H,
+) -> dict[str, Any]:
+    """Paint a compact, centred footer: rule, short title, contacts, gray disclaimer."""
+    geo = cover_footer_geometry(
+        font,
+        heading_font=heading_font,
+        contact_font=contact_font,
+        disclaimer_font=disclaimer_font,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+    )
+    rule_y = geo["rule_y"]
+    rule_x = int(round((canvas_width - FOOTER_RULE_WIDTH) / 2))
+    draw.rectangle(
+        (rule_x, rule_y, rule_x + FOOTER_RULE_WIDTH, rule_y + FOOTER_RULE_HEIGHT),
+        fill=FOOTER_RULE,
+    )
+    y = rule_y + FOOTER_RULE_HEIGHT + FOOTER_RULE_GAP
+    fonts = {
+        "heading": geo["heading_font"] or geo["contact_font"],
+        "contact": geo["contact_font"],
+        "disclaimer": geo["disclaimer_font"],
+    }
+    fills = {
+        "heading": FOOTER_HEADING_FILL,
+        "contact": FOOTER_CONTACT_FILL,
+        "disclaimer": FOOTER_DISCLAIMER_FILL,
+    }
+    bboxes: list[tuple[int, int, int, int]] = []
+    centers: list[float] = []
+    for kind, text_line in geo["rows"]:
+        if kind == "blank":
+            y += _row_advance(kind)
+            continue
+        used = fonts[kind]
+        x = centered_text_x(used, text_line, canvas_width)
+        draw.text((x, y), text_line, font=used, fill=fills[kind])
+        box = draw.textbbox((x, y), text_line, font=used)
+        bboxes.append(box)
+        centers.append((box[0] + box[2]) / 2)
+        y += _row_advance(kind)
+    geo["text_bboxes"] = bboxes
+    geo["line_centers"] = centers
+    geo["rule_x"] = rule_x
+    geo["drawn_bottom"] = int(y)
+    return geo
+
+
+def assert_footer_wording_intact(rows: list[tuple[str, str]]) -> None:
+    """Raise ValueError if laid-out lines no longer equal the official wording."""
+    kinds = [kind for kind, _text in rows]
+    if kinds[:3] != ["heading", "contact", "contact"]:
+        raise ValueError("cover footer must start with the organisation heading and two contacts")
+    if "blank" not in kinds:
+        raise ValueError("cover footer is missing the gap before the disclaimer")
+    if kinds.index("blank") != 3:
+        raise ValueError("disclaimer must come after the contact block")
+    got = {kind: "" for kind in ("heading", "contact", "disclaimer")}
+    contacts: list[str] = []
+    for kind, text_line in rows:
+        if kind == "blank":
+            continue
+        if kind == "contact":
+            contacts.append(text_line)
+        else:
+            got[kind] += text_line
+    if got["heading"] != COVER_FOOTER_ORG:
+        raise ValueError("cover footer organisation heading diverged")
+    if contacts != list(COVER_FOOTER_CONTACTS):
+        raise ValueError("cover footer contacts diverged from the official names or emails")
+    if got["disclaimer"] != COVER_FOOTER_DISCLAIMER:
+        raise ValueError("cover footer disclaimer diverged from the official wording")
+
+
 def compose_official_cover(facts: dict[str, Any], dest: str | Path, *, land_title: str | None = None) -> Path:
     """Paint land-specific cover text onto the bundled formal background."""
     from PIL import Image, ImageDraw, ImageFont
@@ -235,6 +483,26 @@ def compose_official_cover(facts: dict[str, Any], dest: str | Path, *, land_titl
         draw.text((x0, y), label, font=fl, fill=LABEL)
         draw.text((x0 + 260, y), value, font=fv, fill=VALUE)
         y += 74
+
+    heading_font = ImageFont.truetype(str(bold), size=FOOTER_HEADING_SIZE)
+    contact_font = ImageFont.truetype(str(regular), size=FOOTER_CONTACT_SIZE)
+    disclaimer_font = ImageFont.truetype(str(regular), size=FOOTER_DISCLAIMER_SIZE)
+    footer_geo = draw_cover_footer(
+        draw,
+        heading_font=heading_font,
+        contact_font=contact_font,
+        disclaimer_font=disclaimer_font,
+        canvas_width=COVER_W,
+        canvas_height=COVER_H,
+    )
+    assert_footer_wording_intact(footer_geo["rows"])
+    # Keep the footer in the lower band and clear of the meta block.
+    if footer_geo["top"] < y + 36:
+        raise RuntimeError("cover footer would overlap cover meta rows")
+    for box in footer_geo["text_bboxes"]:
+        left, top, right, bottom = box
+        if left < 0 or top < 0 or right > COVER_W or bottom > COVER_H:
+            raise RuntimeError(f"cover footer overflows the canvas: {box}")
 
     canvas.save(dest_path, "PNG")
     return dest_path
