@@ -28,8 +28,12 @@ def generate_official_biweekly_pdf(
     fetch_weather: Any | None = None,
     fetch_truecolor: Any | None = None,
     facts_sidecar: str | Path | None = None,
+    offline: bool = False,
 ) -> Path:
-    """Enrich official facts, then render the six-page official PDF."""
+    """Enrich official facts, then render the official PDF.
+
+    ``offline=True`` 只使用传入的 facts 和像元产品，不访问对象存储、内部接口、气象和影像服务。
+    """
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     figures = Path(figures_dir) if figures_dir else dest_path.parent / f"{dest_path.stem}_figures"
@@ -43,6 +47,7 @@ def generate_official_biweekly_pdf(
         longitude=longitude,
         fetch_weather=fetch_weather,
         fetch_truecolor=fetch_truecolor,
+        offline=offline,
     )
     if "ai_narrative" not in filled:
         from app.reports.biweekly.narrative_ai import generate_metric_judgment

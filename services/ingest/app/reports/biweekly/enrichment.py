@@ -54,6 +54,36 @@ def _end_inclusive(period: dict[str, Any]) -> str:
     return ""
 
 
+def normalize_product(product: dict[str, Any]) -> dict[str, Any]:
+    """Return the product with pixels as ``lonlat_columns_v1`` columns; values are not changed.
+
+    出图和统计只读列式像元。历史产品可能仍是对象数组（lonlat_v1），从数据库导出的行里
+    pixel_data 还可能是 JSON 字符串；这里统一转成列式，像元个数、顺序和数值都不变。
+    不修改传入的对象。
+    """
+    from agric_satellite_analysis_common.lonlat_pixels import (
+        migrate_product_to_columnar,
+        needs_columnar_migration,
+    )
+
+    out = product
+    pixel_data = out.get("pixel_data")
+    if isinstance(pixel_data, str):
+        try:
+            parsed = json.loads(pixel_data)
+        except json.JSONDecodeError:
+            parsed = None
+        out = {**out, "pixel_data": parsed if isinstance(parsed, dict) else None}
+    elif pixel_data is not None and not isinstance(pixel_data, dict):
+        out = {**out, "pixel_data": None}
+    if needs_columnar_migration(out):
+        out = dict(out)
+        if isinstance(out.get("pixel_data"), dict):
+            out["pixel_data"] = dict(out["pixel_data"])
+        migrate_product_to_columnar(out)
+    return out
+
+
 def load_products_from_dir(products_dir: str | Path) -> list[dict[str, Any]]:
     directory = Path(products_dir)
     if not directory.is_dir():
@@ -141,18 +171,23 @@ def resolve_products(
     products: list[dict[str, Any]] | None = None,
     products_dir: str | Path | None = None,
     storage: Any | None = None,
+    offline: bool = False,
 ) -> list[dict[str, Any]]:
     if products is not None:
-        return list(products)
+        return [normalize_product(item) for item in products]
     loaded: list[dict[str, Any]] = []
     if products_dir:
         loaded = load_products_from_dir(products_dir)
-    if loaded:
-        return loaded
+    if loaded or offline:
+        # 离线生成只用调用方给出的产品，找不到也不回退到对象存储。
+        return [normalize_product(item) for item in loaded]
     land_id = _land_id(facts)
     if not land_id:
         return []
-    return load_products_from_oss(land_id, _collect_dates(facts, []), storage=storage)
+    return [
+        normalize_product(item)
+        for item in load_products_from_oss(land_id, _collect_dates(facts, []), storage=storage)
+    ]
 
 
 def _field_points(
@@ -541,14 +576,20 @@ def enrich_official_report_facts(
     longitude: float | None = None,
     fetch_weather: Any | None = None,
     fetch_truecolor: Any | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
-    """Mutate and return official facts with weather and context maps attached."""
+    """Mutate and return official facts with weather and context maps attached.
+
+    ``offline=True`` 时只使用传入的 facts 和像元产品，不访问任何服务：不从对象存储补读产品，
+    不经内部接口取地块中心点，不下载气象数据，不查询影像目录、不下载真彩色影像。
+    缺少的气象和周边对照整节按未提供处理，并在报告「本期未提供的内容」中写明。
+    """
     filled = dict(facts)
     period = _period(filled)
     figures = Path(figures_dir)
     figures.mkdir(parents=True, exist_ok=True)
     loaded = resolve_products(
-        filled, products=products, products_dir=products_dir, storage=storage
+        filled, products=products, products_dir=products_dir, storage=storage, offline=offline
     )
 
     end_inclusive = _end_inclusive(period)
@@ -561,7 +602,12 @@ def enrich_official_report_facts(
     product_by_date = attach_report_inputs(filled, loaded)
     plan = filled["report_metrics"]
     comparison = filled["comparison"]
-    if start and end_inclusive and (not filled.get("weather_daily") or not _has_antecedent_daily(filled, start)):
+    if (
+        not offline
+        and start
+        and end_inclusive
+        and (not filled.get("weather_daily") or not _has_antecedent_daily(filled, start))
+    ):
         point = resolve_report_lat_lon(
             land_id=_land_id(filled) or None,
             latitude=latitude,
@@ -614,10 +660,13 @@ def enrich_official_report_facts(
             "pixel_count": first["stats"]["n_valid"],
         }
 
-    try:
-        surrounding_error = _attach_surrounding(filled, loaded, period, figures, fetch_truecolor)
-    except Exception as exc:  # noqa: BLE001 — 周边对照是可选内容，失败时标为未提供，不影响正文
-        surrounding_error = f"surrounding_{type(exc).__name__}"
+    if offline:
+        surrounding_error = "offline"
+    else:
+        try:
+            surrounding_error = _attach_surrounding(filled, loaded, period, figures, fetch_truecolor)
+        except Exception as exc:  # noqa: BLE001 — 周边对照是可选内容，失败时标为未提供，不影响正文
+            surrounding_error = f"surrounding_{type(exc).__name__}"
     meta = filled.get("surrounding_comparison_meta") or {}
     if not filled.get("surrounding_comparison_image") or not meta.get("comparisons"):
         # 没有成图或没有可比较的数值时，整节按未提供处理，不留半截内容。
@@ -730,6 +779,7 @@ def _attach_surrounding(
 
 
 SURROUNDING_MISSING_REASONS = {
+    "offline": "本次为离线生成，未获取周边1—2公里的同期真彩色影像",
     "no_in_period_field_pixels": "本期没有足够的本田像元，无法在影像上确定本田位置",
     "no_processing_window": "未能确定覆盖本田周边的影像范围",
     "stac_item_unavailable": "未能在影像目录中找到覆盖本田的同期哨兵二号影像",

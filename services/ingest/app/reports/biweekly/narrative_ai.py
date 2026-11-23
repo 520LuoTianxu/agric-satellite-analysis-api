@@ -13,8 +13,6 @@ import os
 import re
 from typing import Any
 
-import httpx
-
 from agric_satellite_analysis_common.biweekly.metric_specs import (
     METRIC_SPECS,
     metric_abbr,
@@ -400,6 +398,8 @@ def generate_metric_judgment(
         "Content-Type": "application/json",
     }
     own_client = client is None
+    import httpx
+
     http = client or httpx.Client(timeout=timeout)
     try:
         response = http.post(
