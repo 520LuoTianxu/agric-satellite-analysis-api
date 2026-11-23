@@ -102,6 +102,58 @@ def _registration_backoff_s(attempt: int) -> int:
     return registration_backoff_s(attempt)
 
 
+def _business_job_already_complete(report_id: str | None) -> bool:
+    if not report_id:
+        return False
+    try:
+        from agric_satellite_analysis_common.internal_api import get_job
+
+        job = get_job(report_id)
+    except Exception:
+        return False
+    return _job_status(job) in (TERMINAL_SUCCESS | {"completed"})
+
+
+def _align_business_job(
+    report_id: str | None,
+    *,
+    official_status: str,
+    oss: dict[str, Any],
+    filename: str | None,
+) -> bool:
+    """Mark the business Job completed after official ready.
+
+    Returns True only when the Job is known completed (this write or a prior
+    successful callback). A False return must leave a claimable work item.
+    """
+    if not report_id:
+        return True
+    try:
+        from app.core.job_http import update_job_record
+
+        update_job_record(
+            None,
+            None,
+            "completed",
+            progress={
+                "stage": "done",
+                "status": official_status,
+                "filename": filename,
+                "oss_artifact": oss,
+            },
+            job_id=report_id,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "biweekly_job_complete_persist_failed err_type=%s",
+            type(exc).__name__,
+        )
+    if _business_job_already_complete(report_id):
+        return True
+    return False
+
+
 def _complete(
     biweekly_job_id: str,
     *,
@@ -301,40 +353,70 @@ def generate_biweekly_report(
             }
         official = (result or {}).get("job") or {}
         official_status = official.get("status") or progress.get("official_status")
+        aligned = _align_business_job(
+            report_id,
+            official_status=str(official_status or "ready"),
+            oss=oss,
+            filename=progress.get("filename"),
+        )
+        if not aligned:
+            try:
+                _persist_registration(
+                    {**progress, "official_registered": True, "official_status": official_status},
+                    attempts=max(attempts, 1),
+                    error_type="JOB_ALIGN_PENDING",
+                )
+            except Exception:
+                pass
+            try:
+                fail_work_item_http(
+                    work_item_id,
+                    "JOB_ALIGN_PENDING",
+                    retry=True,
+                )
+            except Exception:
+                pass
+            # Official is ready, but the business Job is still running.
+            # Keep the work item claimable so a later worker can align it.
+            return {
+                "status": official_status,
+                "job": official,
+                "job_align": "pending",
+            }
+        completed = False
         try:
-            complete_work_item_http(
-                work_item_id,
-                {
-                    "status": official_status,
-                    "biweekly_job_id": bj_id,
-                    "filename": progress.get("filename"),
-                },
+            completed = bool(
+                complete_work_item_http(
+                    work_item_id,
+                    {
+                        "status": official_status,
+                        "biweekly_job_id": bj_id,
+                        "filename": progress.get("filename"),
+                    },
+                )
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "biweekly_work_item_complete_failed err_type=%s",
                 type(exc).__name__,
             )
-        if report_id:
+            completed = False
+        if not completed:
             try:
-                update_job_record(
-                    None,
-                    None,
-                    "completed",
-                    progress={
-                        "stage": "done",
-                        "status": official_status,
-                        "filename": progress.get("filename"),
-                        "oss_artifact": oss,
-                    },
-                    job_id=report_id,
+                fail_work_item_http(
+                    work_item_id,
+                    "JOB_ALIGN_PENDING",
+                    retry=True,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "biweekly_job_complete_persist_failed err_type=%s",
-                    type(exc).__name__,
-                )
-        return {"status": official_status, "job": official}
+            except Exception:
+                pass
+            return {
+                "status": official_status,
+                "job": official,
+                "job_align": "pending",
+                "work_item_align": "pending",
+            }
+        return {"status": official_status, "job": official, "job_align": "done"}
 
     try:
         prior = _load_registration(report_id, registration_progress)

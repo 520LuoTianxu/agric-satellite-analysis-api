@@ -7,7 +7,7 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from agric_satellite_analysis_common.biweekly.official_ref import official_object_key, sha256_bytes
 from agric_satellite_analysis_common.biweekly.official_store import (
@@ -306,6 +306,116 @@ class EventLoopTests(OssCompleteTests):
         out = asyncio.run(run())
         self.assertTrue(out["ok"])
         self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during OSS hash")
+
+    def test_download_oss_stream_does_not_block_event_loop(self):
+        import time
+        from app.services.biweekly_trigger import stream_official_download
+
+        seed_job(self.service, P15_JOB, period="15")
+        self.storage.put_bytes(official_object_key(LAND, P15_JOB), MIN_PDF)
+        # Mark the official job ready with an OSS ref (no hash inspect here).
+        self.service.attach_oss_artifact(
+            P15_JOB,
+            status="ready",
+            artifact={
+                "bucket": BUCKET,
+                "key": official_object_key(LAND, P15_JOB),
+                "size_bytes": len(MIN_PDF),
+                "sha256": sha256_bytes(MIN_PDF),
+                "content_type": "application/pdf",
+                "filename": "p15.pdf",
+                "mime": "application/pdf",
+                "kind": "official_visual_artifact",
+            },
+            inspect=False,
+        )
+        original = self.storage.iter_bytes
+
+        def slow_iter(key, chunk_size=64 * 1024):
+            time.sleep(0.25)
+            yield from original(key, chunk_size=chunk_size)
+
+        self.storage.iter_bytes = slow_iter
+        ticks = []
+
+        async def ticker():
+            for i in range(6):
+                await asyncio.sleep(0.05)
+                ticks.append(i)
+
+        async def consume():
+            _name, agen, _mime, _size = await stream_official_download(self.service, P15_JOB)
+            chunks = []
+            async for part in agen:
+                chunks.append(part)
+            return b"".join(chunks)
+
+        async def run():
+            task = asyncio.create_task(consume())
+            await ticker()
+            return await task
+
+        data = asyncio.run(run())
+        self.assertTrue(data.startswith(b"%PDF-"))
+        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during OSS download")
+
+    def test_start_period_generate_store_io_does_not_block_event_loop(self):
+        import time
+        from app.services.biweekly_report_flow import start_period_generate
+
+        class _StubCatalog:
+            def periods(self, land_id, season_id):
+                return [{
+                    "period_id": "15",
+                    "start": "2026-05-16",
+                    "end_inclusive": "2026-05-29",
+                    "end_exclusive": "2026-05-30",
+                }]
+
+            def period(self, land_id, season_id, period_id):
+                return self.periods(land_id, season_id)[0]
+
+        self.service.catalog = _StubCatalog()
+        orig = self.service.request_generate
+
+        def slow_request(*args, **kwargs):
+            time.sleep(0.25)
+            return orig(*args, **kwargs)
+
+        self.service.request_generate = slow_request
+        ticks = []
+
+        async def ticker():
+            for i in range(6):
+                await asyncio.sleep(0.05)
+                ticks.append(i)
+
+        async def run():
+            with patch(
+                "app.services.biweekly_report_flow.dispatch_bounded_backfill",
+                new=AsyncMock(
+                    return_value={
+                        "dispatched": False,
+                        "reason": "NO_JOBS_CREATED",
+                        "job_ids": [],
+                        "job_count": 0,
+                    }
+                ),
+            ):
+                task = asyncio.create_task(
+                    start_period_generate(
+                        self.service,
+                        land_id=LAND,
+                        season_id=SEASON,
+                        period_id="15",
+                    )
+                )
+                await ticker()
+                return await task
+
+        job = asyncio.run(run())
+        self.assertIn(job.get("status"), {"dispatched", "queued", "running", "ready", "failed"})
+        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during generate store I/O")
 
 
 if __name__ == "__main__":

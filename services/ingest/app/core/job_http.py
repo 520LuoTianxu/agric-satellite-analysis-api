@@ -83,21 +83,24 @@ def complete_work_item_http(
     result: dict[str, Any],
     *,
     worker_id: str | None = None,
-) -> None:
+) -> bool:
+    """Return True when the work item was completed or there was nothing to do."""
     if not work_item_id:
-        return
+        return True
     try:
         from agric_satellite_analysis_common.internal_api import complete_work, http_writes_enabled, internal_api_enabled
 
         if not (http_writes_enabled() or internal_api_enabled()):
-            return
+            return True
         complete_work(str(work_item_id), result, worker_id=worker_id)
+        return True
     except Exception as exc:
         logger.warning(
             "work_item_complete_http_failed",
             work_item_id=work_item_id,
             error=str(exc),
         )
+        return False
 
 
 def fail_work_item_http(

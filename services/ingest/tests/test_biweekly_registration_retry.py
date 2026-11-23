@@ -254,7 +254,9 @@ class RegistrationRetryTests(unittest.TestCase):
         self.assertEqual(len(completes), 1)
         self.assertEqual(completes[0]["oss"]["sha256"], "a" * 64)
         self.assertIsNone(completes[0]["content"])
-        fail_work.assert_not_called()
+        self.assertEqual(out.get("job_align"), "pending")
+        fail_work.assert_called()
+        self.assertTrue(fail_work.call_args.kwargs.get("retry") is True)
 
 
     def test_job_write_failure_still_persists_work_item_progress(self):
@@ -292,9 +294,9 @@ class RegistrationRetryTests(unittest.TestCase):
             patch.object(br, "_upload_official_object", side_effect=fake_upload),
             patch.object(br, "_complete", side_effect=fake_complete),
             patch("app.core.job_http.update_job_record", side_effect=RuntimeError("job write failed")),
-            patch("app.core.job_http.complete_work_item_http"),
             patch("app.core.job_http.progress_work_item_http", side_effect=lambda *a, **k: persisted.append(k.get("progress") or (a[1] if len(a) > 1 else None))),
-            patch("app.core.job_http.fail_work_item_http"),
+            patch("app.core.job_http.complete_work_item_http") as complete_work,
+            patch("app.core.job_http.fail_work_item_http") as fail_work,
         ):
             out = _run(
                 task,
@@ -304,10 +306,131 @@ class RegistrationRetryTests(unittest.TestCase):
                 work_item_id="w1",
             )
         self.assertEqual(out["status"], "ready")
+        self.assertEqual(out.get("job_align"), "pending")
+        complete_work.assert_not_called()
+        fail_work.assert_called()
+        self.assertTrue(fail_work.call_args.kwargs.get("retry") is True)
         self.assertTrue(any(
             isinstance(p, dict) and p.get("oss_artifact", {}).get("sha256") == "a" * 64
             for p in persisted
         ))
+
+    def test_job_align_recovers_on_retry_without_rerender(self):
+        renders = []
+        updates = []
+
+        def fake_render(*args, **kwargs):
+            renders.append(1)
+            raise AssertionError("must not re-render")
+
+        def fake_complete(*args, **kwargs):
+            return {"job": {"status": "ready"}}
+
+        def fake_get_job(job_id):
+            return {"status": "running", "progress_json": {}}
+
+        def flaky_update(*args, **kwargs):
+            status = kwargs.get("status") if "status" in kwargs else (args[2] if len(args) > 2 else None)
+            updates.append(status)
+            if status == "completed" and updates.count("completed") == 1:
+                raise RuntimeError("job write failed")
+            return None
+
+        progress = {
+            "stage": "registration_pending",
+            "official_status": "ready",
+            "official_registered": True,
+            "filename": "x.pdf",
+            "mime": "application/pdf",
+            "kind": "official_visual_artifact",
+            "facts": {"land_id": LAND},
+            "oss_artifact": {
+                "bucket": "agric-test",
+                "key": f"reports/default/{LAND}/biweekly-{P15_JOB}.pdf",
+                "size_bytes": len(MIN_PDF),
+                "sha256": "a" * 64,
+                "content_type": "application/pdf",
+            },
+        }
+        task = DummyTask()
+        with (
+            patch("agric_satellite_analysis_common.internal_api.get_job", side_effect=fake_get_job),
+            patch.object(br, "_complete", side_effect=fake_complete),
+            patch.object(br, "_upload_official_object", side_effect=AssertionError("no upload")),
+            patch("app.core.job_http.update_job_record", side_effect=flaky_update),
+            patch("app.core.job_http.complete_work_item_http", return_value=True) as complete_work,
+            patch("app.core.job_http.progress_work_item_http"),
+            patch("app.core.job_http.fail_work_item_http") as fail_work,
+        ):
+            first = _run(
+                task,
+                report_job_id="report-1",
+                biweekly_job_id=P15_JOB,
+                land_id=LAND,
+                work_item_id="w1",
+                registration_progress=progress,
+            )
+            self.assertEqual(first.get("job_align"), "pending")
+            fail_work.assert_called()
+            complete_work.assert_not_called()
+            second = _run(
+                task,
+                report_job_id="report-1",
+                biweekly_job_id=P15_JOB,
+                land_id=LAND,
+                work_item_id="w1",
+                registration_progress=progress,
+            )
+        self.assertEqual(second.get("job_align"), "done")
+        self.assertEqual(second["status"], "ready")
+        complete_work.assert_called()
+        self.assertEqual(renders, [])
+
+    def test_callback_already_completed_job_finishes_work_item(self):
+        def fake_complete(*args, **kwargs):
+            return {"job": {"status": "ready"}}
+
+        def fake_get_job(job_id):
+            return {
+                "status": "completed",
+                "progress_json": {"stage": "done", "status": "ready"},
+            }
+
+        progress = {
+            "stage": "registration_pending",
+            "official_status": "ready",
+            "filename": "x.pdf",
+            "mime": "application/pdf",
+            "kind": "official_visual_artifact",
+            "oss_artifact": {
+                "bucket": "agric-test",
+                "key": f"reports/default/{LAND}/biweekly-{P15_JOB}.pdf",
+                "size_bytes": len(MIN_PDF),
+                "sha256": "a" * 64,
+                "content_type": "application/pdf",
+            },
+        }
+        with (
+            patch("agric_satellite_analysis_common.internal_api.get_job", side_effect=fake_get_job),
+            patch.object(br, "_complete", side_effect=fake_complete),
+            patch("app.core.job_http.update_job_record", side_effect=RuntimeError("job write failed")),
+            patch("app.core.job_http.complete_work_item_http", return_value=True) as complete_work,
+            patch("app.core.job_http.progress_work_item_http"),
+            patch("app.core.job_http.fail_work_item_http") as fail_work,
+        ):
+            out = _run(
+                DummyTask(),
+                report_job_id="report-1",
+                biweekly_job_id=P15_JOB,
+                land_id=LAND,
+                work_item_id="w1",
+                registration_progress=progress,
+            )
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(out.get("job_align"), "done")
+        complete_work.assert_called()
+        fail_work.assert_not_called()
+
 
 
 if __name__ == "__main__":

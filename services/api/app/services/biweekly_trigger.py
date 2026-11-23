@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 from agric_satellite_analysis_common.biweekly.catalog import LocalPackCatalog
@@ -228,3 +229,38 @@ async def run_trigger_io(func, /, *args, **kwargs):
     across threads.
     """
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def stream_official_download(service, job_id: str):
+    """Stream an official artifact without blocking the event loop on OSS I/O.
+
+    ``iter_download`` (including the official-store lookup) and each OSS
+    chunk are produced on one worker thread; chunks are handed back through
+    an asyncio.Queue so other requests can proceed.
+    """
+    filename, chunks, mime, size = await run_trigger_io(service.iter_download, job_id)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    loop = asyncio.get_running_loop()
+    errors: list[BaseException] = []
+
+    def _produce() -> None:
+        try:
+            for chunk in chunks:
+                asyncio.run_coroutine_threadsafe(queue.put(("data", chunk)), loop).result()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(("end", None)), loop).result()
+
+    threading.Thread(target=_produce, name=f"oss-download-{job_id}", daemon=True).start()
+
+    async def _agen():
+        while True:
+            kind, payload = await queue.get()
+            if kind == "end":
+                if errors:
+                    raise errors[0]
+                return
+            yield payload
+
+    return filename, _agen(), mime, size

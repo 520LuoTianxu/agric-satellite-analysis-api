@@ -47,6 +47,8 @@ from types import ModuleType
 from unittest.mock import patch
 
 payload = json.loads(sys.stdin.read())
+job_write_fails = bool(payload.pop("job_write_fails", False))
+job_already_complete = bool(payload.pop("job_already_complete", False))
 renders = []
 uploads = []
 completes = []
@@ -64,6 +66,8 @@ def fake_complete(*args, **kwargs):
     return {"job": {"status": "ready"}}
 
 def fake_get_job(job_id):
+    if job_already_complete:
+        return {"status": "completed", "progress_json": {"stage": "done", "status": "ready"}}
     return {"status": "running", "progress_json": {"stage": "running"}}
 
 gen_mod = ModuleType("app.reports.biweekly.generate")
@@ -88,8 +92,8 @@ try:
         patch("agric_satellite_analysis_common.internal_api.get_job", side_effect=fake_get_job),
         patch.object(br, "_upload_official_object", side_effect=fake_upload),
         patch.object(br, "_complete", side_effect=fake_complete),
-        patch("app.core.job_http.update_job_record"),
-        patch("app.core.job_http.complete_work_item_http") as complete_work,
+        patch("app.core.job_http.update_job_record", side_effect=RuntimeError("job write failed") if job_write_fails else None),
+        patch("app.core.job_http.complete_work_item_http", return_value=True) as complete_work,
         patch("app.core.job_http.progress_work_item_http"),
         patch("app.core.job_http.fail_work_item_http") as fail_work,
     ):
@@ -103,6 +107,8 @@ try:
         "content": completes[0]["content"] if completes else "missing",
         "complete_called": complete_work.called,
         "fail_called": fail_work.called,
+        "fail_retry": bool((fail_work.call_args.kwargs or {}).get("retry")) if fail_work.called else False,
+        "job_align": result.get("job_align"),
     })
 except Exception as exc:
     out["error"] = f"{type(exc).__name__}: {exc}"
@@ -523,6 +529,128 @@ class WorkItemRegistrationE2EPgTests(unittest.TestCase):
         self.assertEqual(reaped, 1)
         self.assertEqual(status, "pending")
         self.assertEqual(error, "REGISTRATION_PENDING")
+
+
+    def test_official_ready_job_write_failure_keeps_work_item_claimable(self):
+        from app.services import work_items as wi
+        from app.models.tables import WorkItem
+        from agric_satellite_analysis_common.biweekly.official_ref import (
+            registration_progress_from_work_item,
+        )
+
+        item_id, report_job_id = self._insert_pending(progress=self._progress(attempts=2))
+
+        async def claim():
+            async with self.async_sessions() as db:
+                await db.execute(
+                    __import__("sqlalchemy", fromlist=["text"]).text(
+                        "SET search_path TO agric_satellite, public"
+                    )
+                )
+                claimed = await wi.claim_work_items(
+                    db, worker_id="worker-align", types=["biweekly_report"], limit=1, lease_seconds=30
+                )
+                await db.commit()
+                return claimed
+
+        claimed = self._run(claim())
+        self.assertEqual(len(claimed), 1)
+        row = claimed[0]
+        progress = registration_progress_from_work_item({
+            "payload_json": row.payload_json,
+            "progress_json": row.progress_json,
+        })
+        first = _run_ingest_worker(
+            report_job_id=str(report_job_id),
+            biweekly_job_id=P15,
+            land_id=LAND,
+            work_item_id=str(row.id),
+            registration_progress=progress,
+            job_write_fails=True,
+        )
+        self.assertIsNone(first.get("error"), first)
+        self.assertEqual(first["status"], "ready")
+        self.assertEqual(first["job_align"], "pending")
+        self.assertEqual(first["renders"], 0)
+        self.assertEqual(first["uploads"], 0)
+        self.assertEqual(first["completes"], 1)
+        self.assertFalse(first["complete_called"])
+        self.assertTrue(first["fail_called"])
+        self.assertTrue(first["fail_retry"])
+
+        async def requeue():
+            async with self.async_sessions() as db:
+                await db.execute(
+                    __import__("sqlalchemy", fromlist=["text"]).text(
+                        "SET search_path TO agric_satellite, public"
+                    )
+                )
+                item = await wi.fail_work_item(
+                    db, item_id, error="JOB_ALIGN_PENDING", worker_id="worker-align", retry=True
+                )
+                await db.commit()
+                return item.status, dict(item.progress_json or {})
+
+        status, progress_json = self._run(requeue())
+        self.assertEqual(status, "pending")
+        self.assertEqual(progress_json["oss_artifact"]["sha256"], "a" * 64)
+        self.assertTrue(progress_json.get("registration_retry_after"))
+
+        async def expire_backoff_and_reclaim():
+            async with self.async_sessions() as db:
+                await db.execute(
+                    __import__("sqlalchemy", fromlist=["text"]).text(
+                        "SET search_path TO agric_satellite, public"
+                    )
+                )
+                row = await db.get(WorkItem, item_id)
+                progress = dict(row.progress_json or {})
+                progress["registration_retry_after"] = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+                row.progress_json = progress
+                await db.flush()
+                claimed = await wi.claim_work_items(
+                    db, worker_id="worker-align-2", types=["biweekly_report"], limit=1, lease_seconds=30
+                )
+                await db.commit()
+                return claimed
+
+        claimed = self._run(expire_backoff_and_reclaim())
+        self.assertEqual(len(claimed), 1)
+        row = claimed[0]
+        progress = registration_progress_from_work_item({
+            "payload_json": row.payload_json,
+            "progress_json": row.progress_json,
+        })
+        second = _run_ingest_worker(
+            report_job_id=str(report_job_id),
+            biweekly_job_id=P15,
+            land_id=LAND,
+            work_item_id=str(row.id),
+            registration_progress=progress,
+        )
+        self.assertIsNone(second.get("error"), second)
+        self.assertEqual(second["job_align"], "done")
+        self.assertEqual(second["renders"], 0)
+        self.assertEqual(second["uploads"], 0)
+        self.assertTrue(second["complete_called"])
+        self.assertFalse(second["fail_called"])
+
+        async def mark_done():
+            async with self.async_sessions() as db:
+                await db.execute(
+                    __import__("sqlalchemy", fromlist=["text"]).text(
+                        "SET search_path TO agric_satellite, public"
+                    )
+                )
+                item = await wi.complete_work_item(
+                    db, item_id, result={"status": "ready"}, worker_id="worker-align-2", apply_result=False
+                )
+                await db.commit()
+                return item.status
+
+        self.assertEqual(self._run(mark_done()), "done")
 
 
 if __name__ == "__main__":
