@@ -162,7 +162,6 @@ class GenerateTaskTests(unittest.TestCase):
         self.assertIn("没有可用光学", kwargs["content"].decode("utf-8"))
 
     def test_ready_inputs_render_pdf_and_return_to_api(self):
-        from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
         from app.tasks.biweekly_report import generate_biweekly_report
 
         facts = {
@@ -175,7 +174,8 @@ class GenerateTaskTests(unittest.TestCase):
             "in_period_radar": True,
         }
 
-        def _render(payload, dest):
+        def _render(payload, dest, **_kwargs):
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
             Path(dest).write_bytes(b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n")
             return Path(dest)
 
@@ -183,7 +183,7 @@ class GenerateTaskTests(unittest.TestCase):
             "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
             return_value={"error_code": None, "status": "ready", "facts": facts},
         ), patch(
-            "app.reports.biweekly.official_pdf.render_official_biweekly_pdf",
+            "app.reports.biweekly.generate.generate_official_biweekly_pdf",
             side_effect=_render,
         ), patch(
             "app.tasks.biweekly_report._complete",

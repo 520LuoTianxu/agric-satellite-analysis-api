@@ -187,12 +187,12 @@ def generate_biweekly_report(
         if status != "ready" or not facts:
             return _fail("GENERATE_FAILED", "出报输入不完整，补数阶段已经结束，这不是因为没有可用光学。")
 
-        from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
+        from app.reports.biweekly.generate import generate_official_biweekly_pdf
 
         tmp = Path(tempfile.mkdtemp(prefix="biweekly-official-"))
         dest = tmp / "official.pdf"
         try:
-            render_official_biweekly_pdf(facts, dest)
+            generate_official_biweekly_pdf(facts, dest, figures_dir=tmp / "figures")
             content = dest.read_bytes()
             if not content.startswith(b"%PDF") or len(content) < 1000:
                 return _fail("GENERATE_FAILED", "正式 PDF 生成失败，补数阶段已经结束。")
@@ -207,8 +207,9 @@ def generate_biweekly_report(
                 logger.warning("biweekly_oss_upload_skipped err_type=%s", type(exc).__name__)
         finally:
             try:
-                dest.unlink(missing_ok=True)
-                tmp.rmdir()
+                import shutil
+
+                shutil.rmtree(tmp, ignore_errors=True)
             except OSError:
                 pass
         start = (facts.get("period") or {}).get("start")
