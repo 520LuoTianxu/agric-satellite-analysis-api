@@ -8,6 +8,12 @@ agriculture_standard_job.job_name and crop_remote_phase_mapping.stage_name.
 Observed agriculture_plant_task.task_name values and older fixture codes are
 aliases onto those official names only. 起身期 aliases to S2 (via 拔节孕穗期),
 never S1. There is no official 孕穗 or booting row.
+
+S1/S2/S3 在本模块中是小麦生长阶段分组，不是哨兵卫星编号：
+S1=营养生长阶段（出苗期至返青期），S2=营养生长与生殖生长并进阶段（拔节孕穗期），
+S3=生殖生长阶段（抽穗期至成熟期）。卫星传感器在本仓库其他位置也写作 S1/S2
+（Sentinel-1 雷达、Sentinel-2 光学），例如 ``s1_products``、``sensor == "S2"``；
+两者含义不同，报告正文一律用中文阶段名和「哨兵一号/哨兵二号」，不直接输出代号。
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from .metric_specs import METRIC_SPECS
 from .models import ReportError
 
 MAPPING_VERSION = "wheat-smart-pilot-1"
@@ -132,13 +139,11 @@ WHEAT_ALIASES = {
     "maturity": "成熟期",
 }
 
-PLAIN_NAMES = {
-    "ndvi": "绿度",
-    "evi": "增强绿度",
-    "ndre": "叶片营养",
-    "ndmi": "植被水分",
-}
+# 报告正文使用专业指标名；首次出现写全称并附一句用途说明，不用「绿度」等替代词。
+# 保留 PLAIN_NAMES 这个键名只为兼容旧调用方，取值已是正式名称。
+PLAIN_NAMES = {key: spec.label for key, spec in METRIC_SPECS.items()}
 
+# 各阶段的主要/辅助指标。主要指标在报告中给出田内分布图和统计，辅助指标给出统计与趋势。
 PHASE_METRICS = {
     "S1": {"primary": ("ndvi",), "supporting": ("evi", "ndmi")},
     "S2": {"primary": ("ndre", "evi"), "supporting": ("ndvi", "ndmi")},
@@ -146,7 +151,63 @@ PHASE_METRICS = {
 }
 
 FORBIDDEN_REPORT_METRICS = frozenset({"fvc", "lai", "psri", "savi", "osavi"})
+# 接口字段 phase_name 沿用的简称（前端时间轴已在使用，不改）。
 PHASE_LABELS = {"S1": "营养生长", "S2": "营养/生殖并进", "S3": "生殖生长"}
+# 报告正文使用的正式阶段名及其覆盖的生育期。
+PHASE_FORMAL_NAMES = {
+    "S1": "营养生长阶段",
+    "S2": "营养生长与生殖生长并进阶段",
+    "S3": "生殖生长阶段",
+}
+PHASE_STAGE_SPAN = {
+    "S1": "出苗期至返青期",
+    "S2": "拔节孕穗期",
+    "S3": "抽穗期至成熟期",
+}
+# 各阶段选用指标的依据（随 wheat-smart-pilot-1 一并待农学审核）。
+PHASE_METRIC_RATIONALE = {
+    "S1": "该阶段植株以长叶和分蘖为主，冠层尚未封垄，以NDVI反映出苗和覆盖情况；"
+    "EVI用于削弱土壤背景影响，NDMI用于参考冠层水分。",
+    "S2": "该阶段冠层迅速封垄，NDVI趋于饱和，以对叶绿素敏感的NDRE和高覆盖下不易饱和的EVI为主；"
+    "NDVI、NDMI作为辅助。",
+    "S3": "该阶段关注叶片功能期和冠层水分，以NDRE和NDMI为主；NDVI、EVI作为辅助。",
+}
+# 各生育期植被指数的常见季节走向，仅作阶段背景，不是本田的实测结论。
+# trend：low=处于低位，rise=通常上升，stable=通常持平，decline=通常下降。
+STAGE_BACKGROUND: dict[str, dict[str, str]] = {
+    "出苗期": {
+        "trend": "low",
+        "text": "出苗期植被覆盖度低，植被指数处于低位属正常现象，数值受土壤背景影响较大。",
+    },
+    "分蘖期": {
+        "trend": "rise",
+        "text": "分蘖期植被覆盖逐步增加，植被指数通常缓慢上升。",
+    },
+    "越冬期": {
+        "trend": "stable",
+        "text": "越冬期小麦生长基本停滞，植被指数通常持平或略有下降，积雪和霜冻会引起短期波动。",
+    },
+    "返青期": {
+        "trend": "rise",
+        "text": "返青期小麦恢复生长，植被指数通常由低位回升。",
+    },
+    "拔节孕穗期": {
+        "trend": "rise",
+        "text": "拔节孕穗期生物量快速增加，植被指数通常持续上升并接近全季高值。",
+    },
+    "抽穗期": {
+        "trend": "stable",
+        "text": "抽穗期冠层达到全季高值附近，植被指数通常趋于稳定。",
+    },
+    "灌浆期": {
+        "trend": "decline",
+        "text": "灌浆期叶片逐步衰老，植被指数通常由高位缓慢下降。",
+    },
+    "成熟期": {
+        "trend": "decline",
+        "text": "成熟期植株转黄、含水量下降，NDVI、NDRE和NDMI明显下降属正常成熟过程。",
+    },
+}
 
 
 def canonical_stage_code(key: str) -> str:
@@ -232,6 +293,19 @@ def metrics_for_phase(phase_label: str | None) -> dict[str, tuple[str, ...]]:
     return dict(PHASE_METRICS[phase_label])
 
 
+def phase_metric_profile(phase_label: str | None) -> dict[str, Any]:
+    """One phase's metric set with its formal name and selection rationale."""
+    metrics = metrics_for_phase(phase_label)
+    return {
+        "phase_label": phase_label if phase_label in PHASE_METRICS else None,
+        "formal_name": PHASE_FORMAL_NAMES.get(phase_label),
+        "stage_span": PHASE_STAGE_SPAN.get(phase_label),
+        "primary": list(metrics["primary"]),
+        "supporting": list(metrics["supporting"]),
+        "rationale": PHASE_METRIC_RATIONALE.get(phase_label),
+    }
+
+
 def _as_day(value: str) -> date:
     return date.fromisoformat(value)
 
@@ -246,11 +320,13 @@ def display_phase(
     observation_dates: list[str],
     window_start: str,
     end_exclusive: str,
+    prior_observation_dates: list[str] | None = None,
 ) -> dict[str, Any]:
     """Follow in-period valid observations; disclose planned transitions.
 
     planned_intervals items: {stage_code, start, end_exclusive}
     Dates are Asia/Shanghai calendar days. end is exclusive.
+    prior_observation_dates 是对比基准的观测日，只用于标注其计划阶段，不参与本期阶段判定。
     """
     window_days = []
     cursor = _as_day(window_start)
@@ -289,6 +365,20 @@ def display_phase(
         hit = stage_on(day)
         resolved = resolve_wheat_stage(hit["stage_code"]) if hit else None
         obs.append(
+            {
+                "date": day,
+                "stage_code": resolved["stage_code"] if resolved else None,
+                "phase_label": resolved["phase_label"] if resolved else None,
+                "tags": resolved["tags"] if resolved else [],
+            }
+        )
+
+    prior_obs = []
+    for day in prior_observation_dates or []:
+        day = str(day)[:10]
+        hit = stage_on(day)
+        resolved = resolve_wheat_stage(hit["stage_code"]) if hit else None
+        prior_obs.append(
             {
                 "date": day,
                 "stage_code": resolved["stage_code"] if resolved else None,
@@ -340,6 +430,28 @@ def display_phase(
                 break
     next_resolved = resolve_wheat_stage(next_hit["stage_code"]) if next_hit else None
 
+    # 每个出现过的阶段各自的指标组：跨阶段时按观测日所属阶段分别取用，不合并成一组。
+    seen_phases = [
+        label
+        for label in dict.fromkeys(
+            [row["phase_label"] for row in obs]
+            + [row["phase_label"] for row in prior_obs]
+            + [row["phase_label"] for row in planned]
+            + [next_resolved["phase_label"] if next_resolved else None]
+        )
+        if label in PHASE_METRICS
+    ]
+    phase_metrics = {label: phase_metric_profile(label) for label in seen_phases}
+    seen_stages = [
+        code
+        for code in dict.fromkeys(
+            [row["stage_code"] for row in obs]
+            + [row["stage_code"] for row in planned]
+            + [next_resolved["stage_code"] if next_resolved else None]
+        )
+        if code in STAGE_BACKGROUND
+    ]
+
     return {
         "policy_version": POLICY_VERSION,
         "mapping_version": MAPPING_VERSION,
@@ -347,10 +459,14 @@ def display_phase(
         "display_phases_if_split": display if isinstance(display, list) else None,
         "display_source": source,
         "phase_name": PHASE_LABELS.get(display) if isinstance(display, str) else None,
+        "phase_formal_name": PHASE_FORMAL_NAMES.get(display) if isinstance(display, str) else None,
         "primary_metrics": list(metrics["primary"]),
         "supporting_metrics": list(metrics["supporting"]),
+        "phase_metrics": phase_metrics,
+        "stage_background": {code: dict(STAGE_BACKGROUND[code]) for code in seen_stages},
         "plain_names": dict(PLAIN_NAMES),
         "observation_stages": obs,
+        "prior_observation_stages": prior_obs,
         "planned_days": planned,
         "transitions": transitions,
         "next_week": {
@@ -358,6 +474,9 @@ def display_phase(
             "end_exclusive": next_end,
             "stage_code": next_resolved["stage_code"] if next_resolved else None,
             "phase_label": next_resolved["phase_label"] if next_resolved else None,
+            "phase_formal_name": PHASE_FORMAL_NAMES.get(
+                next_resolved["phase_label"] if next_resolved else None
+            ),
             "primary_metrics": list(
                 metrics_for_phase(
                     next_resolved["phase_label"] if next_resolved else None
