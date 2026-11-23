@@ -114,23 +114,25 @@ def _crop_label(facts: dict[str, Any]) -> str | None:
 
 
 def _phase_label(facts: dict[str, Any]) -> str | None:
-    from agric_satellite_analysis_common.biweekly.phase_policy import PHASE_LABELS
+    """Stage shown on the cover, in formal words: 拔节孕穗期（营养生长与生殖生长并进阶段）."""
+    from agric_satellite_analysis_common.biweekly.phase_policy import PHASE_FORMAL_NAMES
 
     phase = _phase(facts)
-    display = phase.get("display_phase")
-    phase_name = phase.get("phase_name") or PHASE_LABELS.get(display)
-    stages = []
+    stages: list[str] = []
+    labels: list[str] = []
     for row in phase.get("observation_stages") or []:
         code = row.get("stage_code")
         if code and code not in stages:
             stages.append(code)
-    if stages and phase_name:
-        return f"{stages[0]}（{phase_name}）"
-    if phase_name:
-        return str(phase_name)
-    if stages:
-        return stages[0]
-    return None
+        label = row.get("phase_label")
+        if label and label not in labels:
+            labels.append(label)
+    # 阶段代号 S1/S2/S3 不上封面，只写中文阶段名；跨阶段时不合并成一个阶段名。
+    phase_name = PHASE_FORMAL_NAMES.get(labels[0]) if len(labels) == 1 else None
+    if not stages:
+        return PHASE_FORMAL_NAMES.get(phase.get("display_phase"))
+    text = "、".join(stages)
+    return f"{text}（{phase_name}）" if phase_name else text
 
 
 def _location_label(facts: dict[str, Any]) -> str | None:
@@ -180,6 +182,9 @@ def cover_meta_rows(facts: dict[str, Any]) -> list[tuple[str, str]]:
     if scale:
         rows.append(("规模", scale))
     rows.append(("报告日期", _report_date_label(facts)))
+    if str(facts.get("data_kind") or "").lower() == "demo":
+        # 示例数据必须在封面上写明，不能让样稿被当成实测报告。
+        rows.append(("数据性质", "示例数据，非实测，不用于农事决策"))
     return rows
 
 
