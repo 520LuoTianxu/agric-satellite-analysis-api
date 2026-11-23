@@ -319,6 +319,11 @@ class BiweeklyOfficialJob(Base):
             "period_id",
             "created_at",
         ),
+        Index(
+            "ix_biweekly_official_jobs_report_job",
+            "report_job_id",
+            postgresql_where=text("report_job_id IS NOT NULL"),
+        ),
     )
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -331,7 +336,6 @@ class BiweeklyOfficialJob(Base):
         UUID(as_uuid=True),
         ForeignKey("jobs.id", ondelete="SET NULL"),
         nullable=True,
-        index=True,
     )
     artifact_json = mapped_column(JSONB, nullable=True)
     job_json = mapped_column(JSONB, nullable=False)
