@@ -47,19 +47,27 @@ async def biweekly_report_inputs(job_id: str, _: InternalAuth) -> dict[str, Any]
     land_id = job["land_id"]
     season_id = job["season_id"]
     period_id = job["period_id"]
-    period = service.catalog.period(land_id, season_id, period_id)
-    periods = service.catalog.periods(land_id, season_id)
     try:
+        # Official inputs run without SmartPlantingCatalog; use the window
+        # already stored on the generate job. Do not invent a calendar.
+        period = service.period_for_job(job)
+        periods = service.periods_for_job(job)
         fields = await _enrich_payload(land_id, period, periods)
     except ReportError as exc:
         note = "读取已入库景失败，不能当作本期没有可用光学。"
+        if exc.code == "SCENE_QUERY_FAILED":
+            body_note = note
+        elif exc.code in {"PERIOD_NOT_FOUND", "PERIOD_WINDOW_INVALID"}:
+            body_note = "任务已存在，但不能从日历或缺窗口还原本期区间，不能伪造种植日历。"
+        else:
+            body_note = str(exc.code)
         return {
             "job_id": job_id,
             "land_id": land_id,
             "season_id": season_id,
             "period_id": period_id,
             "error_code": exc.code,
-            "note": note if exc.code == "SCENE_QUERY_FAILED" else str(exc.code),
+            "note": body_note,
         }
     payload = dict(job.get("payload") or {})
     if not payload.get("native_plan") and hasattr(service.catalog, "native_plan"):

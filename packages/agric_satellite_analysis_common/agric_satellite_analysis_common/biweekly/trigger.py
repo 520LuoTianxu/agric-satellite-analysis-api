@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import secrets
 import shutil
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -409,6 +409,77 @@ class TriggerService:
                 }
         return latest
 
+    def period_for_job(self, job: dict) -> dict:
+        """Use dates persisted on the generate job; catalog.period is a fallback only.
+
+        Official finalize and GET /internal/biweekly/jobs/{id}/inputs build a
+        TriggerService without SmartPlantingCatalog. Smart lands such as 32696
+        are not in the local 6417 pack, so catalog.period would raise
+        PERIOD_NOT_FOUND even though the job already stored its official window.
+        Never invent a calendar when the window is missing.
+        """
+        window = job.get("window") or {}
+        start = window.get("start")
+        end_inclusive = window.get("end_inclusive")
+        end_exclusive = window.get("end_exclusive")
+        if start and (end_inclusive or end_exclusive):
+            if not end_exclusive and end_inclusive:
+                end_exclusive = (
+                    date.fromisoformat(str(end_inclusive)) + timedelta(days=1)
+                ).isoformat()
+            if not end_inclusive and end_exclusive:
+                end_inclusive = (
+                    date.fromisoformat(str(end_exclusive)) - timedelta(days=1)
+                ).isoformat()
+            if str(start) >= str(end_exclusive):
+                raise ReportError("PERIOD_WINDOW_INVALID")
+            return {
+                "period_id": str(job.get("period_id")),
+                "start": str(start),
+                "end_inclusive": str(end_inclusive),
+                "end_exclusive": str(end_exclusive),
+                "snapshot": None,
+            }
+        return self.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+
+    def periods_from_stored_jobs(self, land_id: str, season_id: str) -> list[dict]:
+        rows: list[dict] = []
+        seen: set[str] = set()
+        jobs_dir = self.work_dir / "jobs"
+        if not jobs_dir.is_dir():
+            return rows
+        for path in sorted(jobs_dir.glob("bj-*.json")):
+            try:
+                job = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                str(job.get("land_id")) != str(land_id)
+                or job.get("season_id") != season_id
+                or job.get("kind") != "generate"
+            ):
+                continue
+            try:
+                period = self.period_for_job(job)
+            except ReportError:
+                continue
+            key = str(period.get("period_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(period)
+        rows.sort(key=lambda row: (str(row.get("start") or ""), str(row.get("period_id") or "")))
+        return rows
+
+    def periods_for_job(self, job: dict) -> list[dict]:
+        try:
+            return list(self.catalog.periods(job["land_id"], job["season_id"]))
+        except ReportError:
+            rows = self.periods_from_stored_jobs(job["land_id"], job["season_id"])
+            if rows:
+                return rows
+            return [self.period_for_job(job)]
+
     def _load_reference(self, reference_id: str | None) -> dict | None:
         if reference_id in (None, ""):
             return None
@@ -448,7 +519,7 @@ class TriggerService:
 
     def _run_generate(self, job: dict) -> tuple[dict, dict, str]:
         facts, status = self._prepare_generate_facts(job)
-        period = self.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+        period = self.period_for_job(job)
         if status == "evidence_limited":
             artifact = self._write_brief(job["job_id"], facts, period)
         else:
@@ -465,7 +536,7 @@ class TriggerService:
 
     def _prepare_generate_facts(self, job: dict) -> tuple[dict, str]:
 
-        period = self.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+        period = self.period_for_job(job)
         snapshot = {}
         if period.get("snapshot"):
             try:
@@ -646,7 +717,10 @@ class TriggerService:
                     continue
                 rows.append(row)
             return rows
-        periods = self.catalog.periods(job["land_id"], job["season_id"])
+        try:
+            periods = self.catalog.periods(job["land_id"], job["season_id"])
+        except ReportError:
+            return []
         ids = [row["period_id"] for row in periods]
         try:
             index = ids.index(str(period["period_id"]))

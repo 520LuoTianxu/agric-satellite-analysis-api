@@ -164,10 +164,8 @@ async def finish_generate_job(service, job_id: str) -> dict:
     if job.get("error_code") == "BACKFILL_FAILED":
         return job
     land_id = job["land_id"]
-    season_id = job["season_id"]
-    period_id = job["period_id"]
-    period = service.catalog.period(land_id, season_id, period_id)
-    periods = service.catalog.periods(land_id, season_id)
+    period = service.period_for_job(job)
+    periods = service.periods_for_job(job)
     try:
         fields = await _enrich_payload(land_id, period, periods)
     except ReportError as exc:
