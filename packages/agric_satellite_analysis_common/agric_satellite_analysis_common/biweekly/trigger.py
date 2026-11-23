@@ -637,6 +637,8 @@ class TriggerService:
             "schema_version": "biweekly-trigger-snapshot-v1",
             "land_id": job["land_id"],
             "land_name": payload.get("land_name"),
+            "crop_name": payload.get("crop_name") or (payload.get("native_plan") or {}).get("crop_name"),
+            "crop_type": payload.get("crop_type"),
             "season_id": job["season_id"],
             "period": period,
             "policy_version": POLICY_VERSION,

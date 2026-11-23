@@ -148,7 +148,7 @@ async def _enrich_payload(
         weather_antecedent = summarize_weather(antecedent_rows) if antecedent_rows is not None else None
         if weather_daily and antecedent_rows:
             weather_daily = list(antecedent_rows) + list(weather_daily)
-    return {
+    fields = {
         "observations_override": observations,
         "prior_observations_override": prior_obs,
         "observation_source": "parcel_scene_products",
@@ -158,6 +158,10 @@ async def _enrich_payload(
         "weather_antecedent": weather_antecedent,
         "s1_count": _s1_count(observations),
     }
+    crop_type = (meta or {}).get("crop_type")
+    if crop_type:
+        fields["crop_type"] = crop_type
+    return fields
 
 
 async def finish_generate_job(service, job_id: str) -> dict:
