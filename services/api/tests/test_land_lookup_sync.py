@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -70,3 +71,86 @@ async def test_smart_sync_failure_is_not_reported_as_land_not_found() -> None:
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Smart 地块数据同步失败"
+
+
+@pytest.mark.asyncio
+async def test_filtered_source_row_still_returns_422() -> None:
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=None)
+    sync = AsyncMock(return_value={"status": "filtered", "filtered_land_ids": ["25831"]})
+
+    with patch("app.routers.lands.sync_selected_lands", sync):
+        with pytest.raises(HTTPException) as exc_info:
+            await _get_land_or_sync("25831", db)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Smart 地块数据无法同步"
+
+
+@pytest.mark.asyncio
+async def test_soft_deleted_land_still_triggers_sync_lookup() -> None:
+    db = AsyncMock()
+    db.get = AsyncMock(
+        side_effect=[
+            SimpleNamespace(land_id="25831", deleted_at="tombstone"),
+            None,
+        ]
+    )
+    sync = AsyncMock(return_value={"status": "not_found", "missing_land_ids": ["25831"]})
+
+    with patch("app.routers.lands.sync_selected_lands", sync):
+        with pytest.raises(HTTPException) as exc_info:
+            await _get_land_or_sync("25831", db)
+
+    sync.assert_awaited_once_with(["25831"])
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Land parcel not found in Smart source"
+
+
+class LandLookupSyncTests(IsolatedAsyncioTestCase):
+    async def test_filtered_source_row_still_returns_422(self) -> None:
+        db = AsyncMock()
+        db.get = AsyncMock(return_value=None)
+        sync = AsyncMock(
+            return_value={"status": "filtered", "filtered_land_ids": ["25831"]}
+        )
+
+        with patch("app.routers.lands.sync_selected_lands", sync):
+            with self.assertRaises(HTTPException) as exc_info:
+                await _get_land_or_sync("25831", db)
+
+        self.assertEqual(exc_info.exception.status_code, 422)
+        self.assertEqual(exc_info.exception.detail, "Smart 地块数据无法同步")
+
+    async def test_active_land_does_not_trigger_smart_sync(self) -> None:
+        db = AsyncMock()
+        db.get = AsyncMock(return_value=_land())
+        sync = AsyncMock()
+
+        with patch("app.routers.lands.sync_selected_lands", sync):
+            result = await _get_land_or_sync("25831", db)
+
+        self.assertEqual(result.land_id, "25831")
+        sync.assert_not_awaited()
+
+    async def test_soft_deleted_land_still_triggers_sync_lookup(self) -> None:
+        db = AsyncMock()
+        db.get = AsyncMock(
+            side_effect=[
+                SimpleNamespace(land_id="25831", deleted_at="tombstone"),
+                None,
+            ]
+        )
+        sync = AsyncMock(
+            return_value={"status": "not_found", "missing_land_ids": ["25831"]}
+        )
+
+        with patch("app.routers.lands.sync_selected_lands", sync):
+            with self.assertRaises(HTTPException) as exc_info:
+                await _get_land_or_sync("25831", db)
+
+        sync.assert_awaited_once_with(["25831"])
+        self.assertEqual(exc_info.exception.status_code, 404)
+        self.assertEqual(
+            exc_info.exception.detail, "Land parcel not found in Smart source"
+        )

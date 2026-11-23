@@ -26,7 +26,6 @@ from fastapi import (
     status,
 )
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
 )
 from shapely.geometry import MultiPolygon, mapping, shape
@@ -1012,10 +1011,6 @@ async def backfill_all_lands(
             select(LandParcel.land_id)
             .where(LandParcel.deleted_at.is_(None))
             .where(
-                or_(
-                    LandParcel.base_id.is_(None),
-                    LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                ),
                 or_(
                     LandParcel.land_area_mu.is_(None),
                     LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,
