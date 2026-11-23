@@ -117,26 +117,27 @@ class NarrativeAiTests(unittest.TestCase):
                 {"summary": normalized["summary"], "changes": normalized["changes"]}
             )
         )
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", marked)
-        self.assertIn("<font color='#9C2B1B'><b>往差变化</b></font>", marked)
+        self.assertNotIn("backColor", marked)
         self.assertNotIn("9.99", marked)
+        self.assertIn("长势往好", marked)
         written = (
-            "<b>NDRE</b> 为 <b>0.57</b>，"
-            "<font color='#1F4D38'><b>往好变化</b></font>。"
+            "<b>NDRE</b> 为 "
+            '<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">0.57</font>，'
+            "这处冠层起来了。"
             "<font color='#0000FF'>蓝</font>"
         )
         shown = section_lines({"conclusion": [written]}, "conclusion")[0]
         self.assertIn("<b>NDRE</b>", shown)
-        self.assertIn("<b>0.57</b>", shown)
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", shown)
+        self.assertIn('color="#1F4D38"', shown)
+        self.assertIn('backColor="#D9F2E3"', shown)
         self.assertNotIn("0000FF", shown)
+        plain = section_lines({"conclusion": ["本期往好变化，数值 0.57。"]}, "conclusion")[0]
+        self.assertEqual(plain, "本期往好变化，数值 0.57。")
         parsed["conclusion"] = ["NDRE 往好变化，数值 0.57。", "另有一块地减产 3 成。"]
         parsed["weather"] = ["降水 12 毫米。"]
         again = normalize_judgment(parsed, payload)
         self.assertEqual(again["conclusion"], ["NDRE 往好变化，数值 0.57。"])
         self.assertEqual(again["weather"], [])
-        painted = section_lines(again, "conclusion")
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", painted[0])
 
     def test_http_response_is_used_without_a_local_good_bad_rule(self) -> None:
         class _Response:
@@ -188,10 +189,13 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertEqual(out["changes"][0]["judgment"], "better")
         self.assertIn("0.57", out["changes"][0]["sentence"])
         prompt = client.body["messages"][0]["content"]
-        self.assertIn("不足以判断", prompt)
+        self.assertIn("由你决定", prompt)
+        self.assertNotIn("往好变化必须", prompt)
         self.assertIn("#1F4D38", prompt)
         self.assertIn("<b>", prompt)
         self.assertIn("发挥", prompt)
+        self.assertIn("metric_notes", prompt)
+        self.assertIn("backColor", prompt)
         self.assertNotIn("delta > 0", prompt)
         self.assertNotIn('direction == "up"', prompt)
         user = client.body["messages"][1]["content"]

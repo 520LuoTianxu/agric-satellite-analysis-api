@@ -28,26 +28,28 @@ _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 parameter_guide 和本期参数。parameter_guide 说明每个参数是什么意思，其余字段是程序已经算好的参数值。
 
-请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要套“若升高就写某一句”的填空，也不要只写“全部上升、方向一致”就把参数丢掉。参数里有的指标、日期、田内部位、未采用观测、气象和周边对照，都写进对应段落；某个参数为空就不要编。
+请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。参数里有的指标、日期、田内部位、未采用观测、气象和周边对照都要写到；某个参数为空就不要编。不要写灌溉、施肥、打药这类处方。
 
-数值升高或降低只表示大小，不等于好坏。往好、往差、不足以判断由你阅读参数后决定。
+数值升高或降低只表示大小，不等于好坏。哪一句、哪个数字、哪个部位是重点，由你决定，再给那几个字加粗或上色。不要规定成某几个固定词，也不要每句末尾都补同一个词。
 
-版式：正文是雅黑 10 磅。需要强调时只用下面几种：
-- 指标名和这句里的关键数值加粗，保持黑色：<b>…</b>（雅黑粗体）
-- 往好变化：<font color='#1F4D38'><b>往好变化</b></font>
-- 往差变化：<font color='#9C2B1B'><b>往差变化</b></font>
-- 不足以判断：<font color='#4A4A4A'><b>不足以判断</b></font>
-不要用别的颜色，不要写出字体名称，不要用 Markdown。
+正文是雅黑 10 磅。你可以用这些标记，标记里面放你选中的字，不要把整句都包进去：
+- 加粗：<b>…</b>
+- 你认为往好处、值得注意的字：<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">…</font>
+- 你认为往差处、需要留意的字：<font face="YaHei-Bold" color="#9C2B1B" backColor="#F8D6D2">…</font>
+- 你认为还不能下判断的字：<font face="YaHei-Bold" color="#8A5A12" backColor="#F8E8C8">…</font>
+没有把握的地方保持正文。不要用别的颜色，不要用 Markdown。
 
+metric_notes 是「指标说明」：根据每个指标的 full_name、meaning 和本期数值，写成这个指标在本期说明了什么。不要复读定义原文，每个指标的写法不要相同，重点由你标。
+conclusion 是给种植户看的结论，重点由你用上面的标记标出来。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
 只输出 JSON：
-{"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"你写的句子"}],"conclusion":["你写的句子"],"field_notes":["你写的句子"],"infield":[{"metric":"ndre","text":"你写的句子"}],"surrounding":["你写的句子"],"weather":["你写的句子"]}
-changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear，并和句中的颜色用语一致。
+{"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"带标记的句子"}],"conclusion":["带标记的句子"],"field_notes":["带标记的句子"],"metric_notes":["带标记的句子"],"infield":[{"metric":"ndre","text":"带标记的句子"}],"surrounding":["带标记的句子"],"weather":["带标记的句子"]}
+changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。metric_notes 覆盖 metrics 里的每一个指标。
 """
 
 # 跟参数一起交给模型，只解释含义，不另给可以引用的数字。
 PARAMETER_GUIDE = {
-    "metrics": "每个指标的全田结果。full_name 和 meaning 说明这个指标反映什么。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。statistic 是中位数或均值。role 是本期主要指标还是辅助指标。",
+    "metrics": "每个指标的全田结果。full_name、meaning 和 formula 说明这个指标是什么、怎么计算。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。statistic 是中位数或均值。role 是本期主要指标还是辅助指标。",
     "used_observations": "本期采用的观测日期。",
     "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。",
     "infield": "田块内部差异。median、p10、p90 是有效像元的中位数和第10、第90百分位。flagged_pixels 是明显低于本田整体水平的像元个数，clustered_pixels 是其中连成片的个数。regions.name 是成片像元所在部位，share_percent 是该部位占成片像元的百分比。",
@@ -90,6 +92,7 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
                 "name": spec.abbr if spec else metric_abbr(key),
                 "full_name": spec.name if spec else metric_abbr(key),
                 "meaning": spec.purpose if spec else "",
+                "formula": spec.formula if spec else "",
                 "role": "主要" if role == "primary" else "辅助",
                 "latest": _index(item.get("latest")),
                 "baseline": _index(item.get("baseline")),
@@ -342,6 +345,7 @@ def normalize_judgment(
         "changes": changes,
         "conclusion": _clean_list((parsed or {}).get("conclusion"), blob),
         "field_notes": _clean_list((parsed or {}).get("field_notes"), blob),
+        "metric_notes": _clean_list((parsed or {}).get("metric_notes"), blob),
         "infield": infield,
         "surrounding": _clean_list((parsed or {}).get("surrounding"), blob),
         "weather": _clean_list((parsed or {}).get("weather"), blob),
@@ -358,6 +362,7 @@ def empty_judgment(
         "changes": [],
         "conclusion": [],
         "field_notes": [],
+        "metric_notes": [],
         "infield": {},
         "surrounding": [],
         "weather": [],
@@ -429,13 +434,12 @@ def generate_metric_judgment(
             http.close()
 
 
-_LABELS = {
-    "better": ("往好变化", "#1F4D38"),
-    "worse": ("往差变化", "#9C2B1B"),
-    "unclear": ("不足以判断", "#4A4A4A"),
-}
 _FONT_OPEN = re.compile(
-    r"<\s*font\s+color\s*=\s*['\"]#?(1F4D38|9C2B1B|4A4A4A)['\"]\s*>",
+    r"<\s*font\b[^>]*color\s*=\s*['\"]#?(1F4D38|9C2B1B|8A5A12)['\"][^>]*>",
+    re.IGNORECASE,
+)
+_BOLD_FACE = re.compile(
+    r"<\s*font\b(?![^>]*\bcolor\s*=)[^>]*face\s*=\s*['\"]YaHei-Bold['\"][^>]*>",
     re.IGNORECASE,
 )
 _FONT_CLOSE = re.compile(r"<\s*/\s*font\s*>", re.IGNORECASE)
@@ -449,6 +453,7 @@ def _has_wording(narrative: dict[str, Any]) -> bool:
         or narrative.get("changes")
         or narrative.get("conclusion")
         or narrative.get("field_notes")
+        or narrative.get("metric_notes")
         or narrative.get("infield")
         or narrative.get("surrounding")
         or narrative.get("weather")
@@ -466,7 +471,7 @@ def infield_line(narrative: dict[str, Any] | None, metric: str) -> list[str]:
 
 
 def judgment_paragraphs(narrative: dict[str, Any] | None) -> list[str]:
-    """Show the model's own sentences. Add the color only when the model left it out."""
+    """Render the sentences the model wrote, including the emphasis it chose."""
     if not narrative:
         return []
     items: list[str] = []
@@ -474,41 +479,25 @@ def judgment_paragraphs(narrative: dict[str, Any] | None) -> list[str]:
     if summary:
         items.append(_present(summary))
     for row in narrative.get("changes") or []:
-        label, color = _LABELS.get(row.get("judgment"), _LABELS["unclear"])
         sentence = str(row.get("sentence") or "").strip()
-        if label not in sentence:
-            name = metric_abbr(str(row.get("metric") or ""))
-            mark = f"<font color='{color}'><b>{label}</b></font>"
-            sentence = f"<b>{name}</b> {mark}。{sentence}".strip()
-        items.append(_present(sentence))
+        if sentence:
+            items.append(_present(sentence))
     return items
 
 
 def _present(value: str) -> str:
-    """Keep the bold and the three report colors the model was told to use."""
+    """Keep bold and the three palette colors the model applied. Do not choose the words."""
     slots: list[str] = []
 
     def stash(html: str) -> str:
         slots.append(html)
         return f"\u0000{len(slots) - 1}\u0000"
 
-    text = _FONT_OPEN.sub(
-        lambda match: stash(f"<font color='#{match.group(1).upper()}'>"), value
-    )
+    text = _FONT_OPEN.sub(lambda match: stash(match.group(0)), value)
+    text = _BOLD_FACE.sub(lambda match: stash(match.group(0)), text)
     text = _FONT_CLOSE.sub(lambda _match: stash("</font>"), text)
     text = _BOLD_OPEN.sub(lambda _match: stash("<b>"), text)
     text = _BOLD_CLOSE.sub(lambda _match: stash("</b>"), text)
     text = re.sub(r"<[^>]+>", "", text)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"\u0000(\d+)\u0000", lambda match: slots[int(match.group(1))], text)
-    for phrase, color in _LABELS.values():
-        wrapped = f"<font color='{color}'><b>{phrase}</b></font>"
-        parts = text.split(wrapped)
-        fixed = []
-        for part in parts:
-            part = part.replace(f"<b>{phrase}</b>", wrapped)
-            chunks = part.split(wrapped)
-            part = wrapped.join(chunk.replace(phrase, wrapped) for chunk in chunks)
-            fixed.append(part)
-        text = wrapped.join(fixed)
-    return text
+    return re.sub(r"\u0000(\d+)\u0000", lambda match: slots[int(match.group(1))], text)

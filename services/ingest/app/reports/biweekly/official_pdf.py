@@ -562,7 +562,8 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(Paragraph("变化好坏", styles["h2"]))
     _model_prose(story, styles, judgment_paragraphs(facts.get("ai_narrative")))
     story.append(Paragraph("指标说明", styles["h2"]))
-    _bullets(story, styles, text.metric_definition_items(facts))
+    metric_notes = section_lines(facts.get("ai_narrative"), "metric_notes")
+    _bullets(story, styles, metric_notes or text.metric_definition_items(facts))
     table = text.observation_table(facts)
     if len(table) > 1:
         n_metrics = len(table[0]) - 5
