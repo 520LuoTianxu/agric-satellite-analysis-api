@@ -41,6 +41,20 @@ def _now() -> str:
     return datetime.now(SHANGHAI).isoformat(timespec="seconds")
 
 
+def _fact_observation(row: dict) -> dict:
+    """Compact per-date optical row for report facts. Missing values stay None."""
+    return {
+        "date": str(row.get("date"))[:10],
+        "sensor": row.get("sensor"),
+        "ndvi_avg": row.get("ndvi_avg"),
+        "evi_avg": row.get("evi_avg"),
+        "ndre_avg": row.get("ndre_avg"),
+        "ndmi_avg": row.get("ndmi_avg"),
+        "cloud_cover": row.get("cloud_cover"),
+        "parcel_cloud_cover_pct": row.get("parcel_cloud_cover_pct"),
+    }
+
+
 class TriggerService:
     """In-process, file-backed job store for the local trigger API."""
 
@@ -468,6 +482,7 @@ class TriggerService:
         if not cutoff.endswith("+08:00") and "+08" not in cutoff:
             raise ReportError("CUTOFF_TIMEZONE_INVALID")
         observations = []
+        rejected_optical = []
         for row in source_rows:
             day = str(row.get("date"))[:10]
             if day >= period["end_exclusive"] or day < period["start"]:
@@ -475,6 +490,15 @@ class TriggerService:
             if str(row.get("sensor") or "").strip().upper() != "S2":
                 continue
             if row.get("quality_status") != "eligible_descriptive":
+                # 未采用的光学景也要留痕，报告才能如实说明本期有几次过境、几次因云量等被剔除。
+                rejected_optical.append(
+                    {
+                        "date": day,
+                        "reason": row.get("exclusion_reason") or "excluded",
+                        "cloud_cover": row.get("cloud_cover"),
+                        "parcel_cloud_cover_pct": row.get("parcel_cloud_cover_pct"),
+                    }
+                )
                 continue
             observations.append(row)
 
@@ -484,6 +508,9 @@ class TriggerService:
         if ref_id:
             reference = self._load_reference(ref_id)
 
+        prior_rows = self._prior_optics(job, period) if enriched else []
+        prior_dates = [str(row.get("date"))[:10] for row in prior_rows]
+
         native = job.get("payload", {}).get("native_plan") or None
         if native and native.get("intervals"):
             phase = display_phase(
@@ -491,6 +518,7 @@ class TriggerService:
                 observation_dates=[row["date"][:10] for row in enriched],
                 window_start=period["start"],
                 end_exclusive=period["end_exclusive"],
+                prior_observation_dates=prior_dates,
             )
             phase["phenology_basis"] = native.get("phenology_basis") or "PLAN_DERIVED_FROM_SMART_PLANT_TASK"
             phase["plan_source"] = "native"
@@ -501,6 +529,7 @@ class TriggerService:
                 observation_dates=[row["date"][:10] for row in enriched],
                 window_start=period["start"],
                 end_exclusive=period["end_exclusive"],
+                prior_observation_dates=prior_dates,
             )
             phase["phenology_basis"] = "PLAN_DERIVED_FROM_BTU_REFERENCE"
             phase["plan_source"] = "reference"
@@ -526,7 +555,6 @@ class TriggerService:
         if not metrics_for_compare:
             metrics_for_compare = ["ndvi", "evi", "ndre", "ndmi"]
         metrics_for_compare = [m for m in metrics_for_compare if m not in FORBIDDEN_REPORT_METRICS]
-        prior_rows = self._prior_optics(job, period)
         if enriched and prior_rows:
             prior_cmp = compare_to_prior(enriched, prior_rows, metrics_for_compare)
 
@@ -543,17 +571,10 @@ class TriggerService:
             "policy_version": POLICY_VERSION,
             "cutoff": cutoff,
             "optical_days": [row["date"][:10] for row in enriched],
-            "observations": [
-                {
-                    "date": row["date"][:10],
-                    "sensor": row.get("sensor"),
-                    "ndvi_avg": row.get("ndvi_avg"),
-                    "evi_avg": row.get("evi_avg"),
-                    "ndre_avg": row.get("ndre_avg"),
-                    "ndmi_avg": row.get("ndmi_avg"),
-                }
-                for row in enriched
-            ],
+            "observations": [_fact_observation(row) for row in enriched],
+            # 对比基准的逐日观测与本期一并下发，图表和文字才能用同一组日期，不各取各的。
+            "prior_observations": [_fact_observation(row) for row in prior_rows],
+            "rejected_optical": rejected_optical,
             "phase": phase,
             "prior_comparison": prior_cmp,
             "weather_summary": snapshot.get("weather_summary") or payload.get("weather_summary"),

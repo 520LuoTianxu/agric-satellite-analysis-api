@@ -65,7 +65,45 @@ class EligibleOpticalTests(unittest.TestCase):
             "ndmi_avg": 0.028775,
         }
         self.assertFalse(_eligible_optical(row))
-        self.assertEqual(_to_observation(row)["quality_status"], "excluded")
+        obs = _to_observation(row)
+        self.assertEqual(obs["quality_status"], "excluded")
+        # 未采用的原因和云量随观测下发，报告据此写「未采用：云量超过限值」。
+        self.assertEqual(obs["exclusion_reason"], "cloud_over_limit")
+        self.assertEqual(obs["parcel_cloud_cover_pct"], 100.0)
+        self.assertAlmostEqual(obs["cloud_cover"], 17.158769)
+
+    def test_eligible_row_carries_cloud_and_missing_cloud_stays_none(self) -> None:
+        row = {
+            "sensor": "S2",
+            "date": date(2025, 12, 5),
+            "parcel_cloud_cover_pct": None,
+            "cloud_cover": Decimal("12.5"),
+            "ndvi_avg": 0.163057,
+            "evi_avg": 0.116352,
+            "ndre_avg": None,
+            "ndmi_avg": -0.094621,
+        }
+        obs = _to_observation(row)
+        self.assertEqual(obs["quality_status"], "eligible_descriptive")
+        self.assertIsNone(obs["exclusion_reason"])
+        self.assertIsNone(obs["parcel_cloud_cover_pct"])
+        self.assertEqual(obs["cloud_cover"], 12.5)
+        self.assertIsNone(obs["ndre_avg"])
+
+    def test_clear_scene_without_index_values_is_excluded_with_reason(self) -> None:
+        row = {
+            "sensor": "S2",
+            "date": date(2025, 12, 6),
+            "parcel_cloud_cover_pct": 2.0,
+            "cloud_cover": 3.0,
+            "ndvi_avg": None,
+            "evi_avg": None,
+            "ndre_avg": None,
+            "ndmi_avg": None,
+        }
+        obs = _to_observation(row)
+        self.assertEqual(obs["quality_status"], "excluded")
+        self.assertEqual(obs["exclusion_reason"], "no_index_values")
 
     def test_radar_is_never_eligible_optical(self) -> None:
         row = {
@@ -83,3 +121,5 @@ class EligibleOpticalTests(unittest.TestCase):
         obs = _to_observation(row)
         self.assertEqual(obs["quality_status"], "excluded")
         self.assertEqual(obs["sensor"], "S1")
+        self.assertIsNone(obs["exclusion_reason"])
+        self.assertIsNone(obs["cloud_cover"])
