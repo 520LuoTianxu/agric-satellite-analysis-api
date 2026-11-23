@@ -16,7 +16,7 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_window, prior_period
@@ -33,7 +33,7 @@ from app.services.biweekly_report_flow import (
 from app.services.biweekly_mapping import load_wheat_phase_mapping
 from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
-from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service
+from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service, run_trigger_io, stream_official_download
 
 router = APIRouter(prefix="/lands/{land_id}/biweekly", tags=["biweekly"])
 
@@ -72,6 +72,20 @@ HTTP_ERRORS = {
     "GENERATE_FAILED": 500,
     "FONT_MISSING": 503,
     "PDF_RENDERER_UNAVAILABLE": 503,
+    "OFFICIAL_STORE_UNAVAILABLE": 503,
+    "ARTIFACT_URL_FORBIDDEN": 400,
+    "ARTIFACT_REF_INVALID": 400,
+    "ARTIFACT_KEY_MISMATCH": 400,
+    "ARTIFACT_BUCKET_MISMATCH": 400,
+    "ARTIFACT_SIZE_INVALID": 400,
+    "ARTIFACT_SIZE_MISMATCH": 409,
+    "ARTIFACT_CHECKSUM_INVALID": 400,
+    "ARTIFACT_CONFLICT": 409,
+    "ARTIFACT_LAND_INVALID": 400,
+    "ARTIFACT_JOB_INVALID": 400,
+    "ARTIFACT_KIND_INVALID": 400,
+    "ARTIFACT_INVALID": 400,
+    "ARTIFACT_MISSING": 400,
 }
 
 
@@ -98,6 +112,10 @@ def _http_for(exc: ReportError) -> JSONResponse:
 
 def _public(payload: dict, principal: BiweeklyPrincipal, *, dispatch: dict | None = None) -> dict:
     out = annotate_dispatch(payload, dispatch)
+    if out.get("artifact"):
+        from agric_satellite_analysis_common.biweekly.official_ref import public_artifact
+
+        out["artifact"] = public_artifact(out["artifact"])
     out["production_ready"] = False
     out["auto_publish"] = False
     out["auth"] = principal.public_auth()
@@ -127,10 +145,10 @@ def _with_plan(payload: dict, mapping: dict, calendar: dict) -> dict:
     return attach_public_stages(payload, calendar)
 
 
-def _season_for(service, land_id: str, season: str | None) -> str:
+async def _season_for(service, land_id: str, season: str | None) -> str:
     if season:
         return season
-    seasons = service.list_seasons(land_id)["seasons"]
+    seasons = (await run_trigger_io(service.list_seasons, land_id))["seasons"]
     if len(seasons) == 1:
         return seasons[0]["season_id"]
     raise ReportError("SEASON_NOT_FOUND")
@@ -143,7 +161,7 @@ async def list_seasons(
 ):
     try:
         service, mapping, calendar = await _smart_context(land_id)
-        payload = _with_plan(_public(service.list_seasons(land_id), principal), mapping, calendar)
+        payload = _with_plan(_public(await run_trigger_io(service.list_seasons, land_id), principal), mapping, calendar)
         return payload
     except ReportError as exc:
         return _http_for(exc)
@@ -157,8 +175,8 @@ async def list_periods(
 ):
     try:
         service, mapping, calendar = await _smart_context(land_id)
-        chosen = _season_for(service, land_id, season)
-        payload = _with_plan(_public(service.list_periods(land_id, chosen), principal), mapping, calendar)
+        chosen = await _season_for(service, land_id, season)
+        payload = _with_plan(_public(await run_trigger_io(service.list_periods, land_id, chosen), principal), mapping, calendar)
         # Enrich empty calendar periods with ingested scene counts when available.
         for row in payload.get("periods") or []:
             counts = await _scene_counts(land_id, row["start"], row["end_exclusive"])
@@ -194,23 +212,25 @@ async def request_backfill(
     """Create a bounded satellite_batch plan and dispatch it. Never auto-generates."""
     try:
         service, _mapping, _calendar = await _smart_context(land_id)
-        chosen = _season_for(service, land_id, (body.season if body else None) or season)
+        chosen = await _season_for(service, land_id, (body.season if body else None) or season)
         periods = service.catalog.periods(land_id, chosen)
         window = bounded_backfill_window(periods, period_id)
         # Queue a job record, but do not evaluate a local pack snapshot.
         # Smart periods have snapshot=None; running the fixture would false-fail.
-        job = service.request_backfill(
+        job = await run_trigger_io(
+            service.request_backfill,
             land_id, chosen, period_id, evaluate_local_fixture=False
         )
         try:
             dispatch = await dispatch_bounded_backfill(land_id, window)
         except ReportError as exc:
-            service.record_backfill_dispatch(
+            await run_trigger_io(
+                service.record_backfill_dispatch,
                 job["job_id"],
                 {"dispatched": False, "reason": exc.code, "job_ids": []},
             )
             raise
-        job = service.record_backfill_dispatch(job["job_id"], dispatch)
+        job = await run_trigger_io(service.record_backfill_dispatch, job["job_id"], dispatch)
         # Explicitly do not call request_generate here.
         return _public(job, principal, dispatch=dispatch)
     except ReportError as exc:
@@ -234,7 +254,7 @@ async def request_season_backfill(
     """
     try:
         service, _mapping, _calendar = await _smart_context(land_id)
-        chosen = _season_for(service, land_id, (body.season if body else None) or season)
+        chosen = await _season_for(service, land_id, (body.season if body else None) or season)
         periods = service.catalog.periods(land_id, chosen)
         job = await start_season_generate(
             service,
@@ -259,7 +279,7 @@ async def request_generate(
     try:
         service, mapping, calendar = await _smart_context(land_id)
         payload = body or GenerateBody()
-        chosen = _season_for(service, land_id, payload.season or season)
+        chosen = await _season_for(service, land_id, payload.season or season)
         ref = payload.reference_planting_instance_id
         native = payload.native_plan
         if native is None and hasattr(service.catalog, "native_plan"):
@@ -285,7 +305,7 @@ async def get_job(
 ):
     try:
         service = build_trigger_service()
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
         if job.get("status") == "dispatched":
@@ -324,14 +344,20 @@ async def download_job(
 ):
     try:
         service = build_trigger_service()
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
-        filename, data, mime = service.download(job_id)
-        return Response(
-            content=data,
+        filename, chunks, mime, size = await stream_official_download(service, job_id)
+        headers = {
+            "Content-Disposition": _content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if size:
+            headers["Content-Length"] = str(int(size))
+        return StreamingResponse(
+            chunks,
             media_type=mime or "application/octet-stream",
-            headers={"Content-Disposition": _content_disposition(filename)},
+            headers=headers,
         )
     except ReportError as exc:
         return _http_for(exc)

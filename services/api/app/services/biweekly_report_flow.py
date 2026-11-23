@@ -15,6 +15,7 @@ from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_w
 from agric_satellite_analysis_common.biweekly.models import ReportError
 
 from app.core.logging import logger
+from app.services.biweekly_trigger import run_trigger_io
 from app.services.biweekly_dispatch import (
     BIWEEKLY_PERIOD_DISPLAY_NAME,
     BIWEEKLY_PERIOD_JOB_TYPE,
@@ -148,7 +149,7 @@ async def _enrich_payload(
         weather_antecedent = summarize_weather(antecedent_rows) if antecedent_rows is not None else None
         if weather_daily and antecedent_rows:
             weather_daily = list(antecedent_rows) + list(weather_daily)
-    return {
+    fields = {
         "observations_override": observations,
         "prior_observations_override": prior_obs,
         "observation_source": "parcel_scene_products",
@@ -158,11 +159,15 @@ async def _enrich_payload(
         "weather_antecedent": weather_antecedent,
         "s1_count": _s1_count(observations),
     }
+    crop_type = (meta or {}).get("crop_type")
+    if crop_type:
+        fields["crop_type"] = crop_type
+    return fields
 
 
 async def finish_generate_job(service, job_id: str) -> dict:
     """Load live scenes and render the official PDF or an evidence-limited brief."""
-    job = service.get_job(job_id)
+    job = await run_trigger_io(service.get_job, job_id)
     if job.get("status") in {"ready", "evidence_limited"}:
         return job
     if job.get("error_code") == "BACKFILL_FAILED":
@@ -175,27 +180,27 @@ async def finish_generate_job(service, job_id: str) -> dict:
     except ReportError as exc:
         note = "读取已入库景失败，不能当作本期没有可用光学。"
         if exc.code == "SCENE_QUERY_FAILED":
-            return service.fail_stage(job_id, "SCENE_QUERY_FAILED", note=note)
-        return service.fail_stage(job_id, exc.code or "GENERATE_FAILED", note=str(exc.code))
-    service.set_payload_fields(job_id, **fields)
+            return await run_trigger_io(service.fail_stage, job_id, "SCENE_QUERY_FAILED", note=note)
+        return await run_trigger_io(service.fail_stage, job_id, exc.code or "GENERATE_FAILED", note=str(exc.code))
+    await run_trigger_io(service.set_payload_fields, job_id, **fields)
     # run_job only proceeds from queued/running/dispatched
-    current = service.get_job(job_id)
+    current = await run_trigger_io(service.get_job, job_id)
     if current["status"] == "failed":
         return current
     try:
-        finished = service.run_job(job_id)
+        finished = await run_trigger_io(service.run_job, job_id)
     except ReportError as exc:
-        return service.fail_stage(job_id, exc.code or "GENERATE_FAILED", note="出报失败，补数阶段已经结束。")
+        return await run_trigger_io(service.fail_stage, job_id, exc.code or "GENERATE_FAILED", note="出报失败，补数阶段已经结束。")
     if finished.get("status") == "failed" and not finished.get("error_code"):
-        return service.fail_stage(job_id, "GENERATE_FAILED", note="出报失败，补数阶段已经结束。")
+        return await run_trigger_io(service.fail_stage, job_id, "GENERATE_FAILED", note="出报失败，补数阶段已经结束。")
     result = dict(finished.get("result") or {})
     result["stage"] = "done"
     if finished.get("status") == "ready":
         result["note"] = "补数阶段已结束，正式报告 PDF 已生成。"
     elif finished.get("status") == "evidence_limited":
         result["note"] = "补数阶段已结束。本期确实没有可用光学观测，因此只给出证据受限简报，不是正式 PDF。"
-    service.merge_result(job_id, result, status=finished.get("status"))
-    return service.get_job(job_id)
+    await run_trigger_io(service.merge_result, job_id, result, status=finished.get("status"))
+    return await run_trigger_io(service.get_job, job_id)
 
 
 def backfill_is_hard_failure(dispatch: dict) -> bool:
@@ -212,10 +217,10 @@ def backfill_is_hard_failure(dispatch: dict) -> bool:
 async def _dispatch_official_report(service, job: dict) -> dict:
     """Hand official PDF generation to the download machine. Never render locally."""
     async with _lock_for(job["job_id"]):
-        job = service.get_job(job["job_id"])
+        job = await run_trigger_io(service.get_job, job["job_id"])
         existing = ((job.get("result") or {}).get("report") or {})
         if existing.get("dispatched") and existing.get("job_ids"):
-            return service.merge_result(job["job_id"], {"stage": "report"}, status="dispatched")
+            return await run_trigger_io(service.merge_result, job["job_id"], {"stage": "report"}, status="dispatched")
         window = _report_window(service, job)
         payload = job.get("payload") or {}
         backfill = (job.get("result") or {}).get("backfill") or {}
@@ -235,12 +240,14 @@ async def _dispatch_official_report(service, job: dict) -> dict:
         if not report.get("dispatched"):
             reason = report.get("reason") or "DISPATCH_FAILED"
             code = "LAND_NOT_AVAILABLE" if reason == "LAND_NOT_AVAILABLE" else "REPORT_DISPATCH_FAILED"
-            return service.fail_stage(
+            return await run_trigger_io(
+                service.fail_stage,
                 job["job_id"],
                 code,
                 note="出报任务下发失败。失败发生在把出报交给下载机时，不是因为没有可用光学，也不是本机出报渲染失败。",
             )
-        return service.merge_result(
+        return await run_trigger_io(
+            service.merge_result,
             job["job_id"],
             {
                 "stage": "report",
@@ -263,7 +270,8 @@ async def start_period_generate(
     season_job_type: bool = False,
 ) -> dict:
     """Dispatch bounded backfill first, then generate if backfill need not wait."""
-    job = service.request_generate(
+    job = await run_trigger_io(
+        service.request_generate,
         land_id,
         season_id,
         period_id,
@@ -288,11 +296,12 @@ async def start_period_generate(
             "parent_season_job_id": parent_season_job_id,
         },
     )
-    job = service.record_generate_backfill(job["job_id"], dispatch)
+    job = await run_trigger_io(service.record_generate_backfill, job["job_id"], dispatch)
     if job["status"] == "failed":
         return job
     if (job.get("result") or {}).get("backfill", {}).get("status") == "dispatched":
-        return service.merge_result(
+        return await run_trigger_io(
+            service.merge_result,
             job["job_id"],
             {
                 "note": "本期补数已派发到下载机；出报将在补数完成后由下载机进行。API 机不渲染 PDF。",
@@ -316,7 +325,7 @@ async def start_season_generate(
     native = None
     if hasattr(service.catalog, "native_plan"):
         native = service.catalog.native_plan(land_id, season_id)
-    season_job = service.request_season_backfill(land_id, season_id)
+    season_job = await run_trigger_io(service.request_season_backfill, land_id, season_id)
     child_ids: list[str] = []
     period_results: list[dict[str, Any]] = []
     waiting = False
@@ -363,11 +372,16 @@ async def start_season_generate(
     }
     if all_backfill_failed and period_results:
         result["note"] = "全季各期补数均失败，尚未出报。失败发生在补数阶段。"
-        service.record_backfill_dispatch(season_job["job_id"], {"dispatched": False, "reason": "BACKFILL_FAILED", "job_ids": []})
-        return service.merge_result(season_job["job_id"], result, status="failed")
+        await run_trigger_io(
+            service.record_backfill_dispatch,
+            season_job["job_id"],
+            {"dispatched": False, "reason": "BACKFILL_FAILED", "job_ids": []},
+        )
+        return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="failed")
     if waiting:
         # Keep the season job in dispatched while children wait.
-        service.record_backfill_dispatch(
+        await run_trigger_io(
+            service.record_backfill_dispatch,
             season_job["job_id"],
             {
                 "dispatched": True,
@@ -379,13 +393,14 @@ async def start_season_generate(
                 ],
             },
         )
-        return service.merge_result(season_job["job_id"], result, status="dispatched")
-    service.record_backfill_dispatch(
+        return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="dispatched")
+    await run_trigger_io(
+        service.record_backfill_dispatch,
         season_job["job_id"],
         {"dispatched": True, "reason": "NO_JOBS_CREATED", "job_ids": []},
     )
     # record_backfill_dispatch may mark failed when no jobs; overwrite to ready.
-    return service.merge_result(season_job["job_id"], result, status="ready")
+    return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="ready")
 
 
 async def maybe_finalize_from_satellite_job(params: dict[str, Any] | None, status: str | None) -> None:
@@ -411,7 +426,7 @@ async def maybe_finalize_from_satellite_job(params: dict[str, Any] | None, statu
 async def maybe_finalize_biweekly_job(job_id: str, *, service=None) -> dict | None:
     service = service or trigger_service()
     try:
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
     except ReportError:
         return None
     if job.get("kind") != "generate":
@@ -431,7 +446,8 @@ async def maybe_finalize_biweekly_job(job_id: str, *, service=None) -> dict | No
             return job
         successes = [job_id for job_id, status in outcomes.items() if status in TERMINAL_SUCCESS]
         if not successes:
-            return service.fail_stage(
+            return await run_trigger_io(
+                service.fail_stage,
                 job["job_id"],
                 "BACKFILL_FAILED",
                 note="补数任务全部失败或取消，尚未出报。失败发生在补数阶段，不是因为没有可用光学。",
@@ -439,7 +455,7 @@ async def maybe_finalize_biweekly_job(job_id: str, *, service=None) -> dict | No
     finished = await _dispatch_official_report(service, job)
     parent_id = (finished.get("payload") or {}).get("parent_season_job_id")
     if parent_id:
-        await _roll_up_season(service, service.get_job(parent_id))
+        await _roll_up_season(service, await run_trigger_io(service.get_job, parent_id))
     return finished
 
 
@@ -453,7 +469,7 @@ async def _roll_up_season(service, season_job: dict) -> dict:
     statuses = []
     for child_id in children:
         try:
-            child = service.get_job(child_id)
+            child = await run_trigger_io(service.get_job, child_id)
         except ReportError:
             waiting = True
             continue
@@ -472,15 +488,15 @@ async def _roll_up_season(service, season_job: dict) -> dict:
     result["period_results"] = period_results
     if waiting:
         result["stage"] = "backfill"
-        return service.merge_result(season_job["job_id"], result, status="dispatched")
+        return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="dispatched")
     result["stage"] = "done"
     if statuses and all(status == "failed" and True for status in statuses) and all(
-        service.get_job(child_id).get("error_code") == "BACKFILL_FAILED" for child_id in children
+        (await run_trigger_io(service.get_job, child_id)).get("error_code") == "BACKFILL_FAILED" for child_id in children
     ):
         result["note"] = "全季各期补数均失败，尚未出报。失败发生在补数阶段。"
-        return service.merge_result(season_job["job_id"], result, status="failed")
+        return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="failed")
     result["note"] = "全季各期任务已下发给下载机（补数与出报）。API 机不渲染 PDF。"
-    return service.merge_result(season_job["job_id"], result, status="ready")
+    return await run_trigger_io(service.merge_result, season_job["job_id"], result, status="ready")
 
 
 async def _job_statuses(job_ids: list[str]) -> dict[str, str] | None:
