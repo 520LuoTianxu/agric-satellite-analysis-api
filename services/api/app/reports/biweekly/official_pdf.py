@@ -546,7 +546,7 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     y = bullets(c, _next_week_bullets(facts), y, leading=18, sp=9)
     y = flow_html(
         c,
-        "上图若给出，是本田同一套田间光学观测。主指标因阶段而异，不把各期都写成绿度一项。与周边的对比若给出，是另一套读数，只比相对高低。不作同作物排名。",
+        "上图若给出，是本田同一套田间光学观测。主要指标因生长阶段而异，不以单一指标概括各期。与周边的对比若给出，采用另一项指标，只比较相对高低。不作同作物排名。",
         M,
         y,
         size=8.5,
