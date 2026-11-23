@@ -1,7 +1,8 @@
 """定时任务统一地块过滤规则。
 
 这些规则只约束自动同步、自动下载和自动计算，不删除数据库中的历史地块数据，
-也不改变管理员手工查询地块的权限。
+也不改变管理员手工查询地块的权限或租户 base_id 隔离。
+面积超过阈值的地块不进入自动化队列；不再按基地编号硬编码排除。
 """
 
 from __future__ import annotations
@@ -10,20 +11,9 @@ import math
 from datetime import date, timedelta
 from typing import Any
 
-# 这些基地不参与任何自动化遥感、天气、指数和报告任务。
-EXCLUDED_SCHEDULE_BASE_IDS = frozenset(
-    {"4", "6", "10", "17", "28", "33", "52", "62"}
-)
+# 面积超过该阈值的地块不进入自动化遥感、天气、指数和报告任务。
+# 不再按基地编号硬编码排除地块。
 MAX_SCHEDULE_LAND_AREA_MU = 5_000.0
-
-
-def is_excluded_schedule_base_id(base_id: Any) -> bool:
-    """Return whether a base ID is explicitly excluded from scheduled work."""
-    if base_id is None:
-        return False
-    return str(base_id).strip() in EXCLUDED_SCHEDULE_BASE_IDS
-
-
 
 BYPASS_SCHEDULE_LAND_FILTER_PARAM = "bypass_schedule_land_filter"
 
@@ -43,9 +33,10 @@ def should_bypass_schedule_land_filter(params: Any) -> bool:
 
 
 def is_scheduled_land_allowed(base_id: Any, land_area_mu: Any) -> bool:
-    """判断地块是否允许进入自动化任务队列。"""
-    if is_excluded_schedule_base_id(base_id):
-        return False
+    """判断地块是否允许进入自动化任务队列。
+
+    ``base_id`` 保留以兼容既有调用方，不再作为排除条件。
+    """
     if land_area_mu is None:
         return True
     try:
@@ -57,12 +48,8 @@ def is_scheduled_land_allowed(base_id: Any, land_area_mu: Any) -> bool:
 
 
 def scheduled_land_sql(alias: str = "p", *, area_param: str = "max_schedule_area_mu") -> str:
-    """Return a PostgreSQL predicate for scheduled-land queries."""
-    base_ids = ", ".join(f"'{value}'" for value in sorted(EXCLUDED_SCHEDULE_BASE_IDS))
-    return (
-        f"(({alias}.base_id IS NULL) OR trim({alias}.base_id::text) NOT IN ({base_ids})) "
-        f"AND coalesce({alias}.land_area_mu, 0) <= :{area_param}"
-    )
+    """Return a PostgreSQL predicate for the scheduled-land area limit."""
+    return f"coalesce({alias}.land_area_mu, 0) <= :{area_param}"
 
 
 def scheduled_date_window(
@@ -87,10 +74,8 @@ def scheduled_date_window(
 
 
 __all__ = [
-    "EXCLUDED_SCHEDULE_BASE_IDS",
     "MAX_SCHEDULE_LAND_AREA_MU",
     "BYPASS_SCHEDULE_LAND_FILTER_PARAM",
-    "is_excluded_schedule_base_id",
     "is_scheduled_land_allowed",
     "should_bypass_schedule_land_filter",
     "scheduled_date_window",

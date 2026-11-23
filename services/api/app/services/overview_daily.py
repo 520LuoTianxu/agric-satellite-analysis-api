@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
 )
 from agric_satellite_analysis_common.task_priority import BACKGROUND_TASK_PRIORITY
@@ -317,10 +316,6 @@ async def prepare_daily(db: AsyncSession, day: date) -> dict[str, Any]:
                     )
                     .where(LandParcel.deleted_at.is_(None))
                     .where(
-                        or_(
-                            LandParcel.base_id.is_(None),
-                            LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                        ),
                         or_(
                             LandParcel.land_area_mu.is_(None),
                             LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,

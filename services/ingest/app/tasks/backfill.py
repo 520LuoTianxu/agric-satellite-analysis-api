@@ -16,7 +16,6 @@ from sqlalchemy import or_, select, text
 import structlog
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    EXCLUDED_SCHEDULE_BASE_IDS,
     MAX_SCHEDULE_LAND_AREA_MU,
     is_scheduled_land_allowed,
 )
@@ -537,10 +536,6 @@ def backfill_all_existing_lands(self, months: int | None = None) -> dict:
             session.execute(
                 select(LandParcel).where(
                     LandParcel.deleted_at.is_(None),
-                    or_(
-                        LandParcel.base_id.is_(None),
-                        LandParcel.base_id.notin_(EXCLUDED_SCHEDULE_BASE_IDS),
-                    ),
                     or_(
                         LandParcel.land_area_mu.is_(None),
                         LandParcel.land_area_mu <= MAX_SCHEDULE_LAND_AREA_MU,

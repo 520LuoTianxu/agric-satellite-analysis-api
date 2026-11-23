@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlalchemy.orm import load_only
 
 from agric_satellite_analysis_common.scheduled_land_filter import (
-    is_excluded_schedule_base_id,
     is_scheduled_land_allowed,
 )
 from app.core.geo import repair_polygon_geometry
@@ -85,7 +84,6 @@ SOURCE_SQL = text(
         ON al.group_id = lg.group_id
     WHERE al.del_flag = 0
       AND lg.del_flag = 0
-      AND lg.base_id <> 46
     ORDER BY lg.group_id, al.land_id
     """
 )
@@ -765,10 +763,10 @@ def _selected_source_query(
     names = [f"selected_land_{index}" for index in range(len(normalized))]
     placeholders = ", ".join(f":{name}" for name in names)
     order_clause = "    ORDER BY lg.group_id, al.land_id"
+    # include_excluded_schedule_lands 仍由调用方传入，用于 Python 侧是否绕过
+    # 面积阈值；源 SQL 不再按基地编号排除，因此这里不必改写 WHERE。
+    _ = include_excluded_schedule_lands
     source_text = SOURCE_SQL.text
-    if include_excluded_schedule_lands:
-        # 显式地块回填允许管理员指定自动调度过滤之外的地块；全量每日同步仍保留过滤。
-        source_text = source_text.replace("      AND lg.base_id <> 46\n", "", 1)
     source_text = source_text.replace(
         order_clause,
         f"      AND CAST(al.land_id AS CHAR) IN ({placeholders})\n{order_clause}",
@@ -850,11 +848,8 @@ async def sync_selected_lands(
                 records: list[SourceParcel] = []
                 for row in rows:
                     raw_land_id = _string_or_none(row.get("land_id"))
-                    if not include_excluded_schedule_lands and (
-                        is_excluded_schedule_base_id(row.get("group_base_id"))
-                        or not is_scheduled_land_allowed(
-                            row.get("base_id"), row.get("land_area")
-                        )
+                    if not include_excluded_schedule_lands and not is_scheduled_land_allowed(
+                        row.get("base_id"), row.get("land_area")
                     ):
                         if raw_land_id:
                             summary["filtered_land_ids"].append(raw_land_id)
@@ -967,12 +962,9 @@ async def run_land_sync(*, today: date | None = None) -> dict[str, Any]:
                             if raw_land_id:
                                 seen_land_ids.add(raw_land_id)
                             # MySQL 源快照仍完整读取以保证缺失软删判断准确，
-                            # 但被排除基地或超大地块不进入主表 upsert，也不派发遥感任务。
-                            if (
-                                is_excluded_schedule_base_id(row.get("group_base_id"))
-                                or not is_scheduled_land_allowed(
-                                    row.get("base_id"), row.get("land_area")
-                                )
+                            # 但超大地块不进入主表 upsert，也不派发遥感任务。
+                            if not is_scheduled_land_allowed(
+                                row.get("base_id"), row.get("land_area")
                             ):
                                 summary["filtered_rows"] += 1
                                 continue
