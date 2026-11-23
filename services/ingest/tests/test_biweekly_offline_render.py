@@ -126,9 +126,10 @@ class PlanCalendarTests(unittest.TestCase):
         """接口机用的就是公共包里的同一个函数，离线与线上不会各算各的。"""
         from agric_satellite_analysis_common.biweekly import plan_calendar
 
-        api_module = (REPO_ROOT / "services" / "api" / "app" / "services" / "biweekly_plans.py").read_text(
-            encoding="utf-8"
-        )
+        api_source = REPO_ROOT / "services" / "api" / "app" / "services" / "biweekly_plans.py"
+        if not api_source.is_file():
+            self.skipTest("接口机代码不在本目录（离线代码包只带出报所需的代码）")
+        api_module = api_source.read_text(encoding="utf-8")
         self.assertIn("agric_satellite_analysis_common.biweekly.plan_calendar", api_module)
         self.assertNotIn("def build_seasons_from_rows", api_module)
         self.assertTrue(callable(plan_calendar.build_seasons_from_rows))

@@ -34,7 +34,8 @@
 
 种植季 = 本田 Smart 小麦批次（`crop_id = 4`）下全部种植任务的最早 `plan_start` 到最晚
 `plan_finish`。分期由 `iter_periods` 按 14 天一期切分，北京时间自然日，区间左闭右开，最后一期
-可以不足 14 天。期号从 1 起。种植季编号是 `2025-26` 这样的跨年标签。
+可以不足 14 天。期号从 1 起。种植季编号是 `2025/26` 这样的跨年标签（同年则为 `2026`），
+输出目录名里的 `/` 写成 `-`。
 
 没有方案就没有种植季，也就不出报，线上同样如此。离线工具不接受手填的起止日期。
 
@@ -136,7 +137,7 @@ CSV 的空单元格、`NULL`、`\N` 读成缺测，不读成 0。
 python scripts/biweekly_offline_render.py render --land-id 19994 \
     --plan plan.json --products products/ \
     [--scenes scenes.csv] [--weather weather.csv] [--land-name 名称] \
-    [--season 2025-26] [--period 7] [--as-of 2026-06-30] [--include-current] \
+    [--season 2025/26] [--period 7] [--as-of 2026-06-30] [--include-current] \
     --out out/
 ```
 
