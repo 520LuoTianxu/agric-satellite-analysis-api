@@ -7,6 +7,7 @@ disguised as "no optics".
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 from typing import Any
 
@@ -33,6 +34,42 @@ from app.services.biweekly_trigger import build_trigger_service
 TERMINAL_SUCCESS = {"completed", "succeeded"}
 TERMINAL_FAILURE = {"failed", "cancelled"}
 TERMINAL = TERMINAL_SUCCESS | TERMINAL_FAILURE
+
+# Per-job locks so S1/S2 completions, retries, and GET finalize cannot
+# dispatch two official biweekly_report work items for the same generate job.
+_finalize_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(job_id: str) -> asyncio.Lock:
+    lock = _finalize_locks.get(job_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _finalize_locks[job_id] = lock
+    return lock
+
+
+def _report_window(service, job: dict) -> dict[str, str]:
+    """Use dates persisted on the generate job; catalog.period is a fallback only.
+
+    The production finalize hook and GET /jobs path build a TriggerService
+    without SmartPlantingCatalog. Smart lands such as 32696 are not in the
+    local 6417 pack, so catalog.period would raise PERIOD_NOT_FOUND even
+    though the job already stored its official window.
+    """
+    window = job.get("window") or {}
+    start = window.get("start")
+    end_inclusive = window.get("end_inclusive")
+    if not end_inclusive and window.get("end_exclusive"):
+        end_inclusive = (
+            date.fromisoformat(str(window["end_exclusive"])) - timedelta(days=1)
+        ).isoformat()
+    if start and end_inclusive:
+        return {"date_from": str(start), "date_to_inclusive": str(end_inclusive)}
+    period = service.catalog.period(job["land_id"], job["season_id"], job["period_id"])
+    return {
+        "date_from": period["start"],
+        "date_to_inclusive": period.get("end_inclusive") or period["end_exclusive"],
+    }
 
 
 def _pdf_renderer():
@@ -172,45 +209,44 @@ def backfill_is_hard_failure(dispatch: dict) -> bool:
 
 async def _dispatch_official_report(service, job: dict) -> dict:
     """Hand official PDF generation to the download machine. Never render locally."""
-    existing = ((job.get("result") or {}).get("report") or {})
-    if existing.get("dispatched") and existing.get("job_ids"):
-        return service.merge_result(job["job_id"], {"stage": "report"}, status="dispatched")
-    period = service.catalog.period(job["land_id"], job["season_id"], job["period_id"])
-    payload = job.get("payload") or {}
-    backfill = (job.get("result") or {}).get("backfill") or {}
-    report = await dispatch_biweekly_report(
-        job["land_id"],
-        {
-            "date_from": period["start"],
-            "date_to_inclusive": period.get("end_inclusive") or period["end_exclusive"],
-        },
-        extra_params={
-            "biweekly_job_id": job["job_id"],
-            "biweekly_land_id": str(job["land_id"]),
-            "biweekly_season_id": job["season_id"],
-            "biweekly_period_id": str(job["period_id"]),
-            "reference_planting_instance_id": payload.get("reference_planting_instance_id"),
-            "parent_season_job_id": payload.get("parent_season_job_id"),
-            "wait_for_job_ids": list(backfill.get("job_ids") or []),
-        },
-    )
-    if not report.get("dispatched"):
-        reason = report.get("reason") or "DISPATCH_FAILED"
-        code = "LAND_NOT_AVAILABLE" if reason == "LAND_NOT_AVAILABLE" else "REPORT_DISPATCH_FAILED"
-        return service.fail_stage(
-            job["job_id"],
-            code,
-            note="出报任务下发失败。失败发生在把出报交给下载机时，不是因为没有可用光学，也不是本机出报渲染失败。",
+    async with _lock_for(job["job_id"]):
+        job = service.get_job(job["job_id"])
+        existing = ((job.get("result") or {}).get("report") or {})
+        if existing.get("dispatched") and existing.get("job_ids"):
+            return service.merge_result(job["job_id"], {"stage": "report"}, status="dispatched")
+        window = _report_window(service, job)
+        payload = job.get("payload") or {}
+        backfill = (job.get("result") or {}).get("backfill") or {}
+        report = await dispatch_biweekly_report(
+            job["land_id"],
+            window,
+            extra_params={
+                "biweekly_job_id": job["job_id"],
+                "biweekly_land_id": str(job["land_id"]),
+                "biweekly_season_id": job["season_id"],
+                "biweekly_period_id": str(job["period_id"]),
+                "reference_planting_instance_id": payload.get("reference_planting_instance_id"),
+                "parent_season_job_id": payload.get("parent_season_job_id"),
+                "wait_for_job_ids": list(backfill.get("job_ids") or []),
+            },
         )
-    return service.merge_result(
-        job["job_id"],
-        {
-            "stage": "report",
-            "report": report,
-            "note": "出报任务已下发给下载机。API 机不渲染 PDF。",
-        },
-        status="dispatched",
-    )
+        if not report.get("dispatched"):
+            reason = report.get("reason") or "DISPATCH_FAILED"
+            code = "LAND_NOT_AVAILABLE" if reason == "LAND_NOT_AVAILABLE" else "REPORT_DISPATCH_FAILED"
+            return service.fail_stage(
+                job["job_id"],
+                code,
+                note="出报任务下发失败。失败发生在把出报交给下载机时，不是因为没有可用光学，也不是本机出报渲染失败。",
+            )
+        return service.merge_result(
+            job["job_id"],
+            {
+                "stage": "report",
+                "report": report,
+                "note": "出报任务已下发给下载机。API 机不渲染 PDF。",
+            },
+            status="dispatched",
+        )
 
 
 async def start_period_generate(
@@ -362,9 +398,11 @@ async def maybe_finalize_from_satellite_job(params: dict[str, Any] | None, statu
         await maybe_finalize_biweekly_job(str(biweekly_job_id))
     except Exception as exc:  # noqa: BLE001 — never fail the job patch path
         logger.warning(
-            "biweekly_finalize_hook_failed job_id=%s err_type=%s",
+            "biweekly_finalize_hook_failed job_id=%s err_type=%s error_code=%s",
             biweekly_job_id,
             type(exc).__name__,
+            getattr(exc, "code", None),
+            exc_info=True,
         )
 
 

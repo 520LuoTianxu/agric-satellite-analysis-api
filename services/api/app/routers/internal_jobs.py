@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database import get_db
+from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
 from app.models.tables import Job
 
@@ -276,5 +277,10 @@ async def patch_job(
         params = job.params_json if isinstance(job.params_json, dict) else {}
         asyncio.create_task(maybe_finalize_from_satellite_job(params, job.status))
     except Exception:
-        pass
+        logger.warning(
+            "biweekly_finalize_schedule_failed job_id=%s status=%s",
+            job.id,
+            job.status,
+            exc_info=True,
+        )
     return _patch_out(job, include_progress=include_progress)
