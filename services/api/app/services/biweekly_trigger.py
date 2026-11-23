@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 from agric_satellite_analysis_common.biweekly.catalog import LocalPackCatalog
@@ -141,11 +143,49 @@ def build_trigger_service(
     renderer = pdf_renderer
     if renderer is None and use_official_pdf:
         renderer = _default_pdf_renderer()
+    official_store = None
+    object_storage = None
+    expected_bucket = None
+    try:
+        from app.services.biweekly_official_store import build_official_store
+
+        official_store = build_official_store()
+    except Exception as exc:  # noqa: BLE001
+        # Construction failure is not "no jobs"; TriggerService will surface
+        # OfficialStoreUnavailable on the first store operation if we attach a
+        # broken factory. Leaving the store unset only when we cannot import it.
+        from app.core.logging import logger
+
+        logger.warning(
+            "biweekly_official_store_unavailable_at_build err_type=%s",
+            type(exc).__name__,
+        )
+        from agric_satellite_analysis_common.biweekly.official_store import (
+            UnavailableOfficialStore,
+        )
+
+        # Fail closed: a construction error is not "no jobs" and must not
+        # silently persist new official jobs only under /tmp.
+        official_store = UnavailableOfficialStore(type(exc).__name__)
+    try:
+        from agric_satellite_analysis_common.storage import get_storage
+
+        object_storage = get_storage()
+        expected_bucket = object_storage.bucket()
+    except Exception as exc:  # noqa: BLE001
+        from app.core.logging import logger
+
+        logger.warning("biweekly_object_storage_unavailable_at_build err_type=%s", type(exc).__name__)
+        object_storage = None
+        expected_bucket = None
     return TriggerService(
         work_dir=work_dir,
         catalog=CompositeCatalog(_local_pack(), smart or EmptyCalendarCatalog()),
         auto_run=True,
         pdf_renderer=renderer,
+        official_store=official_store,
+        object_storage=object_storage,
+        expected_oss_bucket=expected_bucket,
     )
 
 
@@ -179,3 +219,48 @@ def annotate_dispatch(job: dict, dispatch: dict | None = None) -> dict:
     if planned:
         out["planned_batch"] = planned
     return out
+
+
+async def run_trigger_io(func, /, *args, **kwargs):
+    """Run TriggerService work that may use sync SQLAlchemy off the event loop.
+
+    SqlAlchemyOfficialStore opens a fresh Session per call via the session
+    factory, so this is safe as long as a Session object is not shared
+    across threads.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def stream_official_download(service, job_id: str):
+    """Stream an official artifact without blocking the event loop on OSS I/O.
+
+    ``iter_download`` (including the official-store lookup) and each OSS
+    chunk are produced on one worker thread; chunks are handed back through
+    an asyncio.Queue so other requests can proceed.
+    """
+    filename, chunks, mime, size = await run_trigger_io(service.iter_download, job_id)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    loop = asyncio.get_running_loop()
+    errors: list[BaseException] = []
+
+    def _produce() -> None:
+        try:
+            for chunk in chunks:
+                asyncio.run_coroutine_threadsafe(queue.put(("data", chunk)), loop).result()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(("end", None)), loop).result()
+
+    threading.Thread(target=_produce, name=f"oss-download-{job_id}", daemon=True).start()
+
+    async def _agen():
+        while True:
+            kind, payload = await queue.get()
+            if kind == "end":
+                if errors:
+                    raise errors[0]
+                return
+            yield payload
+
+    return filename, _agen(), mime, size

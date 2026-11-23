@@ -274,6 +274,14 @@ class ObjectStorage(ABC):
         """按块读取对象；后端必须原生实现以避免整对象驻留内存。"""
         raise NotImplementedError("storage backend must implement streaming reads")
 
+    def stat_object(self, key: str) -> dict:
+        """Return size_bytes / content_type / etag without reading the body."""
+        raise NotImplementedError
+
+    def read_prefix(self, key: str, n: int) -> bytes:
+        """Read the first ``n`` bytes. Unlike get_bytes(max_bytes=n), a larger object is not an error."""
+        raise NotImplementedError
+
     @abstractmethod
     def exists(self, key: str) -> bool:
         """Return True if the object exists."""
@@ -558,6 +566,48 @@ class OssStorage(ObjectStorage):
         return retry_oss_call(
             _once,
             what="exists",
+            attempts=self._max_retries,
+            base=self._backoff,
+            sleep=self._sleep,
+            key=key,
+        )
+
+    def stat_object(self, key: str) -> dict:
+        def _once() -> dict:
+            meta = self._bucket.head_object(key)
+            size = getattr(meta, "content_length", None)
+            if size is None:
+                size = int((getattr(meta, "headers", None) or {}).get("Content-Length") or 0)
+            return {
+                "size_bytes": int(size or 0),
+                "content_type": getattr(meta, "content_type", None)
+                or (getattr(meta, "headers", None) or {}).get("Content-Type"),
+                "etag": (getattr(meta, "etag", None) or "").strip('"') or None,
+            }
+
+        return retry_oss_call(
+            _once,
+            what="stat_object",
+            attempts=self._max_retries,
+            base=self._backoff,
+            sleep=self._sleep,
+            key=key,
+        )
+
+    def read_prefix(self, key: str, n: int) -> bytes:
+        if n <= 0:
+            return b""
+
+        def _once() -> bytes:
+            result = self._bucket.get_object(key, headers={"Range": f"bytes=0-{n - 1}"})
+            try:
+                return result.read(n)
+            finally:
+                result.close()
+
+        return retry_oss_call(
+            _once,
+            what="read_prefix",
             attempts=self._max_retries,
             base=self._backoff,
             sleep=self._sleep,

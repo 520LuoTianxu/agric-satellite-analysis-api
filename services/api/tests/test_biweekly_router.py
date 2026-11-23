@@ -65,6 +65,10 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.work = tempfile.TemporaryDirectory(prefix="biweekly-api-test-")
         settings.biweekly_pack_root = str(PACK_ROOT)
         settings.biweekly_work_dir = self.work.name
+        from tests.official_store_testutil import patch_official_store_not_migrated
+
+        self._official_store = patch_official_store_not_migrated()
+        self._official_store.start()
         settings.biweekly_dispatch_to_production = False
         from app.biweekly_dev_app import app
 
@@ -119,6 +123,8 @@ class BiweeklyRouterTests(unittest.TestCase):
         self._pdf_patch.start()
 
     def tearDown(self):
+        if getattr(self, "_official_store", None):
+            self._official_store.stop()
         for name, value in self._saved.items():
             setattr(settings, name, value)
         self._obs_patch.stop()
@@ -178,7 +184,7 @@ class BiweeklyRouterTests(unittest.TestCase):
     def test_main_app_mounts_biweekly_routes(self):
         # Importing app.main needs optional production deps (xlsxwriter, etc.).
         # Assert the source wiring instead: router is imported and included under /v1.
-        source = Path("/workspace/agric-api-biweekly-offline/services/api/app/main.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
         self.assertIn("biweekly,", source)
         self.assertIn("app.include_router(biweekly.router, prefix=PREFIX)", source)
         from app.routers import biweekly

@@ -10,6 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from agric_satellite_analysis_common.trace import stamp_trace_on_payload
+from agric_satellite_analysis_common.biweekly.official_ref import (
+    recoverable_oss_artifact,
+    registration_backoff_s,
+)
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -209,6 +213,52 @@ def enqueue_work_item_sync(
         session.close()
 
 
+
+def has_recoverable_oss_artifact(data: dict[str, Any] | None) -> bool:
+    """True when a work item already has an uploaded official object to register."""
+    return recoverable_oss_artifact(data) is not None
+
+
+def stamp_registration_backoff(item: WorkItem, now: datetime) -> None:
+    """Ensure a recoverable item is not reclaimed in a tight loop."""
+    if not work_item_has_recoverable_registration(item):
+        return
+    if not registration_retry_is_due(item, now):
+        return
+    progress = dict(item.progress_json or {})
+    attempts = int(progress.get("registration_attempts") or 0)
+    delay = registration_backoff_s(max(attempts, 1))
+    progress["stage"] = progress.get("stage") or "registration_pending"
+    progress["registration_retry_after"] = (now + timedelta(seconds=delay)).isoformat()
+    item.progress_json = progress
+
+
+def work_item_has_recoverable_registration(item: WorkItem) -> bool:
+    progress = item.progress_json if isinstance(item.progress_json, dict) else {}
+    payload = item.payload_json if isinstance(item.payload_json, dict) else {}
+    if has_recoverable_oss_artifact(progress) or has_recoverable_oss_artifact(payload):
+        return True
+    stage = str(progress.get("stage") or "")
+    return stage == "registration_pending" and has_recoverable_oss_artifact(progress)
+
+
+def registration_retry_is_due(item: WorkItem, now: datetime) -> bool:
+    progress = item.progress_json if isinstance(item.progress_json, dict) else {}
+    raw = progress.get("registration_retry_after")
+    if not raw:
+        return True
+    if isinstance(raw, datetime):
+        due = raw
+    else:
+        try:
+            due = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return now >= due
+
+
 # 每次 claim 前顺带回收过期租约；单次最多处理这么多行，避免大量租约同时过期
 # （如某台下载机掉线带走数百任务）时，每 4~5s 的 claim 都把数百行完整 payload 读进 API。
 REAPER_BATCH_LIMIT = 200
@@ -234,7 +284,9 @@ async def reaper_expired_leases(db: AsyncSession, *, limit: int = REAPER_BATCH_L
         item.lease_until = None
         item.updated_at = now
         # attempts只在真正领取时递增；这样“第三次领取后仍未完成”才是第三次失败。
-        if int(item.attempts or 0) >= MAX_WORK_ITEM_ATTEMPTS:
+        # 官方 PDF 已上传、只待登记时，必须回到 pending 让其它下载机接着登记，
+        # 不能把租约耗尽误记成生成失败。
+        if int(item.attempts or 0) >= MAX_WORK_ITEM_ATTEMPTS and not work_item_has_recoverable_registration(item):
             item.status = "failed"
             item.error = WORK_ITEM_LEASE_EXHAUSTED_ERROR
             await _mark_parent_job_failed(
@@ -242,6 +294,8 @@ async def reaper_expired_leases(db: AsyncSession, *, limit: int = REAPER_BATCH_L
             )
         else:
             item.status = "pending"
+            if work_item_has_recoverable_registration(item):
+                item.error = item.error or "REGISTRATION_PENDING"
     if items:
         await db.flush()
         logger.info("work_items_lease_reaped", count=len(items))
@@ -326,7 +380,11 @@ async def claim_work_items(
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
+    claimed: list[WorkItem] = []
     for row in rows:
+        if work_item_has_recoverable_registration(row) and not registration_retry_is_due(row, now):
+            # Leave the row pending; skip_locked already released on commit.
+            continue
         row.status = "leased"
         row.lease_owner = worker_id
         # 每次重新领取都覆盖最近领取机；租约释放时不清除此字段，保留完整追溯信息。
@@ -334,15 +392,16 @@ async def claim_work_items(
         row.lease_until = lease_until
         row.attempts = int(row.attempts or 0) + 1
         row.updated_at = now
-    if rows:
+        claimed.append(row)
+    if claimed:
         await db.flush()
         logger.info(
             "work_items_claimed",
-            count=len(rows),
+            count=len(claimed),
             worker_id=worker_id,
-            ids=[str(r.id) for r in rows],
+            ids=[str(r.id) for r in claimed],
         )
-    return rows
+    return claimed
 
 
 async def touch_download_worker(
@@ -566,9 +625,13 @@ async def fail_work_item(
     item.lease_until = None
     item.updated_at = now
     # 下载机派发失败可回队，但第三次领取仍失败时必须在API侧收敛为终态。
-    retry = bool(retry) and int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS
+    # 已上传 OSS、只待登记的工作项始终回队，不能把登记失败记成生成失败。
+    recoverable = work_item_has_recoverable_registration(item)
+    retry = bool(retry) and (int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS or recoverable)
     if retry:
         item.status = "pending"
+        if recoverable:
+            stamp_registration_backoff(item, now)
     else:
         item.status = "failed"
         await _mark_parent_job_failed(db, item, error=item.error, now=now)
@@ -601,4 +664,8 @@ __all__ = [
     "should_run_claim_agent",
     "work_item_idempotency_key",
     "work_queue_mode",
+    "has_recoverable_oss_artifact",
+    "work_item_has_recoverable_registration",
+    "registration_retry_is_due",
+    "stamp_registration_backoff",
 ]

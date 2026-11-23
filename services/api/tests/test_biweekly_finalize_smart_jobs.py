@@ -113,6 +113,12 @@ class SmartFinalizeTests(unittest.TestCase):
         }
         self.tmp = tempfile.TemporaryDirectory(prefix="smart-finalize-")
         settings.biweekly_work_dir = self.tmp.name
+
+        from tests.official_store_testutil import patch_official_store_not_migrated
+
+        self._official_store = patch_official_store_not_migrated()
+        self._official_store.start()
+
         settings.biweekly_pack_root = str(Path(self.tmp.name) / "no-pack")
         settings.biweekly_api_enabled = True
         settings.biweekly_dev_auth = True
@@ -135,6 +141,8 @@ class SmartFinalizeTests(unittest.TestCase):
         self._report_patch.start()
 
     def tearDown(self):
+        if getattr(self, "_official_store", None):
+            self._official_store.stop()
         self._status_patch.stop()
         self._report_patch.stop()
         for name, value in self._saved.items():
