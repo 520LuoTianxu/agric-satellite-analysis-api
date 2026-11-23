@@ -17,7 +17,6 @@ REGISTRATION_MAX_ATTEMPTS = 8
 READY_OFFICIAL = {"ready", "evidence_limited"}
 
 
-
 def _is_retry(exc: BaseException) -> bool:
     if type(exc).__name__ == "Retry":
         return True
@@ -51,7 +50,9 @@ def _wait_for_backfill(job_ids: list[str]) -> dict[str, str] | None:
             outcomes[job_id] = _job_status(row)
         return outcomes
     except Exception as exc:  # noqa: BLE001
-        logger.warning("biweekly_backfill_status_query_failed err_type=%s", type(exc).__name__)
+        logger.warning(
+            "biweekly_backfill_status_query_failed err_type=%s", type(exc).__name__
+        )
         return None
 
 
@@ -72,7 +73,9 @@ def _load_from_job_progress(report_id: str | None) -> dict[str, Any] | None:
     except Exception:
         return None
     progress = _progress_of(job)
-    from agric_satellite_analysis_common.biweekly.official_ref import recoverable_oss_artifact
+    from agric_satellite_analysis_common.biweekly.official_ref import (
+        recoverable_oss_artifact,
+    )
 
     if recoverable_oss_artifact(progress) is None:
         return None
@@ -89,7 +92,9 @@ def _load_registration(
     later claim to re-render or re-upload when the work item already has the
     OSS object reference.
     """
-    from agric_satellite_analysis_common.biweekly.official_ref import recoverable_oss_artifact
+    from agric_satellite_analysis_common.biweekly.official_ref import (
+        recoverable_oss_artifact,
+    )
 
     if recoverable_oss_artifact(registration_progress) is not None:
         return dict(registration_progress)
@@ -97,9 +102,47 @@ def _load_registration(
 
 
 def _registration_backoff_s(attempt: int) -> int:
-    from agric_satellite_analysis_common.biweekly.official_ref import registration_backoff_s
+    from agric_satellite_analysis_common.biweekly.official_ref import (
+        registration_backoff_s,
+    )
 
     return registration_backoff_s(attempt)
+
+
+def _retry_kwargs(task: Any, progress: dict[str, Any]) -> dict[str, Any]:
+    """Celery retry kwargs that keep the original claim plus the OSS ref.
+
+    ``self.retry(kwargs=...)`` replaces the message kwargs. Dropping land_id /
+    biweekly_job_id here would make the next delivery unable to register.
+    """
+    request = getattr(task, "request", None)
+    raw = getattr(request, "kwargs", None) if request is not None else None
+    base = dict(raw) if isinstance(raw, dict) else {}
+    base["registration_progress"] = progress
+    return base
+
+
+def _bucket_from_upload_uri(uploaded: Any, key: str) -> str | None:
+    """Bucket encoded in ``upload_file_via_storage``'s ``uri`` (``oss://bucket/key``).
+
+    ``OssStorage.uri_for`` writes that string from the same bucket name the
+    property exposes, and only after ``upload_file`` has returned.
+    """
+    if not isinstance(uploaded, dict):
+        return None
+    uri = str(uploaded.get("uri") or "")
+    prefix = "oss://"
+    if not uri.startswith(prefix):
+        return None
+    bucket, sep, object_key = uri[len(prefix) :].partition("/")
+    if not sep or not bucket or "/" in bucket or object_key != key:
+        return None
+    return bucket
+
+
+def _log_exc(event: str, **fields: Any) -> None:
+    """Log the active exception with a redacted type, message, and stack."""
+    logger.exception(event, **fields)
 
 
 def _business_job_already_complete(report_id: str | None) -> bool:
@@ -144,11 +187,8 @@ def _align_business_job(
             job_id=report_id,
         )
         return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "biweekly_job_complete_persist_failed err_type=%s",
-            type(exc).__name__,
-        )
+    except Exception:  # noqa: BLE001
+        _log_exc("biweekly_job_complete_persist_failed")
     if _business_job_already_complete(report_id):
         return True
     return False
@@ -204,18 +244,45 @@ def _upload_official_object(
     mime: str,
     data: bytes,
 ) -> dict[str, Any]:
-    from agric_satellite_analysis_common.biweekly.official_ref import official_object_key, sha256_bytes
-    from agric_satellite_analysis_common.storage import get_storage
+    from agric_satellite_analysis_common.biweekly.official_ref import (
+        official_object_key,
+        sha256_bytes,
+    )
+    from agric_satellite_analysis_common.storage import bucket_name, get_storage
     from app.tasks.storage_tasks import upload_file_via_storage
 
     key = official_object_key(land_id, job_id, kind=kind)
-    upload_file_via_storage(key, str(path), content_type=mime)
-    storage = get_storage()
+    # 哈希在上传前算好：上传函数一旦返回，对象已经在 OSS，不能再依赖临时文件。
+    digest = sha256_bytes(data)
+    uploaded = upload_file_via_storage(key, str(path), content_type=mime)
+    # 真实返回是 {key, public_url, backend, uri}，uri 形如 oss://{bucket}/{key}。
+    # bucket 是 str 属性，不能调用。属性读失败时用这条 uri，上传本身已经成功。
+    uri_bucket = _bucket_from_upload_uri(uploaded, key)
+    try:
+        bucket = bucket_name(get_storage())
+    except Exception:
+        _log_exc(
+            "biweekly_oss_bucket_property_failed",
+            key=key,
+            land_id=land_id,
+            biweekly_job_id=job_id,
+        )
+        if not uri_bucket:
+            raise
+        bucket = uri_bucket
+    else:
+        if uri_bucket and uri_bucket != bucket:
+            logger.warning(
+                "biweekly_oss_bucket_uri_mismatch",
+                key=key,
+                property_bucket=bucket,
+                uri_bucket=uri_bucket,
+            )
     return {
-        "bucket": storage.bucket(),
+        "bucket": bucket,
         "key": key,
         "size_bytes": len(data),
-        "sha256": sha256_bytes(data),
+        "sha256": digest,
         "content_type": mime,
         "kind": kind,
     }
@@ -266,8 +333,8 @@ def generate_biweekly_report(
                     note=note,
                     report_job_id=report_id,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("biweekly_complete_failed_call_failed err_type=%s", type(exc).__name__)
+            except Exception:  # noqa: BLE001
+                _log_exc("biweekly_complete_failed_call_failed")
         if report_id:
             try:
                 update_job_record(None, None, "failed", error=code, job_id=report_id)
@@ -276,7 +343,9 @@ def generate_biweekly_report(
         fail_work_item_http(work_item_id, note or code)
         return {"status": "failed", "error_code": code}
 
-    def _persist_registration(progress: dict[str, Any], *, attempts: int, error_type: str | None = None) -> None:
+    def _persist_registration(
+        progress: dict[str, Any], *, attempts: int, error_type: str | None = None
+    ) -> dict[str, Any]:
         from datetime import datetime, timedelta, timezone
 
         payload = {
@@ -288,23 +357,27 @@ def generate_biweekly_report(
             payload["last_registration_error"] = error_type
         if attempts >= REGISTRATION_MAX_ATTEMPTS:
             payload["registration_retry_after"] = (
-                datetime.now(timezone.utc) + timedelta(seconds=_registration_backoff_s(attempts))
+                datetime.now(timezone.utc)
+                + timedelta(seconds=_registration_backoff_s(attempts))
             ).isoformat()
         if report_id:
             try:
-                update_job_record(None, None, "running", progress=payload, job_id=report_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "biweekly_job_progress_persist_failed err_type=%s",
-                    type(exc).__name__,
+                update_job_record(
+                    None, None, "running", progress=payload, job_id=report_id
                 )
+            except Exception:  # noqa: BLE001
+                _log_exc("biweekly_job_progress_persist_failed")
         try:
             progress_work_item_http(work_item_id, payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "biweekly_work_item_progress_persist_failed err_type=%s",
-                type(exc).__name__,
-            )
+        except Exception:  # noqa: BLE001
+            _log_exc("biweekly_work_item_progress_persist_failed")
+        return payload
+
+    def _retry_registration(progress: dict[str, Any], attempts: int) -> None:
+        raise self.retry(
+            countdown=_registration_backoff_s(max(attempts, 1)),
+            kwargs=_retry_kwargs(self, progress),
+        )
 
     def _register(progress: dict[str, Any]) -> dict:
         oss = progress["oss_artifact"]
@@ -325,18 +398,16 @@ def generate_biweekly_report(
             if _is_retry(exc):
                 raise
             attempts += 1
-            try:
-                _persist_registration(progress, attempts=attempts, error_type=type(exc).__name__)
-            except Exception:
-                pass
+            saved = _persist_registration(
+                progress, attempts=attempts, error_type=type(exc).__name__
+            )
             if attempts < REGISTRATION_MAX_ATTEMPTS:
-                raise self.retry(countdown=_registration_backoff_s(attempts))
-            logger.warning(
-                "biweekly_registration_exhausted land_id=%s biweekly_job_id=%s attempts=%s err_type=%s",
-                land,
-                bj_id,
-                attempts,
-                type(exc).__name__,
+                _retry_registration(saved, attempts)
+            _log_exc(
+                "biweekly_registration_exhausted",
+                land_id=land,
+                biweekly_job_id=bj_id,
+                attempts=attempts,
             )
             try:
                 fail_work_item_http(
@@ -362,7 +433,11 @@ def generate_biweekly_report(
         if not aligned:
             try:
                 _persist_registration(
-                    {**progress, "official_registered": True, "official_status": official_status},
+                    {
+                        **progress,
+                        "official_registered": True,
+                        "official_status": official_status,
+                    },
                     attempts=max(attempts, 1),
                     error_type="JOB_ALIGN_PENDING",
                 )
@@ -395,11 +470,8 @@ def generate_biweekly_report(
                     },
                 )
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "biweekly_work_item_complete_failed err_type=%s",
-                type(exc).__name__,
-            )
+        except Exception:  # noqa: BLE001
+            _log_exc("biweekly_work_item_complete_failed")
             completed = False
         if not completed:
             try:
@@ -418,6 +490,7 @@ def generate_biweekly_report(
             }
         return {"status": official_status, "job": official, "job_align": "done"}
 
+    committed: dict[str, Any] | None = None
     try:
         prior = _load_registration(report_id, registration_progress)
         if prior and bj_id:
@@ -430,26 +503,31 @@ def generate_biweekly_report(
                     None,
                     None,
                     "running",
-                    progress={"stage": "waiting_for_backfill" if wait_ids else "loading"},
+                    progress={
+                        "stage": "waiting_for_backfill" if wait_ids else "loading"
+                    },
                     job_id=report_id,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "biweekly_job_running_persist_failed err_type=%s",
-                    type(exc).__name__,
-                )
+            except Exception:  # noqa: BLE001
+                _log_exc("biweekly_job_running_persist_failed")
         if wait_ids:
             outcomes = _wait_for_backfill(wait_ids)
-            if outcomes is None or any(status not in TERMINAL for status in outcomes.values()):
+            if outcomes is None or any(
+                status not in TERMINAL for status in outcomes.values()
+            ):
                 retries = int(getattr(self.request, "retries", 0) or 0)
                 max_r = int(getattr(self, "max_retries", 40) or 40)
                 if retries < max_r:
-                    raise self.retry(countdown=int(getattr(self, "default_retry_delay", 60) or 60))
+                    raise self.retry(
+                        countdown=int(getattr(self, "default_retry_delay", 60) or 60)
+                    )
                 return _fail(
                     "BACKFILL_FAILED",
                     "等待补数任务超时，尚未出报。失败发生在补数阶段，不是因为没有可用光学。",
                 )
-            successes = [item for item, status in outcomes.items() if status in TERMINAL_SUCCESS]
+            successes = [
+                item for item, status in outcomes.items() if status in TERMINAL_SUCCESS
+            ]
             if not successes:
                 return _fail(
                     "BACKFILL_FAILED",
@@ -459,19 +537,25 @@ def generate_biweekly_report(
         if not bj_id:
             return _fail("BODY_INVALID", "缺少 biweekly_job_id，无法回传正式报告。")
 
-        from agric_satellite_analysis_common.internal_api import get_biweekly_report_inputs
+        from agric_satellite_analysis_common.internal_api import (
+            get_biweekly_report_inputs,
+        )
 
         inputs = get_biweekly_report_inputs(bj_id)
         if inputs.get("error_code"):
             code = str(inputs.get("error_code") or "SCENE_QUERY_FAILED")
-            note = str(inputs.get("note") or "读取已入库景失败，不能当作本期没有可用光学。")
+            note = str(
+                inputs.get("note") or "读取已入库景失败，不能当作本期没有可用光学。"
+            )
             return _fail(code, note)
 
         facts = dict(inputs.get("facts") or {})
         status = str(inputs.get("status") or "")
         land_for_key = str(land or facts.get("land_id") or "")
         if status == "evidence_limited":
-            content = (__import__("json").dumps(facts, ensure_ascii=False, indent=2)).encode("utf-8")
+            content = (
+                __import__("json").dumps(facts, ensure_ascii=False, indent=2)
+            ).encode("utf-8")
             tmp = Path(tempfile.mkdtemp(prefix="biweekly-official-"))
             dest = tmp / "evidence-limited.json"
             try:
@@ -502,28 +586,30 @@ def generate_biweekly_report(
                 "oss_artifact": oss_meta,
                 "registration_attempts": 0,
             }
-            _persist_registration(progress, attempts=0)
+            # 先记住内存中的 OSS 引用，再写 work item。写失败也不能回到生成失败。
+            committed = progress
+            committed = _persist_registration(progress, attempts=0)
             try:
                 _complete(
                     bj_id,
                     status="registration_pending",
-                    filename=progress.get("filename"),
-                    mime=progress.get("mime"),
-                    kind=progress.get("kind"),
-                    facts=progress.get("facts"),
-                    note=progress.get("note"),
+                    filename=committed.get("filename"),
+                    mime=committed.get("mime"),
+                    kind=committed.get("kind"),
+                    facts=committed.get("facts"),
+                    note=committed.get("note"),
                     report_job_id=report_id,
-                    oss=progress.get("oss_artifact"),
+                    oss=committed.get("oss_artifact"),
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "biweekly_registration_pending_notify_failed err_type=%s",
-                    type(exc).__name__,
-                )
-            return _register(progress)
+            except Exception:  # noqa: BLE001
+                _log_exc("biweekly_registration_pending_notify_failed")
+            return _register(committed)
 
         if status != "ready" or not facts:
-            return _fail("GENERATE_FAILED", "出报输入不完整，补数阶段已经结束，这不是因为没有可用光学。")
+            return _fail(
+                "GENERATE_FAILED",
+                "出报输入不完整，补数阶段已经结束，这不是因为没有可用光学。",
+            )
 
         from app.reports.biweekly.generate import generate_official_biweekly_pdf
 
@@ -563,48 +649,62 @@ def generate_biweekly_report(
             "oss_artifact": oss_meta,
             "registration_attempts": 0,
         }
-        _persist_registration(progress, attempts=0)
+        # 先记住内存中的 OSS 引用，再写 work item。写失败也不能回到生成失败。
+        committed = progress
+        committed = _persist_registration(progress, attempts=0)
         try:
             _complete(
                 bj_id,
                 status="registration_pending",
-                filename=progress.get("filename"),
-                mime=progress.get("mime"),
-                kind=progress.get("kind"),
-                facts=progress.get("facts"),
-                note=progress.get("note"),
+                filename=committed.get("filename"),
+                mime=committed.get("mime"),
+                kind=committed.get("kind"),
+                facts=committed.get("facts"),
+                note=committed.get("note"),
                 report_job_id=report_id,
-                oss=progress.get("oss_artifact"),
+                oss=committed.get("oss_artifact"),
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "biweekly_registration_pending_notify_failed err_type=%s",
-                type(exc).__name__,
-            )
-        return _register(progress)
+        except Exception:  # noqa: BLE001
+            _log_exc("biweekly_registration_pending_notify_failed")
+        return _register(committed)
     except Exception as exc:
         if _is_retry(exc):
             raise
         from agric_satellite_analysis_common.biweekly.models import ReportError
+        from agric_satellite_analysis_common.biweekly.official_ref import (
+            recoverable_oss_artifact,
+        )
 
-        prior = _load_registration(report_id, registration_progress)
-        if prior:
-            # OSS already holds the PDF; a later error is a registration problem.
-            logger.warning(
-                "biweekly_registration_error_after_upload land_id=%s biweekly_job_id=%s err_type=%s",
-                land,
-                bj_id,
-                type(exc).__name__,
+        prior = committed if recoverable_oss_artifact(committed) else None
+        if prior is None:
+            prior = _load_registration(report_id, registration_progress)
+        if prior and recoverable_oss_artifact(prior):
+            # 上传已经成功。这里的异常是登记/对齐问题，不能写成 GENERATE_FAILED，
+            # 也不能把 OSS 引用丢掉。先写入 work item，再只重试登记。
+            _log_exc(
+                "biweekly_registration_error_after_upload",
+                land_id=land,
+                biweekly_job_id=bj_id,
+                report_job_id=report_id,
             )
-            return _register(prior)
+            saved = _persist_registration(
+                prior,
+                attempts=int(prior.get("registration_attempts") or 0),
+                error_type=type(exc).__name__,
+            )
+            return _register(saved)
         if isinstance(exc, ReportError):
             code = exc.code or "GENERATE_FAILED"
-            note = "出报失败，补数阶段已经结束。" if code != "SCENE_QUERY_FAILED" else "读取已入库景失败，不能当作本期没有可用光学。"
+            note = (
+                "出报失败，补数阶段已经结束。"
+                if code != "SCENE_QUERY_FAILED"
+                else "读取已入库景失败，不能当作本期没有可用光学。"
+            )
             return _fail(code, note)
-        logger.exception(
-            "biweekly_report_failed land_id=%s biweekly_job_id=%s report_job_id=%s",
-            land,
-            bj_id,
-            report_id,
+        _log_exc(
+            "biweekly_report_failed",
+            land_id=land,
+            biweekly_job_id=bj_id,
+            report_job_id=report_id,
         )
         return _fail("GENERATE_FAILED", "出报失败，补数阶段已经结束。")

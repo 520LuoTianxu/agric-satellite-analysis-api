@@ -3,6 +3,7 @@
 数值、日期和升高、降低由程序算好后传给模型。模型只写判断和说明，
 不能改数字，也不能新增事实里没有的数字。代码不根据涨跌或生育期决定好坏。
 模型名、地址和密钥只从 BAILIAN_MODEL、BAILIAN_BASE_URL、BAILIAN_API_KEY 读取。
+补全长度和等待时间从 BAILIAN_MAX_TOKENS、BAILIAN_TIMEOUT_S 读取，并夹在固定上下界里。
 """
 
 from __future__ import annotations
@@ -13,16 +14,34 @@ import os
 import re
 from typing import Any
 
+import structlog
+
 from agric_satellite_analysis_common.biweekly.metric_specs import (
     METRIC_SPECS,
     metric_abbr,
 )
 from agric_satellite_analysis_common.biweekly.phase_policy import STAGE_BACKGROUND
 
+logger = structlog.get_logger("biweekly.narrative")
+
 DEFAULT_BASE_URL = (
     "https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 )
 DEFAULT_MODEL = "qwen3.7-flash"
+# deepseek-v4.1-flash-1017 把思考算进 completion tokens。隔离测量里
+# max_tokens=1800 得到 HTTP 200、finish_reason=length、completion_tokens=1800、
+# content 为空、reasoning_content 约 4249 字，思考用尽预算后没有 JSON。
+# 8192 是同一次测量里结论、核查、变化和气象能返回的预算，用作默认值，
+# 不是生产 P18 的回放。BAILIAN_MAX_TOKENS 可改，但夹在 4096–16384：
+# 下限高于这次失败的 1800，给思考之后的 JSON 留余量；上限避免误配成无界补全。
+# 这次空正文是 length，不是超时。更大的补全需要更长的客户端等待。
+# BAILIAN_TIMEOUT_S 默认 120 秒，也是那次测量里请求能完成的值，夹在 30–300。
+DEFAULT_MAX_TOKENS = 8192
+MIN_MAX_TOKENS = 4096
+MAX_MAX_TOKENS = 16384
+DEFAULT_TIMEOUT_S = 120
+MIN_TIMEOUT_S = 30
+MAX_TIMEOUT_S = 300
 JUDGMENTS = {"better", "worse", "unclear"}
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
@@ -70,6 +89,123 @@ def bailian_settings() -> dict[str, str]:
         "model": (os.environ.get("BAILIAN_MODEL") or DEFAULT_MODEL).strip()
         or DEFAULT_MODEL,
     }
+
+
+def _bounded_int(name: str, default: int, floor: int, ceiling: int) -> tuple[int, bool]:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default, False
+    try:
+        value = int(raw)
+    except ValueError:
+        return default, True
+    applied = min(ceiling, max(floor, value))
+    return applied, applied != value
+
+
+def completion_budget() -> tuple[int, bool]:
+    """Tokens requested for one completion, after the floor and ceiling."""
+    return _bounded_int(
+        "BAILIAN_MAX_TOKENS", DEFAULT_MAX_TOKENS, MIN_MAX_TOKENS, MAX_MAX_TOKENS
+    )
+
+
+def completion_timeout_s(explicit: float | None = None) -> tuple[float, bool]:
+    """Client wait. An explicit value is clamped; otherwise the env or default is used."""
+    if explicit is not None:
+        try:
+            value = int(explicit)
+        except (TypeError, ValueError):
+            return float(DEFAULT_TIMEOUT_S), True
+        applied = min(MAX_TIMEOUT_S, max(MIN_TIMEOUT_S, value))
+        return float(applied), applied != value
+    seconds, clamped = _bounded_int(
+        "BAILIAN_TIMEOUT_S", DEFAULT_TIMEOUT_S, MIN_TIMEOUT_S, MAX_TIMEOUT_S
+    )
+    return float(seconds), clamped
+
+
+def _content_text(content: Any) -> str:
+    """Assistant content only. Reasoning parts are not text."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get("type") or "text")
+        if kind == "text" and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+    return "".join(parts)
+
+
+def interpret_chat_completion(body: Any) -> tuple[str, dict[str, Any]]:
+    """Return content text and a diagnostic that never includes reasoning text.
+
+    HTTP 200 is not a successful body. ``reasoning_content`` is counted and
+    then discarded. It is not parsed as the report.
+    """
+    choice: dict[str, Any] = {}
+    usage: dict[str, Any] = {}
+    if isinstance(body, dict):
+        choices = body.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            choice = choices[0]
+        if isinstance(body.get("usage"), dict):
+            usage = body["usage"]
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    text = _content_text(message.get("content"))
+    reasoning = message.get("reasoning_content")
+    tokens = usage.get("completion_tokens")
+    return text, {
+        "finish_reason": choice.get("finish_reason"),
+        "completion_tokens": tokens if isinstance(tokens, int) else None,
+        "content_chars": len(text.strip()),
+        "reasoning_chars": len(reasoning) if isinstance(reasoning, str) else 0,
+    }
+
+
+def _unusable_kind(
+    text: str,
+    parsed: dict[str, Any] | None,
+    normalized: dict[str, Any] | None,
+    diag: dict[str, Any],
+) -> str | None:
+    """Name why this completion cannot be report prose. None means the text is usable."""
+    length = diag.get("finish_reason") == "length"
+    if not text.strip():
+        if length:
+            return "truncated_response"
+        if diag.get("reasoning_chars"):
+            return "empty_with_reasoning"
+        return "empty_content"
+    if parsed is None:
+        return "truncated_response" if length else "invalid_json"
+    if not _has_wording(normalized or {}):
+        return "truncated_response" if length else "empty_fields"
+    return None
+
+
+def _log_unusable(error: str, diag: dict[str, Any], *, model: str) -> None:
+    # 只记长度和原因。不记密钥、正文或 reasoning 原文。
+    logger.warning(
+        "biweekly_narrative_unusable",
+        error=error,
+        model=model,
+        finish_reason=diag.get("finish_reason"),
+        completion_tokens=diag.get("completion_tokens"),
+        content_chars=diag.get("content_chars"),
+        reasoning_chars=diag.get("reasoning_chars"),
+        max_tokens=diag.get("max_tokens"),
+        max_tokens_clamped=diag.get("max_tokens_clamped"),
+        http_status=diag.get("http_status"),
+        timeout_s=diag.get("timeout_s"),
+    )
 
 
 def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
@@ -353,9 +489,13 @@ def normalize_judgment(
 
 
 def empty_judgment(
-    *, configured: bool, error: str | None = None, model: str | None = None
+    *,
+    configured: bool,
+    error: str | None = None,
+    model: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "llm_configured": configured,
         "model": model,
         "summary": "",
@@ -368,15 +508,22 @@ def empty_judgment(
         "weather": [],
         "error": error,
     }
+    if diagnostics:
+        out["diagnostics"] = diagnostics
+    return out
 
 
 def generate_metric_judgment(
     facts: dict[str, Any],
     *,
-    timeout: float = 60.0,
-    client: httpx.Client | None = None,
+    timeout: float | None = None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
-    """Ask the configured model for better/worse wording. No key or failure leaves it empty."""
+    """Ask the configured model for wording. A failed body stays empty and named.
+
+    Does not raise. Does not copy reasoning into the report. Does not invent
+    a sentence when the body is missing, cut off, or not JSON.
+    """
     cfg = bailian_settings()
     payload = narrative_input(facts)
     if not payload["metrics"]:
@@ -385,10 +532,12 @@ def generate_metric_judgment(
         )
     if not cfg["api_key"]:
         return empty_judgment(configured=False, error="not_configured", model=None)
+    max_tokens, tokens_clamped = completion_budget()
+    timeout_s, timeout_clamped = completion_timeout_s(timeout)
     body = {
         "model": cfg["model"],
         "temperature": 0.4,
-        "max_tokens": 1800,
+        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -405,29 +554,85 @@ def generate_metric_judgment(
     own_client = client is None
     import httpx
 
-    http = client or httpx.Client(timeout=timeout)
+    http = client or httpx.Client(timeout=timeout_s)
     try:
         response = http.post(
             f"{cfg['base_url']}/chat/completions", headers=headers, json=body
         )
         response.raise_for_status()
-        content = (
-            (response.json().get("choices") or [{}])[0].get("message") or {}
-        ).get("content") or ""
-        normalized = normalize_judgment(_extract_json(content), payload)
-        if not _has_wording(normalized):
+        try:
+            raw = response.json()
+        except ValueError:
+            diag = {
+                "http_status": response.status_code,
+                "max_tokens": max_tokens,
+                "max_tokens_clamped": tokens_clamped,
+                "timeout_s": timeout_s,
+                "timeout_clamped": timeout_clamped,
+                "content_chars": 0,
+                "reasoning_chars": 0,
+            }
+            _log_unusable("invalid_json", diag, model=cfg["model"])
             return empty_judgment(
-                configured=True, error="unparseable_response", model=cfg["model"]
+                configured=True,
+                error="invalid_json",
+                model=cfg["model"],
+                diagnostics=diag,
             )
+        text, diag = interpret_chat_completion(raw)
+        diag["http_status"] = response.status_code
+        diag["max_tokens"] = max_tokens
+        diag["max_tokens_clamped"] = tokens_clamped
+        diag["timeout_s"] = timeout_s
+        diag["timeout_clamped"] = timeout_clamped
+        parsed = _extract_json(text) if text.strip() else None
+        normalized = normalize_judgment(parsed, payload) if parsed is not None else None
+        kind = _unusable_kind(text, parsed, normalized, diag)
+        if kind:
+            _log_unusable(kind, diag, model=cfg["model"])
+            return empty_judgment(
+                configured=True, error=kind, model=cfg["model"], diagnostics=diag
+            )
+        if diag.get("finish_reason") == "length":
+            diag["truncated"] = True
         return {
             "llm_configured": True,
             "model": cfg["model"],
-            **normalized,
+            **(normalized or {}),
             "error": None,
+            "diagnostics": diag,
         }
-    except Exception as exc:  # noqa: BLE001 — 模型失败时不改用代码判断好坏
+    except httpx.TimeoutException:
+        diag = {
+            "max_tokens": max_tokens,
+            "max_tokens_clamped": tokens_clamped,
+            "timeout_s": timeout_s,
+            "timeout_clamped": timeout_clamped,
+        }
+        _log_unusable("timeout", diag, model=cfg["model"])
         return empty_judgment(
-            configured=True, error=type(exc).__name__, model=cfg["model"]
+            configured=True, error="timeout", model=cfg["model"], diagnostics=diag
+        )
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        diag = {
+            "http_status": status,
+            "max_tokens": max_tokens,
+            "max_tokens_clamped": tokens_clamped,
+            "timeout_s": timeout_s,
+        }
+        _log_unusable("http_error", diag, model=cfg["model"])
+        return empty_judgment(
+            configured=True, error="http_error", model=cfg["model"], diagnostics=diag
+        )
+    except Exception as exc:  # noqa: BLE001 — 模型失败时不改用代码判断好坏
+        diag = {"exception_type": type(exc).__name__, "max_tokens": max_tokens}
+        _log_unusable(type(exc).__name__, diag, model=cfg["model"])
+        return empty_judgment(
+            configured=True,
+            error=type(exc).__name__,
+            model=cfg["model"],
+            diagnostics=diag,
         )
     finally:
         if own_client:

@@ -115,9 +115,7 @@ def _parent_job_id_from_payload(payload: dict[str, Any]) -> uuid.UUID | None:
         for followup_key in ("followup_assessment", "followup_season_growth"):
             followup = container.get(followup_key)
             if isinstance(followup, dict):
-                values.extend(
-                    [followup.get("job_id"), followup.get("parent_job_id")]
-                )
+                values.extend([followup.get("job_id"), followup.get("parent_job_id")])
 
     for value in values:
         if isinstance(value, uuid.UUID):
@@ -183,9 +181,7 @@ def enqueue_work_item_sync(
                 select(WorkItem).where(WorkItem.idempotency_key == idempotency_key)
             ).scalar_one_or_none()
             if existing:
-                if _revive_failed_work_item(
-                    existing, now=datetime.now(timezone.utc)
-                ):
+                if _revive_failed_work_item(existing, now=datetime.now(timezone.utc)):
                     session.commit()
                 return str(existing.id)
         item = WorkItem(
@@ -211,7 +207,6 @@ def enqueue_work_item_sync(
         raise
     finally:
         session.close()
-
 
 
 def has_recoverable_oss_artifact(data: dict[str, Any] | None) -> bool:
@@ -242,6 +237,20 @@ def work_item_has_recoverable_registration(item: WorkItem) -> bool:
     return stage == "registration_pending" and has_recoverable_oss_artifact(progress)
 
 
+def lease_expiry_status(item: WorkItem) -> str:
+    """Status to persist when a lease expires.
+
+    An official PDF already stored on the work item must return to pending so
+    another worker can register it. Any other claim that has used its attempts
+    becomes failed. This is the branch ``reaper_expired_leases`` applies.
+    """
+    if int(
+        item.attempts or 0
+    ) >= MAX_WORK_ITEM_ATTEMPTS and not work_item_has_recoverable_registration(item):
+        return "failed"
+    return "pending"
+
+
 def registration_retry_is_due(item: WorkItem, now: datetime) -> bool:
     progress = item.progress_json if isinstance(item.progress_json, dict) else {}
     raw = progress.get("registration_retry_after")
@@ -264,7 +273,9 @@ def registration_retry_is_due(item: WorkItem, now: datetime) -> bool:
 REAPER_BATCH_LIMIT = 200
 
 
-async def reaper_expired_leases(db: AsyncSession, *, limit: int = REAPER_BATCH_LIMIT) -> int:
+async def reaper_expired_leases(
+    db: AsyncSession, *, limit: int = REAPER_BATCH_LIMIT
+) -> int:
     """Return expired leases to pending; exhaust the third claim as failed."""
     now = datetime.now(timezone.utc)
     result = await db.execute(
@@ -286,7 +297,7 @@ async def reaper_expired_leases(db: AsyncSession, *, limit: int = REAPER_BATCH_L
         # attempts只在真正领取时递增；这样“第三次领取后仍未完成”才是第三次失败。
         # 官方 PDF 已上传、只待登记时，必须回到 pending 让其它下载机接着登记，
         # 不能把租约耗尽误记成生成失败。
-        if int(item.attempts or 0) >= MAX_WORK_ITEM_ATTEMPTS and not work_item_has_recoverable_registration(item):
+        if lease_expiry_status(item) == "failed":
             item.status = "failed"
             item.error = WORK_ITEM_LEASE_EXHAUSTED_ERROR
             await _mark_parent_job_failed(
@@ -382,7 +393,9 @@ async def claim_work_items(
     rows = list(result.scalars().all())
     claimed: list[WorkItem] = []
     for row in rows:
-        if work_item_has_recoverable_registration(row) and not registration_retry_is_due(row, now):
+        if work_item_has_recoverable_registration(
+            row
+        ) and not registration_retry_is_due(row, now):
             # Leave the row pending; skip_locked already released on commit.
             continue
         row.status = "leased"
@@ -567,7 +580,9 @@ async def complete_work_item(
     if apply_result and result_dict:
         try:
             import asyncio
-            from agric_satellite_analysis_common.result_apply import apply_complete_result
+            from agric_satellite_analysis_common.result_apply import (
+                apply_complete_result,
+            )
 
             apply_stats = await asyncio.to_thread(apply_complete_result, result_dict)
             # 场景或天气日数据入库后立即重算，使每日长势、干旱和洪涝信号进入预警列表。
@@ -627,7 +642,9 @@ async def fail_work_item(
     # 下载机派发失败可回队，但第三次领取仍失败时必须在API侧收敛为终态。
     # 已上传 OSS、只待登记的工作项始终回队，不能把登记失败记成生成失败。
     recoverable = work_item_has_recoverable_registration(item)
-    retry = bool(retry) and (int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS or recoverable)
+    retry = bool(retry) and (
+        int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS or recoverable
+    )
     if retry:
         item.status = "pending"
         if recoverable:
@@ -665,6 +682,7 @@ __all__ = [
     "work_item_idempotency_key",
     "work_queue_mode",
     "has_recoverable_oss_artifact",
+    "lease_expiry_status",
     "work_item_has_recoverable_registration",
     "registration_retry_is_due",
     "stamp_registration_backoff",

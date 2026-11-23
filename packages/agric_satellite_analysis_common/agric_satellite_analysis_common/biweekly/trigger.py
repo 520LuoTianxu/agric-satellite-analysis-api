@@ -35,7 +35,15 @@ from .phase_policy import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-STATES = ("queued", "running", "dispatched", "registration_pending", "ready", "failed", "evidence_limited")
+STATES = (
+    "queued",
+    "running",
+    "dispatched",
+    "registration_pending",
+    "ready",
+    "failed",
+    "evidence_limited",
+)
 
 
 def _repo_root() -> Path:
@@ -91,7 +99,9 @@ class TriggerService:
         if expected_oss_bucket:
             self.expected_oss_bucket = expected_oss_bucket
         elif object_storage is not None:
-            self.expected_oss_bucket = object_storage.bucket()
+            from agric_satellite_analysis_common.storage import bucket_name
+
+            self.expected_oss_bucket = bucket_name(object_storage)
         else:
             self.expected_oss_bucket = None
 
@@ -160,9 +170,18 @@ class TriggerService:
             raise ReportError("ARTIFACT_UNAVAILABLE")
         artifact = job.get("artifact") or {}
         filename = artifact.get("filename") or f"{job_id}.bin"
-        mime = artifact.get("mime") or artifact.get("content_type") or "application/octet-stream"
+        mime = (
+            artifact.get("mime")
+            or artifact.get("content_type")
+            or "application/octet-stream"
+        )
         if artifact.get("key"):
-            return filename, self._iter_oss_artifact(job, artifact), mime, artifact.get("size_bytes")
+            return (
+                filename,
+                self._iter_oss_artifact(job, artifact),
+                mime,
+                artifact.get("size_bytes"),
+            )
         rel = artifact.get("path")
         if not rel:
             raise ReportError("ARTIFACT_UNAVAILABLE")
@@ -179,7 +198,10 @@ class TriggerService:
         expected_key = official_object_key(job["land_id"], job["job_id"], kind=kind)
         if artifact.get("key") != expected_key:
             raise ReportError("ARTIFACT_KEY_MISMATCH")
-        if self.expected_oss_bucket and artifact.get("bucket") != self.expected_oss_bucket:
+        if (
+            self.expected_oss_bucket
+            and artifact.get("bucket") != self.expected_oss_bucket
+        ):
             raise ReportError("ARTIFACT_BUCKET_MISMATCH")
         for chunk in self.object_storage.iter_bytes(artifact["key"]):
             yield chunk
@@ -214,7 +236,9 @@ class TriggerService:
             period=period,
             payload={"planned_batch": planned, "scope": "period"},
         )
-        should_evaluate = self.auto_run if evaluate_local_fixture is None else evaluate_local_fixture
+        should_evaluate = (
+            self.auto_run if evaluate_local_fixture is None else evaluate_local_fixture
+        )
         if should_evaluate:
             job = self.run_job(job["job_id"])
         return job
@@ -279,13 +303,17 @@ class TriggerService:
         reason = dispatch.get("reason")
         job_ids = list(dispatch.get("job_ids") or [])
         dispatched = bool(dispatch.get("dispatched")) and bool(job_ids)
-        hard_fail = reason in {"DISPATCH_FAILED", "LAND_NOT_AVAILABLE", "BACKFILL_WINDOW_UNBOUNDED"} or (
-            not dispatched and reason not in {None, "NO_JOBS_CREATED"}
-        )
+        hard_fail = reason in {
+            "DISPATCH_FAILED",
+            "LAND_NOT_AVAILABLE",
+            "BACKFILL_WINDOW_UNBOUNDED",
+        } or (not dispatched and reason not in {None, "NO_JOBS_CREATED"})
         result = dict(job.get("result") or {})
         result["stage"] = "backfill"
         result["backfill"] = {
-            "status": "failed" if hard_fail else ("dispatched" if dispatched else "not_needed"),
+            "status": "failed"
+            if hard_fail
+            else ("dispatched" if dispatched else "not_needed"),
             "error_code": (reason or "BACKFILL_FAILED") if hard_fail else None,
             "reason": reason,
             "job_ids": job_ids,
@@ -296,7 +324,9 @@ class TriggerService:
         result["satellite_batch_job_ids"] = job_ids
         result["generate"] = {"status": "pending", "error_code": None}
         if hard_fail:
-            result["note"] = "补数失败，尚未出报。失败发生在补数阶段，不是因为没有可用光学，也不是出报本身失败。"
+            result["note"] = (
+                "补数失败，尚未出报。失败发生在补数阶段，不是因为没有可用光学，也不是出报本身失败。"
+            )
             self._transition(job, "failed", result=result, error_code="BACKFILL_FAILED")
         elif dispatched:
             result["note"] = "本期补数已派发，出报将在补数完成后自动进行。"
@@ -309,11 +339,15 @@ class TriggerService:
         self._write(job)
         return self.get_job(job_id)
 
-    def fail_stage(self, job_id: str, error_code: str, *, note: str | None = None) -> dict:
+    def fail_stage(
+        self, job_id: str, error_code: str, *, note: str | None = None
+    ) -> dict:
         job = self.get_job(job_id)
         if job.get("status") in READY_STATUSES:
             return job
-        if job.get("status") == "registration_pending" and (job.get("artifact") or {}).get("sha256"):
+        if job.get("status") == "registration_pending" and (
+            job.get("artifact") or {}
+        ).get("sha256"):
             return job
         result = dict(job.get("result") or {})
         if error_code == "BACKFILL_FAILED":
@@ -333,7 +367,9 @@ class TriggerService:
         self._transition(job, "failed", result=result, error_code=error_code)
         return self.get_job(job_id)
 
-    def merge_result(self, job_id: str, patch: dict, *, status: str | None = None) -> dict:
+    def merge_result(
+        self, job_id: str, patch: dict, *, status: str | None = None
+    ) -> dict:
         job = self.get_job(job_id)
         result = dict(job.get("result") or {})
         result.update(patch)
@@ -533,14 +569,20 @@ class TriggerService:
         store_latest = None
         if self.official_store is not None:
             try:
-                stored = self.official_store.latest_for_period(land_id, season_id, period_id)
+                stored = self.official_store.latest_for_period(
+                    land_id, season_id, period_id
+                )
             except OfficialStoreNotMigrated:
                 stored = None
             except OfficialStoreUnavailable as exc:
                 raise ReportError("OFFICIAL_STORE_UNAVAILABLE") from exc
             else:
                 store_latest = latest_brief(stored)
-        if store_latest and file_latest and store_latest["job_id"] != file_latest["job_id"]:
+        if (
+            store_latest
+            and file_latest
+            and store_latest["job_id"] != file_latest["job_id"]
+        ):
             # A leftover file job is not silently treated as migrated; pick the newer one.
             store_ts = store_latest.get("created_at") or ""
             file_ts = file_latest.get("created_at") or ""
@@ -606,7 +648,12 @@ class TriggerService:
                 continue
             seen.add(key)
             rows.append(period)
-        rows.sort(key=lambda row: (str(row.get("start") or ""), str(row.get("period_id") or "")))
+        rows.sort(
+            key=lambda row: (
+                str(row.get("start") or ""),
+                str(row.get("period_id") or ""),
+            )
+        )
         return rows
 
     def periods_for_job(self, job: dict) -> list[dict]:
@@ -642,7 +689,8 @@ class TriggerService:
         optical = [
             row
             for row in snapshot.get("observations") or []
-            if str(row.get("sensor") or "").strip().upper() == "S2" and row.get("quality_status") == "eligible_descriptive"
+            if str(row.get("sensor") or "").strip().upper() == "S2"
+            and row.get("quality_status") == "eligible_descriptive"
         ]
         return {
             "mode": "local_fixture_evaluation",
@@ -673,7 +721,6 @@ class TriggerService:
         return facts, artifact, status
 
     def _prepare_generate_facts(self, job: dict) -> tuple[dict, str]:
-
         period = self.period_for_job(job)
         snapshot = {}
         if period.get("snapshot"):
@@ -687,7 +734,9 @@ class TriggerService:
             cutoff = period["end_exclusive"] + "T00:00:00+08:00"
         else:
             source_rows = snapshot.get("observations") or []
-            cutoff = snapshot.get("observation_cutoff") or (period["end_exclusive"] + "T00:00:00+08:00")
+            cutoff = snapshot.get("observation_cutoff") or (
+                period["end_exclusive"] + "T00:00:00+08:00"
+            )
         if not cutoff.endswith("+08:00") and "+08" not in cutoff:
             raise ReportError("CUTOFF_TIMEZONE_INVALID")
         observations = []
@@ -729,7 +778,9 @@ class TriggerService:
                 end_exclusive=period["end_exclusive"],
                 prior_observation_dates=prior_dates,
             )
-            phase["phenology_basis"] = native.get("phenology_basis") or "PLAN_DERIVED_FROM_SMART_PLANT_TASK"
+            phase["phenology_basis"] = (
+                native.get("phenology_basis") or "PLAN_DERIVED_FROM_SMART_PLANT_TASK"
+            )
             phase["plan_source"] = "native"
             phase["plan_label"] = "本田方案"
         elif reference:
@@ -763,7 +814,9 @@ class TriggerService:
         )
         if not metrics_for_compare:
             metrics_for_compare = ["ndvi", "evi", "ndre", "ndmi"]
-        metrics_for_compare = [m for m in metrics_for_compare if m not in FORBIDDEN_REPORT_METRICS]
+        metrics_for_compare = [
+            m for m in metrics_for_compare if m not in FORBIDDEN_REPORT_METRICS
+        ]
         if enriched and prior_rows:
             prior_cmp = compare_to_prior(enriched, prior_rows, metrics_for_compare)
 
@@ -775,7 +828,8 @@ class TriggerService:
             "schema_version": "biweekly-trigger-snapshot-v1",
             "land_id": job["land_id"],
             "land_name": payload.get("land_name"),
-            "crop_name": payload.get("crop_name") or (payload.get("native_plan") or {}).get("crop_name"),
+            "crop_name": payload.get("crop_name")
+            or (payload.get("native_plan") or {}).get("crop_name"),
             "crop_type": payload.get("crop_type"),
             "season_id": job["season_id"],
             "period": period,
@@ -788,7 +842,8 @@ class TriggerService:
             "rejected_optical": rejected_optical,
             "phase": phase,
             "prior_comparison": prior_cmp,
-            "weather_summary": snapshot.get("weather_summary") or payload.get("weather_summary"),
+            "weather_summary": snapshot.get("weather_summary")
+            or payload.get("weather_summary"),
             "weather_daily": payload.get("weather_daily"),
             "weather_period": payload.get("weather_period"),
             "weather_antecedent": payload.get("weather_antecedent"),
@@ -797,15 +852,20 @@ class TriggerService:
             "science_limits": snapshot.get("science_limits"),
             "forbidden_metrics_omitted": sorted(FORBIDDEN_REPORT_METRICS),
             "generated_at": _now(),
-            "observation_source": payload.get("observation_source") or ("pack_snapshot" if snapshot else "none"),
+            "observation_source": payload.get("observation_source")
+            or ("pack_snapshot" if snapshot else "none"),
         }
         if enriched and len(enriched) < 2 and prior_cmp:
             facts["quality_note"] = "仅1次有效观测，不能写成持续改善。"
 
         if not enriched:
-            facts["brief"] = "本期没有可用光学观测。此为证据受限简报，不作出长势好转或阶段诊断。"
+            facts["brief"] = (
+                "本期没有可用光学观测。此为证据受限简报，不作出长势好转或阶段诊断。"
+            )
             if (period.get("s1_products") or 0) == 0:
-                facts["radar_note"] = "本期没有雷达影像，不对内涝风险作出偏低或偏高的结论。"
+                facts["radar_note"] = (
+                    "本期没有雷达影像，不对内涝风险作出偏低或偏高的结论。"
+                )
             status = "evidence_limited"
         else:
             status = "ready"
@@ -815,7 +875,9 @@ class TriggerService:
             "status": status,
             "error_code": None,
             "artifact_kind": (
-                "official_visual_artifact" if status == "ready" else "evidence_limited_brief"
+                "official_visual_artifact"
+                if status == "ready"
+                else "evidence_limited_brief"
             ),
         }
         facts["used_reference"] = bool(reference)
@@ -866,7 +928,11 @@ class TriggerService:
             index = ids.index(str(period["period_id"]))
         except ValueError:
             return []
-        extra = self.catalog.v8_optical_metrics() if period["start"] == "2026-04-04" else None
+        extra = (
+            self.catalog.v8_optical_metrics()
+            if period["start"] == "2026-04-04"
+            else None
+        )
         dates = (extra or {}).get("dates") or {}
         for prior in reversed(periods[:index]):
             if not prior.get("snapshot"):
@@ -897,7 +963,6 @@ class TriggerService:
             return out
         return []
 
-
     def attach_oss_artifact(
         self,
         job_id: str,
@@ -914,7 +979,9 @@ class TriggerService:
         if job.get("kind") != "generate":
             raise ReportError("JOB_KIND_UNSUPPORTED")
         kind = artifact.get("kind") or (
-            "official_visual_artifact" if status == "ready" else "evidence_limited_brief"
+            "official_visual_artifact"
+            if status == "ready"
+            else "evidence_limited_brief"
         )
         ref = {
             "storage": "oss",
@@ -947,7 +1014,13 @@ class TriggerService:
         }
         if note:
             result["note"] = note
-        self._transition(job, status, result=result, artifact=public_artifact(ref), error_code=error_code)
+        self._transition(
+            job,
+            status,
+            result=result,
+            artifact=public_artifact(ref),
+            error_code=error_code,
+        )
         return self.get_job(job_id)
 
     def attach_remote_artifact(
@@ -990,7 +1063,9 @@ class TriggerService:
                     self.object_storage.put_bytes(key, content, content_type=mime)
                 else:
                     dest_tmp = dest
-                    self.object_storage.upload_file(key, str(dest_tmp), content_type=mime)
+                    self.object_storage.upload_file(
+                        key, str(dest_tmp), content_type=mime
+                    )
                 artifact.update(
                     {
                         "storage": "oss",
@@ -1005,7 +1080,9 @@ class TriggerService:
                 artifact["storage"] = "work_dir"
         if facts:
             sidecar = dest_dir / f"{job_id}-facts.json"
-            sidecar.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+            sidecar.write_text(
+                json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             artifact["facts_path"] = str(sidecar.relative_to(self.work_dir))
         result = dict(job.get("result") or {})
         result.update(facts or {})
@@ -1018,9 +1095,13 @@ class TriggerService:
         if note:
             result["note"] = note
         if status == "failed":
-            self._transition(job, "failed", result=result, artifact=artifact, error_code=error_code)
+            self._transition(
+                job, "failed", result=result, artifact=artifact, error_code=error_code
+            )
         else:
-            self._transition(job, status, result=result, artifact=artifact, error_code=error_code)
+            self._transition(
+                job, status, result=result, artifact=artifact, error_code=error_code
+            )
         return self.get_job(job_id)
 
     def _write_brief(self, job_id: str, facts: dict, period: dict) -> dict:
@@ -1038,9 +1119,13 @@ class TriggerService:
             "kind": "evidence_limited_brief",
         }
 
-    def _write_ready_artifact(self, job_id, facts, period, used_reference: bool) -> dict:
+    def _write_ready_artifact(
+        self, job_id, facts, period, used_reference: bool
+    ) -> dict:
         sidecar = self.work_dir / "artifacts" / f"{job_id}-facts.json"
-        sidecar.write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
+        sidecar.write_text(
+            json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         if self.pdf_renderer is None:
             raise ReportError("PDF_RENDERER_UNAVAILABLE")
         start = period.get("start")

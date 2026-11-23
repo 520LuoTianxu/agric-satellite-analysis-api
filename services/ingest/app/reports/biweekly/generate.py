@@ -36,7 +36,11 @@ def generate_official_biweekly_pdf(
     """
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    figures = Path(figures_dir) if figures_dir else dest_path.parent / f"{dest_path.stem}_figures"
+    figures = (
+        Path(figures_dir)
+        if figures_dir
+        else dest_path.parent / f"{dest_path.stem}_figures"
+    )
     filled = enrich_official_report_facts(
         facts,
         figures_dir=figures,
@@ -50,12 +54,33 @@ def generate_official_biweekly_pdf(
         offline=offline,
     )
     if "ai_narrative" not in filled:
-        from app.reports.biweekly.narrative_ai import generate_metric_judgment
+        from app.reports.biweekly.narrative_ai import (
+            empty_judgment,
+            generate_metric_judgment,
+        )
 
-        filled["ai_narrative"] = generate_metric_judgment(filled)
+        try:
+            filled["ai_narrative"] = generate_metric_judgment(filled)
+        except Exception as exc:
+            # 解读异常只记在报告数据上。数值 PDF 仍要生成并上传，
+            # 不能因为模型失败把已经能出的报告记成生成失败，也不能改写成结论。
+            from app.core.logging import logger
+
+            logger.exception(
+                "biweekly_narrative_failed",
+                error_type=type(exc).__name__,
+            )
+            filled["ai_narrative"] = empty_judgment(
+                configured=True,
+                error=type(exc).__name__,
+                model="",
+            )
     rendered = render_official_biweekly_pdf(filled, dest_path, figures_dir=figures)
     if facts_sidecar:
         side = Path(facts_sidecar)
         side.parent.mkdir(parents=True, exist_ok=True)
-        side.write_text(json.dumps(filled, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+        side.write_text(
+            json.dumps(filled, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
     return rendered

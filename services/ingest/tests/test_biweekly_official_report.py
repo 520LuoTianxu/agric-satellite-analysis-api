@@ -17,7 +17,11 @@ class BundledFontTests(unittest.TestCase):
     def test_resolves_bundled_fonts_without_env(self):
         from app.reports.biweekly.fonts import bundled_font_dir, resolve_yahei_fonts
 
-        env = {key: value for key, value in os.environ.items() if not key.startswith("BIWEEKLY_FONT")}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("BIWEEKLY_FONT")
+        }
         with patch.dict(os.environ, env, clear=True):
             regular, bold = resolve_yahei_fonts()
         self.assertEqual(regular.parent, bundled_font_dir())
@@ -48,7 +52,11 @@ class OfficialPdfRenderTests(unittest.TestCase):
     def test_renders_six_page_pdf_with_bundled_fonts(self):
         from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
 
-        env = {key: value for key, value in os.environ.items() if not key.startswith("BIWEEKLY_FONT")}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("BIWEEKLY_FONT")
+        }
         facts = {
             "land_id": "6417",
             "land_name": "试验田6417",
@@ -95,12 +103,16 @@ class GenerateTaskTests(unittest.TestCase):
     def test_all_failed_backfill_is_not_no_optics(self):
         from app.tasks.biweekly_report import generate_biweekly_report
 
-        with patch("app.tasks.biweekly_report._wait_for_backfill", return_value={"job-a": "failed"}), patch(
-            "app.tasks.biweekly_report._complete", return_value={"ok": True}
-        ) as complete, patch(
-            "app.core.job_http.update_job_record"
-        ), patch(
-            "app.core.job_http.fail_work_item_http"
+        with (
+            patch(
+                "app.tasks.biweekly_report._wait_for_backfill",
+                return_value={"job-a": "failed"},
+            ),
+            patch(
+                "app.tasks.biweekly_report._complete", return_value={"ok": True}
+            ) as complete,
+            patch("app.core.job_http.update_job_record"),
+            patch("app.core.job_http.fail_work_item_http"),
         ):
             result = generate_biweekly_report.run(
                 job_id="report-1",
@@ -119,16 +131,20 @@ class GenerateTaskTests(unittest.TestCase):
     def test_scene_query_failure_is_not_evidence_limited(self):
         from app.tasks.biweekly_report import generate_biweekly_report
 
-        with patch("app.tasks.biweekly_report._wait_for_backfill", return_value={}), patch(
-            "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
-            return_value={
-                "error_code": "SCENE_QUERY_FAILED",
-                "note": "读取已入库景失败，不能当作本期没有可用光学。",
-            },
-        ), patch("app.tasks.biweekly_report._complete", return_value={"ok": True}) as complete, patch(
-            "app.core.job_http.update_job_record"
-        ), patch(
-            "app.core.job_http.fail_work_item_http"
+        with (
+            patch("app.tasks.biweekly_report._wait_for_backfill", return_value={}),
+            patch(
+                "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
+                return_value={
+                    "error_code": "SCENE_QUERY_FAILED",
+                    "note": "读取已入库景失败，不能当作本期没有可用光学。",
+                },
+            ),
+            patch(
+                "app.tasks.biweekly_report._complete", return_value={"ok": True}
+            ) as complete,
+            patch("app.core.job_http.update_job_record"),
+            patch("app.core.job_http.fail_work_item_http"),
         ):
             result = generate_biweekly_report.run(
                 land_id="19994",
@@ -142,33 +158,75 @@ class GenerateTaskTests(unittest.TestCase):
         from app.tasks.biweekly_report import generate_biweekly_report
 
         facts = {"brief": "本期没有可用光学观测。", "optical_days": []}
-        with patch("app.tasks.biweekly_report._wait_for_backfill", return_value={}), patch(
-            "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
-            return_value={"error_code": None, "status": "evidence_limited", "facts": facts},
-        ), patch("app.tasks.biweekly_report._complete", return_value={"ok": True, "job": {"status": "evidence_limited"}}) as complete, patch(
-            "app.core.job_http.update_job_record"
-        ), patch(
-            "app.core.job_http.complete_work_item_http"
+        oss = {
+            "bucket": "agric-isolated-fixture",
+            "key": "reports/default/19994/biweekly-bj-0123456789abcdef.json",
+            "size_bytes": 32,
+            "sha256": "ab" * 32,
+            "content_type": "application/json",
+            "kind": "evidence_limited_brief",
+        }
+        with (
+            patch("app.tasks.biweekly_report._wait_for_backfill", return_value={}),
+            patch(
+                "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
+                return_value={
+                    "error_code": None,
+                    "status": "evidence_limited",
+                    "facts": facts,
+                },
+            ),
+            patch(
+                "app.tasks.biweekly_report._complete",
+                return_value={"ok": True, "job": {"status": "evidence_limited"}},
+            ) as complete,
+            patch(
+                "app.tasks.biweekly_report._upload_official_object",
+                return_value=oss,
+            ),
+            patch("app.core.job_http.update_job_record"),
+            patch("app.core.job_http.complete_work_item_http"),
+            patch("app.core.job_http.progress_work_item_http"),
         ):
             result = generate_biweekly_report.run(
                 land_id="19994",
-                biweekly_job_id="bj-test",
+                biweekly_job_id="bj-0123456789abcdef",
                 report_job_id="report-1",
             )
         self.assertEqual(result["status"], "evidence_limited")
         kwargs = complete.call_args.kwargs
         self.assertEqual(kwargs["status"], "evidence_limited")
         self.assertEqual(kwargs["kind"], "evidence_limited_brief")
-        self.assertIn("没有可用光学", kwargs["content"].decode("utf-8"))
+        self.assertEqual(kwargs["oss"]["sha256"], oss["sha256"])
+        self.assertIsNone(kwargs.get("content"))
+        self.assertIn("没有可用光学", kwargs["note"])
 
     def test_ready_inputs_render_pdf_and_return_to_api(self):
         from app.tasks.biweekly_report import generate_biweekly_report
 
         facts = {
             "land_id": "6417",
-            "period": {"start": "2026-04-04", "end_inclusive": "2026-04-17", "end_exclusive": "2026-04-18"},
-            "phase": {"display_phase": "S2", "primary_metrics": ["ndre", "evi"], "supporting_metrics": ["ndvi", "ndmi"], "plan_source": "native"},
-            "observations": [{"date": "2026-04-09", "sensor": "S2", "ndvi_avg": 0.4, "evi_avg": 0.3, "ndre_avg": 0.2, "ndmi_avg": 0.1}],
+            "period": {
+                "start": "2026-04-04",
+                "end_inclusive": "2026-04-17",
+                "end_exclusive": "2026-04-18",
+            },
+            "phase": {
+                "display_phase": "S2",
+                "primary_metrics": ["ndre", "evi"],
+                "supporting_metrics": ["ndvi", "ndmi"],
+                "plan_source": "native",
+            },
+            "observations": [
+                {
+                    "date": "2026-04-09",
+                    "sensor": "S2",
+                    "ndvi_avg": 0.4,
+                    "evi_avg": 0.3,
+                    "ndre_avg": 0.2,
+                    "ndmi_avg": 0.1,
+                }
+            ],
             "optical_days": ["2026-04-09"],
             "s1_count": 1,
             "in_period_radar": True,
@@ -176,29 +234,49 @@ class GenerateTaskTests(unittest.TestCase):
 
         def _render(payload, dest, **_kwargs):
             Path(dest).parent.mkdir(parents=True, exist_ok=True)
-            Path(dest).write_bytes(b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n")
+            Path(dest).write_bytes(
+                b"%PDF-1.4\n" + b"official-test-pdf\n" * 80 + b"%%EOF\n"
+            )
             return Path(dest)
 
-        with patch("app.tasks.biweekly_report._wait_for_backfill", return_value={"job-a": "completed"}), patch(
-            "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
-            return_value={"error_code": None, "status": "ready", "facts": facts},
-        ), patch(
-            "app.reports.biweekly.generate.generate_official_biweekly_pdf",
-            side_effect=_render,
-        ), patch(
-            "app.tasks.biweekly_report._complete",
-            return_value={"ok": True, "job": {"status": "ready"}},
-        ) as complete, patch(
-            "app.core.job_http.update_job_record"
-        ), patch(
-            "app.core.job_http.complete_work_item_http"
-        ), patch(
-            "app.tasks.storage_tasks.upload_file_via_storage",
-            return_value={"public_url": "https://example.invalid/report.pdf"},
+        import sys
+        from types import ModuleType
+
+        gen_mod = ModuleType("app.reports.biweekly.generate")
+        gen_mod.generate_official_biweekly_pdf = _render
+        sys.modules["app.reports.biweekly.generate"] = gen_mod
+        oss = {
+            "bucket": "agric-isolated-fixture",
+            "key": "reports/default/6417/biweekly-bj-0123456789abcdef.pdf",
+            "size_bytes": 1200,
+            "sha256": "cd" * 32,
+            "content_type": "application/pdf",
+            "kind": "official_visual_artifact",
+        }
+        with (
+            patch(
+                "app.tasks.biweekly_report._wait_for_backfill",
+                return_value={"job-a": "completed"},
+            ),
+            patch(
+                "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
+                return_value={"error_code": None, "status": "ready", "facts": facts},
+            ),
+            patch(
+                "app.tasks.biweekly_report._upload_official_object",
+                return_value=oss,
+            ),
+            patch(
+                "app.tasks.biweekly_report._complete",
+                return_value={"ok": True, "job": {"status": "ready"}},
+            ) as complete,
+            patch("app.core.job_http.update_job_record"),
+            patch("app.core.job_http.complete_work_item_http"),
+            patch("app.core.job_http.progress_work_item_http"),
         ):
             result = generate_biweekly_report.run(
                 land_id="6417",
-                biweekly_job_id="bj-test",
+                biweekly_job_id="bj-0123456789abcdef",
                 wait_for_job_ids=["job-a"],
                 report_job_id="report-1",
             )
@@ -206,7 +284,8 @@ class GenerateTaskTests(unittest.TestCase):
         kwargs = complete.call_args.kwargs
         self.assertEqual(kwargs["status"], "ready")
         self.assertEqual(kwargs["kind"], "official_visual_artifact")
-        self.assertTrue(kwargs["content"].startswith(b"%PDF"))
+        self.assertEqual(kwargs["oss"]["key"], oss["key"])
+        self.assertIsNone(kwargs.get("content"))
         self.assertIsNone(kwargs.get("error_code") or None)
 
 

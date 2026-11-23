@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
 
 import oss2
@@ -206,7 +206,9 @@ def retry_oss_call(
     **log_ctx: object,
 ) -> T:
     """Exponential backoff with jitter; non-transient errors raise immediately."""
-    attempts = max(1, int(attempts if attempts is not None else settings.oss_upload_max_retries))
+    attempts = max(
+        1, int(attempts if attempts is not None else settings.oss_upload_max_retries)
+    )
     base = float(settings.oss_upload_retry_backoff_s if base is None else base)
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
@@ -216,7 +218,9 @@ def retry_oss_call(
             last_exc = exc
             if attempt >= attempts or not is_transient_oss_error(exc):
                 raise
-            delay = min(60.0, base * (2 ** (attempt - 1))) * (0.75 + 0.5 * random.random())
+            delay = min(60.0, base * (2 ** (attempt - 1))) * (
+                0.75 + 0.5 * random.random()
+            )
             logger.warning(
                 "oss_upload_retry",
                 what=what,
@@ -242,7 +246,11 @@ class ObjectStorage(ABC):
     @property
     @abstractmethod
     def bucket(self) -> str:
-        """Bucket / container name."""
+        """Bucket / container name.
+
+        This is a ``str`` property. ``storage.bucket()`` raises
+        ``TypeError: 'str' object is not callable``.
+        """
 
     @abstractmethod
     def upload_file(
@@ -468,7 +476,9 @@ class OssStorage(ObjectStorage):
         if size >= self._multipart_threshold:
             root = Path(self._store_root)
             root.mkdir(parents=True, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(prefix="oss-put-", suffix=".bin", dir=str(root))
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="oss-put-", suffix=".bin", dir=str(root)
+            )
             try:
                 with os.fdopen(fd, "wb") as handle:
                     handle.write(data)
@@ -577,7 +587,9 @@ class OssStorage(ObjectStorage):
             meta = self._bucket.head_object(key)
             size = getattr(meta, "content_length", None)
             if size is None:
-                size = int((getattr(meta, "headers", None) or {}).get("Content-Length") or 0)
+                size = int(
+                    (getattr(meta, "headers", None) or {}).get("Content-Length") or 0
+                )
             return {
                 "size_bytes": int(size or 0),
                 "content_type": getattr(meta, "content_type", None)
@@ -768,6 +780,22 @@ def get_parcel_product_storage() -> ObjectStorage:
     return get_storage()
 
 
+def bucket_name(storage: Any) -> str:
+    """Return the bucket string from ``ObjectStorage.bucket``.
+
+    Production OSS storage exposes the name as a property. Calling it is the
+    post-upload ``TypeError`` that used to mark an already-uploaded PDF as
+    ``GENERATE_FAILED``. Method-style fakes are rejected so tests cannot hide
+    that mistake by implementing ``def bucket(self)``.
+    """
+    value = getattr(storage, "bucket", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise TypeError(
+        f"{type(storage).__name__}.bucket is {type(value).__name__}, expected a str property"
+    )
+
+
 def clear_storage_cache() -> None:
     """Clear the cached storage instance (mainly for tests)."""
     get_storage.cache_clear()
@@ -778,6 +806,7 @@ __all__ = [
     "ObjectStorage",
     "ObjectTooLargeError",
     "OssStorage",
+    "bucket_name",
     "get_storage",
     "get_parcel_product_storage",
     "parcel_product_prefix",

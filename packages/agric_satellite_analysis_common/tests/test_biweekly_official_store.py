@@ -34,6 +34,7 @@ class FakeObjectStorage:
         self.full_reads = 0
         self.prefix_reads = 0
 
+    @property
     def bucket(self) -> str:
         return self._bucket
 
@@ -42,7 +43,11 @@ class FakeObjectStorage:
 
     def stat_object(self, key: str) -> dict:
         data = self.objects[key]
-        return {"size_bytes": len(data), "content_type": "application/pdf", "etag": None}
+        return {
+            "size_bytes": len(data),
+            "content_type": "application/pdf",
+            "etag": None,
+        }
 
     def read_prefix(self, key: str, n: int) -> bytes:
         self.prefix_reads += 1
@@ -63,7 +68,13 @@ class FakeObjectStorage:
         return key
 
 
-def _ref(job_id: str, data: bytes, bucket: str = "agric-test", land: str = LAND, kind="official_visual_artifact"):
+def _ref(
+    job_id: str,
+    data: bytes,
+    bucket: str = "agric-test",
+    land: str = LAND,
+    kind="official_visual_artifact",
+):
     return {
         "bucket": bucket,
         "key": official_object_key(land, job_id, kind=kind),
@@ -77,7 +88,14 @@ class OfficialRefTests(unittest.TestCase):
     def test_parse_rejects_signed_url_and_cross_tenant_key(self):
         with self.assertRaises(ReportError) as exc:
             parse_oss_ref(
-                {"oss": {"bucket": "agric-test", "key": "https://evil.example/a.pdf", "size_bytes": 10, "sha256": "a" * 64}},
+                {
+                    "oss": {
+                        "bucket": "agric-test",
+                        "key": "https://evil.example/a.pdf",
+                        "size_bytes": 10,
+                        "sha256": "a" * 64,
+                    }
+                },
                 land_id=LAND,
                 job_id=P15_JOB,
                 kind="official_visual_artifact",
@@ -145,8 +163,12 @@ class OfficialStateTests(unittest.TestCase):
 
     def test_ready_not_overwritten_by_stale_fail(self):
         artifact = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
-        current, _ = apply_status_event(self._job("dispatched"), {"status": "ready", "artifact": artifact})
-        kept, outcome = apply_status_event(current, {"status": "failed", "error_code": "GENERATE_FAILED"})
+        current, _ = apply_status_event(
+            self._job("dispatched"), {"status": "ready", "artifact": artifact}
+        )
+        kept, outcome = apply_status_event(
+            current, {"status": "failed", "error_code": "GENERATE_FAILED"}
+        )
         self.assertEqual(outcome, "ignored_stale_fail")
         self.assertEqual(kept["status"], "ready")
         self.assertEqual(kept["artifact"]["sha256"], artifact["sha256"])
@@ -157,22 +179,35 @@ class OfficialStateTests(unittest.TestCase):
         failed["job_id"] = P12_JOB
         failed["period_id"] = "12"
         failed["error_code"] = "GENERATE_FAILED"
-        next_job, outcome = apply_status_event(failed, {"status": "ready", "artifact": artifact})
+        next_job, outcome = apply_status_event(
+            failed, {"status": "ready", "artifact": artifact}
+        )
         self.assertEqual(outcome, "recovered")
         self.assertEqual(next_job["status"], "ready")
 
     def test_duplicate_complete_is_idempotent(self):
         artifact = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
-        current, _ = apply_status_event(self._job("dispatched"), {"status": "ready", "artifact": artifact})
-        again, outcome = apply_status_event(current, {"status": "ready", "artifact": artifact})
+        current, _ = apply_status_event(
+            self._job("dispatched"), {"status": "ready", "artifact": artifact}
+        )
+        again, outcome = apply_status_event(
+            current, {"status": "ready", "artifact": artifact}
+        )
         self.assertEqual(outcome, "idempotent")
         self.assertEqual(again["status"], "ready")
 
     def test_conflict_on_different_artifact(self):
         first = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
         other_pdf = MIN_PDF + b"x"
-        second = {**_ref(P15_JOB, other_pdf), "kind": "official_visual_artifact", "sha256": sha256_bytes(other_pdf), "size_bytes": len(other_pdf)}
-        current, _ = apply_status_event(self._job("dispatched"), {"status": "ready", "artifact": first})
+        second = {
+            **_ref(P15_JOB, other_pdf),
+            "kind": "official_visual_artifact",
+            "sha256": sha256_bytes(other_pdf),
+            "size_bytes": len(other_pdf),
+        }
+        current, _ = apply_status_event(
+            self._job("dispatched"), {"status": "ready", "artifact": first}
+        )
         with self.assertRaises(ReportError) as exc:
             apply_status_event(current, {"status": "ready", "artifact": second})
         self.assertEqual(exc.exception.code, "ARTIFACT_CONFLICT")
@@ -231,7 +266,9 @@ class DurableStoreRestartTests(unittest.TestCase):
         outcomes = []
 
         def _once():
-            _, outcome = store.apply_event(P15_JOB, {"status": "ready", "artifact": artifact})
+            _, outcome = store.apply_event(
+                P15_JOB, {"status": "ready", "artifact": artifact}
+            )
             outcomes.append(outcome)
 
         threads = [threading.Thread(target=_once) for _ in range(8)]

@@ -29,7 +29,15 @@ IN_FLIGHT_STATUSES = frozenset(
     {"queued", "running", "dispatched", "registration_pending"}
 )
 OFFICIAL_STATES = tuple(
-    ("queued", "running", "dispatched", "registration_pending", "ready", "failed", "evidence_limited")
+    (
+        "queued",
+        "running",
+        "dispatched",
+        "registration_pending",
+        "ready",
+        "failed",
+        "evidence_limited",
+    )
 )
 
 
@@ -53,7 +61,9 @@ class OfficialStoreNotMigrated(OfficialStoreError):
         super().__init__("OFFICIAL_STORE_NOT_MIGRATED", message)
 
 
-def official_object_key(land_id: str, job_id: str, *, kind: str = "official_visual_artifact") -> str:
+def official_object_key(
+    land_id: str, job_id: str, *, kind: str = "official_visual_artifact"
+) -> str:
     _require_ids(land_id, job_id)
     if kind == "evidence_limited_brief":
         return f"{OFFICIAL_KEY_PREFIX}/{land_id}/biweekly-{job_id}.json"
@@ -155,7 +165,11 @@ def inspect_official_object(
     """
     bucket = ref["bucket"]
     key = ref["key"]
-    if getattr(storage, "bucket")() != bucket:
+    # ObjectStorage.bucket 是 str 属性。getattr(...)() 会在真实 OSS 上抛 TypeError，
+    # 登记请求因此 500，已上传的 PDF 无法入库。
+    from agric_satellite_analysis_common.storage import bucket_name
+
+    if bucket_name(storage) != bucket:
         raise ReportError("ARTIFACT_BUCKET_MISMATCH")
     if not storage.exists(key):
         raise ReportError("ARTIFACT_UNAVAILABLE")
@@ -190,10 +204,16 @@ def inspect_official_object(
     }
 
 
-def same_artifact(left: Mapping[str, Any] | None, right: Mapping[str, Any] | None) -> bool:
+def same_artifact(
+    left: Mapping[str, Any] | None, right: Mapping[str, Any] | None
+) -> bool:
     if not left or not right:
         return False
-    if left.get("sha256") and right.get("sha256") and left.get("sha256") != right.get("sha256"):
+    if (
+        left.get("sha256")
+        and right.get("sha256")
+        and left.get("sha256") != right.get("sha256")
+    ):
         return False
     if left.get("key") and right.get("key"):
         return (
@@ -202,9 +222,9 @@ def same_artifact(left: Mapping[str, Any] | None, right: Mapping[str, Any] | Non
             and left.get("sha256") == right.get("sha256")
         )
     if left.get("sha256") and right.get("sha256"):
-        return left["sha256"] == right["sha256"] and int(left.get("size_bytes") or 0) == int(
-            right.get("size_bytes") or 0
-        )
+        return left["sha256"] == right["sha256"] and int(
+            left.get("size_bytes") or 0
+        ) == int(right.get("size_bytes") or 0)
     return False
 
 
@@ -236,7 +256,11 @@ def recoverable_oss_artifact(data: Mapping[str, Any] | None) -> dict[str, Any] |
     """Return a permanent OSS object ref if *data* already has one, else None."""
     if not isinstance(data, Mapping):
         return None
-    meta = data.get("oss_artifact") if isinstance(data.get("oss_artifact"), Mapping) else data
+    meta = (
+        data.get("oss_artifact")
+        if isinstance(data.get("oss_artifact"), Mapping)
+        else data
+    )
     if not isinstance(meta, Mapping):
         return None
     bucket = meta.get("bucket")
@@ -255,7 +279,9 @@ def recoverable_oss_artifact(data: Mapping[str, Any] | None) -> dict[str, Any] |
     return {k: v for k, v in out.items() if v is not None}
 
 
-def registration_progress_from_work_item(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def registration_progress_from_work_item(
+    item: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
     """Build a Celery registration payload from a claimed work item.
 
     Prefer progress_json (written after OSS upload) over payload extras.
@@ -268,7 +294,11 @@ def registration_progress_from_work_item(item: Mapping[str, Any] | None) -> dict
     progress = item.get("progress_json")
     if isinstance(progress, Mapping):
         sources.append(progress)
-    payload = item.get("payload_json") if isinstance(item.get("payload_json"), Mapping) else {}
+    payload = (
+        item.get("payload_json")
+        if isinstance(item.get("payload_json"), Mapping)
+        else {}
+    )
     if payload:
         sources.append(payload)
         extras = payload.get("extras")
@@ -281,7 +311,9 @@ def registration_progress_from_work_item(item: Mapping[str, Any] | None) -> dict
         out: dict[str, Any] = {
             "oss_artifact": oss,
             "stage": "registration_pending",
-            "official_status": src.get("official_status") or src.get("status") or "ready",
+            "official_status": src.get("official_status")
+            or src.get("status")
+            or "ready",
             "filename": src.get("filename"),
             "mime": src.get("mime") or oss.get("content_type"),
             "kind": src.get("kind") or oss.get("kind"),
