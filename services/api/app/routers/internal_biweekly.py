@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any
 
@@ -129,6 +130,10 @@ async def biweekly_report_complete(
             kind = body.kind or "official_visual_artifact"
             mime = body.mime or body.content_type or "application/pdf"
             filename = body.filename or f"种植双周报_{job.get('land_id')}.pdf"
+        elif status == "registration_pending":
+            kind = body.kind or "official_visual_artifact"
+            mime = body.mime or body.content_type or "application/pdf"
+            filename = body.filename or f"种植双周报_{job.get('land_id')}.pdf"
         else:
             kind = body.kind or "evidence_limited_brief"
             mime = body.mime or body.content_type or "application/json"
@@ -151,30 +156,42 @@ async def biweekly_report_complete(
                 oss_ref["filename"] = filename
                 oss_ref["mime"] = mime
                 oss_ref["content_type"] = oss_ref.get("content_type") or mime
-                job = service.attach_oss_artifact(
-                    job_id,
-                    status=status,
-                    artifact=oss_ref,
-                    facts=body.facts,
-                    error_code=body.error_code,
-                    note=body.note,
-                )
+                # Full-object checksum is API-to-OSS I/O. Run it off the
+                # event loop so a 9MB hash cannot stall other requests the
+                # way a huge content_base64 callback used to.
+                inspect = status != "registration_pending"
+
+                def _attach():
+                    return service.attach_oss_artifact(
+                        job_id,
+                        status=status,
+                        artifact=oss_ref,
+                        facts=body.facts,
+                        error_code=body.error_code,
+                        note=body.note,
+                        inspect=inspect,
+                    )
+
+                job = await asyncio.to_thread(_attach)
             elif body.content_base64:
                 try:
                     content = base64.b64decode(body.content_base64)
                 except Exception as exc:  # noqa: BLE001
                     raise HTTPException(status_code=400, detail={"error": "ARTIFACT_CORRUPT"}) from exc
-                job = service.attach_remote_artifact(
-                    job_id,
-                    status=status,
-                    content=content,
-                    filename=filename,
-                    mime=mime,
-                    kind=kind,
-                    facts=body.facts,
-                    error_code=body.error_code,
-                    note=body.note,
-                )
+                def _attach_legacy():
+                    return service.attach_remote_artifact(
+                        job_id,
+                        status=status,
+                        content=content,
+                        filename=filename,
+                        mime=mime,
+                        kind=kind,
+                        facts=body.facts,
+                        error_code=body.error_code,
+                        note=body.note,
+                    )
+
+                job = await asyncio.to_thread(_attach_legacy)
             else:
                 raise HTTPException(status_code=400, detail={"error": "ARTIFACT_MISSING"})
         except HTTPException:

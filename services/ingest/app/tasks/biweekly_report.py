@@ -171,7 +171,12 @@ def generate_biweekly_report(
     **_ignored,
 ) -> dict:
     """Render the official v8 biweekly PDF on the download machine and return it to the API."""
-    from app.core.job_http import complete_work_item_http, fail_work_item_http, update_job_record
+    from app.core.job_http import (
+        complete_work_item_http,
+        fail_work_item_http,
+        progress_work_item_http,
+        update_job_record,
+    )
 
     report_id = str(report_job_id or job_id or "") or None
     bj_id = str(biweekly_job_id or "") or None
@@ -200,8 +205,8 @@ def generate_biweekly_report(
         return {"status": "failed", "error_code": code}
 
     def _persist_registration(progress: dict[str, Any], *, attempts: int, error_type: str | None = None) -> None:
-        if not report_id:
-            return
+        from datetime import datetime, timedelta, timezone
+
         payload = {
             **progress,
             "stage": "registration_pending",
@@ -209,7 +214,16 @@ def generate_biweekly_report(
         }
         if error_type:
             payload["last_registration_error"] = error_type
-        update_job_record(None, None, "running", progress=payload, job_id=report_id)
+        if attempts >= REGISTRATION_MAX_ATTEMPTS:
+            payload["registration_retry_after"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=_registration_backoff_s(attempts))
+            ).isoformat()
+        if report_id:
+            update_job_record(None, None, "running", progress=payload, job_id=report_id)
+        try:
+            progress_work_item_http(work_item_id, payload)
+        except Exception:
+            pass
 
     def _register(progress: dict[str, Any]) -> dict:
         oss = progress["oss_artifact"]
@@ -243,6 +257,14 @@ def generate_biweekly_report(
                 attempts,
                 type(exc).__name__,
             )
+            try:
+                fail_work_item_http(
+                    work_item_id,
+                    "REGISTRATION_PENDING",
+                    retry=True,
+                )
+            except Exception:
+                pass
             return {
                 "status": "registration_pending",
                 "error_code": "REGISTRATION_PENDING",
@@ -352,6 +374,23 @@ def generate_biweekly_report(
                 "registration_attempts": 0,
             }
             _persist_registration(progress, attempts=0)
+            try:
+                _complete(
+                    bj_id,
+                    status="registration_pending",
+                    filename=progress.get("filename"),
+                    mime=progress.get("mime"),
+                    kind=progress.get("kind"),
+                    facts=progress.get("facts"),
+                    note=progress.get("note"),
+                    report_job_id=report_id,
+                    oss=progress.get("oss_artifact"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "biweekly_registration_pending_notify_failed err_type=%s",
+                    type(exc).__name__,
+                )
             return _register(progress)
 
         if status != "ready" or not facts:
@@ -396,6 +435,23 @@ def generate_biweekly_report(
             "registration_attempts": 0,
         }
         _persist_registration(progress, attempts=0)
+        try:
+            _complete(
+                bj_id,
+                status="registration_pending",
+                filename=progress.get("filename"),
+                mime=progress.get("mime"),
+                kind=progress.get("kind"),
+                facts=progress.get("facts"),
+                note=progress.get("note"),
+                report_job_id=report_id,
+                oss=progress.get("oss_artifact"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "biweekly_registration_pending_notify_failed err_type=%s",
+                type(exc).__name__,
+            )
         return _register(progress)
     except Exception as exc:
         if _is_retry(exc):

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import null as sql_null, select
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -96,7 +96,16 @@ def _fill_row(row: BiweeklyOfficialJob, job: dict[str, Any]) -> None:
     row.kind = clean.get("kind") or "generate"
     row.status = clean["status"]
     row.report_job_id = _parse_uuid(clean.get("report_job_id") or (clean.get("payload") or {}).get("report_job_id"))
-    row.artifact_json = clean.get("artifact")
+    artifact = clean.get("artifact")
+    # JSONB would encode Python None as jsonb 'null', which fails
+    # artifact_json IS NULL in the delivered check constraint. Use SQL NULL.
+    if isinstance(artifact, dict) and artifact:
+        row.artifact_json = artifact
+    else:
+        row.artifact_json = sql_null()
+        if "artifact" in clean:
+            clean = dict(clean)
+            clean.pop("artifact", None)
     row.job_json = clean
     created = _parse_time(clean.get("created_at"))
     if created is not None:

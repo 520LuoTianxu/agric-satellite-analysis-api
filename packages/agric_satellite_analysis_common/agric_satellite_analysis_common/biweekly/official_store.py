@@ -255,3 +255,31 @@ def latest_brief(job: dict[str, Any] | None) -> dict[str, Any] | None:
         "reference": bool((job.get("payload") or {}).get("reference_planting_instance_id")),
         "persistence": job.get("persistence") or "database",
     }
+
+
+class UnavailableOfficialStore:
+    """Fail closed when the official store cannot be constructed.
+
+    Callers must not treat this as an empty work_dir catalog.
+    """
+
+    def __init__(self, reason: str = "official job store unavailable"):
+        self.reason = reason
+
+    def _raise(self):
+        raise OfficialStoreUnavailable(self.reason)
+
+    def get(self, job_id: str):
+        self._raise()
+
+    def upsert(self, job: dict):
+        self._raise()
+
+    def apply_event(self, job_id: str, event: dict):
+        self._raise()
+
+    def latest_for_period(self, land_id: str, season_id: str, period_id):
+        self._raise()
+
+    def list_for_land_season(self, land_id: str, season_id: str):
+        self._raise()

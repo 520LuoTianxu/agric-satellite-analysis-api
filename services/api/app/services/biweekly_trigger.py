@@ -158,7 +158,13 @@ def build_trigger_service(
             "biweekly_official_store_unavailable_at_build err_type=%s",
             type(exc).__name__,
         )
-        official_store = None
+        from agric_satellite_analysis_common.biweekly.official_store import (
+            UnavailableOfficialStore,
+        )
+
+        # Fail closed: a construction error is not "no jobs" and must not
+        # silently persist new official jobs only under /tmp.
+        official_store = UnavailableOfficialStore(type(exc).__name__)
     try:
         from agric_satellite_analysis_common.storage import get_storage
 

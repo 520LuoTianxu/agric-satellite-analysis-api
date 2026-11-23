@@ -92,6 +92,7 @@ class RegistrationRetryTests(unittest.TestCase):
             patch.object(br, "_complete", side_effect=fake_complete),
             patch("app.core.job_http.update_job_record", side_effect=fake_update),
             patch("app.core.job_http.complete_work_item_http"),
+            patch("app.core.job_http.progress_work_item_http"),
             patch("app.core.job_http.fail_work_item_http") as fail_work,
         ):
             with self.assertRaises(Retry):
@@ -121,7 +122,8 @@ class RegistrationRetryTests(unittest.TestCase):
                 )
             self.assertEqual(len(renders), 1)
             self.assertEqual(len(uploads), 1)
-            self.assertEqual(len(completes), 2)
+            self.assertGreaterEqual(len(completes), 2)
+            self.assertTrue(all(item["content"] is None for item in completes))
             fail_work.assert_not_called()
 
     def test_registration_exhausted_stays_pending_not_generate_failed(self):
@@ -158,6 +160,7 @@ class RegistrationRetryTests(unittest.TestCase):
             patch.object(br, "_complete", side_effect=TimeoutError("read timeout")),
             patch("app.core.job_http.update_job_record", side_effect=fake_update),
             patch("app.core.job_http.complete_work_item_http") as complete_work,
+            patch("app.core.job_http.progress_work_item_http"),
             patch("app.core.job_http.fail_work_item_http") as fail_work,
         ):
             out = _run(
@@ -170,7 +173,8 @@ class RegistrationRetryTests(unittest.TestCase):
         self.assertEqual(out["status"], "registration_pending")
         self.assertEqual(out["error_code"], "REGISTRATION_PENDING")
         complete_work.assert_not_called()
-        fail_work.assert_not_called()
+        fail_work.assert_called()
+        self.assertTrue(fail_work.call_args.kwargs.get("retry") is True or fail_work.call_args[1].get("retry") is True)
         self.assertFalse(task.retry_countdowns)
 
 

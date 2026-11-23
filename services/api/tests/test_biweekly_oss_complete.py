@@ -273,5 +273,41 @@ class RestartRecoveryTests(unittest.TestCase):
             self.assertEqual(len(data), len(MIN_PDF))
 
 
+
+class EventLoopTests(OssCompleteTests):
+    def test_complete_oss_hash_does_not_block_event_loop(self):
+        import time
+        from agric_satellite_analysis_common.biweekly import official_ref
+
+        seed_job(self.service, P15_JOB, period="15")
+        self.storage.put_bytes(official_object_key(LAND, P15_JOB), MIN_PDF)
+        original = official_ref.inspect_official_object
+
+        def slow_inspect(*args, **kwargs):
+            time.sleep(0.25)
+            return original(*args, **kwargs)
+
+        ticks = []
+
+        async def ticker():
+            for i in range(6):
+                await asyncio.sleep(0.05)
+                ticks.append(i)
+
+        async def run():
+            with patch("agric_satellite_analysis_common.biweekly.trigger.inspect_official_object", side_effect=slow_inspect):
+                complete = asyncio.create_task(
+                    biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None)
+                )
+                await ticker()
+                out = await complete
+                return out
+
+        out = asyncio.run(run())
+        self.assertTrue(out["ok"])
+        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during OSS hash")
+
+
 if __name__ == "__main__":
+
     unittest.main()
