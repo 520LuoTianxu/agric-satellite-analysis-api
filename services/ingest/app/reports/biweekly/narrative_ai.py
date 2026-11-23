@@ -28,17 +28,37 @@ DEFAULT_MODEL = "qwen3.7-flash"
 JUDGMENTS = {"better", "worse", "unclear"}
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
-SYSTEM_PROMPT = """你是农业遥感双周报的撰写人。只根据用户给出的 JSON 事实写说明。用具体、不重复的句子，不要套“若升高则写某句、若降低则写某句”的固定句式。
+SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 parameter_guide 和本期参数。parameter_guide 说明每个参数是什么意思，其余字段是程序已经算好的参数值。
 
-要求：
-- 往好、往差、不足以判断只放在 changes.judgment。阶段背景只供参考，不是必须套用的公式。
-- 不得改写、重算或新增事实里的数值、日期、地块和指标。句子里的数字只能照抄事实 JSON 里已经出现的数字。
-- 不得使用「低值参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」。
-- 某一类事实为空时，对应数组留空，不要编造田间位置、气象或缺测。
-- 只输出 JSON，不要 Markdown。结构为：
-  {"summary":"指标变化的一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"不超过90字"}],"conclusion":["结论短句"],"field_notes":["可到田核对的现象，不写处方"],"infield":[{"metric":"ndre","text":"这张田内图说明什么"}],"surrounding":["周边对照说明"],"weather":["气象说明，缺测照实写"]}
-- changes 和 infield 的 metric 只能是事实 metrics 里出现的键。judgment 只能是 better、worse、unclear。
+请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要套“若升高就写某一句”的填空，也不要只写“全部上升、方向一致”就把参数丢掉。参数里有的指标、日期、田内部位、未采用观测、气象和周边对照，都写进对应段落；某个参数为空就不要编。
+
+数值升高或降低只表示大小，不等于好坏。往好、往差、不足以判断由你阅读参数后决定。
+
+版式：正文是雅黑 10 磅。需要强调时只用下面几种：
+- 指标名和这句里的关键数值加粗，保持黑色：<b>…</b>（雅黑粗体）
+- 往好变化：<font color='#1F4D38'><b>往好变化</b></font>
+- 往差变化：<font color='#9C2B1B'><b>往差变化</b></font>
+- 不足以判断：<font color='#4A4A4A'><b>不足以判断</b></font>
+不要用别的颜色，不要写出字体名称，不要用 Markdown。
+
+数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
+只输出 JSON：
+{"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"你写的句子"}],"conclusion":["你写的句子"],"field_notes":["你写的句子"],"infield":[{"metric":"ndre","text":"你写的句子"}],"surrounding":["你写的句子"],"weather":["你写的句子"]}
+changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear，并和句中的颜色用语一致。
 """
+
+# 跟参数一起交给模型，只解释含义，不另给可以引用的数字。
+PARAMETER_GUIDE = {
+    "metrics": "每个指标的全田结果。full_name 和 meaning 说明这个指标反映什么。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。statistic 是中位数或均值。role 是本期主要指标还是辅助指标。",
+    "used_observations": "本期采用的观测日期。",
+    "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。",
+    "infield": "田块内部差异。median、p10、p90 是有效像元的中位数和第10、第90百分位。flagged_pixels 是明显低于本田整体水平的像元个数，clustered_pixels 是其中连成片的个数。regions.name 是成片像元所在部位，share_percent 是该部位占成片像元的百分比。",
+    "surrounding": "本田和周边约一公里农田的超绿指数。difference_exg 是本田减周边，正数表示本田更高。cover_2km_percent 是影像盖住周边两公里范围的百分比。",
+    "weather": "地块中心的格点气象，不是田间实测。precipitation_mm 是降水量毫米，et0_mm 是参考作物蒸散量毫米。带 days 的字段是有记录的天数，缺测的天没有算进合计。",
+    "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
+    "stage_background": "这个阶段通常的背景，只供参考，不是必须套用的公式，也不是对本田的结论。",
+    "gap_days": "最近一次观测和对比基准之间相隔的天数。",
+}
 
 
 def bailian_settings() -> dict[str, str]:
@@ -70,28 +90,76 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
             spec = METRIC_SPECS.get(key)
             metrics[key] = {
                 "name": spec.abbr if spec else metric_abbr(key),
+                "full_name": spec.name if spec else metric_abbr(key),
+                "meaning": spec.purpose if spec else "",
                 "role": "主要" if role == "primary" else "辅助",
-                "latest": item.get("latest"),
-                "baseline": item.get("baseline"),
-                "delta": item.get("delta"),
-                "arithmetic_direction": item.get("direction"),
-                "statistic": item.get("statistic"),
+                "latest": _index(item.get("latest")),
+                "baseline": _index(item.get("baseline")),
+                "delta": _index(item.get("delta")),
+                "value_direction": {"up": "升高", "down": "降低", "flat": "持平"}.get(
+                    item.get("direction") or ""
+                ),
+                "statistic": (
+                    "中位数"
+                    if item.get("statistic") == "median"
+                    else "均值"
+                    if item.get("statistic") == "mean"
+                    else None
+                ),
             }
     quality = facts.get("data_quality") or {}
     return {
+        "parameter_guide": PARAMETER_GUIDE,
         "period": period_text(facts),
         "stage": stage.get("text"),
         "stage_note": stage.get("source"),
         "stage_background": background.get("text"),
         "latest_date": comparison.get("latest_date"),
         "baseline_date": comparison.get("baseline_date"),
+        "gap_days": comparison.get("gap_days"),
         "metrics": metrics,
         "used_observations": quality.get("used_dates"),
-        "rejected_observations": quality.get("rejected"),
+        "rejected_observations": _rejected_observations(quality),
         "infield": _infield_facts(facts),
         "surrounding": _surrounding_facts(facts),
         "weather": _weather_facts(facts),
     }
+
+
+def _index(value: Any) -> str | None:
+    """Two decimals, same as the evidence table, so the prose does not dump raw floats."""
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _whole(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _rejected_observations(quality: dict[str, Any]) -> list[dict[str, Any]]:
+    from app.reports.biweekly.report_text import REJECT_REASONS
+
+    rows = []
+    for row in quality.get("rejected") or []:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "date": row.get("date"),
+                "reason": REJECT_REASONS.get(row.get("reason") or "", "质量不符合要求"),
+                "cloud_pct": _whole(row.get("cloud_pct")),
+            }
+        )
+    return rows
 
 
 def _infield_facts(facts: dict[str, Any]) -> list[dict[str, Any]]:
@@ -99,20 +167,26 @@ def _infield_facts(facts: dict[str, Any]) -> list[dict[str, Any]]:
     for item in facts.get("infield") or []:
         stats = item.get("stats") or {}
         relative = item.get("relative") or {}
+        regions = []
+        for region in relative.get("regions") or []:
+            if not region.get("name"):
+                continue
+            entry: dict[str, Any] = {"name": region["name"]}
+            if region.get("share") is not None:
+                entry["share_percent"] = _whole(float(region["share"]) * 100)
+            regions.append(entry)
         rows.append(
             {
                 "metric": item.get("metric"),
-                "median": stats.get("median"),
-                "p10": stats.get("p10"),
-                "p90": stats.get("p90"),
-                "valid_fraction": stats.get("valid_fraction"),
-                "flagged_pixels": relative.get("flagged_pixels"),
-                "clustered_pixels": relative.get("clustered_pixels"),
-                "regions": [
-                    region.get("name")
-                    for region in relative.get("regions") or []
-                    if region.get("name")
-                ],
+                "median": _index(stats.get("median")),
+                "p10": _index(stats.get("p10")),
+                "p90": _index(stats.get("p90")),
+                "valid_percent": _whole((stats.get("valid_fraction") or 0) * 100)
+                if stats.get("valid_fraction") is not None
+                else None,
+                "flagged_pixels": _whole(relative.get("flagged_pixels")),
+                "clustered_pixels": _whole(relative.get("clustered_pixels")),
+                "regions": regions,
             }
         )
     return rows
@@ -127,12 +201,16 @@ def _surrounding_facts(facts: dict[str, Any]) -> dict[str, Any]:
         rows.append(
             {
                 "date": row.get("date"),
-                "field_exg": row.get("field"),
-                "surrounding_1km_exg": row.get("surrounding_1km"),
-                "difference_exg": row.get("difference"),
+                "field_exg": _index(row.get("field")),
+                "surrounding_1km_exg": _index(row.get("surrounding_1km")),
+                "difference_exg": _index(row.get("difference")),
             }
         )
-    return {"comparisons": rows, "cover_2km": meta.get("cover_2km")}
+    cover = meta.get("cover_2km")
+    return {
+        "comparisons": rows,
+        "cover_2km_percent": None if cover is None else _whole(float(cover) * 100),
+    }
 
 
 def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
@@ -140,12 +218,12 @@ def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
     antecedent = facts.get("weather_antecedent") or {}
     return {
         "period_days": period.get("days"),
-        "precipitation_mm": period.get("precipitation_mm"),
+        "precipitation_mm": _index(period.get("precipitation_mm")),
         "precipitation_days": period.get("precipitation_days"),
-        "et0_mm": period.get("et0_mm"),
+        "et0_mm": _index(period.get("et0_mm")),
         "et0_days": period.get("et0_days"),
         "antecedent_days": antecedent.get("days"),
-        "antecedent_precipitation_mm": antecedent.get("precipitation_mm"),
+        "antecedent_precipitation_mm": _index(antecedent.get("precipitation_mm")),
     }
 
 
@@ -166,10 +244,21 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
+def _fact_blob(payload: dict[str, Any]) -> str:
+    """Digits may be copied from parameter values, not from the explanatory guide."""
+    values = {key: value for key, value in payload.items() if key != "parameter_guide"}
+    return json.dumps(values, ensure_ascii=False)
+
+
+def _visible_text(sentence: str) -> str:
+    return re.sub(r"<[^>]+>", "", sentence)
+
+
 def _numbers_are_copied(sentence: str, blob: str) -> bool:
     """A digit is allowed when the same value already appears in the facts JSON."""
+    visible = _visible_text(sentence)
     known = [float(token) for token in _NUMBER.findall(blob)]
-    for token in _NUMBER.findall(sentence):
+    for token in _NUMBER.findall(visible):
         if token in blob:
             continue
         try:
@@ -183,14 +272,35 @@ def _numbers_are_copied(sentence: str, blob: str) -> bool:
     return True
 
 
+_BANNED = (
+    "低值",
+    "参考线",
+    "预警线",
+    "达标",
+    "确诊",
+    "灾损",
+    "产量",
+    "好转",
+    "变差",
+    "模型",
+    "人工智能",
+)
+
+
 def _clean_sentence(sentence: str, blob: str, limit: int) -> str:
     text = sentence.strip()
-    if not text or "低值参考线" in text or not _numbers_are_copied(text, blob):
+    if (
+        not text
+        or any(word in text for word in _BANNED)
+        or re.search(r"\bAI\b", text, re.IGNORECASE)
+        or not _numbers_are_copied(text, blob)
+    ):
         return ""
-    return text[:limit]
+    text = re.sub(r"<[^>]*$", "", text[:limit])
+    return text
 
 
-def _clean_list(rows: Any, blob: str, limit: int = 160) -> list[str]:
+def _clean_list(rows: Any, blob: str, limit: int = 420) -> list[str]:
     if isinstance(rows, str):
         rows = [rows]
     cleaned = []
@@ -198,14 +308,14 @@ def _clean_list(rows: Any, blob: str, limit: int = 160) -> list[str]:
         text = _clean_sentence(str(row or ""), blob, limit)
         if text:
             cleaned.append(text)
-    return cleaned[:6]
+    return cleaned[:8]
 
 
 def normalize_judgment(
     parsed: dict[str, Any] | None, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """Keep model wording whose digits were copied. Drop anything the facts do not support."""
-    blob = json.dumps(payload, ensure_ascii=False)
+    blob = _fact_blob(payload)
     allowed = set((payload.get("metrics") or {}).keys())
     changes: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -217,21 +327,18 @@ def normalize_judgment(
         sentence = str(row.get("sentence") or "").strip()
         if metric not in allowed or metric in seen or judgment not in JUDGMENTS:
             continue
-        if "低值参考线" in sentence or not _numbers_are_copied(sentence, blob):
-            sentence = ""
+        sentence = _clean_sentence(sentence, blob, 420)
         seen.add(metric)
-        changes.append(
-            {"metric": metric, "judgment": judgment, "sentence": sentence[:90]}
-        )
+        changes.append({"metric": metric, "judgment": judgment, "sentence": sentence})
     infield: dict[str, str] = {}
     for row in (parsed or {}).get("infield") or []:
         if not isinstance(row, dict):
             continue
         metric = str(row.get("metric") or "").lower()
-        text = _clean_sentence(str(row.get("text") or ""), blob, 160)
+        text = _clean_sentence(str(row.get("text") or ""), blob, 420)
         if metric in allowed and metric not in infield and text:
             infield[metric] = text
-    summary = _clean_sentence(str((parsed or {}).get("summary") or ""), blob, 240)
+    summary = _clean_sentence(str((parsed or {}).get("summary") or ""), blob, 700)
     return {
         "summary": summary,
         "changes": changes,
@@ -277,12 +384,13 @@ def generate_metric_judgment(
         return empty_judgment(configured=False, error="not_configured", model=None)
     body = {
         "model": cfg["model"],
-        "temperature": 0.2,
+        "temperature": 0.4,
+        "max_tokens": 1800,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "请只根据这些事实撰写报告说明，仅输出 JSON：\n"
+                "content": "下面是参数说明和本期参数。请直接发挥写成报告，只输出 JSON：\n"
                 + json.dumps(payload, ensure_ascii=False),
             },
         ],
@@ -324,8 +432,15 @@ def generate_metric_judgment(
 _LABELS = {
     "better": ("往好变化", "#1F4D38"),
     "worse": ("往差变化", "#9C2B1B"),
-    "unclear": ("不足以判断好坏", "#4A4A4A"),
+    "unclear": ("不足以判断", "#4A4A4A"),
 }
+_FONT_OPEN = re.compile(
+    r"<\s*font\s+color\s*=\s*['\"]#?(1F4D38|9C2B1B|4A4A4A)['\"]\s*>",
+    re.IGNORECASE,
+)
+_FONT_CLOSE = re.compile(r"<\s*/\s*font\s*>", re.IGNORECASE)
+_BOLD_OPEN = re.compile(r"<\s*b\s*>", re.IGNORECASE)
+_BOLD_CLOSE = re.compile(r"<\s*/\s*b\s*>", re.IGNORECASE)
 
 
 def _has_wording(narrative: dict[str, Any]) -> bool:
@@ -342,44 +457,58 @@ def _has_wording(narrative: dict[str, Any]) -> bool:
 
 def section_lines(narrative: dict[str, Any] | None, key: str) -> list[str]:
     """Model sentences for one report section. Empty when the model did not write them."""
-    return [_paint(item) for item in (narrative or {}).get(key) or []]
+    return [_present(item) for item in (narrative or {}).get(key) or []]
 
 
 def infield_line(narrative: dict[str, Any] | None, metric: str) -> list[str]:
     text = ((narrative or {}).get("infield") or {}).get(metric)
-    return [_paint(text)] if text else []
+    return [_present(text)] if text else []
 
 
 def judgment_paragraphs(narrative: dict[str, Any] | None) -> list[str]:
-    """Presentation only: color and bold follow the model's judgment, not a new rule."""
-    if (
-        not narrative
-        or not narrative.get("changes")
-        and not (narrative or {}).get("summary")
-    ):
+    """Show the model's own sentences. Add the color only when the model left it out."""
+    if not narrative:
         return []
     items: list[str] = []
-    summary = str((narrative or {}).get("summary") or "").strip()
+    summary = str(narrative.get("summary") or "").strip()
     if summary:
-        items.append(_paint(summary))
-    for row in (narrative or {}).get("changes") or []:
+        items.append(_present(summary))
+    for row in narrative.get("changes") or []:
         label, color = _LABELS.get(row.get("judgment"), _LABELS["unclear"])
-        name = metric_abbr(str(row.get("metric") or ""))
-        sentence = _paint(str(row.get("sentence") or ""))
-        text = f"<font color='{color}'><b>{name} {label}</b></font>"
-        if sentence:
-            text += f"：{sentence}"
-        items.append(text)
+        sentence = str(row.get("sentence") or "").strip()
+        if label not in sentence:
+            name = metric_abbr(str(row.get("metric") or ""))
+            mark = f"<font color='{color}'><b>{label}</b></font>"
+            sentence = f"<b>{name}</b> {mark}。{sentence}".strip()
+        items.append(_present(sentence))
     return items
 
 
-def _escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _present(value: str) -> str:
+    """Keep the bold and the three report colors the model was told to use."""
+    slots: list[str] = []
 
+    def stash(html: str) -> str:
+        slots.append(html)
+        return f"\u0000{len(slots) - 1}\u0000"
 
-def _paint(value: str) -> str:
-    """Bold and color the words the model already chose. This does not decide better or worse."""
-    text = _escape(value)
-    text = text.replace("往好变化", "<font color='#1F4D38'><b>往好变化</b></font>")
-    text = text.replace("往差变化", "<font color='#9C2B1B'><b>往差变化</b></font>")
+    text = _FONT_OPEN.sub(
+        lambda match: stash(f"<font color='#{match.group(1).upper()}'>"), value
+    )
+    text = _FONT_CLOSE.sub(lambda _match: stash("</font>"), text)
+    text = _BOLD_OPEN.sub(lambda _match: stash("<b>"), text)
+    text = _BOLD_CLOSE.sub(lambda _match: stash("</b>"), text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\u0000(\d+)\u0000", lambda match: slots[int(match.group(1))], text)
+    for phrase, color in _LABELS.values():
+        wrapped = f"<font color='{color}'><b>{phrase}</b></font>"
+        parts = text.split(wrapped)
+        fixed = []
+        for part in parts:
+            part = part.replace(f"<b>{phrase}</b>", wrapped)
+            chunks = part.split(wrapped)
+            part = wrapped.join(chunk.replace(phrase, wrapped) for chunk in chunks)
+            fixed.append(part)
+        text = wrapped.join(fixed)
     return text

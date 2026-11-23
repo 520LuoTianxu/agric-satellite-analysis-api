@@ -10,6 +10,7 @@ from unittest.mock import patch
 from app.reports.biweekly.narrative_ai import (
     generate_metric_judgment,
     judgment_paragraphs,
+    narrative_input,
     normalize_judgment,
     section_lines,
 )
@@ -53,6 +54,25 @@ def _facts() -> dict:
 
 
 class NarrativeAiTests(unittest.TestCase):
+    def test_payload_explains_parameters_and_rounds_values(self) -> None:
+        facts = _facts()
+        facts["infield"] = [
+            {
+                "metric": "ndre",
+                "stats": {"median": 0.5712, "p10": 0.506396, "p90": 0.6045, "valid_fraction": 0.98},
+                "relative": {
+                    "flagged_pixels": 80,
+                    "clustered_pixels": 78,
+                    "regions": [{"name": "西南部", "share": 0.4}],
+                },
+            }
+        ]
+        payload = narrative_input(facts)
+        self.assertIn("最近一次有效观测", payload["parameter_guide"]["metrics"])
+        self.assertEqual(payload["metrics"]["ndre"]["latest"], "0.57")
+        self.assertIn("叶绿素", payload["metrics"]["ndre"]["meaning"])
+        self.assertEqual(payload["infield"][0]["p10"], "0.51")
+        self.assertEqual(payload["infield"][0]["regions"][0]["share_percent"], 40)
     def test_missing_key_does_not_invent_better_or_worse(self) -> None:
         with patch.dict(os.environ, {"BAILIAN_API_KEY": ""}, clear=False):
             os.environ.pop("BAILIAN_API_KEY", None)
@@ -97,9 +117,19 @@ class NarrativeAiTests(unittest.TestCase):
                 {"summary": normalized["summary"], "changes": normalized["changes"]}
             )
         )
-        self.assertIn("<font color='#1F4D38'><b>NDRE 往好变化</b></font>", marked)
-        self.assertIn("<font color='#9C2B1B'><b>EVI 往差变化</b></font>", marked)
+        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", marked)
+        self.assertIn("<font color='#9C2B1B'><b>往差变化</b></font>", marked)
         self.assertNotIn("9.99", marked)
+        written = (
+            "<b>NDRE</b> 为 <b>0.57</b>，"
+            "<font color='#1F4D38'><b>往好变化</b></font>。"
+            "<font color='#0000FF'>蓝</font>"
+        )
+        shown = section_lines({"conclusion": [written]}, "conclusion")[0]
+        self.assertIn("<b>NDRE</b>", shown)
+        self.assertIn("<b>0.57</b>", shown)
+        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", shown)
+        self.assertNotIn("0000FF", shown)
         parsed["conclusion"] = ["NDRE 往好变化，数值 0.57。", "另有一块地减产 3 成。"]
         parsed["weather"] = ["降水 12 毫米。"]
         again = normalize_judgment(parsed, payload)
@@ -159,5 +189,13 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("0.57", out["changes"][0]["sentence"])
         prompt = client.body["messages"][0]["content"]
         self.assertIn("不足以判断", prompt)
+        self.assertIn("#1F4D38", prompt)
+        self.assertIn("<b>", prompt)
+        self.assertIn("发挥", prompt)
         self.assertNotIn("delta > 0", prompt)
         self.assertNotIn('direction == "up"', prompt)
+        user = client.body["messages"][1]["content"]
+        self.assertIn("参数说明", user)
+        self.assertIn("最近一次有效观测", user)
+        self.assertIn("0.57", user)
+        self.assertNotIn("0.506", user)

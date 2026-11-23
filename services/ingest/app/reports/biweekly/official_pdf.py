@@ -478,14 +478,9 @@ def _bullets(story: list, styles: dict, items: list[str], *, style: str = "bulle
         story.append(Paragraph(item, styles[style], bulletText="•"))
 
 
-_MODEL_NOTE = "这段说明由模型阅读本期数值后撰写。本次没有生成，表和图仍是程序算出的数值。"
-
-
 def _model_prose(story: list, styles: dict, items: list[str]) -> None:
     if items:
         _bullets(story, styles, items)
-    else:
-        story.append(Paragraph(_MODEL_NOTE, styles["body"]))
 
 
 def _info_table(styles: dict, rows: list[tuple[str, str]]) -> Table:

@@ -470,8 +470,9 @@ class DemoReportTests(unittest.TestCase):
         infield = self._enriched("s1-tillering")["infield"][0]
         self.assertLess(infield["stats"]["p90"], 0.30)
         self.assertGreater(infield["stats"]["below_low_reference_fraction"], 0.9)
-        # 好坏不由代码写成结论；病因限定仍留在说明页。
-        self.assertIn("本次没有生成", text)
+        # 好坏不由代码写成结论，正文也不标明这段文字的来源。
+        self.assertNotIn("本次没有生成", text)
+        self.assertNotIn("由模型", text)
         self.assertIn("不判定病虫害", text)
 
     def test_rejected_pass_and_cloud_shadow_are_disclosed(self):
