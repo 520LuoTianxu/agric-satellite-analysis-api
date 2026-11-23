@@ -17,6 +17,7 @@ from app.services.biweekly_scenes import is_maize_crop
 DEFAULT_PACK_ROOT = Path("/workspace/reports/field6417-2025-2026")
 DEFAULT_WORK_DIR = Path("/tmp/biweekly-api-jobs")
 
+
 class EmptyCalendarCatalog:
     """Used when no Smart plan and no local pack is available."""
 
@@ -48,7 +49,11 @@ class EmptyCalendarCatalog:
 class CompositeCatalog:
     """Prefer a Smart native plan when present; otherwise the local 6417 pack."""
 
-    def __init__(self, local: LocalPackCatalog | None, smart: SmartPlantingCatalog | EmptyCalendarCatalog | None):
+    def __init__(
+        self,
+        local: LocalPackCatalog | None,
+        smart: SmartPlantingCatalog | EmptyCalendarCatalog | None,
+    ):
         self.local = local
         self.smart = smart or EmptyCalendarCatalog()
 
@@ -86,7 +91,11 @@ class CompositeCatalog:
             try:
                 return self.local.period(land_id, season_id, period_id)
             except ReportError as exc:
-                if exc.code not in {"LAND_NOT_IN_LOCAL_CATALOG", "SEASON_NOT_FOUND", "PERIOD_NOT_FOUND"}:
+                if exc.code not in {
+                    "LAND_NOT_IN_LOCAL_CATALOG",
+                    "SEASON_NOT_FOUND",
+                    "PERIOD_NOT_FOUND",
+                }:
                     raise
         return self.smart.period(land_id, season_id, period_id)
 
@@ -168,14 +177,19 @@ def build_trigger_service(
         # silently persist new official jobs only under /tmp.
         official_store = UnavailableOfficialStore(type(exc).__name__)
     try:
-        from agric_satellite_analysis_common.storage import get_storage
+        from agric_satellite_analysis_common.storage import bucket_name, get_storage
 
+        # bucket 是 str 属性，读取本身不访问数据库，也不应吞掉 TypeError
+        # 把整个 OSS 客户端丢掉——那样后续登记会因 expected bucket 为空而失败。
         object_storage = get_storage()
-        expected_bucket = object_storage.bucket()
-    except Exception as exc:  # noqa: BLE001
+        expected_bucket = bucket_name(object_storage)
+    except ValueError as exc:
         from app.core.logging import logger
 
-        logger.warning("biweekly_object_storage_unavailable_at_build err_type=%s", type(exc).__name__)
+        logger.warning(
+            "biweekly_object_storage_unavailable_at_build",
+            err_type=type(exc).__name__,
+        )
         object_storage = None
         expected_bucket = None
     return TriggerService(
@@ -196,7 +210,9 @@ def reject_maize(crop_type: str | None) -> bool:
 def annotate_dispatch(job: dict, dispatch: dict | None = None) -> dict:
     out = dict(job)
     result = dict(out.get("result") or {})
-    planned = (out.get("payload") or {}).get("planned_batch") or result.get("planned_batch")
+    planned = (out.get("payload") or {}).get("planned_batch") or result.get(
+        "planned_batch"
+    )
     if dispatch:
         result.update(dispatch)
         result["dispatched_to_production"] = bool(dispatch.get("dispatched"))
@@ -204,7 +220,11 @@ def annotate_dispatch(job: dict, dispatch: dict | None = None) -> dict:
         if planned:
             planned = dict(planned)
             if planned.get("dispatch") == "plan_only_local_fixture":
-                planned["dispatch"] = "satellite_batch" if dispatch.get("dispatched") else "dispatch_failed"
+                planned["dispatch"] = (
+                    "satellite_batch"
+                    if dispatch.get("dispatched")
+                    else "dispatch_failed"
+                )
             result["planned_batch"] = planned
             payload = dict(out.get("payload") or {})
             if payload:
@@ -246,13 +266,17 @@ async def stream_official_download(service, job_id: str):
     def _produce() -> None:
         try:
             for chunk in chunks:
-                asyncio.run_coroutine_threadsafe(queue.put(("data", chunk)), loop).result()
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(("data", chunk)), loop
+                ).result()
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
         finally:
             asyncio.run_coroutine_threadsafe(queue.put(("end", None)), loop).result()
 
-    threading.Thread(target=_produce, name=f"oss-download-{job_id}", daemon=True).start()
+    threading.Thread(
+        target=_produce, name=f"oss-download-{job_id}", daemon=True
+    ).start()
 
     async def _agen():
         while True:

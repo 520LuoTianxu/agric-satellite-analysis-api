@@ -9,7 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from agric_satellite_analysis_common.biweekly.official_ref import official_object_key, sha256_bytes
+from agric_satellite_analysis_common.biweekly.official_ref import (
+    official_object_key,
+    sha256_bytes,
+)
 from agric_satellite_analysis_common.biweekly.official_store import (
     DurableJsonOfficialStore,
     MemoryOfficialStore,
@@ -34,6 +37,7 @@ class FakeObjectStorage:
         self._bucket = bucket
         self.objects: dict[str, bytes] = {}
 
+    @property
     def bucket(self) -> str:
         return self._bucket
 
@@ -42,7 +46,11 @@ class FakeObjectStorage:
 
     def stat_object(self, key: str) -> dict:
         data = self.objects[key]
-        return {"size_bytes": len(data), "content_type": "application/pdf", "etag": None}
+        return {
+            "size_bytes": len(data),
+            "content_type": "application/pdf",
+            "etag": None,
+        }
 
     def read_prefix(self, key: str, n: int) -> bytes:
         return self.objects[key][:n]
@@ -61,7 +69,14 @@ class FakeObjectStorage:
         return key
 
 
-def seed_job(service: TriggerService, job_id: str, *, period: str, status: str = "dispatched", error=None):
+def seed_job(
+    service: TriggerService,
+    job_id: str,
+    *,
+    period: str,
+    status: str = "dispatched",
+    error=None,
+):
     job = {
         "job_id": job_id,
         "kind": "generate",
@@ -144,10 +159,16 @@ class OssCompleteTests(unittest.TestCase):
         self.assertEqual(latest["persistence"], "database")
 
     def test_p12_existing_oss_unregistered_recovers_from_failed(self):
-        seed_job(self.service, P12_JOB, period="12", status="failed", error="GENERATE_FAILED")
+        seed_job(
+            self.service, P12_JOB, period="12", status="failed", error="GENERATE_FAILED"
+        )
         key = official_object_key(LAND, P12_JOB)
         self.storage.put_bytes(key, MIN_PDF)
-        out = asyncio.run(biweekly_mod.biweekly_report_complete(P12_JOB, oss_body(P12_JOB, MIN_PDF), None))
+        out = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P12_JOB, oss_body(P12_JOB, MIN_PDF), None
+            )
+        )
         self.assertEqual(out["job"]["status"], "ready")
         name, data, mime = self.service.download(P12_JOB)
         self.assertTrue(data.startswith(b"%PDF-"))
@@ -155,8 +176,14 @@ class OssCompleteTests(unittest.TestCase):
     def test_ready_not_reverted_by_stale_fail(self):
         seed_job(self.service, P15_JOB, period="15")
         self.storage.put_bytes(official_object_key(LAND, P15_JOB), MIN_PDF)
-        asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None))
-        fail = biweekly_mod.CompleteRequest(status="failed", error_code="GENERATE_FAILED", note="late fail")
+        asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
+        fail = biweekly_mod.CompleteRequest(
+            status="failed", error_code="GENERATE_FAILED", note="late fail"
+        )
         out = asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, fail, None))
         self.assertEqual(out["job"]["status"], "ready")
         self.assertEqual(self.service.get_job(P15_JOB)["status"], "ready")
@@ -164,11 +191,21 @@ class OssCompleteTests(unittest.TestCase):
     def test_duplicate_complete_is_idempotent(self):
         seed_job(self.service, P15_JOB, period="15")
         self.storage.put_bytes(official_object_key(LAND, P15_JOB), MIN_PDF)
-        first = asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None))
-        second = asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None))
+        first = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
+        second = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
         self.assertEqual(first["job"]["status"], "ready")
         self.assertEqual(second["job"]["status"], "ready")
-        self.assertEqual(second["job"]["artifact"]["sha256"], first["job"]["artifact"]["sha256"])
+        self.assertEqual(
+            second["job"]["artifact"]["sha256"], first["job"]["artifact"]["sha256"]
+        )
 
     def test_legacy_base64_still_completes(self):
         job = self.service.request_generate("6417", "2025/26", "12", defer_run=True)
@@ -180,7 +217,9 @@ class OssCompleteTests(unittest.TestCase):
             content_base64=base64.b64encode(MIN_PDF).decode("ascii"),
             facts={"land_id": "6417"},
         )
-        out = asyncio.run(biweekly_mod.biweekly_report_complete(job["job_id"], body, None))
+        out = asyncio.run(
+            biweekly_mod.biweekly_report_complete(job["job_id"], body, None)
+        )
         self.assertEqual(out["job"]["status"], "ready")
         name, data, mime = self.service.download(job["job_id"])
         self.assertTrue(data.startswith(b"%PDF-"))
@@ -227,7 +266,11 @@ class OssCompleteTests(unittest.TestCase):
     def test_download_rejects_other_land(self):
         seed_job(self.service, P15_JOB, period="15")
         self.storage.put_bytes(official_object_key(LAND, P15_JOB), MIN_PDF)
-        asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None))
+        asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
         job = self.service.get_job(P15_JOB)
         self.assertEqual(job["land_id"], LAND)
         self.assertNotEqual(job["land_id"], "19994")
@@ -250,8 +293,15 @@ class RestartRecoveryTests(unittest.TestCase):
                 expected_oss_bucket=BUCKET,
             )
             seed_job(service, P15_JOB, period="15")
-            with patch("app.routers.internal_biweekly.build_trigger_service", return_value=service):
-                asyncio.run(biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None))
+            with patch(
+                "app.routers.internal_biweekly.build_trigger_service",
+                return_value=service,
+            ):
+                asyncio.run(
+                    biweekly_mod.biweekly_report_complete(
+                        P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+                    )
+                )
 
             # Simulate API restart: empty work_dir, new store instance from the same durable file.
             revived = DurableJsonOfficialStore(store_path)
@@ -262,7 +312,9 @@ class RestartRecoveryTests(unittest.TestCase):
                 object_storage=storage,
                 expected_oss_bucket=BUCKET,
             )
-            self.assertFalse((Path(tmp) / "work2-empty" / "jobs" / f"{P15_JOB}.json").is_file())
+            self.assertFalse(
+                (Path(tmp) / "work2-empty" / "jobs" / f"{P15_JOB}.json").is_file()
+            )
             job = service2.get_job(P15_JOB)
             self.assertEqual(job["status"], "ready")
             self.assertEqual(job["persistence"], "database")
@@ -271,7 +323,6 @@ class RestartRecoveryTests(unittest.TestCase):
             name, data, mime = service2.download(P15_JOB)
             self.assertTrue(data.startswith(b"%PDF-"))
             self.assertEqual(len(data), len(MIN_PDF))
-
 
 
 class EventLoopTests(OssCompleteTests):
@@ -295,9 +346,14 @@ class EventLoopTests(OssCompleteTests):
                 ticks.append(i)
 
         async def run():
-            with patch("agric_satellite_analysis_common.biweekly.trigger.inspect_official_object", side_effect=slow_inspect):
+            with patch(
+                "agric_satellite_analysis_common.biweekly.trigger.inspect_official_object",
+                side_effect=slow_inspect,
+            ):
                 complete = asyncio.create_task(
-                    biweekly_mod.biweekly_report_complete(P15_JOB, oss_body(P15_JOB, MIN_PDF), None)
+                    biweekly_mod.biweekly_report_complete(
+                        P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+                    )
                 )
                 await ticker()
                 out = await complete
@@ -305,7 +361,9 @@ class EventLoopTests(OssCompleteTests):
 
         out = asyncio.run(run())
         self.assertTrue(out["ok"])
-        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during OSS hash")
+        self.assertGreaterEqual(
+            len(ticks), 3, "event loop should keep ticking during OSS hash"
+        )
 
     def test_download_oss_stream_does_not_block_event_loop(self):
         import time
@@ -344,7 +402,9 @@ class EventLoopTests(OssCompleteTests):
                 ticks.append(i)
 
         async def consume():
-            _name, agen, _mime, _size = await stream_official_download(self.service, P15_JOB)
+            _name, agen, _mime, _size = await stream_official_download(
+                self.service, P15_JOB
+            )
             chunks = []
             async for part in agen:
                 chunks.append(part)
@@ -357,7 +417,9 @@ class EventLoopTests(OssCompleteTests):
 
         data = asyncio.run(run())
         self.assertTrue(data.startswith(b"%PDF-"))
-        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during OSS download")
+        self.assertGreaterEqual(
+            len(ticks), 3, "event loop should keep ticking during OSS download"
+        )
 
     def test_start_period_generate_store_io_does_not_block_event_loop(self):
         import time
@@ -365,12 +427,14 @@ class EventLoopTests(OssCompleteTests):
 
         class _StubCatalog:
             def periods(self, land_id, season_id):
-                return [{
-                    "period_id": "15",
-                    "start": "2026-05-16",
-                    "end_inclusive": "2026-05-29",
-                    "end_exclusive": "2026-05-30",
-                }]
+                return [
+                    {
+                        "period_id": "15",
+                        "start": "2026-05-16",
+                        "end_inclusive": "2026-05-29",
+                        "end_exclusive": "2026-05-30",
+                    }
+                ]
 
             def period(self, land_id, season_id, period_id):
                 return self.periods(land_id, season_id)[0]
@@ -414,10 +478,13 @@ class EventLoopTests(OssCompleteTests):
                 return await task
 
         job = asyncio.run(run())
-        self.assertIn(job.get("status"), {"dispatched", "queued", "running", "ready", "failed"})
-        self.assertGreaterEqual(len(ticks), 3, "event loop should keep ticking during generate store I/O")
+        self.assertIn(
+            job.get("status"), {"dispatched", "queued", "running", "ready", "failed"}
+        )
+        self.assertGreaterEqual(
+            len(ticks), 3, "event loop should keep ticking during generate store I/O"
+        )
 
 
 if __name__ == "__main__":
-
     unittest.main()

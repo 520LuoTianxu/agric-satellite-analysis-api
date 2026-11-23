@@ -4,11 +4,89 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
+import traceback
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 import structlog
+
+# 异常正文里的口令、云账号和连接串必须先抹掉再进 JSON。
+# 只匹配「名字 + 赋值」，避免误伤地块号、sha256 这类普通字段。
+_SECRET_ASSIGN_RE = re.compile(
+    r"(?i)\b(password|passwd|secret|token|access_key(?:_id|_secret)?|authorization|ossaccesskeyid|signature)\b"
+    r"\s*[=:]\s*[\"']?([^\s,;\"']+)"
+)
+_URI_RE = re.compile(
+    r"(?i)\b(?:postgres(?:ql)?(?:\+\w+)?|redis(?:s)?|mysql|amqp|amqps)://[^\s\"']+"
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]+")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b")
+_ALIYUN_AK_RE = re.compile(r"\bLTAI[A-Za-z0-9]{8,}\b")
+
+
+def redact_secrets(text: str, *, limit: int = 4000) -> str:
+    """Return ``text`` with credentials removed and length capped."""
+    cleaned = text or ""
+    cleaned = _URI_RE.sub("[uri:redacted]", cleaned)
+    cleaned = _BEARER_RE.sub("Bearer [redacted]", cleaned)
+    cleaned = _JWT_RE.sub("[jwt:redacted]", cleaned)
+    cleaned = _ALIYUN_AK_RE.sub("[access-key:redacted]", cleaned)
+    cleaned = _SECRET_ASSIGN_RE.sub(r"\1=[redacted]", cleaned)
+    if len(cleaned) > limit:
+        # 保留抛出点附近的栈尾，截掉的是更早的调用帧。
+        cleaned = "...[truncated]\n" + cleaned[-(limit - 16) :]
+    return cleaned
+
+
+def redacting_exception_processor(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace structlog's boolean ``exc_info`` with type, message, and stack.
+
+    ``structlog.dev.set_exc_info`` only stores ``True``. ``JSONRenderer`` then
+    emits ``"exc_info": true`` and drops the traceback. Call this processor
+    after ``set_exc_info`` and before ``JSONRenderer``.
+    """
+    if "exc_info" not in event_dict:
+        return event_dict
+    exc_info = event_dict.pop("exc_info")
+    if not exc_info:
+        return event_dict
+    if exc_info is True:
+        exc_info = sys.exc_info()
+    if isinstance(exc_info, BaseException):
+        exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3 or exc_info[0] is None:
+        return event_dict
+    exc_type, exc, tb = exc_info
+    event_dict["exc_type"] = getattr(exc_type, "__name__", None) or type(exc).__name__
+    event_dict["exc_message"] = redact_secrets(str(exc), limit=500)
+    event_dict["exc_stack"] = redact_secrets(
+        "".join(traceback.format_exception(exc_type, exc, tb)),
+        limit=6000,
+    )
+    for key, value in list(event_dict.items()):
+        if key in {"exc_message", "exc_stack"} or not isinstance(value, str):
+            continue
+        event_dict[key] = redact_secrets(value, limit=2000)
+    return event_dict
+
+
+def processor_chain() -> list[Any]:
+    """Processors used by worker and API JSON logs."""
+    return [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        redacting_exception_processor,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ]
 
 
 _RUNTIME_LOG_STREAM: TextIO | None = None
@@ -78,13 +156,18 @@ def _attach_runtime_file_handler() -> None:
         return
 
     root_logger = logging.getLogger()
-    if any(handler.get_name() == "openfarm.runtime.file" for handler in root_logger.handlers):
+    if any(
+        handler.get_name() == "openfarm.runtime.file"
+        for handler in root_logger.handlers
+    ):
         return
 
     handler = logging.StreamHandler(_RUNTIME_LOG_FILE)
     handler.set_name("openfarm.runtime.file")
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s trace_id=%(trace_id)s %(message)s")
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s trace_id=%(trace_id)s %(message)s"
+        )
     )
     root_logger.addHandler(handler)
     if root_logger.level > logging.INFO:
@@ -116,14 +199,7 @@ def setup_logging() -> None:
     _runtime_log_stream()
     _attach_runtime_file_handler()
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer(),
-            structlog.dev.set_exc_info,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
+        processors=processor_chain(),
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=_runtime_log_stream()),
