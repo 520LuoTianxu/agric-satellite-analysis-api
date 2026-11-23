@@ -686,6 +686,7 @@ def _dispatch_report(
     land_id: str,
     extras: dict[str, Any],
     priority: int | None = None,
+    item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "land_id": land_id,
@@ -712,6 +713,15 @@ def _dispatch_report(
         task_name = "app.tasks.biweekly_report.generate_biweekly_report"
         if extras.get("job_id"):
             kwargs["report_job_id"] = str(extras["job_id"])
+        from agric_satellite_analysis_common.biweekly.official_ref import (
+            registration_progress_from_work_item,
+        )
+
+        # Pass the durable work-item OSS ref so a later claim can register
+        # even when Job.progress_json was never written.
+        progress = registration_progress_from_work_item(item)
+        if progress:
+            kwargs["registration_progress"] = progress
     else:
         keys = ("start_date", "end_date", "crops", "label", "material_keys")
         task_name = "app.tasks.season_growth_report.generate_season_growth_report"
@@ -829,7 +839,7 @@ def _dispatch_celery(item: dict[str, Any]) -> dict[str, Any]:
     payload = dict(item.get("payload_json") or {})
     task_id = payload.get("task_id") or extras.get("task_id")
     if wtype in ("assessment_report", "season_growth_report", "biweekly_report"):
-        return _dispatch_report(wtype, work_id, land_id, extras, priority)
+        return _dispatch_report(wtype, work_id, land_id, extras, priority, item=item)
     if wtype in COMPLETE_ON_DISPATCH_TYPES or wtype in DEFAULT_TYPES:
         return _dispatch_via_handler(
             wtype, work_id, land_id, extras, task_id, priority

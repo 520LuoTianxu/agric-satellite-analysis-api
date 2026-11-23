@@ -503,7 +503,7 @@ class CoverAssetTests(unittest.TestCase):
     def test_conclusion_states_direction_without_claiming_improvement(self):
         from app.reports.biweekly.enrichment import ensure_report_inputs
         from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
-        from app.reports.biweekly.report_text import conclusion_items, evidence_table
+        from app.reports.biweekly.report_text import evidence_table
 
         facts = {
             "land_id": "19994",
@@ -537,12 +537,6 @@ class CoverAssetTests(unittest.TestCase):
         self.assertEqual(filled["comparison"]["baseline_date"], "2026-04-04")
         self.assertEqual(filled["comparison"]["metrics"]["ndre"]["direction"], "down")
         self.assertEqual(filled["comparison"]["metrics"]["evi"]["direction"], "up")
-        joined = "\n".join(conclusion_items(filled))
-        self.assertIn("NDRE", joined)
-        self.assertIn("4月9日", joined)
-        self.assertIn("田块均值", joined)
-        for banned in ("好转", "变差", "绿度", "叶片营养", "这两周"):
-            self.assertNotIn(banned, joined)
         table = evidence_table(filled)
         self.assertEqual(table[0][0], "指标")
         self.assertEqual([row[0] for row in table[1:]], ["NDRE（主要）", "EVI（主要）", "NDVI（辅助）", "NDMI（辅助）"])

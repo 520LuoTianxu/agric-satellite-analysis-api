@@ -11,6 +11,7 @@ from unittest.mock import patch
 from PIL import ImageFont
 
 from app.reports.biweekly.cover import (
+    crop_badge_text,
     COVER_FOOTER_CONTACT_LIU,
     COVER_FOOTER_CONTACT_LUO,
     COVER_FOOTER_CONTACTS,
@@ -63,6 +64,14 @@ def _sample_facts() -> dict:
 
 
 class OfficialWordingTests(unittest.TestCase):
+    def test_cover_marks_the_crop(self) -> None:
+        self.assertEqual(crop_badge_text({"phase": {"display_phase": "S2"}}), "冬小麦")
+        self.assertEqual(crop_badge_text({"crop_type": "maize"}), "玉米")
+        self.assertEqual(
+            crop_badge_text({"crop_name": "冬小麦", "phase": {"plan_label": "本田方案"}}),
+            "冬小麦（本田方案）",
+        )
+
     def test_paragraphs_match_reviewed_wording_exactly(self) -> None:
         self.assertEqual(COVER_FOOTER_PARAGRAPHS, _EXPECTED)
         self.assertEqual(COVER_FOOTER_ORG, _EXPECTED[0])

@@ -47,10 +47,12 @@ from app.reports.biweekly.cover import (
     COVER_FOOTER_ORG,
     compact_date_span,
     compose_official_cover,
+    crop_badge_text,
     wrap_footer_text,
 )
 from app.reports.biweekly.enrichment import ensure_report_inputs, series_value
 from app.reports.biweekly.fonts import resolve_yahei_fonts
+from app.reports.biweekly.narrative_ai import infield_line, judgment_paragraphs, section_lines
 
 W, H = A4
 M = 48
@@ -289,8 +291,6 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
             span = hi - lo
             if start and end:
                 ax.axvspan(day(start), day(end) + timedelta(days=1), color="#EDF2EE", zorder=0)
-            if spec.low_reference is not None:
-                ax.axhline(spec.low_reference, color="#6B6B6B", lw=0.8, ls="--", zorder=1)
             points = [(day(row["date"]), series_value(row, metric, stat), row) for row in series]
             points = [p for p in points if p[1] is not None]
             if points:
@@ -313,17 +313,13 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
                 )
                 has_spread = stat == "median" and entry.get("p90") is not None
                 top = max(entry["p90"], value) if has_spread else value
-                low = min(entry["p10"], value) if has_spread else value
-                # 数值标在点的上方；参考线恰好压在标注位置时改标在下方，避免数字被虚线穿过。
-                ref = spec.low_reference
-                below = ref is not None and 0 <= ref - top < 0.16 * span
                 ax.annotate(
                     text.fmt_index(value),
-                    (when, low if below else top),
-                    xytext=(0, -5 if below else 5),
+                    (when, top),
+                    xytext=(0, 5),
                     textcoords="offset points",
                     ha="center",
-                    va="top" if below else "bottom",
+                    va="bottom",
                     fontsize=7.5,
                     color="#000000",
                     zorder=5,
@@ -363,7 +359,6 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
         if any_spread:
             handles.append(Line2D([0], [0], color="#1F4D38", lw=1.0, marker="|", markersize=7,
                                   label="竖线：第10至第90百分位"))
-        handles.append(Line2D([0], [0], color="#6B6B6B", lw=0.8, ls="--", label="低值参考线"))
         if rejected:
             handles.append(Line2D([0], [0], marker="x", color="#8A8A8A", lw=0, markersize=5, label="未采用的过境"))
         handles.append(Patch(facecolor="#EDF2EE", edgecolor="none", label="本监测周期"))
@@ -483,6 +478,11 @@ def _bullets(story: list, styles: dict, items: list[str], *, style: str = "bulle
         story.append(Paragraph(item, styles[style], bulletText="•"))
 
 
+def _model_prose(story: list, styles: dict, items: list[str]) -> None:
+    if items:
+        _bullets(story, styles, items)
+
+
 def _info_table(styles: dict, rows: list[tuple[str, str]]) -> Table:
     data = [[Paragraph(label, styles["label"]), Paragraph(value, styles["value"])] for label, value in rows]
     table = Table(data, colWidths=[78, CW - 78])
@@ -543,24 +543,25 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     _heading(story, styles, next(counter), "本期结论")
     story.append(_info_table(styles, text.basic_info_rows(facts)))
     story.append(Paragraph("结论", styles["h2"]))
-    _bullets(story, styles, text.conclusion_items(facts))
+    _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "conclusion"))
     evidence = text.evidence_table(facts)
     if evidence:
         block = [
             Paragraph("主要证据", styles["h2"]),
-            _data_table(styles, evidence, [76, 52, 52, 52, 96, 62, CW - 390]),
+            _data_table(styles, evidence, [90, 64, 64, 56, CW - 274]),
             Spacer(1, 3),
             Paragraph(text.evidence_caption(facts), styles["small"]),
         ]
         story.append(KeepTogether(block))
     story.append(Paragraph("田间核查建议", styles["h2"]))
-    _bullets(story, styles, text.field_check_items(facts))
+    _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
 
     # 二、指标与数据质量
     story.append(PageBreak())
     _heading(story, styles, next(counter), "指标与数据质量")
+    story.append(Paragraph("变化好坏", styles["h2"]))
+    _model_prose(story, styles, judgment_paragraphs(facts.get("ai_narrative")))
     story.append(Paragraph("指标说明", styles["h2"]))
-    story.append(Paragraph(text.metric_choice_sentence(facts), styles["body"]))
     _bullets(story, styles, text.metric_definition_items(facts))
     table = text.observation_table(facts)
     if len(table) > 1:
@@ -605,7 +606,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
             story.append(PageBreak())
             spec = METRIC_SPECS[item["metric"]]
             _heading(story, styles, number, f"田内空间分布：{spec.label}")
-            _bullets(story, styles, text.infield_items(facts, item))
+            _model_prose(story, styles, infield_line(facts.get("ai_narrative"), item["metric"]))
             story.append(Spacer(1, 2))
             story.append(FitImage(item["image"], max_height=560))
 
@@ -614,7 +615,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     if text.has_surrounding(facts) and surround_image:
         story.append(PageBreak())
         _heading(story, styles, next(counter), "周边农田对照")
-        _bullets(story, styles, text.surrounding_items(facts))
+        _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "surrounding"))
         story.append(FitImage(surround_image, max_height=380))
         contrast = _image_path(facts.get("surrounding_contrast_image"))
         if contrast:
@@ -624,7 +625,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     if text.has_weather(facts):
         story.append(PageBreak())
         _heading(story, styles, next(counter), "气象条件")
-        _bullets(story, styles, text.weather_items(facts))
+        _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "weather"))
         chart = _weather_chart(facts, fig_dir / "weather.png")
         if chart:
             story.append(FitImage(chart, max_height=380))
@@ -635,7 +636,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(Paragraph("数据与方法", styles["h2"]))
     _bullets(story, styles, text.method_items(facts), style="note")
     story.append(Spacer(1, 2))
-    story.append(_data_table(styles, text.metric_spec_table(facts), [44, CW - 44 - 3 * 76, 76, 76, 76]))
+    story.append(_data_table(styles, text.metric_spec_table(facts), [44, CW - 44 - 2 * 76, 76, 76]))
     story.append(Paragraph("生长阶段与指标", styles["h2"]))
     _bullets(story, styles, text.stage_note_items(facts), style="note")
     stage_table = text.stage_metric_table(facts)
@@ -711,6 +712,13 @@ def _draw_cover(c, doc) -> None:
     c.drawString(M, H - 60 * mm, text.land_title(facts))
     c.setFont("YaHei", 13)
     c.drawString(M, H - 74 * mm, compact_date_span(text.period_of(facts)))
+    badge = crop_badge_text(facts)
+    if badge:
+        c.setFillColor(DECOR)
+        c.roundRect(M, H - 108 * mm, 78 * mm, 10 * mm, 3, fill=1, stroke=0)
+        c.setFillColor(HexColor("#FFFFFF"))
+        c.setFont("YaHei-Bold", 11)
+        c.drawString(M + 8, H - 105 * mm, f"作物  {badge}")
     if text.is_demo(facts):
         c.setFillColor(NOTICE)
         c.setFont("YaHei-Bold", 13)

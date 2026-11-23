@@ -49,6 +49,10 @@ def generate_official_biweekly_pdf(
         fetch_truecolor=fetch_truecolor,
         offline=offline,
     )
+    if "ai_narrative" not in filled:
+        from app.reports.biweekly.narrative_ai import generate_metric_judgment
+
+        filled["ai_narrative"] = generate_metric_judgment(filled)
     rendered = render_official_biweekly_pdf(filled, dest_path, figures_dir=figures)
     if facts_sidecar:
         side = Path(facts_sidecar)
