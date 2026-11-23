@@ -5,8 +5,9 @@ Auth is the dedicated biweekly dependency — not AUTH_DISABLED.
 
 Backfill creates bounded satellite_batch jobs through
 create_satellite_batch_jobs / the existing outbox or WorkItem path.
-Generate reads ingested parcel_scene_products and does not run automatically
-after backfill.
+Official generate is handed to the download machine after those backfill
+jobs reach a terminal success (POST /periods/{period_id}/generate and the
+one-click POST /backfill-season path).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_window, prior_period
 from agric_satellite_analysis_common.biweekly.models import ReportError
 
+from app.core.logging import logger
 from app.middleware.biweekly_auth import BiweeklyPrincipal, require_biweekly_access
 from app.services.biweekly_dispatch import dispatch_bounded_backfill, dispatch_season_bounded_backfill
 from app.services.biweekly_report_flow import (
@@ -222,10 +224,13 @@ async def request_season_backfill(
     body: BackfillBody | None = None,
     season: Annotated[str | None, Query()] = None,
 ):
-    """Dispatch bounded satellite_batch jobs for every period in the season.
+    """One-click season entry: bounded backfill per period, then official reports.
 
+    Frontends that label this 「一键补齐全部双周报」 should call this once.
     Each period uses its own window (period plus prior comparison). Never
-    sends one unbounded or three-year window, and never auto-generates.
+    sends one unbounded or three-year window. After backfill jobs reach a
+    terminal success, the API dispatches biweekly_report work items; it
+    does not render PDFs on the API machine.
     """
     try:
         service, _mapping, _calendar = await _smart_context(land_id)
@@ -284,7 +289,26 @@ async def get_job(
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
         if job.get("status") == "dispatched":
-            job = (await maybe_finalize_biweekly_job(job_id, service=service)) or job
+            try:
+                job = (await maybe_finalize_biweekly_job(job_id, service=service)) or job
+            except ReportError as exc:
+                # A job already loaded from disk must not become 404 PERIOD_NOT_FOUND
+                # just because finalize lacks a Smart catalog.
+                logger.warning(
+                    "biweekly_get_finalize_failed job_id=%s land_id=%s error_code=%s",
+                    job_id,
+                    land_id,
+                    exc.code,
+                    exc_info=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — still return the found job
+                logger.warning(
+                    "biweekly_get_finalize_failed job_id=%s land_id=%s err_type=%s",
+                    job_id,
+                    land_id,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
         kind = job.get("kind")
         dispatch = job.get("result") if kind in {"backfill", "backfill_season"} else None
         return _public(job, principal, dispatch=dispatch if kind in {"backfill", "backfill_season"} else None)
