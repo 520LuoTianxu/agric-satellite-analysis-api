@@ -26,6 +26,7 @@ from agric_satellite_analysis_common.biweekly.phase_policy import (
     PHASE_LABELS,
     PLAIN_NAMES,
 )
+from app.reports.biweekly.cover import compact_date_span, compose_official_cover
 from app.reports.biweekly.fonts import resolve_yahei_fonts
 
 W, H = A4
@@ -82,6 +83,30 @@ def _land_title(facts: dict) -> str:
     return f"地块 {land_id}" if land_id else "地块"
 
 
+
+def _image_path(facts: dict, key: str) -> Path | None:
+    raw = facts.get(key)
+    if not raw:
+        return None
+    path = Path(str(raw))
+    return path if path.is_file() else None
+
+
+def _variation_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _draw_figure(c, path: Path | None, y: float, *, max_height: float) -> float:
+    if not path or not path.is_file():
+        return y
+    height = min(max_height, max(y - 56, 80))
+    c.drawImage(str(path), M - 4, y - height, width=CW + 8, height=height, preserveAspectRatio=True, mask="auto")
+    return y - height - 10
+
 def _plan_clause(phase: dict) -> str:
     if phase.get("plan_source") == "reference" or phase.get("phenology_basis") == "PLAN_DERIVED_FROM_BTU_REFERENCE":
         ref = phase.get("reference") or {}
@@ -121,9 +146,17 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return f"{value:.{digits}f}"
 
 
-def _date_span(period: dict) -> str:
+def _date_span(period: dict, *, compact: bool = False) -> str:
+    if compact:
+        return compact_date_span(period)
     start = _day(period.get("start"))
-    end = _day(period.get("end_inclusive") or period.get("end_exclusive"))
+    end = _day(period.get("end_inclusive") or period.get("end"))
+    if not end:
+        exclusive = _day(period.get("end_exclusive"))
+        if exclusive:
+            from datetime import date, timedelta
+
+            end = (date.fromisoformat(exclusive) - timedelta(days=1)).isoformat()
     return f"{_cn_date(start)}—{_cn_date(end)}"
 
 
@@ -133,6 +166,49 @@ def _cn_date(day: str) -> str:
         return day
     year, month, day_n = parts
     return f"{int(year)}年{int(month)}月{int(day_n)}日"
+
+
+def _cn_md(day: str) -> str:
+    parts = _day(day).split("-")
+    if len(parts) != 3:
+        return day
+    return f"{int(parts[1])}月{int(parts[2])}日"
+
+
+def _report_metrics(facts: dict) -> list[str]:
+    phase = _phase(facts)
+    metrics = list(phase.get("primary_metrics") or []) + list(phase.get("supporting_metrics") or [])
+    metrics = [m for m in metrics if m not in FORBIDDEN_REPORT_METRICS]
+    if metrics:
+        return metrics
+    # No plan/stage selection: still show the four plain optical readings, without
+    # turning them into a phenology judgment.
+    observed = list(facts.get("observations") or []) + list(facts.get("prior_observations") or [])
+    available = []
+    for metric in ("ndvi", "evi", "ndre", "ndmi"):
+        if any(_metric_value(row, metric) is not None for row in observed):
+            available.append(metric)
+    return available
+
+
+def _sorted_obs(rows: list[dict]) -> list[dict]:
+    return sorted((row for row in rows if _day(row.get("date"))), key=lambda row: _day(row.get("date")))
+
+
+def _matplotlib_cn():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    regular, bold = resolve_yahei_fonts()
+    font_manager.fontManager.addfont(str(regular))
+    font_manager.fontManager.addfont(str(bold))
+    name = font_manager.FontProperties(fname=str(regular)).get_name()
+    plt.rcParams["font.family"] = name
+    plt.rcParams["axes.unicode_minus"] = False
+    return plt, font_manager.FontProperties(fname=str(regular)), font_manager.FontProperties(fname=str(bold))
 
 
 def heading(c, no: str, title: str, y: float) -> float:
@@ -206,129 +282,351 @@ def bullets(c, items: list[str], y: float, indent: float = 16, size: float = 10.
     return y
 
 
+
+METRIC_COLORS = {
+    "ndvi": "#2E6B3C",
+    "evi": "#7AA86D",
+    "ndre": "#2F5E9E",
+    "ndmi": "#A35B2C",
+}
+METRIC_MARKERS = {"ndvi": "o", "evi": "s", "ndre": "D", "ndmi": "^"}
+
+
 def _metric_chart(facts: dict, dest: Path) -> Path | None:
-    observations = list(facts.get("observations") or [])
-    phase = _phase(facts)
-    metrics = list(phase.get("primary_metrics") or []) + list(phase.get("supporting_metrics") or [])
-    metrics = [m for m in metrics if m not in FORBIDDEN_REPORT_METRICS]
-    if not metrics or not observations:
+    current = _sorted_obs(list(facts.get("observations") or []))
+    prior = _sorted_obs(list(facts.get("prior_observations") or []))
+    metrics = _report_metrics(facts)
+    rows = prior + current
+    if not metrics or not current:
         return None
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib import font_manager
-
-        regular, _bold = resolve_yahei_fonts()
-        font_manager.fontManager.addfont(str(regular))
-        plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(regular)).get_name()
-        plt.rcParams["axes.unicode_minus"] = False
-        fig, ax = plt.subplots(figsize=(8.4, 2.4), dpi=140)
-        dates = [_day(row.get("date"))[5:] for row in observations]
-        x = list(range(len(observations)))
+        plt, yahei, yahei_b = _matplotlib_cn()
+        fig, ax = plt.subplots(figsize=(8.4, 2.55), dpi=160)
+        dates = [_cn_md(_day(row.get("date"))) for row in rows]
+        x = list(range(len(rows)))
         drawn = 0
+        series = {}
         for metric in metrics:
-            ys = [_metric_value(row, metric) for row in observations]
+            ys = [_metric_value(row, metric) for row in rows]
             if all(v is None for v in ys):
                 continue
-            ax.plot(x, ys, marker="o", linewidth=1.8, label=_plain(metric))
+            color = METRIC_COLORS.get(metric, "#333333")
+            ax.plot(
+                x,
+                ys,
+                color=color,
+                linewidth=1.8,
+                marker=METRIC_MARKERS.get(metric, "o"),
+                markersize=6,
+                label=_plain(metric),
+                zorder=3,
+            )
+            series[metric] = ys
             drawn += 1
         if drawn == 0:
             plt.close(fig)
             return None
-        prior = (facts.get("prior_comparison") or {}).get("metrics") or {}
-        for metric, item in prior.items():
-            if not isinstance(item, dict) or item.get("status") != "compared":
+        # Point labels, staggered when values sit close together.
+        for i in range(len(rows)):
+            pts = sorted(
+                ((metric, series[metric][i]) for metric in series if series[metric][i] is not None),
+                key=lambda item: item[1],
+            )
+            if not pts:
                 continue
-            if item.get("prior_mean") is None:
-                continue
-            ax.axhline(item["prior_mean"], linestyle="--", linewidth=0.8, alpha=0.45)
-        ax.set_xticks(x)
-        ax.set_xticklabels(dates)
-        ax.set_ylabel("本期田间均值")
-        ax.legend(frameon=False, ncols=min(4, drawn), fontsize=8, loc="upper left")
-        ax.grid(axis="y", linestyle=":", alpha=0.4)
+            values = [item[1] for item in pts]
+            span = max(values) - min(values) if values else 0.0
+            offset = max(0.012, span * 0.08)
+            dy = {metric: offset for metric, _ in pts}
+            for (m0, y0), (m1, y1) in zip(pts, pts[1:]):
+                if y1 - y0 < offset * 1.6:
+                    dy[m0] = -offset
+                    dy[m1] = offset
+            for metric, yi in pts:
+                va = "bottom" if dy[metric] > 0 else "top"
+                ax.text(
+                    i,
+                    yi + dy[metric],
+                    f"{yi:.2f}" if abs(yi) >= 0.1 else f"{yi:.3f}",
+                    ha="center",
+                    va=va,
+                    fontsize=7.2,
+                    color=METRIC_COLORS.get(metric, "#333333"),
+                )
+        split = len(prior) - 0.5 if prior else None
+        if split is not None and split >= 0:
+            ax.axvline(split, color="#B8C4BC", lw=0.9, ls="--", zorder=1)
+            ax.axvspan(-0.4, split, color="#F3F1EC", zorder=0)
+            ax.axvspan(split, len(rows) - 0.6, color="#E8EFEA", zorder=0)
+            ymin = ax.get_ylim()[0]
+            ax.text(max(split / 2.0, -0.2), ymin, "上一周期", ha="center", va="bottom", fontsize=8, color="#5A5A5A")
+            ax.text((split + len(rows) - 0.6) / 2.0, ymin, "本期", ha="center", va="bottom", fontsize=8, color="#1F4D38")
+            title = "本田四项读数：上一有遥感的周期 与 本期"
+        else:
+            title = "本田四项读数（本期）"
+        ax.set_xticks(x, dates)
+        ax.set_ylabel("读数")
+        ax.set_title(title, loc="left", color="#1F4D38", fontsize=11, pad=8, fontproperties=yahei_b)
+        ax.legend(frameon=False, ncol=min(4, drawn), loc="upper center", bbox_to_anchor=(0.5, -0.18), fontsize=8)
+        ax.grid(axis="y", color="#E6EBE8", lw=0.6)
+        ax.set_axisbelow(True)
+        for spine in ax.spines.values():
+            spine.set_color("#D5DDD8")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         fig.tight_layout()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(dest, dpi=140, facecolor="white")
+        fig.savefig(dest, dpi=160, facecolor="white", bbox_inches="tight")
         plt.close(fig)
-        return dest
-    except Exception:  # noqa: BLE001 — chart is optional; text still carries numbers
+        return dest if dest.is_file() else None
+    except Exception:  # noqa: BLE001 — chart is optional; text still carries the judgment
         return None
 
 
-def _weather_chart(series: list[dict], dest: Path) -> Path | None:
+
+def _weather_chart(facts: dict, dest: Path) -> Path | None:
+    series = list(facts.get("weather_daily") or [])
     if not series:
         return None
+    period = _period(facts)
+    start = _day(period.get("start"))
+    end = _day(period.get("end_inclusive") or period.get("end"))
+    if not end:
+        exclusive = _day(period.get("end_exclusive"))
+        if exclusive:
+            from datetime import date, timedelta
+
+            end = (date.fromisoformat(exclusive) - timedelta(days=1)).isoformat()
+    period_rows = [row for row in series if start and start <= _day(row.get("date")) <= (end or "9999-99-99")]
+    antecedent_rows = [row for row in series if start and _day(row.get("date")) < start]
+    if not period_rows and not antecedent_rows:
+        period_rows = series
     try:
-        import matplotlib
+        plt, yahei, yahei_b = _matplotlib_cn()
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib import font_manager
+        def _plot(ax, rows, title, *, shade_start: str | None = None, shade_end: str | None = None):
+            days = [_day(row.get("date")) for row in rows]
+            x = list(range(len(rows)))
+            rain = [row.get("precipitation_mm") for row in rows]
+            tmin = [row.get("min_c") for row in rows]
+            tmax = [row.get("max_c") for row in rows]
+            if any(v is not None for v in rain):
+                ax.bar(x, [0 if v is None else v for v in rain], color="#8FB8D6", width=0.6, label="日降雨", zorder=2)
+                ax.set_ylabel("降雨（毫米）")
+            ax2 = ax.twinx()
+            if any(v is not None for v in tmax):
+                ax2.plot(x, tmax, color="#7A3E2E", linewidth=1.6, marker="o", markersize=2.4, label="日最高气温", zorder=3)
+            if any(v is not None for v in tmin):
+                ax2.plot(x, tmin, color="#1F4D38", linewidth=1.6, marker="o", markersize=2.4, label="日最低气温", zorder=3)
+            ax2.set_ylabel("气温（摄氏度）")
+            if shade_start and shade_end:
+                xs = [i for i, day in enumerate(days) if shade_start <= day <= shade_end]
+                if xs:
+                    ax.axvspan(xs[0] - 0.5, xs[-1] + 0.5, color="#E8EFEA", zorder=0)
+            step = max(1, len(x) // 8)
+            ax.set_xticks(x[::step], [days[i][5:] for i in range(0, len(days), step)])
+            ax.set_title(title, loc="left", color="#1F4D38", fontsize=10.5, pad=6, fontproperties=yahei_b)
+            ax.spines["top"].set_visible(False)
+            ax2.spines["top"].set_visible(False)
+            handles, labels = [], []
+            for axis in (ax, ax2):
+                h, lab = axis.get_legend_handles_labels()
+                handles.extend(h)
+                labels.extend(lab)
+            if handles:
+                ax.legend(handles, labels, frameon=False, fontsize=7.5, loc="upper left", ncol=3)
+            return ax
 
-        regular, _bold = resolve_yahei_fonts()
-        font_manager.fontManager.addfont(str(regular))
-        plt.rcParams["font.family"] = font_manager.FontProperties(fname=str(regular)).get_name()
-        plt.rcParams["axes.unicode_minus"] = False
-        fig, ax1 = plt.subplots(figsize=(8.4, 2.6), dpi=140)
-        days = [_day(row.get("date"))[5:] for row in series]
-        x = list(range(len(series)))
-        rain = [row.get("precipitation_mm") for row in series]
-        tmin = [row.get("min_c") for row in series]
-        tmax = [row.get("max_c") for row in series]
-        if any(v is not None for v in rain):
-            ax1.bar(x, [0 if v is None else v for v in rain], color="#8FB8D6", width=0.6, label="降雨毫米")
-            ax1.set_ylabel("降雨（毫米）")
-        ax2 = ax1.twinx()
-        if any(v is not None for v in tmax):
-            ax2.plot(x, tmax, color="#7A3E2E", linewidth=1.6, label="最高气温")
-        if any(v is not None for v in tmin):
-            ax2.plot(x, tmin, color="#1F4D38", linewidth=1.6, label="最低气温")
-        ax2.set_ylabel("气温（℃）")
-        ax1.set_xticks(x[:: max(1, len(x) // 10)])
-        ax1.set_xticklabels([days[i] for i in range(0, len(days), max(1, len(x) // 10))])
-        ax1.spines["top"].set_visible(False)
-        ax2.spines["top"].set_visible(False)
-        h1, l1 = ax1.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        ax1.legend(h1 + h2, l1 + l2, frameon=False, fontsize=8, loc="upper left")
+        if antecedent_rows and period_rows:
+            fig, axes = plt.subplots(2, 1, figsize=(8.4, 6.4), dpi=150, sharex=False)
+            _plot(axes[0], period_rows, f"本期（{_date_span(period, compact=True)}）日气温与降雨")
+            _plot(
+                axes[1],
+                antecedent_rows + period_rows,
+                f"本期开始前30天与本期（{_cn_md(antecedent_rows[0].get('date'))}—{_cn_md(period_rows[-1].get('date'))}）",
+                shade_start=start,
+                shade_end=end,
+            )
+            fig.suptitle(
+                f"气温与降雨（截止 {_cn_date(end or period_rows[-1].get('date'))}，北京时间）",
+                fontsize=12,
+                color="#1F4D38",
+                y=1.01,
+                fontproperties=yahei_b,
+            )
+        else:
+            fig, ax = plt.subplots(figsize=(8.4, 3.2), dpi=150)
+            _plot(ax, period_rows or series, "本期日气温与降雨")
         fig.tight_layout()
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(dest, dpi=140, facecolor="white")
+        fig.savefig(dest, dpi=150, facecolor="white", bbox_inches="tight")
         plt.close(fig)
-        return dest
+        return dest if dest.is_file() else None
     except Exception:  # noqa: BLE001
         return None
 
 
+def _join_names(names: list[str]) -> str:
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]}和{names[1]}"
+    return "、".join(names[:-1]) + "和" + names[-1]
+
+
+def _intra_period_trend(observations: list[dict], metrics: list[str]) -> str:
+    rows = _sorted_obs(observations)
+    if len(rows) < 2:
+        return ""
+    first, last = rows[0], rows[-1]
+    rose, fell = [], []
+    for metric in metrics:
+        a, b = _metric_value(first, metric), _metric_value(last, metric)
+        if a is None or b is None:
+            continue
+        if b > a + 1e-4:
+            rose.append(_plain(metric))
+        elif b < a - 1e-4:
+            fell.append(_plain(metric))
+    bits = []
+    if rose:
+        bits.append(_join_names(rose) + "小幅升高")
+    if fell:
+        bits.append(_join_names(fell) + "略有回落")
+    if not bits:
+        return "这两周内各项读数变化很小。"
+    return "这两周内" + "，".join(bits) + "。"
+
+
+def _prior_trend_phrase(facts: dict, metrics: list[str]) -> str:
+    cmp_ = facts.get("prior_comparison") or {}
+    items = cmp_.get("metrics") or {}
+    higher, lower, missing = [], [], []
+    for metric in metrics:
+        row = items.get(metric) or {}
+        name = row.get("plain_name") or _plain(metric)
+        if row.get("status") != "compared":
+            if metric in items:
+                missing.append(name)
+            continue
+        (higher if row.get("higher") else lower).append(name)
+    if not higher and not lower:
+        return "没有上一有可用光学的遥感期对照，不能作出好转判断。"
+    if higher and not lower:
+        if cmp_.get("can_claim_sustained_improvement"):
+            body = f"相对上一有可用光学的遥感期，{_join_names(higher)}都明显升高。"
+        else:
+            body = f"相对上一有可用光学的遥感期，{_join_names(higher)}升高。"
+            if len(facts.get("observations") or []) < 2:
+                body += "仅一次有效观测，不能写成持续改善。"
+        return body
+    parts = []
+    if higher:
+        parts.append(_join_names(higher) + "升高")
+    if lower:
+        parts.append(_join_names(lower) + "未升高")
+    return "相对上一有可用光学的遥感期，" + "，".join(parts) + "。不能据此写成好转。"
+
+
+def _surrounding_judgment(facts: dict) -> str | None:
+    canned = facts.get("surrounding_judgment")
+    if canned:
+        return str(canned)
+    meta = facts.get("surrounding_comparison_meta") or {}
+    stats = (meta.get("stats") or {}) if isinstance(meta, dict) else {}
+    by_date = meta.get("by_date") if isinstance(meta, dict) else None
+    def _one(day: str | None, block: dict) -> str | None:
+        field = (block.get("field") or {})
+        ring = (block.get("surrounding_1km") or block.get("ring1") or {})
+        fmean, rmean = field.get("mean"), ring.get("mean")
+        if fmean is None or rmean is None:
+            return None
+        delta = fmean - rmean
+        day_txt = _cn_md(day) if day else ""
+        cmp_txt = "高于" if fmean > rmean else "不高于"
+        return f"{day_txt}本田 {fmean:.2f} 对一公里 {rmean:.2f}（{cmp_txt} {abs(delta):.2f}）".replace("本田", " 本田" if day_txt else "本田").strip()
+
+    pieces = []
+    if isinstance(by_date, dict):
+        for day, block in sorted(by_date.items()):
+            bit = _one(day, block)
+            if bit:
+                pieces.append(bit)
+    elif stats:
+        bit = _one(meta.get("date"), stats)
+        if bit:
+            pieces.append(bit)
+    if not pieces:
+        if facts.get("surrounding_comparison"):
+            return None  # page 4 has detail; judgment will use a short fallback below
+        return ""
+    first_stats = stats or ((list(by_date.values())[0] if by_date else {}) or {})
+    field_mean = ((first_stats.get("field") or {}).get("mean"))
+    ring_mean = ((first_stats.get("surrounding_1km") or {}).get("mean"))
+    direction = "高于" if field_mean is not None and ring_mean is not None and field_mean > ring_mean else "不高于"
+    if field_mean is not None and ring_mean is not None and all(
+        ((block.get("field") or {}).get("mean") or 0) > ((block.get("surrounding_1km") or {}).get("mean") or 0)
+        for block in (by_date.values() if by_date else [stats])
+        if (block.get("field") or {}).get("mean") is not None
+    ):
+        direction = "高于"
+        lead = f"{J}本田绿度高于周边田地。{E}"
+    elif direction == "不高于":
+        lead = f"{B}本田可见光绿度不高于周边田地。{E}"
+    else:
+        lead = f"{J}本田绿度高于周边田地。{E}"
+    return lead + "；".join(pieces) + "。此项不能与上图直接加减。"
+
+
+def _spatial_judgment(facts: dict) -> str | None:
+    canned = facts.get("spatial_judgment")
+    if canned:
+        body = str(canned)
+        if "<font" not in body:
+            body = body.replace("田内并不均匀。", "")
+            return f"{R}田内并不均匀。{E}{body}"
+        return body
+    meta = facts.get("spatial_variation_meta") or {}
+    summary = meta.get("summary") if isinstance(meta, dict) else None
+    if summary:
+        return f"{R}田内并不均匀。{E}{summary}"
+    if facts.get("spatial_variation") or facts.get("spatial_variation_image"):
+        return f"{R}田内并不均匀。{E}偏低或变差的位置见后页图。整体读数升高，不等于各处都已好转。"
+    return ""
+
+
 def _judgment_bullets(facts: dict) -> list[str]:
     phase = _phase(facts)
-    period = _period(facts)
-    observations = list(facts.get("observations") or [])
+    observations = _sorted_obs(list(facts.get("observations") or []))
     display = phase.get("display_phase")
     phase_name = phase.get("phase_name") or (PHASE_LABELS.get(display) if display else None)
     primary = [m for m in (phase.get("primary_metrics") or []) if m not in FORBIDDEN_REPORT_METRICS]
     supporting = [m for m in (phase.get("supporting_metrics") or []) if m not in FORBIDDEN_REPORT_METRICS]
+    metrics = _report_metrics(facts)
     items: list[str] = []
     if phase.get("display_phases_if_split"):
-        items.append(
-            f"{J}这两周跨越计划中的两个阶段，不把读数合成一个阶段均值。{E}"
-            + _plan_clause(phase)
-        )
+        items.append(f"{J}这两周跨越计划中的两个阶段，不把读数合成一个阶段均值。{E}" + _plan_clause(phase))
     elif display and phase_name:
-        stage = phase.get("observation_stages") or []
         names = []
-        for row in stage:
+        for row in phase.get("observation_stages") or []:
             name = row.get("stage_code")
             if name and name not in names:
                 names.append(name)
         stage_txt = "、".join(names) if names else "计划阶段"
+        extra = "。"
+        trans = phase.get("transitions") or []
+        if trans:
+            bits = []
+            for row in trans:
+                day, code = _day(row.get("date") or row.get("start")), row.get("stage_code") or row.get("label")
+                if day and code:
+                    bits.append(f"{_cn_md(day)}起进入{code}")
+            if bits:
+                extra = "，" + "，".join(bits) + "。"
         items.append(
-            f"{J}这两周主要处于计划中的{stage_txt}（{phase_name}）。{E}"
+            f"{J}这两周主要处于计划中的{stage_txt}（{phase_name}）{extra}{E}"
             + _plan_clause(phase)
             + f"本期有 {len(observations)} 次可用光学观测。"
         )
@@ -336,83 +634,73 @@ def _judgment_bullets(facts: dict) -> list[str]:
         items.append(_plan_clause(phase) + f"本期有 {len(observations)} 次可用光学观测。")
 
     if primary:
-        focus = "、".join(_plain(m) for m in primary)
-        support = "、".join(_plain(m) for m in supporting) if supporting else ""
-        head = f"{J}本期更应看{focus}"
+        focus = _join_names([_plain(m) for m in primary])
+        support = _join_names([_plain(m) for m in supporting]) if supporting else ""
+        head = f"{J}{stage_label(phase, display, phase_name)}更应看{focus}"
         if support:
             head += f"，并对照{support}"
-        head += f"。{E}"
-        bits = []
-        for metric in primary + supporting:
-            current = _mean(observations, metric)
-            if current is None:
-                bits.append(f"{_plain(metric)}缺失")
-                continue
-            bits.append(f"{_plain(metric)}为 {_fmt(current)}")
-        cmp_ = facts.get("prior_comparison") or {}
-        metrics_cmp = cmp_.get("metrics") or {}
-        improved = []
-        declined = []
-        missing = []
-        for metric in primary + supporting:
-            item = metrics_cmp.get(metric) or {}
-            if item.get("status") != "compared":
-                if metric in metrics_cmp:
-                    missing.append(_plain(metric))
-                continue
-            name = item.get("plain_name") or _plain(metric)
-            delta = item.get("delta")
-            if item.get("higher"):
-                improved.append(f"{name}升高 {_fmt(delta)}")
-            else:
-                declined.append(f"{name}未升高（变化 {_fmt(delta)}）")
-        if cmp_.get("can_claim_sustained_improvement"):
-            head += f"{J}相对上一有可用光学的遥感期，对比项均升高，且本期有两次及以上有效观测。{E}"
-        elif cmp_.get("all_compared_higher") and not cmp_.get("can_claim_sustained_improvement"):
-            head += f"{J}相对上一有可用光学的遥感期，对比项均升高。{E}仅一次有效观测，不能写成持续改善。"
-        elif improved or declined:
-            head += "相对上一有可用光学的遥感期，" + "；".join(improved + declined) + "。"
-            if not cmp_.get("can_claim_sustained_improvement") and len(observations) < 2:
-                head += "仅一次有效观测，不能写成持续改善。"
-        else:
-            head += "没有上一有可用光学的遥感期对照，不能作出好转判断。"
-        if bits:
-            head += "本期田间均值：" + "，".join(bits) + "。"
+        head += "。"
+        head += _prior_trend_phrase(facts, primary + supporting)
+        intra = _intra_period_trend(observations, primary + supporting)
+        if intra:
+            head += intra
+        head += E
+        items.append(head)
+    elif metrics and observations:
+        head = f"{J}{_prior_trend_phrase(facts, metrics)}"
+        intra = _intra_period_trend(observations, metrics)
+        if intra:
+            head += intra
+        head += E
+        head += "这只说明田间光学读数的变化，不作为生育期或三阶段判断。"
         items.append(head)
     else:
-        items.append("本期没有按阶段选定的主指标，不把各项读数合成一个阶段结论。")
+        items.append("本期没有按阶段选定的主指标，也不具备可比较的田间光学读数，不把各项读数合成一个阶段结论。")
 
-    surround = facts.get("surrounding_comparison")
-    if not surround:
+    surround = _surrounding_judgment(facts)
+    if surround:
+        items.append(surround)
+    elif not facts.get("surrounding_comparison") and not facts.get("surrounding_comparison_image"):
         items.append("周边一至二公里田地对照缺失。对照须使用影像中识别的田块，不使用项目登记地块，因此本期不作周边高低判断。")
-    spatial = facts.get("spatial_variation")
-    if not spatial:
+
+    spatial = _spatial_judgment(facts)
+    if spatial:
+        items.append(spatial)
+    elif not facts.get("spatial_variation") and not facts.get("spatial_variation_image"):
         items.append(f"{R}田内偏低或变差的位置图缺失。{E}不把缺失图件说成田内已经均匀，也不换算受灾面积。")
 
     weather = facts.get("weather_period") or {}
     rain = weather.get("precipitation_mm")
     et0 = weather.get("et0_mm")
-    if rain is None and et0 is None:
-        items.append("本期气温与降雨记录缺失，不对水分状况作出偏低或偏高的结论。")
-    elif rain is not None and et0 is not None:
-        gap = et0 - rain
-        if gap > 0:
-            items.append(
-                f"{R}这两周降雨 {_fmt(rain, 1)} 毫米，田间耗水约 {_fmt(et0, 1)} 毫米，存在失墒压力，尚不能确认旱害。{E}"
-            )
-        else:
-            items.append(
-                f"这两周降雨 {_fmt(rain, 1)} 毫米，田间耗水约 {_fmt(et0, 1)} 毫米。这只能说明水分账，不能代替田间墒情，也不能确认旱害。"
-            )
-    else:
-        if rain is not None:
-            items.append(f"这两周降雨 {_fmt(rain, 1)} 毫米。田间耗水记录缺失，不能据此确认旱害或排除失墒。")
-        else:
-            items.append("本期降雨记录缺失，不对水分状况作出偏低或偏高的结论。")
-
+    radar_bit = ""
     if int((_period(facts).get("s1_products") or facts.get("s1_count") or 0) or 0) == 0 and not facts.get("in_period_radar"):
-        items.append("本期没有雷达影像，无法判断是否积水，也不能把缺少影像当成内涝风险很低。")
+        radar_bit = "本期无雷达影像，无法判断是否积水。"
+    if rain is None and et0 is None:
+        items.append("本期气温与降雨记录缺失，不对水分状况作出偏低或偏高的结论。" + radar_bit)
+    elif rain is not None and et0 is not None and et0 > rain:
+        items.append(
+            f"{R}这两周降雨 {_fmt(rain, 1)} 毫米，田间耗水约 {_fmt(et0, 1)} 毫米，存在失墒压力，尚不能确认旱害。{E}{radar_bit}"
+        )
+    elif rain is not None and et0 is not None:
+        items.append(
+            f"这两周降雨 {_fmt(rain, 1)} 毫米，田间耗水约 {_fmt(et0, 1)} 毫米。这只能说明水分账，不能代替田间墒情，也不能确认旱害。" + radar_bit
+        )
+    elif rain is not None:
+        items.append(f"这两周降雨 {_fmt(rain, 1)} 毫米。田间耗水记录缺失，不能据此确认旱害或排除失墒。" + radar_bit)
+    else:
+        items.append("本期降雨记录缺失，不对水分状况作出偏低或偏高的结论。" + radar_bit)
     return items
+
+
+def stage_label(phase: dict, display: str | None, phase_name: str | None) -> str:
+    names = []
+    for row in phase.get("observation_stages") or []:
+        code = row.get("stage_code")
+        if code and code not in names:
+            names.append(code)
+    if names:
+        return names[0]
+    return phase_name or "本期"
 
 
 def _next_week_bullets(facts: dict) -> list[str]:
@@ -425,13 +713,18 @@ def _next_week_bullets(facts: dict) -> list[str]:
         phase_label = nxt.get("phase_label")
         phase_name = PHASE_LABELS.get(phase_label) if phase_label else None
         primary = [m for m in (nxt.get("primary_metrics") or []) if m not in FORBIDDEN_REPORT_METRICS]
-        focus = "、".join(_plain(m) for m in primary) if primary else "已选定的阶段指标"
+        focus = _join_names([_plain(m) for m in primary]) if primary else "已选定的阶段指标"
         label = f"{stage}" + (f"（{phase_name}）" if phase_name else "")
         source = "参照计划" if phase.get("plan_source") == "reference" else "本田计划"
         items.append(
-            f"{J}按{source}，下一周（{start}—{end}）进入{label}，{E}更应看{focus}；该阶段不能当成已核实的本田物候，仍需结合田间查看。"
+            f"{J}按{source}已进入{label}，{E}更应看{focus}；该阶段不能当成已核实的本田物候，仍需结合田间查看。"
         )
-    if not facts.get("spatial_variation"):
+    spatial = (facts.get("spatial_variation_meta") or {}).get("next_week")
+    if spatial:
+        items.append(f"{R}{spatial}{E}不能仅凭影像决定灌溉量。")
+    elif facts.get("spatial_variation") or facts.get("spatial_variation_image"):
+        items.append(f"{R}核对田内偏低或变差的部位，并核对这些部位的墒情。{E}不能仅凭影像决定灌溉量。")
+    elif not facts.get("spatial_variation"):
         items.append("田内偏低或变差位置图缺失，下一周如需核对局部差异，仍应结合田间查看，不能仅凭影像决定灌溉量。")
     if not facts.get("in_period_radar") and int((_period(facts).get("s1_products") or facts.get("s1_count") or 0) or 0) == 0:
         items.append("本期没有雷达影像，不能判断积水，也不能把缺少影像当成内涝风险很低。")
@@ -441,28 +734,56 @@ def _next_week_bullets(facts: dict) -> list[str]:
 def _notes(facts: dict) -> list[str]:
     phase = _phase(facts)
     period = _period(facts)
-    cutoff = str(facts.get("cutoff") or (period.get("end_exclusive") or "") + "T00:00:00+08:00")
+    end = _day(period.get("end_inclusive") or period.get("end"))
+    if not end:
+        exclusive = _day(period.get("end_exclusive"))
+        if exclusive:
+            from datetime import date, timedelta
+
+            end = (date.fromisoformat(exclusive) - timedelta(days=1)).isoformat()
     items = [_plan_clause(phase)]
     if phase.get("plan_source") == "reference" or phase.get("phenology_basis") == "PLAN_DERIVED_FROM_BTU_REFERENCE":
-        ref = phase.get("reference") or {}
+        ref = phase.get("reference") or facts.get("reference") or {}
         disclosure = ref.get("disclosure")
         if disclosure:
             items.append(str(disclosure))
         else:
             items.append("正文中的生育期来自调用方明确传入的参照方案，须按参照阅读，不是本田已关联方案。")
     if not facts.get("in_period_radar") and int((period.get("s1_products") or facts.get("s1_count") or 0) or 0) == 0:
-        items.append("本期没有雷达影像，不对内涝风险作出偏低或偏高的结论。")
-    items.append(f"报告只使用 {_cn_date(cutoff[:10])} 及此前的观测（北京时间）。下一周应当关注的事项，是根据本期已有观测提出的核对方向，不是对之后影像的预判。")
+        note = "本期没有雷达影像，不对内涝风险作出偏低或偏高的结论。"
+        prior_radar = facts.get("sar_context_dates") or period.get("sar_context_dates") or []
+        if prior_radar:
+            days = "、".join(_cn_md(d) for d in prior_radar)
+            note += f"{days}的雷达观测在本期开始之前，只能说明前期情况。"
+        items.append(note)
+    items.append(
+        f"报告只使用 {_cn_date(end)} 23 时 59 分（北京时间）及此前的观测。下一周应当关注的事项，是根据本期已有观测提出的核对方向，不是对 {_cn_date(end)} 以后影像的预判。"
+        if end
+        else "报告只使用本期截止日及此前的观测（北京时间）。"
+    )
     items.append("没有经过地面标定的覆盖度和已验证的叶面积，正文不给出这类数值。")
-    items.append("田内偏低和变差范围只在有可靠图件时说明位置，不换算受灾亩数，也不推断病虫害或灌溉原因。")
-    items.append("判断页上的本田跨周期读数，与周边对照不是同一套数值，不能直接加减。周边比较若给出，只使用影像中识别的田块，不是项目登记地块对照，也不是同作物排名。")
+    items.append("田内偏低和变差范围只说明位置，不换算受灾亩数，也不推断病虫害或灌溉原因。")
+    items.append("判断页上的本田跨周期读数，与周边对照页的可见光绿度，不是同一套数值，不能直接加减。周边比较若给出，只使用影像中识别的田块，不是项目登记地块对照，也不是同作物排名；周边湿度缺少可靠计算条件时，不给出对比。")
     items.append("结论供了解田间情况参考，不作为受灾认定、保险理赔或交易的依据。")
+    # Promote the plan clause to colored emphasis on the first sentence, as in v8.
+    if items:
+        clause = items[0]
+        if "本田未关联" in clause or "尚未关联" in clause:
+            items[0] = f"{B}{clause[:clause.find('，')+1] if '，' in clause else clause}{E}" + (
+                clause[clause.find('，') + 1 :] if "，" in clause else ""
+            )
+        elif "阶段来自本田方案" in clause:
+            items[0] = f"{B}阶段来自本田方案的计划窗口，{E}" + clause.split("，", 1)[-1] if "，" in clause else f"{B}{clause}{E}"
     return items
 
 
-def _draw_cover(c, facts: dict, land_title: str) -> None:
+def _draw_cover(c, facts: dict, land_title: str, *, cover_image: Path | None = None) -> None:
+    """Draw the formal v8-style cover from the bundled background when available."""
+    if cover_image and Path(cover_image).is_file():
+        c.drawImage(str(cover_image), 0, 0, width=W, height=H, preserveAspectRatio=False, mask="auto")
+        return
+    # typographic fallback only if the bundled artwork cannot be composed
     period = _period(facts)
-    phase = _phase(facts)
     c.setFillColor(DECOR)
     c.rect(0, H - 28 * mm, W, 28 * mm, fill=1, stroke=0)
     c.setFillColor(white)
@@ -474,31 +795,7 @@ def _draw_cover(c, facts: dict, land_title: str) -> None:
     c.setFont("YaHei-Bold", 20)
     c.drawString(M, H - 60 * mm, land_title)
     c.setFont("YaHei", 13)
-    c.drawString(M, H - 74 * mm, _date_span(period))
-    plan = "本田方案"
-    if phase.get("plan_source") == "reference" or phase.get("phenology_basis") == "PLAN_DERIVED_FROM_BTU_REFERENCE":
-        plan = "参照方案（须按参照阅读）"
-    elif phase.get("plan_source") not in {"native", "reference"} and not phase.get("plan_label"):
-        plan = "未关联种植方案"
-    elif phase.get("plan_label"):
-        plan = str(phase.get("plan_label"))
-        if phase.get("plan_source") == "reference":
-            plan = f"参照方案 · {plan}"
-    c.setFont("YaHei-Bold", 12)
-    c.drawString(M, H - 94 * mm, plan)
-    display = phase.get("display_phase")
-    phase_name = phase.get("phase_name") or PHASE_LABELS.get(display)
-    if display and phase_name:
-        c.setFont("YaHei", 12)
-        c.drawString(M, H - 108 * mm, f"本期主要阶段：{phase_name}")
-    c.setFillColor(DECOR)
-    c.rect(M, 38 * mm, 18, 3, fill=1, stroke=0)
-    c.setFillColor(INK)
-    c.setFont("YaHei", 9)
-    policy = (_phase(facts).get("policy_version") or facts.get("policy_version") or "").strip()
-    mapping = (_phase(facts).get("mapping_version") or "").strip()
-    meta = "  ·  ".join(item for item in (policy, mapping) if item)
-    c.drawString(M, 30 * mm, meta or "种植双周正式报告")
+    c.drawString(M, H - 74 * mm, _date_span(period, compact=True))
     footer(c, 1, 6, land_title)
 
 
@@ -515,15 +812,19 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     period = _period(facts)
     total = 6
     metric_chart = _metric_chart(facts, fig_dir / "period_metrics.png")
-    weather_rows = list(facts.get("weather_daily") or [])
-    weather_chart = _weather_chart(weather_rows, fig_dir / "weather.png") if weather_rows else None
+    weather_chart = _weather_chart(facts, fig_dir / "weather.png") if facts.get("weather_daily") else None
+    cover_image = None
+    try:
+        cover_image = compose_official_cover(facts, fig_dir / "cover.png", land_title=land_title)
+    except Exception:
+        cover_image = None
 
     c = canvas.Canvas(str(dest_path), pagesize=A4)
-    c.setTitle(f"{land_title} 种植双周长势报告（{_date_span(period)}）")
+    c.setTitle(f"{land_title} 种植双周长势报告（{_date_span(period, compact=True)}）")
     c.setAuthor("乡合农服")
     c.setSubject("地块双周长势正式报告")
 
-    _draw_cover(c, facts, land_title)
+    _draw_cover(c, facts, land_title, cover_image=cover_image)
     c.showPage()
 
     header_bar(c, "本期判断")
@@ -541,12 +842,23 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     nxt = (_phase(facts).get("next_week") or {})
     nxt_label = "下一周应当关注"
     if nxt.get("start"):
-        nxt_label = f"下一周应当关注（{_cn_date(nxt['start'])}—{_cn_date(nxt.get('end_exclusive'))}）"
+        nxt_label = f"下一周应当关注（{_cn_md(nxt['start'])}—{_cn_md(nxt.get('end_exclusive'))}）"
     y = subhead(c, nxt_label, y)
     y = bullets(c, _next_week_bullets(facts), y, leading=18, sp=9)
+    primary = [m for m in (_phase(facts).get("primary_metrics") or []) if m not in FORBIDDEN_REPORT_METRICS]
+    if primary:
+        caption = (
+            "上图是本田同一套田间光学观测。"
+            + _join_names([_plain(m) for m in primary])
+            + "是"
+            + stage_label(_phase(facts), _phase(facts).get("display_phase"), _phase(facts).get("phase_name"))
+            + "更应看重的指标。与周边的对比是另一套读数，只比相对高低。不作同作物排名。"
+        )
+    else:
+        caption = "上图若给出，是本田同一套田间光学观测。与周边的对比若给出，是另一套读数，只比相对高低。不作同作物排名。"
     y = flow_html(
         c,
-        "上图若给出，是本田同一套田间光学观测。主指标因阶段而异，不把各期都写成绿度一项。与周边的对比若给出，是另一套读数，只比相对高低。不作同作物排名。",
+        caption,
         M,
         y,
         size=8.5,
@@ -559,8 +871,12 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     header_bar(c, "田内偏低与变差的位置")
     y = H - 78
     y = heading(c, "02", "田内需要关注的位置", y)
-    if facts.get("spatial_variation"):
-        y = bullets(c, [str(facts["spatial_variation"])], y, leading=17, sp=6)
+    spatial_items = _variation_items(facts.get("spatial_variation"))
+    spatial_image = _image_path(facts, "spatial_variation_image")
+    if spatial_items or spatial_image:
+        if spatial_items:
+            y = bullets(c, spatial_items, y, leading=17, sp=6)
+        y = _draw_figure(c, spatial_image, y, max_height=455)
     else:
         y = bullets(
             c,
@@ -578,8 +894,14 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     header_bar(c, "周边田地对照")
     y = H - 78
     y = heading(c, "03", "周边一至二公里长势对照", y)
-    if facts.get("surrounding_comparison"):
-        y = bullets(c, [str(facts["surrounding_comparison"])], y, leading=17, sp=6)
+    surround_items = _variation_items(facts.get("surrounding_comparison"))
+    surround_image = _image_path(facts, "surrounding_comparison_image")
+    if surround_items or surround_image:
+        if surround_items:
+            y = bullets(c, surround_items, y, leading=17, sp=5)
+        y = _draw_figure(c, surround_image, y, max_height=365)
+        contrast = _image_path(facts, "surrounding_contrast_image")
+        y = _draw_figure(c, contrast, y, max_height=155)
     else:
         y = bullets(
             c,
@@ -603,31 +925,34 @@ def render_official_biweekly_pdf(facts: dict[str, Any], dest: str | Path, *, fig
     if weather.get("precipitation_mm") is not None or weather.get("et0_mm") is not None:
         rain = weather.get("precipitation_mm")
         et0 = weather.get("et0_mm")
-        text = "本期记录："
+        period_days = weather.get("days") or (_period(facts).get("days") or 14)
+        text = f"{B}本期 {period_days} 天"
         if rain is not None:
             text += f"降雨 {_fmt(rain, 1)} 毫米"
         if et0 is not None:
-            text += ("，" if rain is not None else "") + f"田间耗水约 {_fmt(et0, 1)} 毫米"
-        text += "。"
+            text += ("，" if rain is not None else "") + f"同期田间耗水约 {_fmt(et0, 1)} 毫米"
+        text += f"。{E}"
         if antecedent.get("precipitation_mm") is not None or antecedent.get("et0_mm") is not None:
-            text += "开始前 30 天："
+            text += "开始前 30 天"
             if antecedent.get("precipitation_mm") is not None:
                 text += f"降雨 {_fmt(antecedent['precipitation_mm'], 1)} 毫米"
             if antecedent.get("et0_mm") is not None:
                 text += ("，" if antecedent.get("precipitation_mm") is not None else "") + f"耗水约 {_fmt(antecedent['et0_mm'], 1)} 毫米"
             text += "。"
         if rain is not None and et0 is not None and et0 > rain:
-            weather_bits.append(f"{R}{text}降雨少于同期耗水，这是判断存在失墒压力的依据。{E}这不能代替田间墒情，也不能确认旱害。")
-        else:
-            weather_bits.append(text + "这只能说明水分账，不能代替田间墒情，也不能确认旱害。")
+            text += "降雨均少于同期耗水，这是判断存在失墒压力的依据。"
+        weather_bits.append(text)
+        weather_bits.append(f"{R}这只能说明存在失墒压力，{E}不能代替田间墒情，也不能确认旱害。下图为本期逐日气温、降雨，以及开始前 30 天对照。" if (antecedent or weather) else "下图为本期逐日气温、降雨。")
     else:
         weather_bits.append(f"{R}本期气温与降雨记录缺失。{E}不对水分状况作出偏低或偏高的结论，也不用其他参数填补。")
-    if weather_rows:
-        weather_bits.append("下图为本期及可获得的对照日气温、降雨。缺测日期不补估。")
+    if not facts.get("weather_daily"):
+        pass
+    elif not any("下图" in item for item in weather_bits):
+        weather_bits.append("下图为本期逐日气温、降雨，以及可获得的对照日。缺测日期不补估。")
     y = bullets(c, weather_bits, y, leading=17, sp=8)
     if weather_chart and weather_chart.is_file():
-        ch = 240
-        c.drawImage(str(weather_chart), M - 4, y - ch, width=CW + 8, height=ch, preserveAspectRatio=True, mask="auto")
+        ch = 520
+        c.drawImage(str(weather_chart), M - 6, y - ch, width=CW + 12, height=ch, preserveAspectRatio=True, mask="auto")
     footer(c, 5, total, land_title)
     c.showPage()
 
