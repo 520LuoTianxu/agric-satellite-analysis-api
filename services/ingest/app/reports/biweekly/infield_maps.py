@@ -116,7 +116,7 @@ def _draw_pixels(ax, xs, ys, values, *, half: float, cmap, norm, invalid=None):
     return mappable
 
 
-def _frame(ax, xs, ys, *, half: float, title: str, bold):
+def _frame(ax, xs, ys, *, half: float, title: str, bold, compact: bool = False):
     xmin, xmax = float(xs.min()) - half, float(xs.max()) + half
     ymin, ymax = float(ys.min()) - half, float(ys.max()) + half
     width, height = xmax - xmin, ymax - ymin
@@ -130,31 +130,47 @@ def _frame(ax, xs, ys, *, half: float, title: str, bold):
         spine.set_edgecolor("#C9CEC9")
         spine.set_linewidth(0.6)
     # 标题左对齐、限制在图框宽度内，较长的标题不会压到相邻面板或色标。
-    ax.set_title(title, loc="left", fontsize=8.6, color=INK, fontproperties=bold, pad=5)
+    ax.set_title(title, loc="left", fontsize=7.6 if compact else 8.6, color=INK, fontproperties=bold, pad=3 if compact else 5)
     # 比例尺和指北标记放在田块下方的留白里，不压在像元上。
     bar = _nice_bar_length(width)
     bar_y = ymin - 0.09 * height
     ax.plot([xmin, xmin + bar], [bar_y, bar_y], color=INK, lw=1.6, solid_capstyle="butt")
-    ax.text(xmin + bar / 2, bar_y - 0.02 * height, f"{bar} 米", ha="center", va="top", fontsize=7.5, color=INK)
+    ax.text(
+        xmin + bar / 2,
+        bar_y - 0.02 * height,
+        f"{bar} 米",
+        ha="center",
+        va="top",
+        fontsize=6.8 if compact else 7.5,
+        color=INK,
+    )
     ax.annotate(
         "北",
         xy=(xmax, ymin - 0.035 * height),
         xytext=(xmax, ymin - 0.165 * height),
         ha="center",
         va="center",
-        fontsize=7.5,
+        fontsize=6.8 if compact else 7.5,
         color=INK,
         arrowprops={"arrowstyle": "-|>", "color": INK, "lw": 0.9},
     )
 
 
-def _colorbar(fig, ax, mappable, *, ticks, extend, label):
+def _colorbar(fig, ax, mappable, *, ticks, extend, label, compact: bool = False):
     from matplotlib.ticker import FuncFormatter
 
-    cbar = fig.colorbar(mappable, ax=ax, fraction=0.046, pad=0.03, extend=extend, ticks=ticks)
+    cbar = fig.colorbar(
+        mappable,
+        ax=ax,
+        fraction=0.040 if compact else 0.046,
+        pad=0.02 if compact else 0.03,
+        extend=extend,
+        ticks=ticks,
+    )
     cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:g}"))
-    cbar.ax.tick_params(labelsize=7.5, length=2)
-    cbar.set_label(label, fontsize=7.5, color=INK)
+    size = 6.6 if compact else 7.5
+    cbar.ax.tick_params(labelsize=size, length=2)
+    cbar.set_label(label, fontsize=size, color=INK)
     cbar.outline.set_linewidth(0.5)
     return cbar
 
@@ -245,7 +261,7 @@ def analyse_metric(
     return out
 
 
-def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | None:
+def render_metric_figure(analysis: dict[str, Any], dest: str | Path, *, compact: bool = False) -> Path | None:
     """Draw the panels for one metric. Returns None if plotting is unavailable."""
     try:
         plt, bold = _setup_matplotlib()
@@ -258,8 +274,17 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
     half = pixel_spacing_m(xs, ys) / 2.0
     scale = absolute_scale(metric)
     lo, hi = spec.display_range
-    abs_label = f"{spec.abbr}（{spec.unit}）"
-    fixed = f"色标固定 {lo:g} 至 {hi:g}"
+    # 合页时色标文字缩短，完整说法留在单指标大图上，避免标题和色标标签画出图外。
+    if compact:
+        abs_label = spec.abbr
+        change_label = "变化"
+        relative_label = "差值"
+        fixed = f"{lo:g}–{hi:g}"
+    else:
+        abs_label = f"{spec.abbr}（{spec.unit}）"
+        change_label = "变化量（0 居中）"
+        relative_label = "与本田中位数之差（0 居中）"
+        fixed = f"色标固定 {lo:g} 至 {hi:g}"
 
     panels: list[str] = []
     if "baseline" in arrays:
@@ -270,7 +295,13 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
     panels.append("relative")
     ncols = 2
     nrows = (len(panels) + 1) // 2
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7.4, 3.45 * nrows + 0.75), dpi=200)
+    # 两个主要指标要放在同一页时用较矮的图。字号按这个尺寸来写，不再在 PDF 里把大图缩到看不清。
+    if compact:
+        # 两幅图加页眉和两三行说明要落在一页正文高度里，所以按这个高度排，而不是事后硬缩。
+        fig_w, fig_h = 7.15, 1.62 * nrows + 0.58
+    else:
+        fig_w, fig_h = 7.4, 3.45 * nrows + 0.75
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), dpi=160 if compact else 200)
     axes_list = np.atleast_1d(axes).ravel().tolist()
     order = "①②③④"
     for index, kind in enumerate(panels):
@@ -282,26 +313,27 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
                 ax, base["xs"], base["ys"], base["values"], half=half,
                 cmap=scale["cmap"], norm=scale["norm"], invalid=base["invalid"],
             )
-            _frame(ax, base["xs"], base["ys"], half=half, bold=bold,
+            _frame(ax, base["xs"], base["ys"], half=half, bold=bold, compact=compact,
                    title=f"{mark} {_short_day(analysis['baseline_date'])} {spec.abbr}（{fixed}）")
             _colorbar(fig, ax, mappable, ticks=scale["ticks"], extend=scale["extend"],
-                      label=abs_label)
+                      label=abs_label, compact=compact)
         elif kind == "latest":
             mappable = _draw_pixels(
                 ax, xs, ys, arrays["values"], half=half,
                 cmap=scale["cmap"], norm=scale["norm"], invalid=arrays["invalid"],
             )
-            _frame(ax, xs, ys, half=half, bold=bold, title=f"{mark} {_short_day(analysis['date'])} {spec.abbr}（{fixed}）")
+            _frame(ax, xs, ys, half=half, bold=bold, compact=compact,
+                   title=f"{mark} {_short_day(analysis['date'])} {spec.abbr}（{fixed}）")
             _colorbar(fig, ax, mappable, ticks=scale["ticks"], extend=scale["extend"],
-                      label=abs_label)
+                      label=abs_label, compact=compact)
         elif kind == "change":
             delta = arrays["delta"]
             cscale = change_scale(delta)
             mappable = _draw_pixels(ax, xs, ys, delta, half=half, cmap=cscale["cmap"], norm=cscale["norm"])
-            _frame(ax, xs, ys, half=half, bold=bold,
+            _frame(ax, xs, ys, half=half, bold=bold, compact=compact,
                    title=f"{mark} 变化量：{_short_day(analysis['date'])}减{_short_day(analysis['baseline_date'])}")
             _colorbar(fig, ax, mappable, ticks=cscale["ticks"], extend=cscale["extend"],
-                      label="变化量（0 居中）")
+                      label=change_label, compact=compact)
         else:
             relative = arrays["relative"]
             rscale = relative_scale(relative)
@@ -326,10 +358,10 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path) -> Path | N
                 ax.add_collection(
                     PolyCollection(outline, facecolors="none", edgecolors=FLAG_EDGE_COLOR, linewidths=0.5)
                 )
-            _frame(ax, xs, ys, half=half, bold=bold,
+            _frame(ax, xs, ys, half=half, bold=bold, compact=compact,
                    title=f"{mark} {_short_day(analysis['date'])} 相对本田中位数的差异")
             _colorbar(fig, ax, mappable, ticks=rscale["ticks"], extend=rscale["extend"],
-                      label="与本田中位数之差（0 居中）")
+                      label=relative_label, compact=compact)
     for ax in axes_list[len(panels):]:
         ax.axis("off")
 
@@ -351,16 +383,22 @@ Patch(
         loc="lower center",
         ncol=2,
         frameon=False,
-        fontsize=7.5,
-        handlelength=1.6,
-        columnspacing=1.8,
+        fontsize=6.6 if compact else 7.5,
+        handlelength=1.4 if compact else 1.6,
+        columnspacing=1.2 if compact else 1.8,
         bbox_to_anchor=(0.5, 0.0),
     )
-    fig.subplots_adjust(left=0.03, right=0.93, top=1 - 0.28 / (3.45 * nrows + 0.75),
-                        bottom=0.72 / (3.45 * nrows + 0.75), wspace=0.32, hspace=0.16)
+    fig.subplots_adjust(
+        left=0.02,
+        right=0.86 if compact else 0.93,
+        top=1 - (0.22 if compact else 0.28) / fig_h,
+        bottom=(0.58 if compact else 0.72) / fig_h,
+        wspace=0.28 if compact else 0.32,
+        hspace=0.22 if compact else 0.16,
+    )
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(dest_path, dpi=200, facecolor="white")
+    fig.savefig(dest_path, dpi=160 if compact else 200, facecolor="white")
     plt.close(fig)
     return dest_path if dest_path.is_file() else None
 
@@ -376,11 +414,12 @@ def build_infield_metric(
     latest: dict[str, Any],
     baseline: dict[str, Any] | None,
     dest: str | Path,
+    compact: bool = False,
 ) -> dict[str, Any] | None:
     analysis = analyse_metric(metric, latest, baseline)
     if analysis is None:
         return None
-    image = render_metric_figure(analysis, dest)
+    image = render_metric_figure(analysis, dest, compact=compact)
     out = public_analysis(analysis)
     out["image"] = str(image) if image else None
     out["panels"] = [

@@ -637,6 +637,8 @@ def enrich_official_report_facts(
         product_by_date.get(comparison["baseline_date"]) if comparison and comparison.get("baseline_date") else None
     )
     if latest_product is not None:
+        # 两个及以上主要指标共用一页，图按该页高度绘制，避免 PDF 再把大图缩糊。
+        compact_maps = len(plan["primary"]) > 1
         for metric in plan["primary"]:
             try:
                 item = build_infield_metric(
@@ -644,6 +646,7 @@ def enrich_official_report_facts(
                     latest=latest_product,
                     baseline=baseline_product,
                     dest=figures / f"infield_{metric}.png",
+                    compact=compact_maps,
                 )
             except Exception:  # noqa: BLE001 — 单个指标出图失败不影响其余内容
                 item = None
@@ -684,6 +687,12 @@ def enrich_official_report_facts(
         filled["surrounding_missing_reason"] = SURROUNDING_MISSING_REASONS.get(
             surrounding_error or "", "未能完成周边1—2公里农田对照"
         )
+    # 水分和田内格局只用已经附在事实里的序列、气象和像元，不另外取数。
+    from app.reports.biweekly.field_patterns import assess_field_patterns
+    from app.reports.biweekly.water_risk import assess_water_risk
+
+    filled["field_patterns"] = assess_field_patterns(filled, list(product_by_date.values()))
+    filled["water_risk"] = assess_water_risk(filled, list(product_by_date.values()))
     return filled
 
 

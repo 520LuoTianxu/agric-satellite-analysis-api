@@ -431,6 +431,54 @@ def observation_table(facts: dict[str, Any]) -> list[list[str]]:
     return [header] + [cells for _, cells in rows]
 
 
+def observation_footnote(facts: dict[str, Any]) -> str:
+    """Cloud, exclusion and valid-pixel coverage without repeating the chart's values."""
+    quality = facts.get("data_quality") or {}
+    limit = quality.get("cloud_limit_pct")
+    limit_text = f"{limit:.0f}%" if limit is not None else "限值"
+    prior = [cn_md(row["date"]) for row in _series(facts) if not row["in_period"]]
+    current = [cn_md(row["date"]) for row in _series(facts) if row["in_period"]]
+    parts: list[str] = []
+    when = []
+    if prior:
+        when.append("前期" + "、".join(prior))
+    if current:
+        when.append("本期" + "、".join(current))
+    if when:
+        parts.append("采用的光学观测：" + "；".join(when) + "。")
+    rejected_bits = []
+    for row in quality.get("rejected") or []:
+        cloud = f"{row['cloud_pct']:.0f}%" if row.get("cloud_pct") is not None else "云量缺测"
+        reason = REJECT_REASONS.get(row.get("reason") or "", "质量不符合要求")
+        rejected_bits.append(f"{cn_md(row['date'])}未采用：{reason}（{cloud}）")
+    if rejected_bits:
+        parts.append("；".join(rejected_bits) + "。")
+    lo, hi = quality.get("valid_fraction_min"), quality.get("valid_fraction_max")
+    if lo is not None and hi is not None:
+        if abs(float(lo) - float(hi)) < 1e-6:
+            fraction = f"采用观测的有效像元占比为{fmt_pct(lo)}。"
+        else:
+            fraction = f"采用观测的有效像元占比为{fmt_pct(lo)}至{fmt_pct(hi)}。"
+    else:
+        fraction = ""
+    parts.append(
+        f"云量指地块范围内的云量，缺少时为整景云量；超过 {limit_text} 的观测不采用。{fraction}"
+        "有效像元占比指扣除云、云影和缺测后可用于统计的像元比例。前期观测只用于对比。"
+        "各指标数值见上图；未采用的过境只标灰叉，不补数值。"
+    )
+    return "".join(parts)
+
+
+def trend_axis_note(facts: dict[str, Any]) -> str:
+    """Explain why a trend axis may extend past the fixed map colour scale."""
+    del facts
+    return (
+        "田内分布图的色标范围固定。变化图纵轴包含该色标范围，并在上下留出空档，"
+        "使有效观测、百分位竖线和数值标签完整落在图内；观测超出色标时纵轴再向外扩展，不裁切、不隐藏。"
+        "横轴为实际观测日期。"
+    )
+
+
 def observation_caption(facts: dict[str, Any]) -> str:
     quality = facts.get("data_quality") or {}
     limit = quality.get("cloud_limit_pct")
@@ -490,10 +538,15 @@ def omitted_items(facts: dict[str, Any]) -> list[str]:
         items.append(f"田内空间分布（{join_names(missing)}）：没有足够的像元级有效数据，本期不提供分布图。")
     quality = facts.get("data_quality") or {}
     radar = int(quality.get("radar_count") or 0)
-    if radar:
-        items.append(f"雷达：本期有 {radar} 景哨兵一号雷达影像，本报告未用于指标计算，不作积水判断。")
+    vv_count = int((facts.get("water_risk") or {}).get("radar_vv_count") or 0)
+    if radar and vv_count < 3:
+        items.append(
+            f"雷达：本期有 {radar} 景哨兵一号。同轨可比的后向散射样本不足，不能确认或排除积水。"
+        )
+    elif radar:
+        items.append(f"雷达：本期有 {radar} 景哨兵一号。积水只转述已有同轨规则的标记，不作为灾损结论。")
     else:
-        items.append("雷达：本期没有哨兵一号雷达影像，不作积水判断。")
+        items.append("雷达：本期没有哨兵一号雷达影像，不能对积水作出判断。")
     items.append("植被覆盖度、叶面积指数等未经地面标定的参数，本报告不提供。")
     return items
 

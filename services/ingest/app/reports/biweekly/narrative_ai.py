@@ -61,6 +61,7 @@ SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 
 metric_notes 是「指标说明」：根据每个指标的 full_name、meaning 和本期数值，写成这个指标在本期说明了什么。不要复读定义原文，每个指标的写法不要相同，重点由你标。
 conclusion 是给种植户看的结论，重点由你用上面的标记标出来。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
+field_pattern_lines 和 water_risk_lines 已经印在报告里，不要再写一遍。不要把 NDMI、降水差或雷达标记写成干旱、洪涝、缺肥、病虫害或产量结论；证据不足时不要改成无风险。
 只输出 JSON：
 {"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"带标记的句子"}],"conclusion":["带标记的句子"],"field_notes":["带标记的句子"],"metric_notes":["带标记的句子"],"infield":[{"metric":"ndre","text":"带标记的句子"}],"surrounding":["带标记的句子"],"weather":["带标记的句子"]}
 changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。metric_notes 覆盖 metrics 里的每一个指标。
@@ -74,6 +75,8 @@ PARAMETER_GUIDE = {
     "infield": "田块内部差异。median、p10、p90 是有效像元的中位数和第10、第90百分位。flagged_pixels 是明显低于本田整体水平的像元个数，clustered_pixels 是其中连成片的个数。regions.name 是成片像元所在部位，share_percent 是该部位占成片像元的百分比。",
     "surrounding": "本田和周边约一公里农田的超绿指数。difference_exg 是本田减周边，正数表示本田更高。cover_2km_percent 是影像盖住周边两公里范围的百分比。",
     "weather": "地块中心的格点气象，不是田间实测。precipitation_mm 是降水量毫米，et0_mm 是参考作物蒸散量毫米。带 days 的字段是有记录的天数，缺测的天没有算进合计。",
+    "field_pattern_lines": "已经写好的持续偏弱、均匀度和历史同期句子。报告会印出，不要复述，也不要改数字。",
+    "water_risk_lines": "已经写好的水分状况句子，区分观测、推算和证据不足。报告会印出，不要复述，不要另判干旱或洪涝。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
     "stage_background": "这个阶段通常的背景，只供参考，不是必须套用的公式，也不是对本田的结论。",
     "gap_days": "最近一次观测和对比基准之间相隔的天数。",
@@ -260,6 +263,8 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
         "infield": _infield_facts(facts),
         "surrounding": _surrounding_facts(facts),
         "weather": _weather_facts(facts),
+        "field_pattern_lines": _pattern_lines(facts),
+        "water_risk_lines": list((facts.get("water_risk") or {}).get("lines") or []),
     }
 
 
@@ -350,6 +355,16 @@ def _surrounding_facts(facts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pattern_lines(facts: dict[str, Any]) -> list[str]:
+    patterns = facts.get("field_patterns") or {}
+    lines = []
+    lines.extend(patterns.get("persistent_lines") or [])
+    lines.extend(patterns.get("uniformity_lines") or [])
+    if patterns.get("history_line"):
+        lines.append(patterns["history_line"])
+    return [str(line) for line in lines if line]
+
+
 def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
     period = facts.get("weather_period") or {}
     antecedent = facts.get("weather_antecedent") or {}
@@ -424,11 +439,19 @@ _BANNED = (
 )
 
 
+def _asserts_diagnosis(sentence: str) -> bool:
+    """Drop a drought, flood, nutrient or pest claim unless the sentence refuses it."""
+    if not any(word in sentence for word in ("干旱", "洪涝", "病虫害", "缺肥", "积水面积")):
+        return False
+    return not any(word in sentence for word in ("不判定", "不能判定", "不诊断", "不是灾损"))
+
+
 def _clean_sentence(sentence: str, blob: str, limit: int) -> str:
     text = sentence.strip()
     if (
         not text
         or any(word in text for word in _BANNED)
+        or _asserts_diagnosis(text)
         or re.search(r"\bAI\b", text, re.IGNORECASE)
         or not _numbers_are_copied(text, blob)
     ):

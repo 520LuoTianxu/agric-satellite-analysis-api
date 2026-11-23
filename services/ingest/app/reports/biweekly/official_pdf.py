@@ -1,7 +1,8 @@
 """Render the official winter-wheat biweekly PDF.
 
-版面顺序：封面 → 本期结论（基本信息、结论、主要证据、田间核查建议）→ 指标与数据质量
-→ 田内空间分布（每个主要指标一页）→ 周边农田对照 → 气象条件 → 说明。
+版面顺序：封面 → 本期结论（基本信息、结论、主要证据、田间核查建议）→ 指标变化
+（变化图、质量脚注、均匀度和历史同期各一行）→ 田内空间分布（全部主要指标同一页，
+持续偏弱写在该页）→ 周边农田对照 → 气象条件（水分状况并入此页）→ 说明。
 没有数据的章节整节省略，并在「说明」页的「本期未提供的内容」中列出原因，不留空页，
 也不用 0 或占位图代替。页数随内容变化，页脚页码按实际总页数生成。
 
@@ -246,6 +247,111 @@ def _matplotlib_cn():
     return plt, font_manager.FontProperties(fname=str(bold))
 
 
+def trend_y_limits(
+    display_range: tuple[float, float],
+    values: list[float | None],
+    lows: list[float | None] | None = None,
+    highs: list[float | None] | None = None,
+) -> tuple[float, float, bool]:
+    """Axis range that keeps every finite point, percentile and its label inside the axes.
+
+    The colour-scale range is always included. The axis grows past that range when an
+    observation sits outside it, and always keeps a label margin above the highest mark.
+    Missing values are ignored rather than drawn as zero.
+    """
+    lo, hi = display_range
+    span = hi - lo if hi > lo else 1.0
+    finite: list[float] = []
+    for value in list(values) + list(lows or []) + list(highs or []):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number == number and number not in (float("inf"), float("-inf")):
+            finite.append(number)
+    data_min = min(finite) if finite else lo
+    data_max = max(finite) if finite else hi
+    # 0.16 倍色标跨度大约够一行 7.5 磅标签；底部留空放未采用过境的灰叉，不占用数值。
+    margin = 0.16 * span
+    gutter = 0.10 * span
+    y0 = min(lo, data_min) - gutter
+    y1 = max(hi, data_max + margin)
+    expanded = data_min < lo - 1e-9 or data_max > hi + 1e-9
+    return y0, y1, expanded
+
+
+def _boxes_overlap(left, right, pad: float = 2.0) -> bool:
+    return not (
+        left.x1 + pad < right.x0
+        or right.x1 + pad < left.x0
+        or left.y1 + pad < right.y0
+        or right.y1 + pad < left.y0
+    )
+
+
+def _place_point_labels(ax, items: list[tuple[Any, float, str]]) -> None:
+    """Put value labels inside the axes and away from each other.
+
+    ``items`` are ``(x, y, text)`` in data coordinates. Candidates are tried in
+    display points so the choice follows the real glyph box, not a guessed width.
+    """
+    if not items:
+        return
+    fig = ax.figure
+    renderer = fig.canvas.get_renderer()
+    ax_box = ax.get_window_extent(renderer)
+    placed = []
+    candidates = ((0, 4), (0, -11), (12, 5), (-12, 5), (0, 15), (12, -12), (-12, -12), (0, -20))
+    for x, y, label in items:
+        chosen = None
+        chosen_box = None
+        for dx, dy in candidates:
+            probe = ax.annotate(
+                label,
+                (x, y),
+                xytext=(dx, dy),
+                textcoords="offset points",
+                ha="center",
+                va="bottom" if dy >= 0 else "top",
+                fontsize=7.2,
+                color="#000000",
+                annotation_clip=True,
+                zorder=5,
+            )
+            fig.canvas.draw()
+            box = probe.get_window_extent(renderer).padded(0.4)
+            inside = (
+                box.x0 >= ax_box.x0 - 0.5
+                and box.x1 <= ax_box.x1 + 0.5
+                and box.y0 >= ax_box.y0 - 0.5
+                and box.y1 <= ax_box.y1 + 0.5
+            )
+            if inside and not any(_boxes_overlap(box, other) for other in placed):
+                chosen = probe
+                chosen_box = box
+                break
+            probe.remove()
+        if chosen is None:
+            # 没有完全避开的位置时仍放在点的上方，并保证落在纵轴范围内。
+            chosen = ax.annotate(
+                label,
+                (x, y),
+                xytext=(0, 4),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7.2,
+                color="#000000",
+                annotation_clip=True,
+                zorder=5,
+            )
+            fig.canvas.draw()
+            chosen_box = chosen.get_window_extent(renderer)
+        placed.append(chosen_box)
+
+
 def _report_metric_roles(facts: dict) -> list[tuple[str, str]]:
     plan = facts.get("report_metrics") or {}
     roles = [(m, "主要指标") for m in plan.get("primary") or []]
@@ -254,7 +360,7 @@ def _report_metric_roles(facts: dict) -> list[tuple[str, str]]:
 
 
 def _trend_chart(facts: dict, dest: Path) -> Path | None:
-    """Small multiples: one panel per metric, real date axis, fixed y range per metric."""
+    """Small multiples. The y-axis keeps the colour scale and every finite observation."""
     series = list(facts.get("metric_series") or [])
     roles = _report_metric_roles(facts)
     statistics = facts.get("metric_statistics") or {}
@@ -273,9 +379,10 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
 
         ncols = 2 if len(roles) > 1 else 1
         nrows = (len(roles) + ncols - 1) // ncols
-        panel_h = 1.95
-        total_h = panel_h * nrows + 0.55
-        fig, axes = plt.subplots(nrows, ncols, figsize=(7.2, total_h), dpi=200, squeeze=False)
+        # 面板加高，给百分位竖线上方的数值标签留出空档，避免顶到标题或被图框裁掉。
+        panel_h = 2.45
+        total_h = panel_h * nrows + 0.78
+        fig, axes = plt.subplots(nrows, ncols, figsize=(7.2, total_h), dpi=160, squeeze=False)
         all_days = [day(row["date"]) for row in series] + [day(d) for d in rejected]
         if start:
             all_days.append(day(start))
@@ -283,71 +390,108 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
             all_days.append(day(end))
         x_lo, x_hi = min(all_days) - timedelta(days=2), max(all_days) + timedelta(days=2)
         any_spread = False
+        label_jobs: list[tuple[Any, list[tuple[Any, float, str]]]] = []
         for index, (metric, role) in enumerate(roles):
             ax = axes[index // ncols][index % ncols]
             spec = METRIC_SPECS[metric]
             stat = statistics.get(metric)
             lo, hi = spec.display_range
-            span = hi - lo
             if start and end:
                 ax.axvspan(day(start), day(end) + timedelta(days=1), color="#EDF2EE", zorder=0)
             points = [(day(row["date"]), series_value(row, metric, stat), row) for row in series]
-            points = [p for p in points if p[1] is not None]
+            points = [point for point in points if point[1] is not None]
+            lows: list[float | None] = []
+            highs: list[float | None] = []
+            for _when, value, row in points:
+                entry = row["metrics"][metric]
+                if stat == "median" and entry.get("p10") is not None and entry.get("p90") is not None:
+                    lows.append(entry["p10"])
+                    highs.append(entry["p90"])
+            y0, y1, _expanded = trend_y_limits(
+                (lo, hi),
+                [value for _when, value, _row in points],
+                lows,
+                highs,
+            )
             if points:
-                ax.plot([p[0] for p in points], [p[1] for p in points], color="#1F4D38", lw=1.2, zorder=2)
+                ax.plot([p[0] for p in points], [p[1] for p in points], color="#1F4D38", lw=1.2, zorder=2, clip_on=True)
+            labels: list[tuple[Any, float, str]] = []
             for when, value, row in points:
                 entry = row["metrics"][metric]
-                if stat == "median" and entry.get("p10") is not None:
+                has_spread = stat == "median" and entry.get("p10") is not None and entry.get("p90") is not None
+                if has_spread:
                     any_spread = True
-                    ax.plot([when, when], [entry["p10"], entry["p90"]], color="#1F4D38", lw=1.0, zorder=2)
+                    ax.plot(
+                        [when, when],
+                        [entry["p10"], entry["p90"]],
+                        color="#1F4D38",
+                        lw=1.0,
+                        zorder=2,
+                        clip_on=True,
+                    )
                 ax.plot(
                     [when],
                     [value],
                     marker="o",
-                    markersize=5.5,
+                    markersize=5.2,
                     markerfacecolor="#1F4D38" if row["in_period"] else "white",
                     markeredgecolor="#1F4D38",
                     markeredgewidth=1.1,
                     zorder=3,
-                    clip_on=False,
+                    clip_on=True,
                 )
-                has_spread = stat == "median" and entry.get("p90") is not None
-                top = max(entry["p90"], value) if has_spread else value
-                ax.annotate(
-                    text.fmt_index(value),
-                    (when, top),
-                    xytext=(0, 5),
-                    textcoords="offset points",
-                    ha="center",
-                    va="bottom",
-                    fontsize=7.5,
-                    color="#000000",
-                    zorder=5,
-                )
+                anchor = max(entry["p90"], value) if has_spread else value
+                labels.append((when, anchor, text.fmt_index(value)))
             if not points:
-                ax.text(0.5, 0.5, text.MISSING, transform=ax.transAxes, ha="center", va="center",
-                        fontsize=9, color="#6B6B6B")
+                ax.text(
+                    0.5,
+                    0.5,
+                    text.MISSING,
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#6B6B6B",
+                )
+            # 灰叉固定在纵轴底部的留白里，不代表该日的指数。
             for item in rejected:
-                ax.plot([day(item)], [lo + 0.04 * span], marker="x", color="#8A8A8A", markersize=5,
-                        markeredgewidth=1.1, zorder=3)
-            ax.set_ylim(lo, hi)
+                ax.plot(
+                    [day(item)],
+                    [y0 + 0.04 * (y1 - y0)],
+                    marker="x",
+                    color="#8A8A8A",
+                    markersize=5,
+                    markeredgewidth=1.1,
+                    zorder=3,
+                    clip_on=True,
+                )
+            ax.set_ylim(y0, y1)
             ax.set_xlim(x_lo, x_hi)
             ticks = sorted({p[0] for p in points} | {day(d) for d in rejected})
-            # 观测日过密时隔一个标一个，避免日期标签相互重叠。
-            min_gap = (x_hi - x_lo).days / 9.0
-            shown: list[date] = []
-            for tick in ticks:
-                if not shown or (tick - shown[-1]).days >= min_gap:
-                    shown.append(tick)
+            # 日期不多时全部标出，相邻一天也不抽掉；再多才按间隔抽稀，避免标签叠在一起。
+            close = any((b - a).days <= 1 for a, b in zip(ticks, ticks[1:]))
+            if len(ticks) <= 8:
+                shown = ticks
+            else:
+                min_gap = (x_hi - x_lo).days / 9.0
+                shown = []
+                for tick in ticks:
+                    if not shown or (tick - shown[-1]).days >= max(min_gap, 1):
+                        shown.append(tick)
             ax.set_xticks(shown, [f"{t.month}/{t.day}" for t in shown])
-            ax.tick_params(labelsize=7.5, length=2.5)
-            ax.set_title(f"{spec.abbr}（{role}）", fontsize=9, fontproperties=bold, loc="left", pad=4)
+            ax.tick_params(labelsize=6.5 if close else 7.5, length=2.5)
+            if close and len(shown) > 4:
+                for label in ax.get_xticklabels():
+                    label.set_rotation(32)
+                    label.set_ha("right")
+            ax.set_title(f"{spec.abbr}（{role}）", fontsize=9, fontproperties=bold, loc="left", pad=8)
             ax.grid(axis="y", color="#E3E7E4", lw=0.5)
             ax.set_axisbelow(True)
             for side in ("top", "right"):
                 ax.spines[side].set_visible(False)
             for side in ("left", "bottom"):
                 ax.spines[side].set_color("#9AA39D")
+            label_jobs.append((ax, labels))
         for extra in range(len(roles), nrows * ncols):
             axes[extra // ncols][extra % ncols].axis("off")
         handles = [
@@ -362,15 +506,25 @@ def _trend_chart(facts: dict, dest: Path) -> Path | None:
         if rejected:
             handles.append(Line2D([0], [0], marker="x", color="#8A8A8A", lw=0, markersize=5, label="未采用的过境"))
         handles.append(Patch(facecolor="#EDF2EE", edgecolor="none", label="本监测周期"))
-        fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False, fontsize=7.5,
-                   handlelength=1.6, columnspacing=1.2, bbox_to_anchor=(0.5, 0.0))
-        fig.subplots_adjust(left=0.07, right=0.985, top=1 - 0.28 / total_h, bottom=0.72 / total_h,
-                            wspace=0.2, hspace=0.55)
+        fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 3), frameon=False, fontsize=7.2,
+                   handlelength=1.6, columnspacing=1.1, bbox_to_anchor=(0.5, 0.0))
+        fig.subplots_adjust(
+            left=0.08,
+            right=0.985,
+            top=1 - 0.42 / total_h,
+            bottom=0.92 / total_h,
+            wspace=0.26,
+            hspace=0.58,
+        )
+        # 先定好坐标范围再放标签，标签避让才能知道哪些位置会越出图框。
+        fig.canvas.draw()
+        for ax, labels in label_jobs:
+            _place_point_labels(ax, labels)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(dest, dpi=200, facecolor="white")
+        fig.savefig(dest, dpi=160, facecolor="white")
         plt.close(fig)
         return dest if dest.is_file() else None
-    except Exception:  # noqa: BLE001 — 图是可选的，表格仍给出全部数值
+    except Exception:  # noqa: BLE001 — 图是可选的，正文仍保留已经算好的数值
         return None
 
 
@@ -523,6 +677,13 @@ def _data_table(styles: dict, rows: list[list[str]], widths: list[float]) -> Tab
     return table
 
 
+def _shared_image_budget(n_images: int, extra_lines: int) -> float:
+    """Height per map so the maps and the short notes under them stay on one page."""
+    frame = H - TOP - BOTTOM
+    reserve = 46 + 18 + extra_lines * 14 + 10
+    return max(160.0, (frame - reserve) / max(n_images, 1))
+
+
 def _image_path(raw: Any) -> Path | None:
     if not raw:
         return None
@@ -556,60 +717,62 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(Paragraph("田间核查建议", styles["h2"]))
     _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
 
-    # 二、指标与数据质量
+    # 二、指标变化。数值只留在图上；云量、剔除和有效像元改成脚注，不再单占一页表。
     story.append(PageBreak())
-    _heading(story, styles, next(counter), "指标与数据质量")
-    story.append(Paragraph("变化好坏", styles["h2"]))
-    _model_prose(story, styles, judgment_paragraphs(facts.get("ai_narrative")))
-    story.append(Paragraph("指标说明", styles["h2"]))
+    _heading(story, styles, next(counter), "指标变化")
+    judgment = judgment_paragraphs(facts.get("ai_narrative"))
+    if judgment:
+        story.append(Paragraph("变化好坏", styles["h2"]))
+        _model_prose(story, styles, judgment)
     metric_notes = section_lines(facts.get("ai_narrative"), "metric_notes")
-    _bullets(story, styles, metric_notes or text.metric_definition_items(facts))
-    table = text.observation_table(facts)
-    if len(table) > 1:
-        n_metrics = len(table[0]) - 5
-        widths = [62, 34, 40, 66] + [44] * n_metrics
-        widths.append(CW - sum(widths))
-        story.append(
-            KeepTogether(
-                [
-                    Paragraph("观测与数据质量", styles["h2"]),
-                    _data_table(styles, table, widths),
-                    Spacer(1, 3),
-                    Paragraph(text.observation_caption(facts), styles["small"]),
-                ]
-            )
-        )
+    if metric_notes:
+        story.append(Paragraph("指标说明", styles["h2"]))
+        _bullets(story, styles, metric_notes)
     trend = _trend_chart(facts, fig_dir / "metric_trend.png")
+    patterns = facts.get("field_patterns") or {}
+    trend_notes = [text.observation_footnote(facts), text.trend_axis_note(facts)]
+    trend_notes.extend(patterns.get("uniformity_lines") or [])
+    if patterns.get("history_line"):
+        trend_notes.append(patterns["history_line"])
+    if not text.has_weather(facts):
+        trend_notes.extend((facts.get("water_risk") or {}).get("lines") or [])
     if trend:
-        story.append(
-            KeepTogether(
-                [
-                    Paragraph("指标变化", styles["h2"]),
-                    FitImage(trend, max_height=330),
-                    Paragraph(
-                        "各指标纵轴范围固定，与田内分布图的色标范围一致；横轴为实际观测日期。",
-                        styles["small"],
-                    ),
-                ]
-            )
-        )
+        # 图单独缩放。说明文字跟在图后，放不下就续到下一页，不把图裁掉。
+        story.append(FitImage(trend, max_height=430, min_scale=0.82))
+    if not metric_notes:
+        # 没有模型说明时，仍用正式名称介绍每个指标；有模型说明时不重复铺一段。
+        _bullets(story, styles, text.metric_definition_items(facts), style="note")
+    for note in trend_notes:
+        if note:
+            story.append(Paragraph(note, styles["small"]))
 
-    # 三、田内空间分布：每个主要指标一页
-    # 只有图、没有统计结果的条目不出页：图旁必须有中位数和有效像元数作依据。
+    # 三、田内空间分布：全部主要指标同一页。持续偏弱写在图下，不再一项一页。
     infield = [
         item
         for item in (facts.get("infield") or [])
         if _image_path(item.get("image")) and (item.get("stats") or {}).get("status") == "ok"
     ]
     if infield:
-        number = next(counter)
+        story.append(PageBreak())
+        _heading(story, styles, next(counter), "田内空间分布")
+        names = "、".join(METRIC_SPECS[item["metric"]].label for item in infield)
+        story.append(Paragraph(f"{names}。每项仍保留对比前后、变化量和相对本田中位数的差异。", styles["small"]))
+        persistent = list(patterns.get("persistent_lines") or [])
+        model_lines: list[str] = []
         for item in infield:
-            story.append(PageBreak())
-            spec = METRIC_SPECS[item["metric"]]
-            _heading(story, styles, number, f"田内空间分布：{spec.label}")
-            _model_prose(story, styles, infield_line(facts.get("ai_narrative"), item["metric"]))
-            story.append(Spacer(1, 2))
-            story.append(FitImage(item["image"], max_height=560))
+            model_lines.extend(infield_line(facts.get("ai_narrative"), item["metric"]))
+        budget = _shared_image_budget(len(infield), len(persistent) + len(model_lines) + 1)
+        for item in infield:
+            story.append(
+                FitImage(
+                    item["image"],
+                    max_height=budget,
+                    min_scale=0.86 if len(infield) > 1 else 0.72,
+                )
+            )
+        for line in persistent:
+            story.append(Paragraph(line, styles["small"]))
+        _model_prose(story, styles, model_lines)
 
     # 四、周边农田对照（有数据才出）
     surround_image = _image_path(facts.get("surrounding_comparison_image"))
@@ -629,7 +792,9 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
         _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "weather"))
         chart = _weather_chart(facts, fig_dir / "weather.png")
         if chart:
-            story.append(FitImage(chart, max_height=380))
+            story.append(FitImage(chart, max_height=340, min_scale=0.8))
+        for line in (facts.get("water_risk") or {}).get("lines") or []:
+            story.append(Paragraph(line, styles["small"]))
 
     # 说明
     story.append(PageBreak())

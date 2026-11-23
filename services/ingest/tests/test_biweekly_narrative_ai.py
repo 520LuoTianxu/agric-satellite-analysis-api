@@ -157,6 +157,9 @@ class NarrativeAiTests(unittest.TestCase):
         again = normalize_judgment(parsed, payload)
         self.assertEqual(again["conclusion"], ["NDRE 往好变化，数值 0.57。"])
         self.assertEqual(again["weather"], [])
+        parsed["conclusion"] = ["这是干旱。", "不判定干旱。"]
+        diagnosed = normalize_judgment(parsed, payload)
+        self.assertEqual(diagnosed["conclusion"], ["不判定干旱。"])
 
     def test_http_response_is_used_without_a_local_good_bad_rule(self) -> None:
         class _Response:
