@@ -213,12 +213,15 @@ def build_infield_variation(
         chosen = ["ndvi"]
     dest_path = Path(dest)
     built: list[dict[str, Any]] = []
+    compact_maps = len(chosen) > 1
     for metric in chosen:
         latest, baseline = comparison_pair(products, period, optical_days=optical_days, metric=metric)
         if latest is None:
             continue
         target = dest_path.with_name(f"{dest_path.stem}_{metric}{dest_path.suffix or '.png'}")
-        item = build_infield_metric(metric=metric, latest=latest, baseline=baseline, dest=target)
+        item = build_infield_metric(
+            metric=metric, latest=latest, baseline=baseline, dest=target, compact=compact_maps
+        )
         if item is not None:
             built.append(item)
     if not built:

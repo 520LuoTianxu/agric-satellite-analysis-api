@@ -489,17 +489,24 @@ class DemoReportTests(unittest.TestCase):
         labels = {name: self._enriched(name)["phase"]["display_phase"] for name in self.built}
         self.assertEqual(labels, {"s1-tillering": "S1", "s2-jointing": "S2", "s3-grainfill": "S3"})
 
-    def test_one_infield_page_per_primary_metric(self):
-        expected = {"s1-tillering": 6, "s2-jointing": 8, "s3-grainfill": 7}
+    def test_primary_infield_maps_share_one_page(self):
+        # 改版前 s1 6、s2 8、s3 7。合页并去掉整页数值表后：s1 仍是 6（只有一个主要指标，减不了分布页），s2 7、s3 6。
+        expected = {"s1-tillering": 6, "s2-jointing": 7, "s3-grainfill": 6}
         for name, pages in self.pages.items():
-            self.assertEqual(len(pages), expected[name], name)
+            self.assertEqual(len(pages), expected[name], (name, len(pages)))
             enriched = self._enriched(name)
+            spatial = [page for page in pages if "田内空间分布" in page]
+            self.assertEqual(len(spatial), 1, name)
             for metric in enriched["report_metrics"]["primary"]:
-                heading = _flat(f"田内空间分布：{FORMAL_NAMES[metric]}")
-                self.assertEqual(sum(heading in page for page in pages), 1, (name, metric))
+                self.assertIn(_flat(FORMAL_NAMES[metric]), spatial[0], (name, metric))
             self.assertEqual(
                 [item["metric"] for item in enriched["infield"]], enriched["report_metrics"]["primary"]
             )
+            self.assertNotIn("观测与数据质量", "".join(pages))
+            self.assertIn("历史可比数据不足，暂不评价", "".join(pages))
+            self.assertIn("持续偏弱", "".join(pages))
+            self.assertIn("均匀度", "".join(pages))
+            self.assertIn("不判定干旱或洪涝", "".join(pages))
 
     def test_formal_metric_names_and_no_colloquial_wording(self):
         for name, text in self.text.items():
@@ -611,6 +618,51 @@ class WeatherSummaryTests(unittest.TestCase):
         facts = {"weather_daily": [], "weather_period": {"days": 0, "precipitation_mm": None, "et0_mm": None}}
         self.assertFalse(has_weather(facts))
         self.assertTrue(any("气象" in item for item in omitted_items(facts)))
+
+
+class LayoutFixtureTests(unittest.TestCase):
+    """Screenshot-like and evidence-gap PDFs. Not production land 32696."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pypdf import PdfReader
+
+        from app.reports.biweekly.demo_data import render_layout_fixture, render_water_insufficient
+
+        cls.out = Path(tempfile.mkdtemp(prefix="biweekly-layout-"))
+        cls.dense = _pages(PdfReader(str(render_layout_fixture(cls.out)["pdf"])))
+        cls.thin = _pages(PdfReader(str(render_water_insufficient(cls.out)["pdf"])))
+
+    def test_dense_report_keeps_both_maps_and_the_archive_on_existing_pages(self):
+        self.assertEqual(len(self.dense), 6)
+        spatial = [page for page in self.dense if "田内空间分布" in page]
+        self.assertEqual(len(spatial), 1)
+        self.assertIn("NDRE", spatial[0])
+        self.assertIn("NDMI", spatial[0])
+        joined = "".join(self.dense)
+        self.assertIn("云量超过限值（42%）", joined)
+        self.assertIn("0.61", joined)
+        self.assertIn("相差", joined)
+        self.assertIn("不是产量", joined)
+        self.assertIn("方向不一致", joined)
+        self.assertIn("不判定干旱或洪涝", joined)
+        self.assertIn("不是生产地块32696的结论", joined)
+        self.assertNotIn("观测与数据质量", joined)
+        self.assertIn("四、气象条件", joined)
+
+    def test_missing_ndmi_and_weather_is_one_line_not_a_page(self):
+        self.assertEqual(len(self.thin), 5)
+        joined = "".join(self.thin)
+        self.assertNotIn("四、气象条件", joined)
+        self.assertIn("历史可比数据不足，暂不评价", joined)
+        self.assertIn("证据不足", joined)
+        self.assertIn("不能写成无风险", joined)
+        self.assertIn("不判定干旱或洪涝", joined)
+        self.assertIn("不是生产地块32696的结论", joined)
+
+
+def _pages(reader) -> list[str]:
+    return [_flat(page.extract_text() or "") for page in reader.pages]
 
 
 if __name__ == "__main__":

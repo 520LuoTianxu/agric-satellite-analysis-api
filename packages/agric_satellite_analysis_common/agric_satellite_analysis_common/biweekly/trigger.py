@@ -741,9 +741,29 @@ class TriggerService:
             raise ReportError("CUTOFF_TIMEZONE_INVALID")
         observations = []
         rejected_optical = []
+        radar_observations = []
         for row in source_rows:
             day = str(row.get("date"))[:10]
             if day >= period["end_exclusive"] or day < period["start"]:
+                continue
+            if str(row.get("sensor") or "").strip().upper() == "S1":
+                # 同期查询已经带回的雷达景。这里只转交，不再查库。
+                metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                radar_observations.append(
+                    {
+                        "date": day,
+                        "scene_id": row.get("scene_id"),
+                        "stac_item_id": row.get("stac_item_id"),
+                        "relative_orbit": row.get("relative_orbit"),
+                        "platform": row.get("platform"),
+                        "vv": row.get("vv_avg") if row.get("vv_avg") is not None else metrics.get("vv"),
+                        "vh": row.get("vh_avg") if row.get("vh_avg") is not None else metrics.get("vh"),
+                        "processing_version": row.get("processing_version"),
+                        "calibration_epoch": row.get("calibration_epoch"),
+                        "calibration_method": row.get("calibration_method"),
+                        "calibration_scale": row.get("calibration_scale"),
+                    }
+                )
                 continue
             if str(row.get("sensor") or "").strip().upper() != "S2":
                 continue
@@ -849,6 +869,12 @@ class TriggerService:
             "weather_antecedent": payload.get("weather_antecedent"),
             "s1_count": s1_count,
             "in_period_radar": int(s1_count or 0) > 0,
+            # 只转交调用方已经放进载荷的雷达景和同田往年归档，不在这里查询或回填。
+            "radar_observations": radar_observations,
+            "historical_same_period": payload.get("historical_same_period")
+            if isinstance(payload.get("historical_same_period"), list)
+            else None,
+            "sowing_date": payload.get("sowing_date"),
             "science_limits": snapshot.get("science_limits"),
             "forbidden_metrics_omitted": sorted(FORBIDDEN_REPORT_METRICS),
             "generated_at": _now(),

@@ -199,13 +199,20 @@ def build_product(case: dict[str, Any], scene: dict[str, Any], grid: dict[str, n
     def derive(intercept: float, slope: float, scale: float) -> np.ndarray:
         return np.clip(intercept + slope * ndvi + day_rng.normal(scale=scale, size=gx.size), -1.0, 1.0)
 
+    ndre = derive(0.04, 0.52, 0.006)
+    ndmi = derive(-0.22, 0.55, 0.008)
+    # 版式探针用：把指数整体平移到色标上沿之外，检验变化图是否裁切。不是生物学校正。
+    if scene.get("ndre_shift"):
+        ndre = np.clip(ndre + float(scene["ndre_shift"]), -1.0, 1.0)
+    if scene.get("ndmi_shift"):
+        ndmi = np.clip(ndmi + float(scene["ndmi_shift"]), -1.0, 1.0)
     columns: dict[str, list[Any]] = {
         "lon": [float(v) for v in grid["lon"]],
         "lat": [float(v) for v in grid["lat"]],
         "NDVI": [round(float(v), 4) for v in ndvi],
         "EVI": [round(float(v), 4) for v in derive(0.05, 0.60, 0.007)],
-        "NDRE": [round(float(v), 4) for v in derive(0.04, 0.52, 0.006)],
-        "NDMI": [round(float(v), 4) for v in derive(-0.22, 0.55, 0.008)],
+        "NDRE": [round(float(v), 4) for v in ndre],
+        "NDMI": [round(float(v), 4) for v in ndmi],
     }
     clear = np.ones(gx.size, dtype=int)
     if scene.get("shadow"):
@@ -337,16 +344,17 @@ class _DemoCatalog:
         return {}
 
 
-def build_case(name: str, work_dir: str | Path) -> dict[str, Any]:
+def build_case(name: str, work_dir: str | Path, case: dict[str, Any] | None = None) -> dict[str, Any]:
     """Write one case's inputs under work_dir and return facts + paths.
 
     Facts come from the same TriggerService code the API uses, fed with the
     demo scenes as observation overrides and the demo plan as the native plan.
+    ``case`` 只用于不进入 CASES 的版式探针，避免三个阶段样稿的断言被探针改掉。
     """
     from agric_satellite_analysis_common.biweekly.trigger import TriggerService
     from app.reports.biweekly.weather_fetch import summarize_weather_rows
 
-    case = CASES[name]
+    case = CASES[name] if case is None else case
     work = Path(work_dir)
     products_dir = work / "products"
     products_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +395,11 @@ def build_case(name: str, work_dir: str | Path) -> dict[str, Any]:
             "observation_source": "demo_fixture",
         },
     }
+    if case.get("sowing_date"):
+        job["payload"]["sowing_date"] = case["sowing_date"]
+    if isinstance(case.get("historical_same_period"), list):
+        # 只放调用方已经准备好的归档，不向任何服务回填往年景。
+        job["payload"]["historical_same_period"] = case["historical_same_period"]
     service = TriggerService(work / "trigger", _DemoCatalog(period), auto_run=False)
     facts, status = service.prepare_generate_facts(job)
     facts.update(
@@ -441,6 +454,123 @@ def render_case(name: str, out_dir: str | Path) -> dict[str, Any]:
         fetch_weather=no_network_weather,
         fetch_truecolor=synthetic_truecolor if built["case"]["surrounding"] else no_truecolor,
         facts_sidecar=out / "facts-enriched.json",
+    )
+    built["pdf"] = pdf
+    built["out_dir"] = out
+    return built
+
+
+def _layout_case() -> dict[str, Any]:
+    """Grain-fill dates packed together, with NDMI above the fixed colour scale.
+
+    复现报告截图里的问题：NDMI 中位数高于 0.50、相邻日期的标签挤在一起、
+    一景因云量未采用。数字是示例，不是生产地块 32696。
+    """
+    case = {
+        "title": "版式探针（灌浆期，NDMI 超出色标）",
+        "seed": 20260506,
+        "period": ("2026-05-02", "2026-05-16"),
+        "patch": {"cx": 8.0, "cy": 8.0, "radius": 3.4},
+        "scenes": [
+            {"date": "2026-04-28", "ndvi": 0.84, "ndre_shift": 0.24, "ndmi_shift": 0.30, "cloud": 4.0},
+            {"date": "2026-05-03", "ndvi": 0.86, "ndre_shift": 0.26, "ndmi_shift": 0.32, "patch_depth": -0.16, "cloud": 2.0},
+            {"date": "2026-05-06", "ndvi": 0.87, "ndre_shift": 0.27, "ndmi_shift": 0.36, "patch_depth": -0.18, "cloud": 1.0},
+            {"date": "2026-05-08", "ndvi": 0.85, "ndre_shift": 0.25, "ndmi_shift": 0.34, "patch_depth": -0.17, "cloud": 6.0},
+            {"date": "2026-05-10", "ndvi": 0.84, "ndre_shift": 0.24, "ndmi_shift": 0.33, "patch_depth": -0.15, "cloud": 3.0},
+            {"date": "2026-05-11", "ndvi": 0.83, "ndre_shift": 0.23, "ndmi_shift": 0.38, "patch_depth": -0.19, "cloud": 0.0},
+            {"date": "2026-05-13", "cloud": 42.0, "rejected": True},
+        ],
+        "radar": 0,
+        # 降水少、ET0 完整，和升高的 NDMI 方向相反，用来看冲突句是否被收成一个结论。
+        "weather": {
+            "t_mean": 21.0,
+            "t_trend": 0.05,
+            "rain_days": {2: 1.2, 9: 2.4},
+            "et0": 4.2,
+        },
+        "surrounding": False,
+        "sowing_date": "2025-10-06",
+        "historical_same_period": [
+            {
+                "land_id": LAND_ID,
+                "crop_type": "冬小麦",
+                "sowing_date": "2024-10-08",
+                "observations": [
+                    {
+                        "date": "2024-05-12",
+                        "metrics": {
+                            "ndre": {"median": 0.70, "n_valid": 420, "statistic": "median"},
+                            "ndmi": {"median": 0.55, "n_valid": 420, "statistic": "median"},
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    return case
+
+
+def render_layout_fixture(out_dir: str | Path) -> dict[str, Any]:
+    """Dense two-metric page, uncropped trend, comparable archive, conflicting water evidence."""
+    from app.reports.biweekly.generate import generate_official_biweekly_pdf
+
+    out = Path(out_dir) / "layout-dense"
+    case = _layout_case()
+    built = build_case("layout-dense", out / "inputs", case)
+    built["facts"]["data_source_note"] = (
+        str(built["facts"].get("data_source_note") or "")
+        + "本样稿不是生产地块 32696 的结论。"
+    )
+    pdf = out / "biweekly-layout-dense.pdf"
+    generate_official_biweekly_pdf(
+        built["facts"],
+        pdf,
+        figures_dir=out / "figures",
+        products_dir=built["products_dir"],
+        latitude=LAT0,
+        longitude=LON0,
+        fetch_weather=no_network_weather,
+        fetch_truecolor=no_truecolor,
+        facts_sidecar=out / "facts-enriched.json",
+        offline=True,
+    )
+    built["pdf"] = pdf
+    built["out_dir"] = out
+    return built
+
+
+def render_water_insufficient(out_dir: str | Path) -> dict[str, Any]:
+    """No NDMI pair and no weather: one insufficiency sentence, not a blank page and not 'no risk'."""
+    from app.reports.biweekly.generate import generate_official_biweekly_pdf
+
+    out = Path(out_dir) / "water-insufficient"
+    built = build_case("s1-tillering", out / "inputs")
+    for product in built["products"]:
+        columns = ((product.get("pixel_data") or {}).get("columns") or {})
+        columns.pop("NDMI", None)
+        for key in ("ndmi_avg", "ndmi_min", "ndmi_max"):
+            product.pop(key, None)
+        path = built["products_dir"] / f"{product['date']}_S2.json"
+        path.write_text(json.dumps(product, ensure_ascii=False) + "\n", encoding="utf-8")
+    facts = built["facts"]
+    for key in ("weather_daily", "weather_period", "weather_antecedent"):
+        facts.pop(key, None)
+    facts["data_source_note"] = (
+        str(facts.get("data_source_note") or "")
+        + "本样稿去掉了 NDMI 和气象，用来展示水分证据不足，不是生产地块 32696 的结论。"
+    )
+    pdf = out / "biweekly-water-insufficient.pdf"
+    generate_official_biweekly_pdf(
+        facts,
+        pdf,
+        figures_dir=out / "figures",
+        products_dir=built["products_dir"],
+        latitude=LAT0,
+        longitude=LON0,
+        fetch_weather=no_network_weather,
+        fetch_truecolor=no_truecolor,
+        facts_sidecar=out / "facts-enriched.json",
+        offline=True,
     )
     built["pdf"] = pdf
     built["out_dir"] = out

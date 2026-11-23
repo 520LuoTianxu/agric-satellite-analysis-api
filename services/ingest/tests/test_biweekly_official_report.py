@@ -244,6 +244,8 @@ class GenerateTaskTests(unittest.TestCase):
 
         gen_mod = ModuleType("app.reports.biweekly.generate")
         gen_mod.generate_official_biweekly_pdf = _render
+        # 测完放回真正的生成模块，否则同一进程里后面的报告测试会拿到这个假模块。
+        previous = sys.modules.get("app.reports.biweekly.generate")
         sys.modules["app.reports.biweekly.generate"] = gen_mod
         oss = {
             "bucket": "agric-isolated-fixture",
@@ -253,33 +255,39 @@ class GenerateTaskTests(unittest.TestCase):
             "content_type": "application/pdf",
             "kind": "official_visual_artifact",
         }
-        with (
-            patch(
-                "app.tasks.biweekly_report._wait_for_backfill",
-                return_value={"job-a": "completed"},
-            ),
-            patch(
-                "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
-                return_value={"error_code": None, "status": "ready", "facts": facts},
-            ),
-            patch(
-                "app.tasks.biweekly_report._upload_official_object",
-                return_value=oss,
-            ),
-            patch(
-                "app.tasks.biweekly_report._complete",
-                return_value={"ok": True, "job": {"status": "ready"}},
-            ) as complete,
-            patch("app.core.job_http.update_job_record"),
-            patch("app.core.job_http.complete_work_item_http"),
-            patch("app.core.job_http.progress_work_item_http"),
-        ):
-            result = generate_biweekly_report.run(
-                land_id="6417",
-                biweekly_job_id="bj-0123456789abcdef",
-                wait_for_job_ids=["job-a"],
-                report_job_id="report-1",
-            )
+        try:
+            with (
+                patch(
+                    "app.tasks.biweekly_report._wait_for_backfill",
+                    return_value={"job-a": "completed"},
+                ),
+                patch(
+                    "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
+                    return_value={"error_code": None, "status": "ready", "facts": facts},
+                ),
+                patch(
+                    "app.tasks.biweekly_report._upload_official_object",
+                    return_value=oss,
+                ),
+                patch(
+                    "app.tasks.biweekly_report._complete",
+                    return_value={"ok": True, "job": {"status": "ready"}},
+                ) as complete,
+                patch("app.core.job_http.update_job_record"),
+                patch("app.core.job_http.complete_work_item_http"),
+                patch("app.core.job_http.progress_work_item_http"),
+            ):
+                result = generate_biweekly_report.run(
+                    land_id="6417",
+                    biweekly_job_id="bj-0123456789abcdef",
+                    wait_for_job_ids=["job-a"],
+                    report_job_id="report-1",
+                )
+        finally:
+            if previous is None:
+                sys.modules.pop("app.reports.biweekly.generate", None)
+            else:
+                sys.modules["app.reports.biweekly.generate"] = previous
         self.assertEqual(result["status"], "ready")
         kwargs = complete.call_args.kwargs
         self.assertEqual(kwargs["status"], "ready")
