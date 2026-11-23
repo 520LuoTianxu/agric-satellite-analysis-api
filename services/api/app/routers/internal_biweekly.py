@@ -52,7 +52,7 @@ async def biweekly_report_inputs(job_id: str, _: InternalAuth) -> dict[str, Any]
         # already stored on the generate job. Do not invent a calendar.
         period = service.period_for_job(job)
         periods = service.periods_for_job(job)
-        fields = await _enrich_payload(land_id, period, periods)
+        fields = await _enrich_payload(land_id, period, periods, job_id=job_id)
     except ReportError as exc:
         note = "读取已入库景失败，不能当作本期没有可用光学。"
         if exc.code == "SCENE_QUERY_FAILED":
