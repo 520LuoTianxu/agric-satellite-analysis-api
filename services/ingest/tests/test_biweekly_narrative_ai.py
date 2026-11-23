@@ -117,8 +117,9 @@ class NarrativeAiTests(unittest.TestCase):
                 {"summary": normalized["summary"], "changes": normalized["changes"]}
             )
         )
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", marked)
-        self.assertIn("<font color='#9C2B1B'><b>往差变化</b></font>", marked)
+        self.assertIn('color="#1F4D38" backColor="#D9F2E3"', marked)
+        self.assertIn('color="#9C2B1B" backColor="#F8D6D2"', marked)
+        self.assertIn('<font face="YaHei-Bold">0.17</font>', marked)
         self.assertNotIn("9.99", marked)
         written = (
             "<b>NDRE</b> 为 <b>0.57</b>，"
@@ -127,8 +128,8 @@ class NarrativeAiTests(unittest.TestCase):
         )
         shown = section_lines({"conclusion": [written]}, "conclusion")[0]
         self.assertIn("<b>NDRE</b>", shown)
-        self.assertIn("<b>0.57</b>", shown)
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", shown)
+        self.assertIn('<font face="YaHei-Bold">0.57</font>', shown)
+        self.assertIn('backColor="#D9F2E3"', shown)
         self.assertNotIn("0000FF", shown)
         parsed["conclusion"] = ["NDRE 往好变化，数值 0.57。", "另有一块地减产 3 成。"]
         parsed["weather"] = ["降水 12 毫米。"]
@@ -136,7 +137,8 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertEqual(again["conclusion"], ["NDRE 往好变化，数值 0.57。"])
         self.assertEqual(again["weather"], [])
         painted = section_lines(again, "conclusion")
-        self.assertIn("<font color='#1F4D38'><b>往好变化</b></font>", painted[0])
+        self.assertIn('backColor="#D9F2E3"', painted[0])
+        self.assertIn('<font face="YaHei-Bold">0.57</font>', painted[0])
 
     def test_http_response_is_used_without_a_local_good_bad_rule(self) -> None:
         class _Response:
@@ -192,6 +194,8 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("#1F4D38", prompt)
         self.assertIn("<b>", prompt)
         self.assertIn("发挥", prompt)
+        self.assertIn("metric_notes", prompt)
+        self.assertIn("backColor", prompt)
         self.assertNotIn("delta > 0", prompt)
         self.assertNotIn('direction == "up"', prompt)
         user = client.body["messages"][1]["content"]
