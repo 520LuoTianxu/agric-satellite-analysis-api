@@ -222,3 +222,72 @@ def public_artifact(artifact: Mapping[str, Any] | None) -> dict[str, Any] | None
 
 def sha256_bytes(data: bytes) -> str:
     return digest(data)
+
+
+REGISTRATION_BACKOFF_CAP_S = 300
+
+
+def registration_backoff_s(attempt: int) -> int:
+    """Bounded backoff for official registration retries (seconds)."""
+    return min(REGISTRATION_BACKOFF_CAP_S, 15 * (2 ** max(0, int(attempt) - 1)))
+
+
+def recoverable_oss_artifact(data: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a permanent OSS object ref if *data* already has one, else None."""
+    if not isinstance(data, Mapping):
+        return None
+    meta = data.get("oss_artifact") if isinstance(data.get("oss_artifact"), Mapping) else data
+    if not isinstance(meta, Mapping):
+        return None
+    bucket = meta.get("bucket")
+    key = meta.get("key")
+    sha256 = meta.get("sha256")
+    if not (bucket and key and sha256):
+        return None
+    out = {
+        "bucket": str(bucket),
+        "key": str(key),
+        "sha256": str(sha256),
+        "size_bytes": meta.get("size_bytes"),
+        "content_type": meta.get("content_type") or meta.get("mime"),
+        "kind": meta.get("kind"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def registration_progress_from_work_item(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Build a Celery registration payload from a claimed work item.
+
+    Prefer progress_json (written after OSS upload) over payload extras.
+    Does not invent an artifact from a job progress field that is not on
+    the work item itself.
+    """
+    if not isinstance(item, Mapping):
+        return None
+    sources: list[Mapping[str, Any]] = []
+    progress = item.get("progress_json")
+    if isinstance(progress, Mapping):
+        sources.append(progress)
+    payload = item.get("payload_json") if isinstance(item.get("payload_json"), Mapping) else {}
+    if payload:
+        sources.append(payload)
+        extras = payload.get("extras")
+        if isinstance(extras, Mapping):
+            sources.append(extras)
+    for src in sources:
+        oss = recoverable_oss_artifact(src)
+        if oss is None:
+            continue
+        out: dict[str, Any] = {
+            "oss_artifact": oss,
+            "stage": "registration_pending",
+            "official_status": src.get("official_status") or src.get("status") or "ready",
+            "filename": src.get("filename"),
+            "mime": src.get("mime") or oss.get("content_type"),
+            "kind": src.get("kind") or oss.get("kind"),
+            "facts": src.get("facts"),
+            "note": src.get("note"),
+            "registration_attempts": src.get("registration_attempts") or 0,
+        }
+        return {k: v for k, v in out.items() if v is not None}
+    return None

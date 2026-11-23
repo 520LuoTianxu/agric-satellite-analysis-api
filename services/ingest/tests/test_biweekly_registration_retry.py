@@ -178,5 +178,137 @@ class RegistrationRetryTests(unittest.TestCase):
         self.assertFalse(task.retry_countdowns)
 
 
+    def test_work_item_artifact_used_when_job_progress_missing(self):
+        """Job.progress_json empty or get_job fails; work-item kwargs still register only."""
+        renders = []
+        uploads = []
+        completes = []
+
+        def fake_render(facts, dest, figures_dir=None):
+            renders.append(1)
+            Path(dest).write_bytes(MIN_PDF)
+
+        def fake_upload(path, **kwargs):
+            uploads.append(path)
+            raise AssertionError("must not re-upload")
+
+        def fake_complete(*args, **kwargs):
+            completes.append({"oss": kwargs.get("oss"), "content": kwargs.get("content")})
+            return {"job": {"status": "ready"}}
+
+        def fake_get_job(job_id):
+            # Business job write failed: no oss_artifact here.
+            return {"status": "running", "progress_json": {"stage": "running"}}
+
+        def boom_update(*args, **kwargs):
+            raise RuntimeError("job write failed")
+
+        progress = {
+            "stage": "registration_pending",
+            "official_status": "ready",
+            "filename": "x.pdf",
+            "mime": "application/pdf",
+            "kind": "official_visual_artifact",
+            "facts": {"land_id": LAND},
+            "note": "ok",
+            "oss_artifact": {
+                "bucket": "agric-test",
+                "key": f"reports/default/{LAND}/biweekly-{P15_JOB}.pdf",
+                "size_bytes": len(MIN_PDF),
+                "sha256": "a" * 64,
+                "content_type": "application/pdf",
+            },
+            "registration_attempts": 2,
+        }
+        import sys
+        from types import ModuleType
+
+        gen_mod = ModuleType("app.reports.biweekly.generate")
+        gen_mod.generate_official_biweekly_pdf = fake_render
+        sys.modules["app.reports.biweekly.generate"] = gen_mod
+        sys.modules.setdefault("app.reports", ModuleType("app.reports"))
+        sys.modules.setdefault("app.reports.biweekly", ModuleType("app.reports.biweekly"))
+
+        task = DummyTask()
+        with (
+            patch("agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs", return_value={"status": "ready", "facts": {"land_id": LAND}}),
+            patch("agric_satellite_analysis_common.internal_api.get_job", side_effect=fake_get_job),
+            patch.object(br, "_upload_official_object", side_effect=fake_upload),
+            patch.object(br, "_complete", side_effect=fake_complete),
+            patch("app.core.job_http.update_job_record", side_effect=boom_update),
+            patch("app.core.job_http.complete_work_item_http"),
+            patch("app.core.job_http.progress_work_item_http"),
+            patch("app.core.job_http.fail_work_item_http") as fail_work,
+        ):
+            out = _run(
+                task,
+                report_job_id="report-1",
+                biweekly_job_id=P15_JOB,
+                land_id=LAND,
+                work_item_id="w1",
+                registration_progress=progress,
+            )
+        self.assertEqual(out["status"], "ready")
+        self.assertEqual(renders, [])
+        self.assertEqual(uploads, [])
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(completes[0]["oss"]["sha256"], "a" * 64)
+        self.assertIsNone(completes[0]["content"])
+        fail_work.assert_not_called()
+
+
+    def test_job_write_failure_still_persists_work_item_progress(self):
+        persisted = []
+
+        def fake_render(facts, dest, figures_dir=None):
+            Path(dest).write_bytes(MIN_PDF)
+
+        def fake_upload(path, **kwargs):
+            return {
+                "bucket": "agric-test",
+                "key": f"reports/default/{LAND}/biweekly-{P15_JOB}.pdf",
+                "size_bytes": len(MIN_PDF),
+                "sha256": "a" * 64,
+                "content_type": "application/pdf",
+                "kind": "official_visual_artifact",
+            }
+
+        def fake_complete(*args, **kwargs):
+            return {"job": {"status": "ready"}}
+
+        import sys
+        from types import ModuleType
+
+        gen_mod = ModuleType("app.reports.biweekly.generate")
+        gen_mod.generate_official_biweekly_pdf = fake_render
+        sys.modules["app.reports.biweekly.generate"] = gen_mod
+        sys.modules.setdefault("app.reports", ModuleType("app.reports"))
+        sys.modules.setdefault("app.reports.biweekly", ModuleType("app.reports.biweekly"))
+
+        task = DummyTask()
+        with (
+            patch("agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs", return_value={"status": "ready", "facts": {"land_id": LAND, "period": {"start": "2026-05-16", "end_inclusive": "2026-05-29"}}}),
+            patch("agric_satellite_analysis_common.internal_api.get_job", return_value={"status": "running", "progress_json": {}}),
+            patch.object(br, "_upload_official_object", side_effect=fake_upload),
+            patch.object(br, "_complete", side_effect=fake_complete),
+            patch("app.core.job_http.update_job_record", side_effect=RuntimeError("job write failed")),
+            patch("app.core.job_http.complete_work_item_http"),
+            patch("app.core.job_http.progress_work_item_http", side_effect=lambda *a, **k: persisted.append(k.get("progress") or (a[1] if len(a) > 1 else None))),
+            patch("app.core.job_http.fail_work_item_http"),
+        ):
+            out = _run(
+                task,
+                report_job_id="report-1",
+                biweekly_job_id=P15_JOB,
+                land_id=LAND,
+                work_item_id="w1",
+            )
+        self.assertEqual(out["status"], "ready")
+        self.assertTrue(any(
+            isinstance(p, dict) and p.get("oss_artifact", {}).get("sha256") == "a" * 64
+            for p in persisted
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from agric_satellite_analysis_common.trace import stamp_trace_on_payload
+from agric_satellite_analysis_common.biweekly.official_ref import (
+    recoverable_oss_artifact,
+    registration_backoff_s,
+)
 
 from app.core.config import settings
 from app.core.logging import logger
@@ -212,12 +216,21 @@ def enqueue_work_item_sync(
 
 def has_recoverable_oss_artifact(data: dict[str, Any] | None) -> bool:
     """True when a work item already has an uploaded official object to register."""
-    if not isinstance(data, dict):
-        return False
-    meta = data.get("oss_artifact") if isinstance(data.get("oss_artifact"), dict) else data
-    if not isinstance(meta, dict):
-        return False
-    return bool(meta.get("key") and meta.get("sha256") and meta.get("bucket"))
+    return recoverable_oss_artifact(data) is not None
+
+
+def stamp_registration_backoff(item: WorkItem, now: datetime) -> None:
+    """Ensure a recoverable item is not reclaimed in a tight loop."""
+    if not work_item_has_recoverable_registration(item):
+        return
+    if not registration_retry_is_due(item, now):
+        return
+    progress = dict(item.progress_json or {})
+    attempts = int(progress.get("registration_attempts") or 0)
+    delay = registration_backoff_s(max(attempts, 1))
+    progress["stage"] = progress.get("stage") or "registration_pending"
+    progress["registration_retry_after"] = (now + timedelta(seconds=delay)).isoformat()
+    item.progress_json = progress
 
 
 def work_item_has_recoverable_registration(item: WorkItem) -> bool:
@@ -617,6 +630,8 @@ async def fail_work_item(
     retry = bool(retry) and (int(item.attempts or 0) < MAX_WORK_ITEM_ATTEMPTS or recoverable)
     if retry:
         item.status = "pending"
+        if recoverable:
+            stamp_registration_backoff(item, now)
     else:
         item.status = "failed"
         await _mark_parent_job_failed(db, item, error=item.error, now=now)
@@ -652,4 +667,5 @@ __all__ = [
     "has_recoverable_oss_artifact",
     "work_item_has_recoverable_registration",
     "registration_retry_is_due",
+    "stamp_registration_backoff",
 ]

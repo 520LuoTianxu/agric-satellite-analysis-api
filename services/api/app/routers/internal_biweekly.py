@@ -14,7 +14,7 @@ from agric_satellite_analysis_common.biweekly.models import ReportError
 from app.core.logging import logger
 from app.middleware.internal_auth import InternalAuth
 from app.services.biweekly_report_flow import _enrich_payload, _roll_up_season
-from app.services.biweekly_trigger import build_trigger_service
+from app.services.biweekly_trigger import build_trigger_service, run_trigger_io
 
 router = APIRouter(prefix="/internal/biweekly", tags=["internal-biweekly"])
 
@@ -54,7 +54,7 @@ async def biweekly_report_inputs(job_id: str, _: InternalAuth) -> dict[str, Any]
     """Return scene, weather, and plan inputs for official v8 PDF generation."""
     service = _service()
     try:
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
     except ReportError as exc:
         raise HTTPException(status_code=404, detail={"error": exc.code}) from exc
     if job.get("kind") != "generate":
@@ -87,8 +87,8 @@ async def biweekly_report_inputs(job_id: str, _: InternalAuth) -> dict[str, Any]
     payload = dict(job.get("payload") or {})
     if not payload.get("native_plan") and hasattr(service.catalog, "native_plan"):
         fields.setdefault("native_plan", service.catalog.native_plan(land_id, season_id))
-    service.set_payload_fields(job_id, **fields)
-    job = service.get_job(job_id)
+    await run_trigger_io(service.set_payload_fields, job_id, **fields)
+    job = await run_trigger_io(service.get_job, job_id)
     facts, status = service.prepare_generate_facts(job)
     return {
         "job_id": job_id,
@@ -113,14 +113,15 @@ async def biweekly_report_complete(
     """Register a pre-uploaded OSS object, or accept legacy base64 from old machines."""
     service = _service()
     try:
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
     except ReportError as exc:
         raise HTTPException(status_code=404, detail={"error": exc.code}) from exc
     if job.get("kind") != "generate":
         raise HTTPException(status_code=409, detail={"error": "JOB_KIND_UNSUPPORTED"})
     status = body.status
     if status == "failed":
-        job = service.fail_stage(
+        job = await run_trigger_io(
+            service.fail_stage,
             job_id,
             body.error_code or "GENERATE_FAILED",
             note=body.note,
@@ -204,7 +205,7 @@ async def biweekly_report_complete(
     parent_id = (job.get("payload") or {}).get("parent_season_job_id")
     if parent_id:
         try:
-            await _roll_up_season(service, service.get_job(parent_id))
+            await _roll_up_season(service, await run_trigger_io(service.get_job, parent_id))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "biweekly_season_rollup_failed job_id=%s err_type=%s",

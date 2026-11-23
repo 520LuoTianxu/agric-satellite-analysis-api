@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from agric_satellite_analysis_common.biweekly.catalog import LocalPackCatalog
@@ -217,3 +218,13 @@ def annotate_dispatch(job: dict, dispatch: dict | None = None) -> dict:
     if planned:
         out["planned_batch"] = planned
     return out
+
+
+async def run_trigger_io(func, /, *args, **kwargs):
+    """Run TriggerService work that may use sync SQLAlchemy off the event loop.
+
+    SqlAlchemyOfficialStore opens a fresh Session per call via the session
+    factory, so this is safe as long as a Session object is not shared
+    across threads.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)

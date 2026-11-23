@@ -33,7 +33,7 @@ from app.services.biweekly_report_flow import (
 from app.services.biweekly_mapping import load_wheat_phase_mapping
 from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
-from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service
+from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service, run_trigger_io
 
 router = APIRouter(prefix="/lands/{land_id}/biweekly", tags=["biweekly"])
 
@@ -161,7 +161,7 @@ async def list_seasons(
 ):
     try:
         service, mapping, calendar = await _smart_context(land_id)
-        payload = _with_plan(_public(service.list_seasons(land_id), principal), mapping, calendar)
+        payload = _with_plan(_public(await run_trigger_io(service.list_seasons, land_id), principal), mapping, calendar)
         return payload
     except ReportError as exc:
         return _http_for(exc)
@@ -176,7 +176,7 @@ async def list_periods(
     try:
         service, mapping, calendar = await _smart_context(land_id)
         chosen = _season_for(service, land_id, season)
-        payload = _with_plan(_public(service.list_periods(land_id, chosen), principal), mapping, calendar)
+        payload = _with_plan(_public(await run_trigger_io(service.list_periods, land_id, chosen), principal), mapping, calendar)
         # Enrich empty calendar periods with ingested scene counts when available.
         for row in payload.get("periods") or []:
             counts = await _scene_counts(land_id, row["start"], row["end_exclusive"])
@@ -303,7 +303,7 @@ async def get_job(
 ):
     try:
         service = build_trigger_service()
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
         if job.get("status") == "dispatched":
@@ -342,7 +342,7 @@ async def download_job(
 ):
     try:
         service = build_trigger_service()
-        job = service.get_job(job_id)
+        job = await run_trigger_io(service.get_job, job_id)
         if str(job.get("land_id")) != str(land_id):
             raise ReportError("JOB_NOT_FOUND")
         filename, chunks, mime, size = service.iter_download(job_id)

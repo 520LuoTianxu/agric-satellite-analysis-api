@@ -62,8 +62,7 @@ def _progress_of(job: dict | None) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def _load_registration(report_id: str | None) -> dict[str, Any] | None:
-    """Return a previously persisted OSS registration payload, if any."""
+def _load_from_job_progress(report_id: str | None) -> dict[str, Any] | None:
     if not report_id:
         return None
     try:
@@ -73,14 +72,34 @@ def _load_registration(report_id: str | None) -> dict[str, Any] | None:
     except Exception:
         return None
     progress = _progress_of(job)
-    meta = progress.get("oss_artifact")
-    if not isinstance(meta, dict) or not meta.get("key") or not meta.get("sha256"):
+    from agric_satellite_analysis_common.biweekly.official_ref import recoverable_oss_artifact
+
+    if recoverable_oss_artifact(progress) is None:
         return None
     return progress
 
 
+def _load_registration(
+    report_id: str | None,
+    registration_progress: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Prefer the work-item payload passed by the claim agent, then Job progress.
+
+    Job.progress_json is not sufficient: a failed job write must not cause a
+    later claim to re-render or re-upload when the work item already has the
+    OSS object reference.
+    """
+    from agric_satellite_analysis_common.biweekly.official_ref import recoverable_oss_artifact
+
+    if recoverable_oss_artifact(registration_progress) is not None:
+        return dict(registration_progress)
+    return _load_from_job_progress(report_id)
+
+
 def _registration_backoff_s(attempt: int) -> int:
-    return min(300, 15 * (2 ** max(0, int(attempt) - 1)))
+    from agric_satellite_analysis_common.biweekly.official_ref import registration_backoff_s
+
+    return registration_backoff_s(attempt)
 
 
 def _complete(
@@ -168,6 +187,7 @@ def generate_biweekly_report(
     wait_for_job_ids: list | None = None,
     reference_planting_instance_id: str | None = None,
     report_job_id: str | None = None,
+    registration_progress: dict | None = None,
     **_ignored,
 ) -> dict:
     """Render the official v8 biweekly PDF on the download machine and return it to the API."""
@@ -219,11 +239,20 @@ def generate_biweekly_report(
                 datetime.now(timezone.utc) + timedelta(seconds=_registration_backoff_s(attempts))
             ).isoformat()
         if report_id:
-            update_job_record(None, None, "running", progress=payload, job_id=report_id)
+            try:
+                update_job_record(None, None, "running", progress=payload, job_id=report_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "biweekly_job_progress_persist_failed err_type=%s",
+                    type(exc).__name__,
+                )
         try:
             progress_work_item_http(work_item_id, payload)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "biweekly_work_item_progress_persist_failed err_type=%s",
+                type(exc).__name__,
+            )
 
     def _register(progress: dict[str, Any]) -> dict:
         oss = progress["oss_artifact"]
@@ -272,43 +301,61 @@ def generate_biweekly_report(
             }
         official = (result or {}).get("job") or {}
         official_status = official.get("status") or progress.get("official_status")
-        complete_work_item_http(
-            work_item_id,
-            {
-                "status": official_status,
-                "biweekly_job_id": bj_id,
-                "filename": progress.get("filename"),
-            },
-        )
-        if report_id:
-            update_job_record(
-                None,
-                None,
-                "completed",
-                progress={
-                    "stage": "done",
+        try:
+            complete_work_item_http(
+                work_item_id,
+                {
                     "status": official_status,
+                    "biweekly_job_id": bj_id,
                     "filename": progress.get("filename"),
-                    "oss_artifact": oss,
                 },
-                job_id=report_id,
             )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "biweekly_work_item_complete_failed err_type=%s",
+                type(exc).__name__,
+            )
+        if report_id:
+            try:
+                update_job_record(
+                    None,
+                    None,
+                    "completed",
+                    progress={
+                        "stage": "done",
+                        "status": official_status,
+                        "filename": progress.get("filename"),
+                        "oss_artifact": oss,
+                    },
+                    job_id=report_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "biweekly_job_complete_persist_failed err_type=%s",
+                    type(exc).__name__,
+                )
         return {"status": official_status, "job": official}
 
     try:
-        prior = _load_registration(report_id)
+        prior = _load_registration(report_id, registration_progress)
         if prior and bj_id:
             # Upload already succeeded; retry official registration only.
             return _register(prior)
 
         if report_id:
-            update_job_record(
-                None,
-                None,
-                "running",
-                progress={"stage": "waiting_for_backfill" if wait_ids else "loading"},
-                job_id=report_id,
-            )
+            try:
+                update_job_record(
+                    None,
+                    None,
+                    "running",
+                    progress={"stage": "waiting_for_backfill" if wait_ids else "loading"},
+                    job_id=report_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "biweekly_job_running_persist_failed err_type=%s",
+                    type(exc).__name__,
+                )
         if wait_ids:
             outcomes = _wait_for_backfill(wait_ids)
             if outcomes is None or any(status not in TERMINAL for status in outcomes.values()):
@@ -458,7 +505,7 @@ def generate_biweekly_report(
             raise
         from agric_satellite_analysis_common.biweekly.models import ReportError
 
-        prior = _load_registration(report_id)
+        prior = _load_registration(report_id, registration_progress)
         if prior:
             # OSS already holds the PDF; a later error is a registration problem.
             logger.warning(
