@@ -12,6 +12,10 @@ from typing import Any
 
 from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_window, prior_period
 from agric_satellite_analysis_common.biweekly.models import ReportError
+from agric_satellite_analysis_common.biweekly.scene_rows import (
+    eligible_observations as _eligible,
+)
+from agric_satellite_analysis_common.biweekly.scene_rows import radar_count as _s1_count
 
 from app.core.logging import logger
 from app.services.biweekly_dispatch import (
@@ -47,18 +51,6 @@ def _pdf_renderer():
 def trigger_service(smart=None):
     # API no longer renders official PDFs; the download machine does.
     return build_trigger_service(smart, use_official_pdf=False)
-
-
-def _eligible(rows: list[dict] | None) -> list[dict]:
-    if not rows:
-        return []
-    return [row for row in rows if row.get("quality_status") == "eligible_descriptive"]
-
-
-def _s1_count(rows: list[dict] | None) -> int:
-    if not rows:
-        return 0
-    return sum(1 for row in rows if str(row.get("sensor") or "").upper() == "S1")
 
 
 async def _last_optical_observations(land_id: str, periods: list[dict], period_id: str) -> list[dict] | None:
