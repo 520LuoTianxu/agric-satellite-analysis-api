@@ -17,6 +17,8 @@ from agric_satellite_analysis_common.biweekly.calendar import (
     MAX_BACKFILL_DAYS,
     bounded_backfill_window,
     parse_day,
+    periods_closed_before,
+    today_shanghai,
 )
 from agric_satellite_analysis_common.biweekly.models import ReportError
 from agric_satellite_analysis_common.scheduled_land_filter import (
@@ -145,18 +147,23 @@ async def dispatch_bounded_backfill(
         }
 
 
-async def dispatch_season_bounded_backfill(land_id: str, periods: list[dict]) -> dict[str, Any]:
-    """Dispatch one bounded window per biweekly period in the season.
+async def dispatch_season_bounded_backfill(
+    land_id: str, periods: list[dict], *, as_of: str | None = None
+) -> dict[str, Any]:
+    """Dispatch one bounded window per biweekly period that has already ended.
 
     Never collapses the season into a single window. Each window is the
     current period plus its prior comparison window and must honor
-    MAX_BACKFILL_DAYS. Does not call generate.
+    MAX_BACKFILL_DAYS. Periods still open on as_of are omitted so the
+    download window does not run through a future day. Does not call generate.
     """
     if not periods:
         raise ReportError("SEASON_NOT_FOUND")
+    as_of = str(as_of or today_shanghai())[:10]
+    closed = periods_closed_before(periods, as_of)
     period_results: list[dict[str, Any]] = []
     job_ids: list[str] = []
-    for row in periods:
+    for row in closed:
         window = bounded_backfill_window(periods, row["period_id"])
         dispatch = await dispatch_bounded_backfill(
             land_id,
@@ -182,22 +189,32 @@ async def dispatch_season_bounded_backfill(land_id: str, periods: list[dict]) ->
         job_ids.extend(entry["job_ids"])
     dispatched = any(item["dispatched"] for item in period_results)
     failed = [item for item in period_results if not item["dispatched"]]
+    if not closed:
+        reason = "NO_CLOSED_PERIODS"
+        note = f"截至 {as_of} 没有已结束的分期，未下发遥感补数。"
+    elif dispatched:
+        reason = None
+        note = "已按双周报周期分别派发有界 satellite_batch 任务。不会自动出报。"
+    else:
+        reason = failed[0]["reason"] if failed else "DISPATCH_FAILED"
+        note = "已按双周报周期分别派发有界 satellite_batch 任务。不会自动出报。"
     return {
         "dispatched": dispatched,
         "dispatched_to_production": dispatched,
-        "reason": None if dispatched else (failed[0]["reason"] if failed else "DISPATCH_FAILED"),
+        "reason": reason,
         "job_ids": job_ids,
         "job_count": len(job_ids),
-        "period_count": len(periods),
+        "period_count": len(closed),
         "period_results": period_results,
         "failed_period_count": len(failed),
+        "as_of": as_of,
         "scope": "season",
         "land_id": str(land_id),
         "sensors": ["S2", "S1"],
         "job_type": BIWEEKLY_SEASON_JOB_TYPE,
         "display_name": BIWEEKLY_SEASON_DISPLAY_NAME,
         "claim_type": "satellite_batch",
-        "note": "已按双周报周期分别派发有界 satellite_batch 任务。不会自动出报。",
+        "note": note,
     }
 
 

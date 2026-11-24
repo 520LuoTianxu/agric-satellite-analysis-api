@@ -201,5 +201,81 @@ class ReportFlowTests(unittest.TestCase):
         self.assertTrue(all(not item.get("artifact_kind") for item in children))
 
 
+class _OpenSeasonCatalog:
+    def periods(self, land_id, season_id):
+        from agric_satellite_analysis_common.biweekly.calendar import iter_periods
+
+        return iter_periods("2026-10-15", "2027-06-06")
+
+    def period(self, land_id, season_id, period_id):
+        for row in self.periods(land_id, season_id):
+            if row["period_id"] == str(period_id):
+                return row
+        raise AssertionError(period_id)
+
+
+class OpenPeriodSeasonGenerateTests(unittest.TestCase):
+    def test_one_click_does_not_dispatch_the_period_ending_on_nov_25(self):
+        service = TriggerService(
+            Path(tempfile.mkdtemp(prefix="open-period-")),
+            _OpenSeasonCatalog(),
+            pdf_renderer=_stub_pdf,
+        )
+        captured = []
+
+        async def fake_dispatch(land_id, window, **kwargs):
+            captured.append(window)
+            return {
+                "dispatched": True,
+                "reason": None,
+                "job_ids": [f"batch-{window['current_period_id']}"],
+                "job_count": 1,
+                "date_from": window["date_from"],
+                "date_to": window["date_to_inclusive"],
+            }
+
+        with patch(
+            "app.services.biweekly_report_flow.dispatch_bounded_backfill",
+            new=fake_dispatch,
+        ), patch(
+            "app.services.biweekly_report_flow.load_weather_series",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.services.biweekly_report_flow.load_land_meta",
+            new=AsyncMock(return_value={"land_name": "试验田"}),
+        ), patch(
+            "app.services.biweekly_report_flow.dispatch_biweekly_report",
+            new=AsyncMock(
+                return_value={
+                    "dispatched": True,
+                    "job_ids": ["report-1"],
+                    "job_count": 1,
+                    "job_type": "biweekly_report",
+                }
+            ),
+        ):
+            job = asyncio.run(
+                start_season_generate(
+                    service,
+                    land_id="32696",
+                    season_id="2026/27",
+                    as_of="2026-11-24",
+                )
+            )
+        ends = [window["date_to_inclusive"] for window in captured]
+        self.assertTrue(ends)
+        self.assertNotIn("2026-11-25", ends)
+        self.assertTrue(all(end < "2026-11-24" for end in ends))
+        period_ids = [item["period_id"] for item in job["result"]["period_results"]]
+        open_id = next(
+            row["period_id"]
+            for row in service.catalog.periods("32696", "2026/27")
+            if row["end_inclusive"] == "2026-11-25"
+        )
+        self.assertNotIn(open_id, period_ids)
+        self.assertIn("尚未结束", job["result"]["note"])
+        self.assertEqual(job["status"], "dispatched")
+
+
 if __name__ == "__main__":
     unittest.main()

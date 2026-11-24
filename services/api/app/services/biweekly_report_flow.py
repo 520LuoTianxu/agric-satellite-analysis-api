@@ -11,7 +11,11 @@ import asyncio
 from datetime import date, timedelta
 from typing import Any
 
-from agric_satellite_analysis_common.biweekly.calendar import bounded_backfill_window, prior_period
+from agric_satellite_analysis_common.biweekly.calendar import (
+    bounded_backfill_window,
+    periods_closed_before,
+    today_shanghai,
+)
 from agric_satellite_analysis_common.biweekly.models import ReportError
 from agric_satellite_analysis_common.biweekly.scene_rows import (
     eligible_observations as _eligible,
@@ -309,20 +313,31 @@ async def start_season_generate(
     land_id: str,
     season_id: str,
     reference_planting_instance_id: str | None = None,
+    as_of: str | None = None,
 ) -> dict:
-    """Dispatch each period's bounded backfill and generate a report per period."""
+    """Dispatch each finished period's bounded backfill, then a report per period.
+
+    Periods that are still open on as_of (Asia/Shanghai today by default) are
+    not dispatched. Their end date is today or later, so a satellite window
+    would request imagery that has not been acquired yet.
+    """
     periods = service.catalog.periods(land_id, season_id)
     if not periods:
         raise ReportError("SEASON_NOT_FOUND")
+    as_of = str(as_of or today_shanghai())[:10]
+    # 只补已经结束的分期。进行中的最后一期结束日还没到，不能把遥感拉到明天。
+    closed = periods_closed_before(periods, as_of)
     native = None
     if hasattr(service.catalog, "native_plan"):
         native = service.catalog.native_plan(land_id, season_id)
-    season_job = await run_trigger_io(service.request_season_backfill, land_id, season_id)
+    season_job = await run_trigger_io(
+        service.request_season_backfill, land_id, season_id, as_of
+    )
     child_ids: list[str] = []
     period_results: list[dict[str, Any]] = []
     waiting = False
     all_backfill_failed = True
-    for row in periods:
+    for row in closed:
         child = await start_period_generate(
             service,
             land_id=land_id,
@@ -348,19 +363,25 @@ async def start_season_generate(
             all_backfill_failed = False
         if child.get("status") == "dispatched":
             waiting = True
+    skipped = len(periods) - len(closed)
+    if not closed:
+        note = f"截至 {as_of} 没有已结束的分期，未下发遥感补数。进行中的分期结束后再补齐。"
+    elif waiting:
+        note = "全季已按期派发有界补数；各期出报将由下载机在补数完成后进行。API 机不渲染 PDF。"
+    else:
+        note = "全季各期任务已下发给下载机（补数与出报）。API 机不渲染 PDF。"
+    if skipped and closed:
+        note = f"{note} 截至 {as_of} 有 {skipped} 个尚未结束的分期未下发遥感补数。"
     result = {
         "stage": "backfill" if waiting else "done",
         "scope": "season",
+        "as_of": as_of,
         "period_results": period_results,
         "generate_job_ids": child_ids,
         "dispatched_to_production": any(
             (item.get("backfill") or {}).get("status") == "dispatched" for item in period_results
         ),
-        "note": (
-            "全季已按期派发有界补数；各期出报将由下载机在补数完成后进行。API 机不渲染 PDF。"
-            if waiting
-            else "全季各期任务已下发给下载机（补数与出报）。API 机不渲染 PDF。"
-        ),
+        "note": note,
     }
     if all_backfill_failed and period_results:
         result["note"] = "全季各期补数均失败，尚未出报。失败发生在补数阶段。"
