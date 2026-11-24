@@ -7,6 +7,7 @@ from agric_satellite_analysis_common.biweekly.calendar import (
     MAX_BACKFILL_DAYS,
     bounded_backfill_window,
     iter_periods,
+    periods_closed_before,
     planting_season_label,
 )
 from agric_satellite_analysis_common.biweekly.catalog import LocalPackCatalog
@@ -34,6 +35,22 @@ class CalendarTests(unittest.TestCase):
         first = bounded_backfill_window(periods, "1")
         self.assertEqual(first["date_from"], "2025-11-01")
         self.assertFalse(first["includes_prior_comparison_window"])
+
+    def test_open_period_ending_tomorrow_is_not_a_backfill_window(self):
+        # 2026-10-15 起每 14 天：2026-11-12～2026-11-25 在 11-24 仍未结束。
+        periods = iter_periods("2026-10-15", "2027-06-06")
+        open_period = next(
+            row for row in periods if row["start"] <= "2026-11-24" <= row["end_inclusive"]
+        )
+        self.assertEqual(open_period["end_inclusive"], "2026-11-25")
+        closed = periods_closed_before(periods, "2026-11-24")
+        self.assertNotIn(open_period["period_id"], {row["period_id"] for row in closed})
+        self.assertTrue(closed)
+        self.assertTrue(all(row["end_inclusive"] < "2026-11-24" for row in closed))
+        for row in closed:
+            window = bounded_backfill_window(periods, row["period_id"])
+            self.assertLess(window["date_to_inclusive"], "2026-11-24")
+        self.assertEqual(periods_closed_before(periods, "2026-10-15"), [])
 
 
 class TriggerServiceTests(unittest.TestCase):
@@ -271,3 +288,35 @@ class TriggerServiceTests(unittest.TestCase):
             date.fromisoformat(max(ends)) - date.fromisoformat(min(starts))
         ).days + 1
         self.assertGreater(season_days, MAX_BACKFILL_DAYS)
+
+
+class _OpenSeasonCatalog:
+    """2026-10-15 起的冬小麦季。2026-11-24 时，结束日为 11-25 的分期仍在进行。"""
+
+    def periods(self, land_id: str, season_id: str) -> list[dict]:
+        return iter_periods("2026-10-15", "2027-06-06")
+
+    def period(self, land_id: str, season_id: str, period_id: str) -> dict:
+        for row in self.periods(land_id, season_id):
+            if row["period_id"] == str(period_id):
+                return row
+        raise ReportError("PERIOD_NOT_FOUND")
+
+
+class OpenPeriodSeasonBackfillTests(unittest.TestCase):
+    def test_season_backfill_does_not_list_the_period_ending_tomorrow(self):
+        service = TriggerService(Path(tempfile.mkdtemp()), _OpenSeasonCatalog())
+        job = service.request_season_backfill("32696", "2026/27", as_of="2026-11-24")
+        windows = job["payload"]["windows"]
+        ends = [item["window"]["date_to_inclusive"] for item in windows]
+        self.assertTrue(ends)
+        self.assertTrue(all(end < "2026-11-24" for end in ends))
+        self.assertNotIn("2026-11-25", ends)
+        open_id = next(
+            row["period_id"]
+            for row in service.catalog.periods("32696", "2026/27")
+            if row["end_inclusive"] == "2026-11-25"
+        )
+        self.assertIn(open_id, job["payload"]["skipped_period_ids"])
+        self.assertNotIn(open_id, job["payload"]["period_ids"])
+        self.assertEqual(job["window"]["end_inclusive"], max(ends))

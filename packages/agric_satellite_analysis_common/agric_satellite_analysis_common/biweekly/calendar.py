@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from .models import ReportError
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 CADENCE_DAYS = 14
 # Safety cap for a single backfill request: current period + prior comparison
@@ -69,6 +72,26 @@ def iter_periods(start: str, end_inclusive: str, cadence: int = CADENCE_DAYS) ->
         cursor = nxt
         index += 1
     return periods
+
+
+def today_shanghai(now: datetime | None = None) -> str:
+    current = now.astimezone(SHANGHAI) if now is not None else datetime.now(SHANGHAI)
+    return current.date().isoformat()
+
+
+def periods_closed_before(periods: list[dict], as_of: str) -> list[dict]:
+    """分期最后一天早于 as_of 才算已经结束。
+
+    一键补齐只给这些分期拉遥感。as_of 当天仍在进行的分期，以及还没开始的分期，
+    结束日会落在今天或以后；照样下发时，下载窗口会拉到尚未到来的日期。
+    """
+    day = parse_day(str(as_of)[:10])
+    closed = []
+    for row in periods:
+        end = parse_day(str(row.get("end_inclusive") or "")[:10])
+        if end < day:
+            closed.append(row)
+    return closed
 
 
 def prior_period(periods: list[dict], period_id: str) -> dict | None:

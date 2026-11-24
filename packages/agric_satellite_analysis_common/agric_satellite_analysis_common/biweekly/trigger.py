@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .calendar import bounded_backfill_window
+from .calendar import add_days, bounded_backfill_window, periods_closed_before, today_shanghai
 from .catalog import ALLOWED_REFERENCE_IDS, LocalPackCatalog
 from .models import ReportError, canonical, digest
 from .official_ref import (
@@ -243,30 +243,57 @@ class TriggerService:
             job = self.run_job(job["job_id"])
         return job
 
-    def request_season_backfill(self, land_id: str, season_id: str) -> dict:
-        """Queue a season-scoped backfill job without evaluating local fixtures."""
+    def request_season_backfill(
+        self, land_id: str, season_id: str, as_of: str | None = None
+    ) -> dict:
+        """Queue a season-scoped backfill job without evaluating local fixtures.
+
+        Only periods that have already ended before as_of are listed. An open
+        period would ask the download host for imagery through a future day.
+        """
         periods = self.catalog.periods(land_id, season_id)
         if not periods:
             raise ReportError("SEASON_NOT_FOUND")
+        as_of = str(as_of or today_shanghai())[:10]
+        closed = periods_closed_before(periods, as_of)
         windows = []
-        for row in periods:
+        for row in closed:
             window = bounded_backfill_window(periods, row["period_id"])
+            # 结束日当天仍可能没有完整影像，窗口停在 as_of 之前。
+            if window["date_to_inclusive"] >= as_of:
+                continue
             windows.append({"period_id": row["period_id"], "window": window})
-        first, last = periods[0], periods[-1]
-        job = self._create(
-            kind="backfill_season",
-            land_id=land_id,
-            season_id=season_id,
-            period={
+        closed_ids = [item["period_id"] for item in windows]
+        if windows:
+            by_id = {row["period_id"]: row for row in closed}
+            first = by_id[windows[0]["period_id"]]
+            last = by_id[windows[-1]["period_id"]]
+            span = {
                 "period_id": None,
                 "start": first["start"],
                 "end_inclusive": last["end_inclusive"],
                 "end_exclusive": last["end_exclusive"],
-            },
+            }
+        else:
+            span = {
+                "period_id": None,
+                "start": as_of,
+                "end_inclusive": as_of,
+                "end_exclusive": add_days(as_of, 1),
+            }
+        job = self._create(
+            kind="backfill_season",
+            land_id=land_id,
+            season_id=season_id,
+            period=span,
             payload={
                 "scope": "season",
+                "as_of": as_of,
                 "windows": windows,
-                "period_ids": [row["period_id"] for row in periods],
+                "period_ids": closed_ids,
+                "skipped_period_ids": [
+                    row["period_id"] for row in periods if row["period_id"] not in set(closed_ids)
+                ],
             },
         )
         # Never auto-run the local snapshot evaluation for a season fill.
