@@ -4,7 +4,7 @@
 不下载影像和气象数据，不调用 Celery 任务，也不回写任何生产接口。
 
 它与线上链路共用同一份代码：
-    种植季与分期   plan_calendar.build_seasons_from_rows → calendar.iter_periods
+    种植季与分期   plan_calendar.build_seasons_from_rows → iter_observation_periods
     景的采用规则   scene_rows.to_observation
     事实构建       TriggerService.prepare_generate_facts
     补充与渲染     generate_official_biweekly_pdf(offline=True)
@@ -32,6 +32,7 @@ from agric_satellite_analysis_common.biweekly.models import ReportError
 from agric_satellite_analysis_common.biweekly.plan_calendar import (
     SmartPlantingCatalog,
     build_seasons_from_rows,
+    iter_observation_periods,
 )
 from agric_satellite_analysis_common.biweekly.scene_rows import (
     as_day,
@@ -146,6 +147,17 @@ def _live_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
+def _period_identity(rows: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    return [
+        (
+            str(row.get("period_id")),
+            as_day(row.get("start")),
+            as_day(row.get("end_exclusive")),
+        )
+        for row in rows
+    ]
+
+
 def _season_from_api(land_id: str, season: dict[str, Any]) -> dict[str, Any]:
     plan = season.get("native_plan")
     if not isinstance(plan, dict) or not plan.get("intervals"):
@@ -159,18 +171,20 @@ def _season_from_api(land_id: str, season: dict[str, Any]) -> dict[str, Any]:
     season_id = str(season.get("season_id") or "").strip()
     if not (start and end_inclusive and season_id):
         raise OfflineInputError("方案文件中的种植季缺少 season_id / start / end_inclusive")
-    derived = iter_periods(start, end_inclusive)
+    # 新导出从 S1 起算。已经按整季窗口导出的历史文件仍按原分期核对，不改写旧期次。
+    derived = iter_observation_periods(plan)
+    legacy = iter_periods(start, end_inclusive)
     supplied = season.get("periods")
+    chosen = derived
     if supplied:
-        # 接口已经给出分期时，逐期核对与正式推导一致；不一致说明文件被改动或版本不符，不继续。
-        want = [(row["period_id"], row["start"], row["end_exclusive"]) for row in derived]
-        got = [
-            (str(row.get("period_id")), as_day(row.get("start")), as_day(row.get("end_exclusive")))
-            for row in supplied
-        ]
-        if want != got:
+        got = _period_identity(supplied)
+        if got == _period_identity(derived):
+            chosen = derived
+        elif got == _period_identity(legacy):
+            chosen = legacy
+        else:
             raise OfflineInputError(
-                f"种植季 {season_id} 的分期与正式推导（iter_periods）不一致，请重新导出方案文件"
+                f"种植季 {season_id} 的分期与正式推导不一致，请重新导出方案文件"
             )
     periods = [
         {
@@ -183,7 +197,7 @@ def _season_from_api(land_id: str, season: dict[str, Any]) -> dict[str, Any]:
             "plan_status": "smart_plant_task",
             "label": f"第{item['period_id']}期",
         }
-        for item in derived
+        for item in chosen
     ]
     return {
         "season_id": season_id,
@@ -201,7 +215,7 @@ def _season_from_api(land_id: str, season: dict[str, Any]) -> dict[str, Any]:
 def calendar_from_plan(land_id: str, payload: Any) -> dict[str, Any]:
     """Seasons and periods for one land from an exported plan file.
 
-    接受三种来源，分期都由 iter_periods 得出：
+    接受三种来源。新方案的分期从 S1 起算；已按整季窗口导出的历史文件保持原分期：
     1. Smart 原始行 {"batches": [...], "tasks": [...], "mapping_rows": [...]（可选）}
        → build_seasons_from_rows（与接口机读取 Smart 后调用的是同一个函数）；
     2. 接口 GET /v1/lands/{land_id}/biweekly/seasons 的返回（含 seasons[].native_plan）；
