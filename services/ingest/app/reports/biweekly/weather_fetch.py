@@ -61,14 +61,24 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "et0_mm": None,
             "min_c": None,
             "max_c": None,
+            "mean_c": None,
             "precipitation_days": 0,
             "et0_days": 0,
             "temperature_days": 0,
         }
-    rains = [row["precipitation_mm"] for row in rows if row.get("precipitation_mm") is not None]
+    rains = [
+        row["precipitation_mm"]
+        for row in rows
+        if row.get("precipitation_mm") is not None
+    ]
     et0s = [row["et0_mm"] for row in rows if row.get("et0_mm") is not None]
     mins = [row["min_c"] for row in rows if row.get("min_c") is not None]
     maxs = [row["max_c"] for row in rows if row.get("max_c") is not None]
+    means = [
+        (row["min_c"] + row["max_c"]) / 2
+        for row in rows
+        if row.get("min_c") is not None and row.get("max_c") is not None
+    ]
     return {
         "days": len(rows),
         "start": rows[0]["date"],
@@ -77,6 +87,7 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "et0_mm": sum(et0s) if et0s else None,
         "min_c": min(mins) if mins else None,
         "max_c": max(maxs) if maxs else None,
+        "mean_c": (sum(means) / len(means)) if means else None,
         "missing_precipitation": len(rains) != len(rows),
         "missing_et0": len(et0s) != len(rows),
         # 有记录的天数随合计一并给出：缺测日不计入合计，报告须写明合计覆盖了几天。
@@ -86,12 +97,14 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def centroid_from_products(products: list[dict[str, Any]]) -> tuple[float, float] | None:
+def centroid_from_products(
+    products: list[dict[str, Any]],
+) -> tuple[float, float] | None:
     """Field-pixel centroid (lat, lon) from lonlat_columns_v1 products."""
     lats: list[float] = []
     lons: list[float] = []
     for product in products or []:
-        columns = ((product.get("pixel_data") or {}).get("columns") or {})
+        columns = (product.get("pixel_data") or {}).get("columns") or {}
         lat_col = columns.get("lat") or []
         lon_col = columns.get("lon") or []
         for lat, lon in zip(lat_col, lon_col):
@@ -120,7 +133,10 @@ def resolve_report_lat_lon(
     if not land_id:
         return None
     try:
-        from agric_satellite_analysis_common.internal_api import internal_api_enabled, land_geom
+        from agric_satellite_analysis_common.internal_api import (
+            internal_api_enabled,
+            land_geom,
+        )
 
         if not internal_api_enabled():
             return None
@@ -133,6 +149,61 @@ def resolve_report_lat_lon(
         return None
 
 
+def _prior_year(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
+def _load_daily(
+    latitude: float, longitude: float, start: date, end: date
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Open-Meteo archive, then NASA POWER. Returns daily, source, error."""
+    from app.tasks.weather import (
+        _daily_has_usable_rows,
+        _fetch_nasa_power,
+        _fetch_open_meteo,
+    )
+
+    error: str | None = None
+    try:
+        payload = _fetch_open_meteo(
+            float(latitude), float(longitude), start, end, use_archive=True
+        )
+        if _daily_has_usable_rows((payload or {}).get("daily")):
+            return (payload or {}).get("daily"), "open-meteo", None
+        error = "open_meteo_no_data"
+    except Exception as exc:  # noqa: BLE001
+        error = f"open_meteo_{type(exc).__name__}"
+    try:
+        payload = _fetch_nasa_power(float(latitude), float(longitude), start, end)
+        return (payload or {}).get("daily"), "nasa-power", None
+    except Exception as exc:  # noqa: BLE001
+        return None, None, error or f"nasa_power_{type(exc).__name__}"
+
+
+def _summary_for_range(
+    latitude: float,
+    longitude: float,
+    start: date,
+    end: date,
+    loader: Any | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    daily, _source, error = (loader or _load_daily)(latitude, longitude, start, end)
+    if daily is None:
+        return None, error or "no_data"
+    rows = [
+        row
+        for row in rows_from_daily_payload(daily)
+        if start.isoformat() <= row["date"] <= end.isoformat()
+    ]
+    summary = summarize_weather_rows(rows)
+    if summary.get("temperature_days") or summary.get("precipitation_mm") is not None:
+        return summary, None
+    return None, error or "no_data"
+
+
 def fetch_period_weather(
     *,
     latitude: float,
@@ -140,12 +211,16 @@ def fetch_period_weather(
     period_start: str,
     period_end_inclusive: str,
     antecedent_days: int = ANTECEDENT_DAYS,
+    daily_loader: Any | None = None,
 ) -> dict[str, Any]:
     """Fetch period + antecedent daily weather. Never invents or writes a database."""
-    from agric_satellite_analysis_common.weather_window import resolve_historical_weather_window
-    from app.tasks.weather import _daily_has_usable_rows, _fetch_nasa_power, _fetch_open_meteo
+    from agric_satellite_analysis_common.weather_window import (
+        resolve_historical_weather_window,
+    )
 
-    start = date.fromisoformat(_as_day(period_start)) - timedelta(days=int(antecedent_days))
+    start = date.fromisoformat(_as_day(period_start)) - timedelta(
+        days=int(antecedent_days)
+    )
     end = date.fromisoformat(_as_day(period_end_inclusive))
     try:
         window = resolve_historical_weather_window(date_from=start, date_to=end)
@@ -154,44 +229,26 @@ def fetch_period_weather(
             "weather_daily": [],
             "weather_period": summarize_weather_rows([]),
             "weather_antecedent": summarize_weather_rows([]),
+            "weather_same_period_prior_year": None,
             "weather_source": None,
             "weather_error": str(exc),
         }
 
-    source = "open-meteo"
-    error: str | None = None
-    payload: dict[str, Any] | None = None
-    try:
-        payload = _fetch_open_meteo(
-            float(latitude),
-            float(longitude),
-            window.start,
-            window.end,
-            use_archive=True,
-        )
-        if not _daily_has_usable_rows((payload or {}).get("daily")):
-            error = "open_meteo_no_data"
-            payload = None
-    except Exception as exc:  # noqa: BLE001
-        error = f"open_meteo_{type(exc).__name__}"
-        payload = None
+    loader = daily_loader or _load_daily
+    daily, source, error = loader(
+        float(latitude), float(longitude), window.start, window.end
+    )
+    if daily is None:
+        return {
+            "weather_daily": [],
+            "weather_period": summarize_weather_rows([]),
+            "weather_antecedent": summarize_weather_rows([]),
+            "weather_same_period_prior_year": None,
+            "weather_source": None,
+            "weather_error": error,
+        }
 
-    if payload is None:
-        try:
-            payload = _fetch_nasa_power(
-                float(latitude), float(longitude), window.start, window.end
-            )
-            source = "nasa-power"
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "weather_daily": [],
-                "weather_period": summarize_weather_rows([]),
-                "weather_antecedent": summarize_weather_rows([]),
-                "weather_source": None,
-                "weather_error": error or f"nasa_power_{type(exc).__name__}",
-            }
-
-    rows = rows_from_daily_payload((payload or {}).get("daily"))
+    rows = rows_from_daily_payload(daily)
     period_rows = [
         row
         for row in rows
@@ -199,15 +256,23 @@ def fetch_period_weather(
     ]
     antecedent_end = _as_day(period_start)
     antecedent_rows = [
-        row
-        for row in rows
-        if _as_day(start) <= row["date"] < antecedent_end
+        row for row in rows if _as_day(start) <= row["date"] < antecedent_end
     ]
+    period_start_day = date.fromisoformat(_as_day(period_start))
+    period_end_day = date.fromisoformat(_as_day(period_end_inclusive))
+    prior_summary, _prior_error = _summary_for_range(
+        float(latitude),
+        float(longitude),
+        _prior_year(period_start_day),
+        _prior_year(period_end_day),
+        loader,
+    )
     return {
         # official_pdf charts "本期及可获得的对照日"; totals stay split.
         "weather_daily": antecedent_rows + period_rows,
         "weather_period": summarize_weather_rows(period_rows),
         "weather_antecedent": summarize_weather_rows(antecedent_rows),
+        "weather_same_period_prior_year": prior_summary,
         "weather_source": source,
         "weather_error": None,
     }

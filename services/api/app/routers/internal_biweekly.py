@@ -87,6 +87,15 @@ async def biweekly_report_inputs(job_id: str, _: InternalAuth) -> dict[str, Any]
     payload = dict(job.get("payload") or {})
     if not payload.get("native_plan") and hasattr(service.catalog, "native_plan"):
         fields.setdefault("native_plan", service.catalog.native_plan(land_id, season_id))
+    from app.services.biweekly_field_records import load_key_node_records
+    from app.services.biweekly_soil_context import load_soil_context
+
+    fields["key_node_records"] = await load_key_node_records(
+        land_id,
+        season_id,
+        crop_name=str(payload.get("crop_name") or ""),
+    )
+    fields["soil_context"] = await load_soil_context(land_id)
     await run_trigger_io(service.set_payload_fields, job_id, **fields)
     job = await run_trigger_io(service.get_job, job_id)
     facts, status = service.prepare_generate_facts(job)

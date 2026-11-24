@@ -98,23 +98,38 @@ class WeatherFetchTests(unittest.TestCase):
 
         def _open(_lat, _lon, start, end, *, use_archive=False):
             self.assertTrue(use_archive)
+            if start.year == 2025:
+                return {
+                    "daily": {
+                        "time": ["2025-04-02", "2025-04-15"],
+                        "precipitation_sum": [0.0, 0.0],
+                        "temperature_2m_min": [1.0, 1.0],
+                        "temperature_2m_max": [9.0, 9.0],
+                        "et0_fao_evapotranspiration": [1.0, 1.0],
+                    }
+                }
             self.assertLessEqual(end, date(2026, 4, 15))
             self.assertEqual(start, date(2026, 3, 3))
             return {"daily": daily}
 
-        with patch("app.tasks.weather._fetch_open_meteo", side_effect=_open), patch(
-            "app.tasks.weather._daily_has_usable_rows", return_value=True
-        ), patch("app.tasks.weather._fetch_nasa_power") as nasa:
-            result = fetch_period_weather(
-                latitude=37.252,
-                longitude=112.086,
-                period_start="2026-04-02",
-                period_end_inclusive="2026-04-15",
-            )
-        nasa.assert_not_called()
+        def _loader(_lat, _lon, start, end):
+            payload = _open(_lat, _lon, start, end, use_archive=True)
+            return payload["daily"], "open-meteo", None
+
+        result = fetch_period_weather(
+            latitude=37.252,
+            longitude=112.086,
+            period_start="2026-04-02",
+            period_end_inclusive="2026-04-15",
+            daily_loader=_loader,
+        )
         self.assertEqual(result["weather_source"], "open-meteo")
         self.assertIsNone(result["weather_error"])
         self.assertEqual(result["weather_period"]["precipitation_mm"], 14.0)
+        self.assertEqual(result["weather_period"]["min_c"], 2.0)
+        self.assertEqual(result["weather_period"]["max_c"], 12.0)
+        self.assertEqual(result["weather_period"]["mean_c"], 7.0)
+        self.assertEqual(result["weather_same_period_prior_year"]["mean_c"], 5.0)
         self.assertEqual(result["weather_antecedent"]["precipitation_mm"], 1.0)
         # Chart series includes the 30-day antecedent plus the period.
         days = [row["date"] for row in result["weather_daily"]]
@@ -132,16 +147,19 @@ class WeatherFetchTests(unittest.TestCase):
             "temperature_2m_max": [13.0, 14.0],
         }
 
-        with patch("app.tasks.weather._fetch_open_meteo", side_effect=RuntimeError("down")), patch(
-            "app.tasks.weather._daily_has_usable_rows", return_value=False
-        ), patch("app.tasks.weather._fetch_nasa_power", return_value={"daily": nasa_daily}):
-            result = fetch_period_weather(
-                latitude=37.252,
-                longitude=112.086,
-                period_start="2026-04-02",
-                period_end_inclusive="2026-04-03",
-                antecedent_days=0,
-            )
+        def _loader(_lat, _lon, start, end):
+            if start.year == 2025:
+                return None, None, "no_prior_year"
+            return nasa_daily, "nasa-power", None
+
+        result = fetch_period_weather(
+            latitude=37.252,
+            longitude=112.086,
+            period_start="2026-04-02",
+            period_end_inclusive="2026-04-03",
+            antecedent_days=0,
+            daily_loader=_loader,
+        )
         self.assertEqual(result["weather_source"], "nasa-power")
         self.assertEqual(result["weather_period"]["precipitation_mm"], 1.0)
         self.assertIsNone(result["weather_period"]["et0_mm"])
