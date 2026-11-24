@@ -284,6 +284,93 @@ class BiweeklyRouterTests(unittest.TestCase):
             ],
         )
 
+    def test_summary_shows_current_and_prior_core_parameters(self):
+        from app.services.biweekly_report_card import build_report_card
+
+        card = build_report_card(
+            {
+                "job_id": "bj-99a41147675c6560",
+                "status": "ready",
+                "result": {
+                    "period": {
+                        "start": "2026-05-06",
+                        "end_inclusive": "2026-05-19",
+                        "days": 14,
+                    },
+                    "observations": [
+                        {"date": "2026-05-08", "ndvi_avg": 0.60, "evi_avg": 0.40},
+                        {"date": "2026-05-18", "ndvi_avg": 0.70, "evi_avg": 0.50},
+                    ],
+                    "prior_observations": [
+                        {"date": "2026-04-24", "ndvi_avg": 0.50, "evi_avg": 0.30},
+                    ],
+                    "weather_period": {
+                        "days": 14,
+                        "precipitation_mm": 0.1,
+                        "et0_mm": 31.7,
+                        "mean_c": 18.24,
+                    },
+                    "weather_daily": [
+                        {
+                            "date": "2026-04-22",
+                            "precipitation_mm": 2.0,
+                            "et0_mm": 2.0,
+                            "min_c": 8,
+                            "max_c": 16,
+                        },
+                        {
+                            "date": "2026-04-30",
+                            "precipitation_mm": 3.5,
+                            "et0_mm": 2.5,
+                            "min_c": 10,
+                            "max_c": 18,
+                        },
+                        {
+                            "date": "2026-05-05",
+                            "precipitation_mm": 0,
+                            "et0_mm": 1.0,
+                            "min_c": 11,
+                            "max_c": 19,
+                        },
+                        {
+                            "date": "2026-05-10",
+                            "precipitation_mm": 99,
+                            "et0_mm": 99,
+                            "min_c": 1,
+                            "max_c": 2,
+                        },
+                    ],
+                },
+            }
+        )
+        self.assertEqual(card["periods"]["current"], {
+            "label": "本期",
+            "start": "2026-05-06",
+            "end": "2026-05-19",
+        })
+        self.assertEqual(card["periods"]["prior"], {
+            "label": "上一期",
+            "start": "2026-04-22",
+            "end": "2026-05-05",
+        })
+        by_key = {row["key"]: row for row in card["metrics"]}
+        self.assertEqual(by_key["ndvi"]["current"], 0.65)
+        self.assertEqual(by_key["ndvi"]["prior"], 0.50)
+        self.assertEqual(by_key["ndvi"]["name"], "长势")
+        self.assertEqual(by_key["evi"]["current"], 0.45)
+        self.assertNotIn("ndre", by_key)
+        weather = {row["key"]: row for row in card["weather"]}
+        self.assertEqual(weather["precipitation_mm"]["name"], "有效降雨")
+        self.assertEqual(weather["precipitation_mm"]["current"], 0.1)
+        self.assertEqual(weather["precipitation_mm"]["prior"], 5.5)
+        self.assertEqual(weather["et0_mm"]["current"], 31.7)
+        self.assertEqual(weather["et0_mm"]["prior"], 5.5)
+        self.assertEqual(weather["mean_c"]["current"], 18.2)
+        self.assertEqual(weather["mean_c"]["prior"], 13.7)
+        empty = build_report_card({"job_id": "bj-ca85562c28b78c54", "status": "ready", "result": {}})
+        self.assertEqual(empty["metrics"], [])
+        self.assertEqual(empty["weather"], [])
+
     def test_summary_reads_sentences_kept_on_the_download_task(self):
         self._enable_dev()
         job_id = "bj-b37fb809482e8490"
