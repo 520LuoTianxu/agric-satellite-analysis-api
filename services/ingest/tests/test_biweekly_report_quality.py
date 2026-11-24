@@ -495,10 +495,11 @@ class DemoReportTests(unittest.TestCase):
         for name, pages in self.pages.items():
             self.assertEqual(len(pages), expected[name], (name, len(pages)))
             enriched = self._enriched(name)
-            spatial = [page for page in pages if "田内空间分布" in page]
+            spatial = [page for page in pages if "田里哪一块不一样" in page]
             self.assertEqual(len(spatial), 1, name)
-            for metric in enriched["report_metrics"]["primary"]:
-                self.assertIn(_flat(FORMAL_NAMES[metric]), spatial[0], (name, metric))
+            self.assertIn("比整块地偏弱", spatial[0])
+            self.assertNotIn("三、田里哪一块不一样", "".join(pages))
+            self.assertNotIn("四、和周围的农田比", "".join(pages))
             self.assertEqual(
                 [item["metric"] for item in enriched["infield"]], enriched["report_metrics"]["primary"]
             )
@@ -635,10 +636,10 @@ class LayoutFixtureTests(unittest.TestCase):
 
     def test_dense_report_keeps_both_maps_and_the_archive_on_existing_pages(self):
         self.assertEqual(len(self.dense), 6)
-        spatial = [page for page in self.dense if "田内空间分布" in page]
+        spatial = [page for page in self.dense if "田里哪一块不一样" in page]
         self.assertEqual(len(spatial), 1)
-        self.assertIn("NDRE", spatial[0])
-        self.assertIn("NDMI", spatial[0])
+        self.assertIn("叶绿素", spatial[0])
+        self.assertIn("叶子里的水", spatial[0])
         joined = "".join(self.dense)
         self.assertIn("云量超过限值（42%）", joined)
         self.assertIn("0.61", joined)
@@ -648,11 +649,13 @@ class LayoutFixtureTests(unittest.TestCase):
         self.assertIn("不判定干旱或洪涝", joined)
         self.assertIn("不是生产地块32696的结论", joined)
         self.assertNotIn("观测与数据质量", joined)
-        self.assertIn("四、气象条件", joined)
+        self.assertIn("三、气象条件", joined)
+        self.assertIn("和周围的农田比", joined)
 
     def test_missing_ndmi_and_weather_is_one_line_not_a_page(self):
         self.assertEqual(len(self.thin), 5)
         joined = "".join(self.thin)
+        self.assertNotIn("三、气象条件", joined)
         self.assertNotIn("四、气象条件", joined)
         self.assertIn("历史可比数据不足，暂不评价", joined)
         self.assertIn("证据不足", joined)

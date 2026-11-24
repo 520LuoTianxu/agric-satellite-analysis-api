@@ -260,7 +260,8 @@ class ContextMapTests(unittest.TestCase):
         self.assertGreater(built["stats"]["field"]["n"], 0)
         self.assertGreater(built["stats"]["surrounding_1km"]["n"], 0)
         joined = "。".join(built["text"]) if isinstance(built["text"], list) else str(built["text"])
-        self.assertIn("超绿指数（ExG）", joined)
+        self.assertIn("谁更绿", joined)
+        self.assertNotIn("超绿指数", joined)
         self.assertNotIn("绿度", joined)
         self.assertIn("不是项目登记地块", joined)
 

@@ -476,15 +476,15 @@ def render_surrounding_map(
     ax.set_xlim(0, view_w)
     ax.set_ylim(view_h, 0)
     note = basemap_note or f"底图为{_cn_md_safe(date)}哨兵二号真彩色影像"
-    ax.set_title(f"本田与周边1—2公里影像识别农田（{note}）", fontsize=10.5, color="#1F2A24", pad=8,
+    ax.set_title(f"这块地和周围一两公里的农田（{note}）", fontsize=10.5, color="#1F2A24", pad=8,
                  fontproperties=bold)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.legend(
         handles=[
             Line2D([0], [0], color="#E6C200", lw=1.6, label="本田范围"),
-            Patch(facecolor="#D2BE46", label="周边1公里内影像识别农田"),
-            Patch(facecolor="#E8D260", alpha=0.6, label="周边1—2公里影像识别农田"),
+            Patch(facecolor="#D2BE46", label="周围一公里里的农田"),
+            Patch(facecolor="#E8D260", alpha=0.6, label="再往外到两公里的农田"),
             Line2D([0], [0], color="#888888", ls="--", label="1公里范围"),
             Line2D([0], [0], color="#888888", ls=":", label="2公里范围"),
         ],
@@ -587,9 +587,9 @@ def render_greenness_contrast(by_date: dict[str, dict], dest: str | Path) -> Pat
         else:
             ax.text(i + width, 0, "缺测", ha="center", va="bottom", fontsize=7.5, color="#7A7A7A")
     ax.set_xticks(x, days)
-    ax.set_ylabel("超绿指数ExG（无量纲）", fontsize=8.5)
+    ax.set_ylabel("绿的程度", fontsize=8.5)
     ax.tick_params(labelsize=8.5)
-    ax.set_title("本田与周边农田的超绿指数（ExG）中位数，同日影像", loc="left", color="#1F2A24",
+    ax.set_title("这块地和周围农田谁更绿", loc="left", color="#1F2A24",
                  fontsize=10.5, pad=8, fontproperties=bold)
     ax.margins(y=0.18)
     ax.legend(frameon=False, ncol=3, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16))
@@ -625,8 +625,8 @@ def build_surrounding_comparison(
     if not field["n"] or not r1["n"]:
         return {
             "text": (
-                f"{date}的真彩色影像中未能识别出足够的周边农田像元，"
-                "本期不作本田与周边农田的对照。对照未改用项目登记地块。"
+                f"{date}的卫星图里没能认出足够的周围农田，"
+                "本期不和周围的农田比。也没有改用项目登记地块来凑。"
             ),
             "image": None,
             "date": date,
@@ -671,13 +671,13 @@ def build_surrounding_comparison(
             diff = row["difference"]
             word = "高于" if diff > 0 else ("低于" if diff < 0 else "等于")
             parts.append(
-                f"{row['date']}本田 {row['field']:.1f}，周边1公里内农田 {row['surrounding_1km']:.1f}，"
-                f"本田{word}周边" + (f" {abs(diff):.1f}" if diff else "")
+                f"{row['date']}这块地 {row['field']:.1f}，周围一公里的农田 {row['surrounding_1km']:.1f}，"
+                f"这块地{word}周围" + (f" {abs(diff):.1f}" if diff else "")
             )
-        bits.append("超绿指数（ExG）中位数：" + "；".join(parts) + "。")
+        bits.append("谁更绿：" + "；".join(parts) + "。")
     bits.append(
-        "周边农田由同日真彩色影像自动识别，不是项目登记地块，作物类型未经确认；"
-        "对照只说明相对高低，不作同作物排名。"
+        "周围的农田是同一天的卫星图自动认出来的，不是项目登记地块，种的什么还不能确定；"
+        "只说明这块地比周围更绿还是更弱，不是同一种作物的排名。"
     )
     contrast = None
     if contrast_dest is not None and series:

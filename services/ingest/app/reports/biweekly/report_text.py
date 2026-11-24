@@ -532,14 +532,16 @@ def omitted_items(facts: dict[str, Any]) -> list[str]:
     items = []
     if not has_surrounding(facts):
         reason = facts.get("surrounding_missing_reason") or "未能完成周边1—2公里农田对照"
-        items.append(f"周边农田对照：{reason}，本期不提供。")
+        items.append(f"和周围的农田比：{reason}，本期不提供。")
     if not has_weather(facts):
         items.append("气象条件：未取得本期气温和降水记录，本期不提供，也不对水分状况作判断。")
     plan = facts.get("report_metrics") or {}
     have = {item["metric"] for item in facts.get("infield") or [] if item.get("image")}
     missing = [metric_abbr(m) for m in (plan.get("primary") or []) if m not in have]
     if missing and facts.get("comparison"):
-        items.append(f"田内空间分布（{join_names(missing)}）：没有足够的像元级有效数据，本期不提供分布图。")
+        items.append(
+            f"田里哪一块不一样（{join_names(missing)}）：没有足够的地块内部数据，本期不出这张图。"
+        )
     quality = facts.get("data_quality") or {}
     radar = int(quality.get("radar_count") or 0)
     vv_count = int((facts.get("water_risk") or {}).get("radar_vv_count") or 0)
