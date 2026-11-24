@@ -99,6 +99,8 @@ _MAX_NODES = 8
 _MAX_ANSWERS = 6
 _MAX_PHOTOS = 6
 _URL = re.compile(r"^https?://", re.I)
+# 表单里大量英文键名和枚举值，直接印出来种植户看不懂。
+_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 def workbox_season_keys(season_id: str, crop_name: str | None = None) -> list[str]:
@@ -250,13 +252,27 @@ def _from_blob(raw: Any, source: str) -> tuple[list[dict[str, str]], list[str]]:
         if str(key).lower() in _SKIP:
             continue
         text = _scalar(value)
-        if not text:
+        if not text or _CODE.match(text):
             continue
-        label = _LABELS.get(str(key), str(key))
+        label = _answer_label(str(key), text)
+        if not label or (label == "说明" and text in {"是", "否"}):
+            continue
         if prefix:
             label = f"{prefix}{label}"
         answers.append({"source": source, "label": label, "value": text[:80]})
     return answers, photos
+
+
+def _answer_label(key: str, text: str) -> str | None:
+    """有中文含义才保留。英文键名不进报告；值本身是人话时改叫「说明」。"""
+    mapped = _LABELS.get(key)
+    if mapped:
+        return mapped
+    if re.search(r"[\u4e00-\u9fff]", key):
+        return key
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "说明"
+    return None
 
 
 def _loads(raw: Any) -> Any:
