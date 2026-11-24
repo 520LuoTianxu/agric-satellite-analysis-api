@@ -874,6 +874,12 @@ class TriggerService:
             "historical_same_period": payload.get("historical_same_period")
             if isinstance(payload.get("historical_same_period"), list)
             else None,
+            "key_node_records": payload.get("key_node_records")
+            if isinstance(payload.get("key_node_records"), dict)
+            else None,
+            "soil_context": payload.get("soil_context")
+            if isinstance(payload.get("soil_context"), dict)
+            else None,
             "sowing_date": payload.get("sowing_date"),
             "science_limits": snapshot.get("science_limits"),
             "forbidden_metrics_omitted": sorted(FORBIDDEN_REPORT_METRICS),

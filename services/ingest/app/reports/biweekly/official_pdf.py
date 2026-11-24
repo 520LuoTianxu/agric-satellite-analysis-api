@@ -714,6 +714,12 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     note = reader_note(facts.get("ai_narrative"))
     if note:
         story.append(Paragraph(note, styles["small"]))
+    # 气温、关键节点和土壤本底跟在结论后，不另起一页。
+    from app.reports.biweekly.conclusion_context import build_conclusion_context
+
+    context = facts.get("conclusion_context") or build_conclusion_context(facts)
+    for line in context.get("lines") or []:
+        story.append(Paragraph(str(line), styles["small"]))
     evidence = text.evidence_table(facts)
     if evidence:
         block = [

@@ -488,7 +488,11 @@ def observation_caption(facts: dict[str, Any]) -> str:
 
 def has_weather(facts: dict[str, Any]) -> bool:
     period = facts.get("weather_period") or {}
-    return bool(facts.get("weather_daily")) and (period.get("precipitation_mm") is not None or period.get("et0_mm") is not None)
+    has_number = any(
+        period.get(key) is not None
+        for key in ("precipitation_mm", "et0_mm", "min_c", "max_c", "mean_c")
+    )
+    return bool(facts.get("weather_daily")) and has_number
 
 
 def has_surrounding(facts: dict[str, Any]) -> bool:

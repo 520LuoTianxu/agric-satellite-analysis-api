@@ -53,7 +53,7 @@ _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 parameter_guide 和本期参数。parameter_guide 说明每个参数是什么意思，其余字段是程序已经算好的参数值。
 
-请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。参数里有的指标、日期、田内部位、未采用观测、气象和周边对照都要写到；某个参数为空就不要编。不要写灌溉、施肥、打药这类处方。
+请直接根据这些参数发挥，写成给种植户看的报告。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。参数里有的指标、日期、田内部位、未采用观测、气象、去年同期、关键节点填写、土壤本底和周边对照都要写到；某个参数为空就不要编。不要新写灌溉、施肥、打药处方。关键节点是已经填写的农事，可以当作背景，不要把它说成卫星测到的。
 
 数值升高或降低只表示大小，不等于好坏。哪一句、哪个数字、哪个部位是重点，由你决定，再给那几个字加粗或上色。不要规定成某几个固定词，也不要每句末尾都补同一个词。
 
@@ -65,7 +65,7 @@ SYSTEM_PROMPT = """你在写农业遥感双周报的正文。用户消息里有 
 没有把握的地方保持正文。不要用别的颜色，不要用 Markdown。
 
 metric_notes 是「指标说明」：根据每个指标的 full_name、meaning 和本期数值，写成这个指标在本期说明了什么。不要复读定义原文，每个指标的写法不要相同，重点由你标。
-conclusion 是给种植户看的结论，重点由你用上面的标记标出来。
+conclusion 是给种植户看的结论。有气温、去年同期、关键节点或土壤本底时，要和遥感变化写在一起；context_lines 会印在结论下面，不要把那些原句再抄一遍。重点由你用上面的标记标出来。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
 field_pattern_lines 和 water_risk_lines 已经印在报告里，不要再写一遍。不要把 NDMI、降水差或雷达标记写成干旱、洪涝、缺肥、病虫害或产量结论；证据不足时不要改成无风险。
 不要输出思考过程，只输出 JSON：
@@ -80,7 +80,11 @@ PARAMETER_GUIDE = {
     "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。",
     "infield": "田块内部差异。median、p10、p90 是有效像元的中位数和第10、第90百分位。flagged_pixels 是明显低于本田整体水平的像元个数，clustered_pixels 是其中连成片的个数。regions.name 是成片像元所在部位，share_percent 是该部位占成片像元的百分比。",
     "surrounding": "本田和周边约一公里农田的超绿指数。difference_exg 是本田减周边，正数表示本田更高。cover_2km_percent 是影像盖住周边两公里范围的百分比。",
-    "weather": "地块中心的格点气象，不是田间实测。precipitation_mm 是降水量毫米，et0_mm 是参考作物蒸散量毫米。带 days 的字段是有记录的天数，缺测的天没有算进合计。",
+    "weather": "地块中心的格点气象，不是田间实测。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是降水量毫米，et0_mm 是参考作物蒸散量毫米。prior_year 是去年同一段日期。带 days 的字段是有记录的天数，缺测的天没有算进合计。",
+    "key_nodes": "人工填写的关键节点。relevance 为 in_period 表示提交日落在本期，stage 表示对应当前生育阶段但不是本期新提交。没有记录就不要写农事。",
+    "soil": "地块土壤档案，不是本期测土。不要据此判断缺肥。",
+    "photo_review": "现场照片的画面检查。status 不是 reviewed 时，不要描述照片内容。",
+    "context_lines": "已经印在结论下面的短句。解释它们和遥感的关系，不要原句复述。",
     "field_pattern_lines": "已经写好的持续偏弱、均匀度和历史同期句子。报告会印出，不要复述，也不要改数字。",
     "water_risk_lines": "已经写好的水分状况句子，区分观测、推算和证据不足。报告会印出，不要复述，不要另判干旱或洪涝。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
@@ -356,6 +360,18 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
         "infield": _infield_facts(facts),
         "surrounding": _surrounding_facts(facts),
         "weather": _weather_facts(facts),
+        "key_nodes": _key_nodes_for_model(facts),
+        "soil": facts.get("soil_context")
+        if isinstance(facts.get("soil_context"), dict)
+        else None,
+        "photo_review": {
+            "status": (facts.get("photo_review") or {}).get("status"),
+            "count": (facts.get("photo_review") or {}).get("count") or 0,
+            "note": (facts.get("photo_review") or {}).get("note"),
+        },
+        "context_lines": list(
+            (facts.get("conclusion_context") or {}).get("lines") or []
+        ),
         "field_pattern_lines": _pattern_lines(facts),
         "water_risk_lines": list((facts.get("water_risk") or {}).get("lines") or []),
     }
@@ -448,6 +464,56 @@ def _surrounding_facts(facts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _prior_year_weather(summary: Any) -> dict[str, Any] | None:
+    if not isinstance(summary, dict):
+        return None
+    if summary.get("mean_c") is None and summary.get("precipitation_mm") is None:
+        return None
+    return {
+        "start": summary.get("start"),
+        "end": summary.get("end"),
+        "min_c": _index(summary.get("min_c")),
+        "max_c": _index(summary.get("max_c")),
+        "mean_c": _index(summary.get("mean_c")),
+        "precipitation_mm": _index(summary.get("precipitation_mm")),
+    }
+
+
+def _key_nodes_for_model(facts: dict[str, Any]) -> list[dict[str, Any]]:
+    from app.reports.biweekly.conclusion_context import select_key_nodes
+
+    payload = facts.get("key_node_records") or {}
+    period = facts.get("period") or {}
+    phase = facts.get("phase") or {}
+    names = [
+        str(row.get("stage_code") or "")
+        for row in (phase.get("observation_stages") or phase.get("planned_days") or [])
+        if isinstance(row, dict)
+    ]
+    selected = select_key_nodes(
+        list(payload.get("nodes") or []),
+        period_start=str(period.get("start") or "")[:10],
+        period_end=str(period.get("end_inclusive") or "")[:10],
+        stage_text="、".join(dict.fromkeys(name for name in names if name)),
+    )
+    compact = []
+    for node in selected:
+        compact.append(
+            {
+                "task_name": node.get("task_name"),
+                "task_status": node.get("task_status"),
+                "submitted_on": node.get("submitted_on"),
+                "relevance": node.get("relevance"),
+                "answers": [
+                    {"label": item.get("label"), "value": item.get("value")}
+                    for item in (node.get("answers") or [])
+                ],
+                "photo_count": node.get("photo_count") or 0,
+            }
+        )
+    return compact
+
+
 def _pattern_lines(facts: dict[str, Any]) -> list[str]:
     patterns = facts.get("field_patterns") or {}
     lines = []
@@ -463,12 +529,17 @@ def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
     antecedent = facts.get("weather_antecedent") or {}
     return {
         "period_days": period.get("days"),
+        "min_c": _index(period.get("min_c")),
+        "max_c": _index(period.get("max_c")),
+        "mean_c": _index(period.get("mean_c")),
+        "temperature_days": period.get("temperature_days"),
         "precipitation_mm": _index(period.get("precipitation_mm")),
         "precipitation_days": period.get("precipitation_days"),
         "et0_mm": _index(period.get("et0_mm")),
         "et0_days": period.get("et0_days"),
         "antecedent_days": antecedent.get("days"),
         "antecedent_precipitation_mm": _index(antecedent.get("precipitation_mm")),
+        "prior_year": _prior_year_weather(facts.get("weather_same_period_prior_year")),
     }
 
 

@@ -11,8 +11,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.reports.biweekly.conclusion_context import attach_conclusion_context
 from app.reports.biweekly.enrichment import enrich_official_report_facts
 from app.reports.biweekly.official_pdf import render_official_biweekly_pdf
+from app.reports.biweekly.photo_review import attach_photo_review
 
 
 def generate_official_biweekly_pdf(
@@ -53,6 +55,9 @@ def generate_official_biweekly_pdf(
         fetch_truecolor=fetch_truecolor,
         offline=offline,
     )
+    if not offline:
+        attach_photo_review(filled)
+    attach_conclusion_context(filled)
     if "ai_narrative" not in filled:
         from app.reports.biweekly.narrative_ai import (
             empty_judgment,
