@@ -75,6 +75,33 @@ def generate_official_biweekly_pdf(
                 error=type(exc).__name__,
                 model="",
             )
+        narrative = filled.get("ai_narrative")
+        if isinstance(narrative, dict):
+            from app.reports.biweekly.narrative_ai import reader_note
+
+            note = reader_note(narrative)
+            if note:
+                narrative["reader_note"] = note
+            # 登记用的是调用方 facts。把诊断写回去，状态仍由任务按 PDF 是否上传决定。
+            facts["ai_narrative"] = {
+                key: narrative[key]
+                for key in (
+                    "llm_configured",
+                    "model",
+                    "error",
+                    "reader_note",
+                    "diagnostics",
+                    "summary",
+                    "changes",
+                    "conclusion",
+                    "field_notes",
+                    "metric_notes",
+                    "infield",
+                    "surrounding",
+                    "weather",
+                )
+                if key in narrative
+            }
     rendered = render_official_biweekly_pdf(filled, dest_path, figures_dir=figures)
     if facts_sidecar:
         side = Path(facts_sidecar)

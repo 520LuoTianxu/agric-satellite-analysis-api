@@ -53,7 +53,12 @@ from app.reports.biweekly.cover import (
 )
 from app.reports.biweekly.enrichment import ensure_report_inputs, series_value
 from app.reports.biweekly.fonts import resolve_yahei_fonts
-from app.reports.biweekly.narrative_ai import infield_line, judgment_paragraphs, section_lines
+from app.reports.biweekly.narrative_ai import (
+    infield_line,
+    judgment_paragraphs,
+    reader_note,
+    section_lines,
+)
 
 W, H = A4
 M = 48
@@ -705,6 +710,10 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(_info_table(styles, text.basic_info_rows(facts)))
     story.append(Paragraph("结论", styles["h2"]))
     _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "conclusion"))
+    # 模型失败只加一行说明，不另起空白页，也不把思考过程写进来。
+    note = reader_note(facts.get("ai_narrative"))
+    if note:
+        story.append(Paragraph(note, styles["small"]))
     evidence = text.evidence_table(facts)
     if evidence:
         block = [
