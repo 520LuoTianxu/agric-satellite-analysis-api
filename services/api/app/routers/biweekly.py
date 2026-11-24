@@ -337,6 +337,48 @@ async def get_job(
         return _http_for(exc)
 
 
+async def _extra_fact_documents(job: dict) -> list[dict]:
+    """Facts kept on the business job or its work item when the official row has none.
+
+    Registration progress stores the same facts that were sent to complete.
+    A later status write can leave the official result without those sentences.
+    """
+    report_id = job.get("report_job_id") or (job.get("payload") or {}).get("report_job_id")
+    if not report_id:
+        return []
+    try:
+        from uuid import UUID
+
+        from sqlalchemy import select
+
+        from app.core.database import async_session
+        from app.models.tables import Job, WorkItem
+
+        report_uuid = UUID(str(report_id))
+    except (TypeError, ValueError):
+        return []
+    documents: list[dict] = []
+    try:
+        async with async_session() as db:
+            row = await db.get(Job, report_uuid)
+            progress = row.progress_json if row is not None else None
+            if isinstance(progress, dict):
+                documents.append(progress)
+            stored = (
+                await db.execute(
+                    select(WorkItem.progress_json).where(WorkItem.parent_job_id == report_uuid)
+                )
+            ).scalars()
+            documents.extend(item for item in stored if isinstance(item, dict))
+    except Exception:  # noqa: BLE001 — the official card still returns without this copy
+        logger.warning(
+            "biweekly_summary_fact_lookup_failed job_id=%s",
+            job.get("job_id"),
+            exc_info=True,
+        )
+    return documents
+
+
 @router.get("/jobs/{job_id}/summary")
 async def get_job_summary(
     land_id: str,
@@ -360,7 +402,12 @@ async def get_job_summary(
                     land_id,
                     exc_info=True,
                 )
-        return build_report_card(job)
+        card = build_report_card(job)
+        if card.get("source") == "status" and card.get("status") in {"ready", "evidence_limited"}:
+            extra = await _extra_fact_documents(job)
+            if extra:
+                card = build_report_card(job, *extra)
+        return card
     except ReportError as exc:
         return _http_for(exc)
 
