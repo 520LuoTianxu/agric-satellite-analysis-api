@@ -263,7 +263,11 @@ class GenerateTaskTests(unittest.TestCase):
                 ),
                 patch(
                     "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
-                    return_value={"error_code": None, "status": "ready", "facts": facts},
+                    return_value={
+                        "error_code": None,
+                        "status": "ready",
+                        "facts": facts,
+                    },
                 ),
                 patch(
                     "app.tasks.biweekly_report._upload_official_object",
@@ -295,6 +299,53 @@ class GenerateTaskTests(unittest.TestCase):
         self.assertEqual(kwargs["oss"]["key"], oss["key"])
         self.assertIsNone(kwargs.get("content"))
         self.assertIsNone(kwargs.get("error_code") or None)
+
+
+class MissingSoilFetchTests(unittest.TestCase):
+    def test_absent_soil_is_fetched_once_and_reread(self) -> None:
+        from app.tasks.biweekly_report import _fill_missing_soil
+
+        facts = {"land_id": "28024", "soil_context": {"status": "absent"}}
+        refreshed = {
+            "error_code": None,
+            "facts": {
+                "land_id": "28024",
+                "soil_context": {"status": "ready", "ph": 6.8},
+            },
+        }
+        with (
+            patch(
+                "agric_satellite_analysis_common.internal_api.internal_api_enabled",
+                return_value=True,
+            ),
+            patch(
+                "agric_satellite_analysis_common.internal_api.get_biweekly_report_inputs",
+                return_value=refreshed,
+            ) as reload,
+            patch(
+                "app.tasks.biweekly_report._fetch_soil_for_land",
+                return_value={"status": "success"},
+            ) as fetch,
+        ):
+            out = _fill_missing_soil("bj-1", facts, "28024")
+        fetch.assert_called_once_with("28024")
+        reload.assert_called_once_with("bj-1")
+        self.assertEqual(out["soil_context"]["status"], "ready")
+
+    def test_ready_soil_and_disabled_api_do_not_fetch(self) -> None:
+        from app.tasks.biweekly_report import _fill_missing_soil
+
+        ready = {"soil_context": {"status": "ready", "texture": "壤土"}}
+        with patch("app.tasks.biweekly_report._fetch_soil_for_land") as fetch:
+            self.assertEqual(_fill_missing_soil("bj-1", ready, "28024"), ready)
+            fetch.assert_not_called()
+            with patch(
+                "agric_satellite_analysis_common.internal_api.internal_api_enabled",
+                return_value=False,
+            ):
+                absent = {"soil_context": {"status": "absent"}}
+                self.assertEqual(_fill_missing_soil("bj-1", absent, "28024"), absent)
+            fetch.assert_not_called()
 
 
 if __name__ == "__main__":

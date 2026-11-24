@@ -714,7 +714,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     note = reader_note(facts.get("ai_narrative"))
     if note:
         story.append(Paragraph(note, styles["small"]))
-    # 气温、关键节点和土壤本底跟在结论后，不另起一页。
+    # 只跟一两句农事和土壤底子。气温由模型写进结论，不再在下面重复。
     from app.reports.biweekly.conclusion_context import build_conclusion_context
 
     context = facts.get("conclusion_context") or build_conclusion_context(facts)

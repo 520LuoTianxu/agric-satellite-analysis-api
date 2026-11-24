@@ -140,6 +140,67 @@ def _bucket_from_upload_uri(uploaded: Any, key: str) -> str | None:
     return bucket
 
 
+def _soil_is_ready(facts: dict[str, Any]) -> bool:
+    soil = facts.get("soil_context")
+    return isinstance(soil, dict) and soil.get("status") == "ready"
+
+
+def _fetch_soil_for_land(land_id: str) -> dict[str, Any]:
+    from app.tasks.soil import fetch_soil_for_land
+
+    return fetch_soil_for_land.run(land_id)
+
+
+def _fill_missing_soil(
+    bj_id: str, facts: dict[str, Any], land_id: str
+) -> dict[str, Any]:
+    """Pull the field soil archive once when the report would otherwise omit it.
+
+    A failed fetch still returns the original facts. The conclusion must not
+    invent soil numbers, and this does not open the API database directly.
+    """
+    if _soil_is_ready(facts) or not bj_id or not land_id:
+        return facts
+    try:
+        from agric_satellite_analysis_common.internal_api import (
+            get_biweekly_report_inputs,
+            internal_api_enabled,
+        )
+    except Exception:  # noqa: BLE001
+        return facts
+    if not internal_api_enabled():
+        return facts
+    try:
+        result = _fetch_soil_for_land(land_id)
+    except Exception as exc:  # noqa: BLE001 — 土壤补拉失败不挡住已经能出的报告
+        logger.warning(
+            "biweekly_soil_fetch_failed",
+            land_id=land_id,
+            error_type=type(exc).__name__,
+        )
+        return facts
+    if not isinstance(result, dict) or result.get("status") != "success":
+        logger.warning(
+            "biweekly_soil_fetch_empty",
+            land_id=land_id,
+            status=result.get("status") if isinstance(result, dict) else None,
+        )
+        return facts
+    try:
+        again = get_biweekly_report_inputs(bj_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "biweekly_soil_reread_failed",
+            land_id=land_id,
+            error_type=type(exc).__name__,
+        )
+        return facts
+    if again.get("error_code"):
+        return facts
+    refreshed = dict(again.get("facts") or {})
+    return refreshed or facts
+
+
 def _log_exc(event: str, **fields: Any) -> None:
     """Log the active exception with a redacted type, message, and stack."""
     logger.exception(event, **fields)
@@ -552,6 +613,9 @@ def generate_biweekly_report(
         facts = dict(inputs.get("facts") or {})
         status = str(inputs.get("status") or "")
         land_for_key = str(land or facts.get("land_id") or "")
+        if status == "ready":
+            # 没有土壤档案时先拉一次再出结论，不要只用“缺失”把别的数据补上去。
+            facts = _fill_missing_soil(bj_id, facts, land_for_key)
         if status == "evidence_limited":
             content = (
                 __import__("json").dumps(facts, ensure_ascii=False, indent=2)

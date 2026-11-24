@@ -64,6 +64,29 @@ class FieldRecordTests(unittest.TestCase):
         self.assertNotIn("secret", blob)
         self.assertEqual(node["answers"][0]["label"], "断垄")
         self.assertEqual(node["answers"][1]["value"], "38")
+        coded = parse_workbox_rows(
+            [
+                _row(
+                    executor_json=json.dumps(
+                        {
+                            "submitData": {
+                                "offlineInspection": "是",
+                                "devFert": 1040,
+                                "reportReasonOther": "播种时已镇压",
+                                "gapLabel": "无断垄",
+                            }
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            ]
+        )
+        labels = [item["label"] for item in coded["nodes"][0]["answers"]]
+        values = [item["value"] for item in coded["nodes"][0]["answers"]]
+        self.assertNotIn("offlineInspection", "".join(labels))
+        self.assertNotIn("devFert", "".join(labels + values))
+        self.assertIn("播种时已镇压", values)
+        self.assertIn("无断垄", values)
         self.assertEqual(node["photo_count"], 1)
         self.assertTrue(parsed["photos"][0]["url"].endswith("/a.jpg"))
 
@@ -117,13 +140,17 @@ class ConclusionContextTests(unittest.TestCase):
         }
         lines = build_conclusion_context(facts)["lines"]
         joined = "\n".join(lines)
-        self.assertIn("最低1.0℃", joined)
-        self.assertIn("去年同期", joined)
-        self.assertIn("+2.0℃", joined)
+        self.assertNotIn("最低", joined)
+        self.assertNotIn("去年同期", joined)
+        self.assertNotIn("无断垄", joined)
+        self.assertNotIn("不描述照片", joined)
+        self.assertNotIn("没有对应", joined)
         self.assertIn("出苗检查", joined)
-        self.assertIn("无断垄", joined)
-        self.assertIn("pH 7.2", joined)
-        self.assertIn("不描述照片内容", joined)
+        self.assertIn("土壤底子", joined)
+        self.assertIn("中性", joined)
+        self.assertIn("7.2", joined)
+        self.assertNotIn("pH", joined)
+        self.assertLessEqual(len(lines), 2)
         self.assertNotIn("不应出现", joined)
 
 
