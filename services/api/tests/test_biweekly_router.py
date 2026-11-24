@@ -200,9 +200,11 @@ class BiweeklyRouterTests(unittest.TestCase):
         self.assertEqual(body["source"], "conclusion")
         self.assertEqual(
             body["lines"],
-            ["叶子里的水少了一些，要留意浇水。", "东北部有一小片一直偏弱。"],
+            [
+                "叶子里的水少了一些，<b>要留意浇水</b>。",
+                '<font color="#9C2B1B" backColor="#F8D6D2">东北部有一小片一直偏弱。</font>',
+            ],
         )
-        self.assertNotIn("<b>", "".join(body["lines"]))
         missing = self.client.get(
             "/v1/lands/6417/biweekly/jobs/bj-0123456789abcdef/summary",
             headers=self._auth(self._token()),
@@ -222,6 +224,27 @@ class BiweeklyRouterTests(unittest.TestCase):
         pending = build_report_card({"job_id": job_id, "status": "dispatched", "result": {}})
         self.assertEqual(pending["source"], "status")
         self.assertIn("正在生成", pending["lines"][0])
+        marked = build_report_card(
+            {
+                "job_id": job_id,
+                "status": "ready",
+                "result": {
+                    "ai_narrative": {
+                        "conclusion": [
+                            '<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">偏干</font>',
+                            '<b onclick="alert(1)">词</b><script>alert(1)</script>',
+                        ]
+                    }
+                },
+            }
+        )
+        self.assertEqual(
+            marked["lines"],
+            [
+                '<font color="#1F4D38" backColor="#D9F2E3">偏干</font>',
+                "词alert(1)",
+            ],
+        )
 
     def test_router_does_not_use_anonymous_auth_bypass(self):
         import ast
