@@ -109,7 +109,8 @@ class PlanCalendarTests(unittest.TestCase):
         season = calendar["seasons"][0]
         self.assertEqual(season["season_id"], "2025/26")
         self.assertEqual((season["start"], season["end_inclusive"]), ("2025-10-05", "2026-06-09"))
-        official = iter_periods("2025-10-05", "2026-06-09")
+        self.assertEqual(season["observation_start"], "2025-10-12")
+        official = iter_periods("2025-10-12", "2026-06-09")
         self.assertEqual(
             [(row["period_id"], row["start"], row["end_exclusive"]) for row in season["periods"]],
             [(row["period_id"], row["start"], row["end_exclusive"]) for row in official],
@@ -153,6 +154,28 @@ class PlanCalendarTests(unittest.TestCase):
         tampered["seasons"][0]["periods"][3]["start"] = "2025-11-17"
         with self.assertRaises(OfflineInputError):
             calendar_from_plan(LAND, tampered)
+
+    def test_historical_full_season_export_keeps_its_periods(self) -> None:
+        from agric_satellite_analysis_common.biweekly.calendar import iter_periods
+        from app.reports.biweekly.offline_render import calendar_from_plan
+
+        built = calendar_from_plan(LAND, _smart_plan_rows())
+        historical = {"land_id": LAND, "seasons": json.loads(json.dumps(built["seasons"]))}
+        legacy = iter_periods("2025-10-05", "2026-06-09")
+        historical["seasons"][0]["periods"] = [
+            {
+                "period_id": row["period_id"],
+                "start": row["start"],
+                "end_exclusive": row["end_exclusive"],
+            }
+            for row in legacy
+        ]
+        again = calendar_from_plan(LAND, historical)
+        self.assertEqual(
+            [row["start"] for row in again["seasons"][0]["periods"]],
+            [row["start"] for row in legacy],
+        )
+        self.assertEqual(again["seasons"][0]["periods"][0]["start"], "2025-10-05")
 
     def test_plan_of_another_land_is_never_used(self) -> None:
         from app.reports.biweekly.offline_render import OfflineInputError, calendar_from_plan

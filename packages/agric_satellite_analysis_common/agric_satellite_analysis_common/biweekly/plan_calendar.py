@@ -5,8 +5,9 @@ calls this module; offline tooling calls it with exported rows, so both derive
 the same season windows, period numbering and stage intervals.
 
 种植季窗口取本田 Smart 小麦种植任务（agriculture_plant_task）的最早计划开始日
-到最晚计划结束日，再按 14 天一期切分。没有方案时返回空的、带说明的状态，
-不会改用其他地块的方案。
+到最晚计划结束日。双周报期次不从整地、播种起算，而从 S1（营养生长，出苗期）
+起按 14 天切分；S1 之前的生育期仍留在方案里，供时间轴展示。没有方案时返回
+空的、带说明的状态，不会改用其他地块的方案。
 """
 
 from __future__ import annotations
@@ -20,6 +21,11 @@ from .models import ReportError
 from .phase_policy import CROP_ID, CROP_NAME, MAPPING_VERSION, resolve_wheat_stage
 
 MISSING_NOTE = "本田未关联 Smart 种植方案，未列出种植季。不会改用其他地块的方案。"
+SEASON_NOTE = (
+    "按本田 Smart 种植任务窗口列出种植季。生育期来自计划，不是卫星识别物候。"
+    "双周报期次从进入监测的生育期起算，S1 之前的整地、播种不计入期次。"
+)
+_MONITORED_PHASES = frozenset({"S1", "S2", "S3"})
 
 
 def as_plan_day(value: Any) -> date | None:
@@ -103,6 +109,51 @@ class SmartPlantingCatalog:
         return None
 
 
+def observation_period_start(intervals: list[dict[str, Any]] | None) -> str | None:
+    """First day that may belong to a biweekly period.
+
+    整地、播种前准备、播种期发生在营养生长（S1）之前，没有遥感观察价值，
+    不占期次。有 S1 时从最早的 S1 开始日切分；方案里没有 S1 时，从第一个
+    已监测阶段（S2 或 S3）起算。这些阶段仍留在 intervals 里，时间轴照常展示。
+    """
+    s1: list[str] = []
+    later: list[str] = []
+    for row in intervals or []:
+        start = str(row.get("start") or "")[:10]
+        if len(start) != 10:
+            continue
+        label = row.get("phase_label") or None
+        status = str(row.get("mapping_status") or "")
+        if status == "NOT_APPLICABLE" or label not in _MONITORED_PHASES:
+            continue
+        if label == "S1":
+            s1.append(start)
+        else:
+            later.append(start)
+    if s1:
+        return min(s1)
+    if later:
+        return min(later)
+    return None
+
+
+def iter_observation_periods(plan: dict[str, Any] | None) -> list[dict]:
+    """14-day periods from the first monitored stage through the plan end.
+
+    种植季起止仍覆盖整份方案（含 S1 之前的农事）。这里只决定双周报怎么分期。
+    没有监测阶段时不产生期次。
+    """
+    if not plan:
+        return []
+    end_inclusive = str(plan.get("end_inclusive") or "")[:10]
+    if len(end_inclusive) != 10:
+        return []
+    start = observation_period_start(plan.get("intervals") or [])
+    if not start or start > end_inclusive:
+        return []
+    return iter_periods(start, end_inclusive)
+
+
 def build_seasons_from_rows(
     land_id: str,
     batches: Iterable[dict[str, Any]],
@@ -138,7 +189,7 @@ def build_seasons_from_rows(
         seen_labels[label] = seen_labels.get(label, 0) + 1
         season_id = label if seen_labels[label] == 1 else f"{label}-b{batch_id}"
         periods = []
-        for item in iter_periods(plan["start"], plan["end_inclusive"]):
+        for item in iter_observation_periods(plan):
             periods.append(
                 {
                     **item,
@@ -162,6 +213,9 @@ def build_seasons_from_rows(
                 "start": plan["start"],
                 "end_inclusive": plan["end_inclusive"],
                 "end_exclusive": plan["end_exclusive"],
+                "observation_start": observation_period_start(
+                    plan.get("intervals") or []
+                ),
                 "cadence_days": 14,
                 "batch_id": batch_id,
                 "batch_name": batch.get("batch_name"),
@@ -173,7 +227,7 @@ def build_seasons_from_rows(
                 "mapping_version": MAPPING_VERSION,
                 "native_plan": plan,
                 "periods": periods,
-                "note": "按本田 Smart 种植任务窗口列出种植季。生育期来自计划，不是卫星识别物候。",
+                "note": SEASON_NOTE,
             }
         )
 

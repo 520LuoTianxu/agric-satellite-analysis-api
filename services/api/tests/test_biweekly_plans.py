@@ -62,6 +62,58 @@ class SmartPlanTests(unittest.TestCase):
         self.assertEqual(payload["seasons"], [])
         self.assertEqual(payload["note"], MISSING_NOTE)
 
+    def test_periods_omit_pre_s1_work_but_keep_those_stages(self):
+        tasks = [
+            _task(
+                name="整地播种期", start="2025-09-06", finish="2025-10-17", task_id=1
+            ),
+            _task(
+                name="出苗至三叶期", start="2025-10-18", finish="2025-11-10", task_id=2
+            ),
+            _task(name="成熟期", start="2026-05-20", finish="2026-06-06", task_id=3),
+        ]
+        payload = build_seasons_from_rows("18407", [_batch()], tasks)
+        season = payload["seasons"][0]
+        self.assertEqual(season["start"], "2025-09-06")
+        self.assertEqual(season["end_inclusive"], "2026-06-06")
+        self.assertEqual(season["observation_start"], "2025-10-18")
+        self.assertEqual(season["periods"][0]["period_id"], "1")
+        self.assertEqual(season["periods"][0]["start"], "2025-10-18")
+        self.assertEqual(season["periods"][0]["end_inclusive"], "2025-10-31")
+        self.assertTrue(all(row["start"] >= "2025-10-18" for row in season["periods"]))
+        names = [row["source_stage_name"] for row in season["native_plan"]["intervals"]]
+        self.assertEqual(names, ["整地播种期", "出苗至三叶期", "成熟期"])
+
+    def test_without_s1_periods_start_at_the_first_monitored_stage(self):
+        tasks = [
+            _task(name="播种期", start="2026-09-20", finish="2026-10-05", task_id=1),
+            _task(
+                name="拔节孕穗期", start="2027-03-11", finish="2027-04-10", task_id=2
+            ),
+            _task(name="成熟期", start="2027-05-20", finish="2027-06-05", task_id=3),
+        ]
+        season = build_seasons_from_rows("18407", [_batch()], tasks)["seasons"][0]
+        self.assertEqual(season["start"], "2026-09-20")
+        self.assertEqual(season["observation_start"], "2027-03-11")
+        self.assertEqual(season["periods"][0]["start"], "2027-03-11")
+        self.assertIn(
+            "播种期",
+            [row["source_stage_name"] for row in season["native_plan"]["intervals"]],
+        )
+
+    def test_only_pre_s1_tasks_keep_the_season_and_emit_no_periods(self):
+        tasks = [
+            _task(name="整地播种期", start="2026-09-06", finish="2026-10-01", task_id=1)
+        ]
+        payload = build_seasons_from_rows("18407", [_batch()], tasks)
+        season = payload["seasons"][0]
+        self.assertEqual(season["start"], "2026-09-06")
+        self.assertIsNone(season["observation_start"])
+        self.assertEqual(season["periods"], [])
+        self.assertEqual(
+            season["native_plan"]["intervals"][0]["source_stage_name"], "整地播种期"
+        )
+
     def test_builds_planting_season_and_official_intervals(self):
         tasks = [
             _task(name="整地播种期", start="2027-09-20", finish="2027-11-01", task_id=1),
@@ -79,8 +131,11 @@ class SmartPlanTests(unittest.TestCase):
         self.assertEqual(season["crop_name"], "小麦")
         self.assertEqual(season["start"], "2027-09-20")
         self.assertEqual(season["end_inclusive"], "2028-05-04")
+        self.assertEqual(season["observation_start"], "2027-11-02")
         self.assertTrue(season["periods"])
-        self.assertEqual(season["periods"][0]["start"], "2027-09-20")
+        self.assertEqual(season["periods"][0]["start"], "2027-11-02")
+        self.assertEqual(season["periods"][0]["label"], "第1期")
+        self.assertTrue(all(row["start"] >= "2027-11-02" for row in season["periods"]))
         self.assertLessEqual(season["periods"][0]["days"], 14)
         plan = season["native_plan"]
         self.assertEqual(plan["plan_label"], "本田方案")
@@ -120,6 +175,10 @@ class SmartPlanTests(unittest.TestCase):
         self.assertEqual(by_source["出苗期"]["phase_label"], "S1")
         self.assertEqual(by_source["拔节孕穗期"]["phase_label"], "S2")
         self.assertEqual(by_source["成熟期"]["phase_label"], "S3")
+        self.assertEqual(season["observation_start"], "2026-10-16")
+        self.assertEqual(season["periods"][0]["start"], "2026-10-16")
+        self.assertTrue(all(row["start"] >= "2026-10-16" for row in season["periods"]))
+        self.assertEqual(season["start"], "2026-09-20")
 
         payload = attach_public_stages(
             {"land_id": "18509", "seasons": [dict(season)], "season_id": season["season_id"], "periods": season["periods"]},
