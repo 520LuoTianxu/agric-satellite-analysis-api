@@ -1,6 +1,6 @@
 """Render the official winter-wheat biweekly PDF.
 
-版面顺序：封面 → 本期结论 → 田里哪一块不一样 → 和周围的农田比 → 指标变化
+版面顺序：封面 → 本期结论 → 田内空间分布 → 和周围的农田比 → 指标变化
 → 气象条件（水分状况并入此页）→ 说明。两节图在指标变化前面，各自编号。
 没有数据的章节整节省略，并在「说明」页的「本期未提供的内容」中列出原因，不留空页，
 也不用 0 或占位图代替。页数随内容变化，页脚页码按实际总页数生成。
@@ -738,7 +738,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(Paragraph("田间核查建议", styles["h2"]))
     _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
 
-    # 田里哪一块不一样、和周围的农田比各自成章，排在指标变化前面。
+    # 田内空间分布、和周围的农田比各自成章，排在指标变化前面。
     patterns = facts.get("field_patterns") or {}
     infield = [
         item
@@ -747,7 +747,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     ]
     if infield:
         story.append(PageBreak())
-        _heading(story, styles, next(counter), "田里哪一块不一样")
+        _heading(story, styles, next(counter), "田内空间分布")
         names = "、".join(
             _GROWER_METRIC.get(item["metric"], METRIC_SPECS[item["metric"]].name)
             for item in infield

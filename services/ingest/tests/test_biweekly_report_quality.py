@@ -495,9 +495,9 @@ class DemoReportTests(unittest.TestCase):
         for name, pages in self.pages.items():
             self.assertEqual(len(pages), expected[name], (name, len(pages)))
             enriched = self._enriched(name)
-            spatial = [page for page in pages if "田里哪一块不一样" in page]
+            spatial = [page for page in pages if "田内空间分布" in page]
             self.assertEqual(len(spatial), 1, name)
-            self.assertIn("二、田里哪一块不一样", spatial[0])
+            self.assertIn("二、田内空间分布", spatial[0])
             self.assertIn("比整块地偏弱", spatial[0])
             joined_case = "".join(pages)
             if enriched.get("surrounding_comparison_image"):
@@ -642,7 +642,7 @@ class LayoutFixtureTests(unittest.TestCase):
 
     def test_dense_report_keeps_both_maps_and_the_archive_on_existing_pages(self):
         self.assertEqual(len(self.dense), 6)
-        spatial = [page for page in self.dense if "田里哪一块不一样" in page]
+        spatial = [page for page in self.dense if "田内空间分布" in page]
         self.assertEqual(len(spatial), 1)
         self.assertIn("叶绿素", spatial[0])
         self.assertIn("叶子里的水", spatial[0])
@@ -655,7 +655,7 @@ class LayoutFixtureTests(unittest.TestCase):
         self.assertIn("不判定干旱或洪涝", joined)
         self.assertIn("不是生产地块32696的结论", joined)
         self.assertNotIn("观测与数据质量", joined)
-        self.assertIn("二、田里哪一块不一样", joined)
+        self.assertIn("二、田内空间分布", joined)
         self.assertIn("三、指标变化", joined)
         self.assertIn("四、气象条件", joined)
         self.assertIn("和周围的农田比", joined)
@@ -663,7 +663,7 @@ class LayoutFixtureTests(unittest.TestCase):
     def test_missing_ndmi_and_weather_is_one_line_not_a_page(self):
         self.assertEqual(len(self.thin), 5)
         joined = "".join(self.thin)
-        self.assertIn("二、田里哪一块不一样", joined)
+        self.assertIn("二、田内空间分布", joined)
         self.assertIn("三、指标变化", joined)
         self.assertNotIn("四、指标变化", joined)
         self.assertNotIn("三、气象条件", joined)

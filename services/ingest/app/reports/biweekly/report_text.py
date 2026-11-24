@@ -540,7 +540,7 @@ def omitted_items(facts: dict[str, Any]) -> list[str]:
     missing = [metric_abbr(m) for m in (plan.get("primary") or []) if m not in have]
     if missing and facts.get("comparison"):
         items.append(
-            f"田里哪一块不一样（{join_names(missing)}）：没有足够的地块内部数据，本期不出这张图。"
+            f"田内空间分布（{join_names(missing)}）：没有足够的地块内部数据，本期不出这张图。"
         )
     quality = facts.get("data_quality") or {}
     radar = int(quality.get("radar_count") or 0)

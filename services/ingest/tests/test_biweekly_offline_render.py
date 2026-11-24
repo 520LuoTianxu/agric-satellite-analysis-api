@@ -541,7 +541,7 @@ class RenderLandTests(unittest.TestCase):
             self.assertEqual(row["status"], "ready")
             self.assertEqual(row["pixel_dates"], [])
             self.assertEqual(row["mean_only_dates"], ["2026-05-06", "2026-05-14"])
-            self.assertTrue(any(item.startswith("田里哪一块不一样") for item in row["not_provided"]))
+            self.assertTrue(any(item.startswith("田内空间分布") for item in row["not_provided"]))
             self.assertEqual(list((Path(tmp) / "figures").glob("infield_*.png")), [])
 
 
