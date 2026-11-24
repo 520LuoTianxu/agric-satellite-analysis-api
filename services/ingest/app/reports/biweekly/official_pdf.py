@@ -1,8 +1,7 @@
 """Render the official winter-wheat biweekly PDF.
 
-版面顺序：封面 → 本期结论（基本信息、结论、主要证据、田间核查建议）→ 指标变化
-（变化图、质量脚注、均匀度和历史同期各一行）→ 田内空间分布（全部主要指标同一页，
-持续偏弱写在该页）→ 周边农田对照 → 气象条件（水分状况并入此页）→ 说明。
+版面顺序：封面 → 本期结论 → 田内空间分布 → 和周围的农田比 → 指标变化
+→ 气象条件（水分状况并入此页）→ 说明。两节图在指标变化前面，各自编号。
 没有数据的章节整节省略，并在「说明」页的「本期未提供的内容」中列出原因，不留空页，
 也不用 0 或占位图代替。页数随内容变化，页脚页码按实际总页数生成。
 
@@ -697,6 +696,13 @@ def _image_path(raw: Any) -> Path | None:
 
 
 _SECTION_NUMBERS = "一二三四五六七八九"
+# 田内图的说明用种植户的叫法。证据表和说明页仍用正式名称。
+_GROWER_METRIC = {
+    "ndvi": "长势",
+    "evi": "叶子绿不绿",
+    "ndre": "叶绿素",
+    "ndmi": "叶子里的水",
+}
 
 
 def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
@@ -732,36 +738,8 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story.append(Paragraph("田间核查建议", styles["h2"]))
     _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
 
-    # 二、指标变化。数值只留在图上；云量、剔除和有效像元改成脚注，不再单占一页表。
-    story.append(PageBreak())
-    _heading(story, styles, next(counter), "指标变化")
-    judgment = judgment_paragraphs(facts.get("ai_narrative"))
-    if judgment:
-        story.append(Paragraph("变化好坏", styles["h2"]))
-        _model_prose(story, styles, judgment)
-    metric_notes = section_lines(facts.get("ai_narrative"), "metric_notes")
-    if metric_notes:
-        story.append(Paragraph("指标说明", styles["h2"]))
-        _bullets(story, styles, metric_notes)
-    trend = _trend_chart(facts, fig_dir / "metric_trend.png")
+    # 田内空间分布、和周围的农田比各自成章，排在指标变化前面。
     patterns = facts.get("field_patterns") or {}
-    trend_notes = [text.observation_footnote(facts), text.trend_axis_note(facts)]
-    trend_notes.extend(patterns.get("uniformity_lines") or [])
-    if patterns.get("history_line"):
-        trend_notes.append(patterns["history_line"])
-    if not text.has_weather(facts):
-        trend_notes.extend((facts.get("water_risk") or {}).get("lines") or [])
-    if trend:
-        # 图单独缩放。说明文字跟在图后，放不下就续到下一页，不把图裁掉。
-        story.append(FitImage(trend, max_height=430, min_scale=0.82))
-    if not metric_notes:
-        # 没有模型说明时，仍用正式名称介绍每个指标；有模型说明时不重复铺一段。
-        _bullets(story, styles, text.metric_definition_items(facts), style="note")
-    for note in trend_notes:
-        if note:
-            story.append(Paragraph(note, styles["small"]))
-
-    # 三、田内空间分布：全部主要指标同一页。持续偏弱写在图下，不再一项一页。
     infield = [
         item
         for item in (facts.get("infield") or [])
@@ -770,8 +748,15 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     if infield:
         story.append(PageBreak())
         _heading(story, styles, next(counter), "田内空间分布")
-        names = "、".join(METRIC_SPECS[item["metric"]].label for item in infield)
-        story.append(Paragraph(f"{names}。每项仍保留对比前后、变化量和相对本田中位数的差异。", styles["small"]))
+        names = "、".join(
+            _GROWER_METRIC.get(item["metric"], METRIC_SPECS[item["metric"]].name)
+            for item in infield
+        )
+        story.append(Paragraph(
+            f"这几张图看{names}。从左到右是上一次、这一次、变了多少，以及哪一块比整块地偏弱。"
+            "黑框圈出的是连成片、比整块地明显偏弱的地方。",
+            styles["small"],
+        ))
         persistent = list(patterns.get("persistent_lines") or [])
         model_lines: list[str] = []
         for item in infield:
@@ -789,18 +774,50 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
             story.append(Paragraph(line, styles["small"]))
         _model_prose(story, styles, model_lines)
 
-    # 四、周边农田对照（有数据才出）
     surround_image = _image_path(facts.get("surrounding_comparison_image"))
     if text.has_surrounding(facts) and surround_image:
         story.append(PageBreak())
-        _heading(story, styles, next(counter), "周边农田对照")
+        _heading(story, styles, next(counter), "和周围的农田比")
+        story.append(Paragraph(
+            "下面把这块地和周围大约一公里的农田放在一起，看谁更绿。"
+            "周围的地是卫星图认出来的，种的不一定是同一种作物，只说明相对高低。",
+            styles["small"],
+        ))
         _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "surrounding"))
         story.append(FitImage(surround_image, max_height=380))
         contrast = _image_path(facts.get("surrounding_contrast_image"))
         if contrast:
             story.append(FitImage(contrast, max_height=170))
 
-    # 五、气象条件（有数据才出）
+    # 两节图都有时，指标变化是第四节。缺哪一节就空出，不留空白页。
+    story.append(PageBreak())
+    _heading(story, styles, next(counter), "指标变化")
+    judgment = judgment_paragraphs(facts.get("ai_narrative"))
+    if judgment:
+        story.append(Paragraph("变化好坏", styles["h2"]))
+        _model_prose(story, styles, judgment)
+    metric_notes = section_lines(facts.get("ai_narrative"), "metric_notes")
+    if metric_notes:
+        story.append(Paragraph("指标说明", styles["h2"]))
+        _bullets(story, styles, metric_notes)
+    trend = _trend_chart(facts, fig_dir / "metric_trend.png")
+    trend_notes = [text.observation_footnote(facts), text.trend_axis_note(facts)]
+    trend_notes.extend(patterns.get("uniformity_lines") or [])
+    if patterns.get("history_line"):
+        trend_notes.append(patterns["history_line"])
+    if not text.has_weather(facts):
+        trend_notes.extend((facts.get("water_risk") or {}).get("lines") or [])
+    if trend:
+        # 图单独缩放。说明文字跟在图后，放不下就续到下一页，不把图裁掉。
+        story.append(FitImage(trend, max_height=430, min_scale=0.82))
+    if not metric_notes:
+        # 没有模型说明时，仍用正式名称介绍每个指标；有模型说明时不重复铺一段。
+        _bullets(story, styles, text.metric_definition_items(facts), style="note")
+    for note in trend_notes:
+        if note:
+            story.append(Paragraph(note, styles["small"]))
+
+    # 气象条件（有数据才出）。
     if text.has_weather(facts):
         story.append(PageBreak())
         _heading(story, styles, next(counter), "气象条件")

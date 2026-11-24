@@ -283,7 +283,7 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path, *, compact:
     else:
         abs_label = f"{spec.abbr}（{spec.unit}）"
         change_label = "变化量（0 居中）"
-        relative_label = "与本田中位数之差（0 居中）"
+        relative_label = "比整块地高还是低"
         fixed = f"色标固定 {lo:g} 至 {hi:g}"
 
     panels: list[str] = []
@@ -359,7 +359,7 @@ def render_metric_figure(analysis: dict[str, Any], dest: str | Path, *, compact:
                     PolyCollection(outline, facecolors="none", edgecolors=FLAG_EDGE_COLOR, linewidths=0.5)
                 )
             _frame(ax, xs, ys, half=half, bold=bold, compact=compact,
-                   title=f"{mark} {_short_day(analysis['date'])} 相对本田中位数的差异")
+                   title=f"{mark} {_short_day(analysis['date'])} 和整块地比")
             _colorbar(fig, ax, mappable, ticks=rscale["ticks"], extend=rscale["extend"],
                       label=relative_label, compact=compact)
     for ax in axes_list[len(panels):]:
@@ -375,7 +375,7 @@ Patch(
             facecolor="none",
             edgecolor=FLAG_EDGE_COLOR,
             linewidth=0.8,
-            label=f"黑框：成片显著低于本田整体水平的像元（不少于{MIN_CLUSTER_PIXELS}个相邻像元）",
+            label="黑框：连成片、比整块地明显偏弱",
         )
     )
     fig.legend(

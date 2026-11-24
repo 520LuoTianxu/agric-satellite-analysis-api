@@ -516,7 +516,7 @@ class RenderLandTests(unittest.TestCase):
         self.assertEqual(row["status"], "ready")
         self.assertEqual(row["rejected_optical"], 1)
         self.assertTrue(any(item.startswith("气象条件") for item in row["not_provided"]))
-        self.assertTrue(any(item.startswith("周边农田对照") for item in row["not_provided"]))
+        self.assertTrue(any(item.startswith("和周围的农田比") for item in row["not_provided"]))
         text = _pdf_text(self.out / row["dir"] / row["artifact"])
         self.assertIn("未取得本期气温和降水记录", text)
 
