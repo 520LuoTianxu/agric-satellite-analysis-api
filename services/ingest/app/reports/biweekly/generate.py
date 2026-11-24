@@ -107,6 +107,23 @@ def generate_official_biweekly_pdf(
                 )
                 if key in narrative
             }
+    # 渲染用的是 facts 的副本。页面读的是登记回 API 的这份 facts，
+    # 所以 PDF 里已经写好的短句要写回来，不能只留在副本上。
+    context = filled.get("conclusion_context")
+    if isinstance(context, dict) and context.get("lines"):
+        facts["conclusion_context"] = {"lines": list(context.get("lines") or [])}
+    patterns = filled.get("field_patterns")
+    if isinstance(patterns, dict):
+        kept = {
+            key: patterns.get(key)
+            for key in ("persistent_lines", "uniformity_lines", "history_line")
+            if patterns.get(key)
+        }
+        if kept:
+            facts["field_patterns"] = kept
+    water = filled.get("water_risk")
+    if isinstance(water, dict) and water.get("lines"):
+        facts["water_risk"] = {"lines": list(water.get("lines") or [])}
     rendered = render_official_biweekly_pdf(filled, dest_path, figures_dir=figures)
     if facts_sidecar:
         side = Path(facts_sidecar)

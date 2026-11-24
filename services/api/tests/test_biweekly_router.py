@@ -224,6 +224,44 @@ class BiweeklyRouterTests(unittest.TestCase):
         pending = build_report_card({"job_id": job_id, "status": "dispatched", "result": {}})
         self.assertEqual(pending["source"], "status")
         self.assertIn("正在生成", pending["lines"][0])
+        changes_only = build_report_card(
+            {
+                "job_id": job_id,
+                "status": "ready",
+                "result": {
+                    "ai_narrative": {
+                        "conclusion": [],
+                        "summary": "",
+                        "changes": [
+                            {"metric": "ndmi", "judgment": "worse", "sentence": "<b>要留意浇水</b>。"}
+                        ],
+                    }
+                },
+            }
+        )
+        self.assertEqual(changes_only["source"], "changes")
+        self.assertEqual(changes_only["lines"], ["<b>要留意浇水</b>。"])
+        from_progress = build_report_card(
+            {"job_id": job_id, "status": "ready", "result": {"stage": "done"}},
+            {"facts": {"ai_narrative": {"conclusion": ["东北部有一小片一直偏弱。"]}}},
+        )
+        self.assertEqual(from_progress["source"], "conclusion")
+        self.assertEqual(from_progress["lines"], ["东北部有一小片一直偏弱。"])
+        program = build_report_card(
+            {
+                "job_id": job_id,
+                "status": "ready",
+                "result": {
+                    "conclusion_context": {"lines": ["土壤底子：壤土，酸碱偏碱。"]},
+                    "field_patterns": {"persistent_lines": ["东北部有一小片一直偏弱。"]},
+                },
+            }
+        )
+        self.assertEqual(program["source"], "report")
+        self.assertEqual(
+            program["lines"],
+            ["土壤底子：壤土，酸碱偏碱。", "东北部有一小片一直偏弱。"],
+        )
         marked = build_report_card(
             {
                 "job_id": job_id,
@@ -245,6 +283,49 @@ class BiweeklyRouterTests(unittest.TestCase):
                 "词alert(1)",
             ],
         )
+
+    def test_summary_reads_sentences_kept_on_the_download_task(self):
+        self._enable_dev()
+        job_id = "bj-b37fb809482e8490"
+        jobs = Path(self.work.name) / "jobs"
+        jobs.mkdir(exist_ok=True)
+        (jobs / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "land_id": "6417",
+                    "season_id": "2026/27",
+                    "period_id": "4",
+                    "kind": "generate",
+                    "status": "ready",
+                    "report_job_id": "00000000-0000-0000-0000-000000000001",
+                    "history": [],
+                    "result": {"stage": "done"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        extra = [
+            {
+                "facts": {
+                    "ai_narrative": {
+                        "conclusion": ["叶子里的水少了一些，<b>要留意浇水</b>。"]
+                    }
+                }
+            }
+        ]
+        with patch(
+            "app.routers.biweekly._extra_fact_documents",
+            new=AsyncMock(return_value=extra),
+        ):
+            response = self.client.get(
+                f"/v1/lands/6417/biweekly/jobs/{job_id}/summary",
+                headers=self._auth(self._token()),
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["source"], "conclusion")
+        self.assertEqual(body["lines"], ["叶子里的水少了一些，<b>要留意浇水</b>。"])
 
     def test_router_does_not_use_anonymous_auth_bypass(self):
         import ast
