@@ -38,8 +38,8 @@ DEFAULT_MODEL = "qwen3.7-flash"
 # content_chars=0、reasoning_chars=14791。思考随预算变长，把上限改成 16384
 # 不能单独证明正文会出现。默认关闭思考，正文预算 16384，上限用模型的 393216。
 # 非 DeepSeek 模型不发送 enable_thinking，输出保护上限 32768。
-# 一次报告最多两次模型调用。超时未设置时按预算估算，夹在 30–600 秒，
-# 两次调用仍低于 Celery 软限制 1500 秒。
+# 一次报告最多两次模型调用。超时、连接中断、429 和 5xx 会再试一次。
+# 超时未设置时按预算估算，夹在 30–600 秒，两次调用仍低于 Celery 软限制 1500 秒。
 DEEPSEEK_OUTPUT_MAX = 393216
 OTHER_OUTPUT_MAX = 32768
 DEFAULT_MAX_TOKENS = 16384
@@ -291,8 +291,34 @@ def _unusable_kind(
     return None, []
 
 
+def _safe_disconnect_reason(exc: BaseException, secret: str = "") -> str:
+    """保留一句断连原因。去掉密钥、换行和过长原文。"""
+    text = " ".join(str(exc).split())
+    if secret:
+        text = text.replace(secret, "[redacted]")
+    text = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|token|authorization)\s*[=:]\s*\S+",
+        lambda match: f"{match.group(1)}=[redacted]",
+        text,
+    )
+    return text[:180]
+
+
+def _disconnect_detail(exc: BaseException, secret: str = "") -> tuple[str, str | None]:
+    """异常类型之外，再留底层原因的类型和一句安全说明。"""
+    reason = _safe_disconnect_reason(exc, secret)
+    cause = exc.__cause__
+    if cause is None or cause is exc:
+        return reason, None
+    extra = _safe_disconnect_reason(cause, secret)
+    if extra and extra not in reason:
+        reason = (f"{reason} ({extra})" if reason else extra)[:180]
+    return reason, type(cause).__name__
+
+
 def _log_unusable(error: str, diag: dict[str, Any], *, model: str) -> None:
-    # 只记长度和原因。不记密钥、正文或 reasoning 原文。
+    # 只记长度、异常类型和截断后的断连原因。不记密钥、正文或 reasoning 原文。
     logger.warning(
         "biweekly_narrative_unusable",
         error=error,
@@ -305,6 +331,10 @@ def _log_unusable(error: str, diag: dict[str, Any], *, model: str) -> None:
         max_tokens_clamped=diag.get("max_tokens_clamped"),
         http_status=diag.get("http_status"),
         timeout_s=diag.get("timeout_s"),
+        attempts=diag.get("attempts"),
+        exception_type=diag.get("exception_type"),
+        disconnect_reason=diag.get("disconnect_reason"),
+        cause_type=diag.get("cause_type"),
     )
 
 
@@ -687,6 +717,7 @@ _READER_NOTES = {
     "empty_fields": "本期模型文字未完成：结论为空。数值和图表仍是程序计算结果。",
     "incomplete_fields": "本期模型文字未完成：部分段落缺失。数值和图表仍是程序计算结果。",
     "timeout": "本期模型文字未完成：请求超时。数值和图表仍是程序计算结果。",
+    "connection_error": "本期模型文字未完成：模型连接中断。数值和图表仍是程序计算结果。",
     "http_error": "本期模型文字未完成：模型服务暂时没有返回。数值和图表仍是程序计算结果。",
 }
 _GENERIC_READER_NOTE = "本期模型文字未完成。数值和图表仍是程序计算结果。"
@@ -812,7 +843,8 @@ def generate_metric_judgment(
 
     Does not raise. Does not copy reasoning into the report. At most two calls:
     the second turns thinking off, raises the budget after a length stop, or
-    repeats once after timeout, 429, or 5xx. It does not invent sentences.
+    repeats once after timeout, a dropped connection, 429, or 5xx. It does not
+    invent sentences.
     """
     cfg = bailian_settings()
     payload = narrative_input(facts)
@@ -899,6 +931,27 @@ def generate_metric_judgment(
                 )
                 if attempt >= MAX_MODEL_CALLS or status not in _RETRYABLE_HTTP:
                     best = result
+                    break
+                continue
+            except (httpx.NetworkError, httpx.ProtocolError, httpx.ProxyError) as exc:
+                # 对端在完整响应前断开。再请求一次；仍失败就写明连接中断，不改用代码写结论。
+                reason, cause_type = _disconnect_detail(exc, cfg["api_key"])
+                diag["exception_type"] = type(exc).__name__
+                diag["disconnect_reason"] = reason
+                if cause_type:
+                    diag["cause_type"] = cause_type
+                _log_unusable("connection_error", diag, model=cfg["model"])
+                result = _apply_reader_note(
+                    empty_judgment(
+                        configured=True,
+                        error="connection_error",
+                        model=cfg["model"],
+                        diagnostics=diag,
+                    )
+                )
+                if _filled_score(result) > best_score:
+                    best, best_score = result, _filled_score(result)
+                if attempt >= MAX_MODEL_CALLS:
                     break
                 continue
             except Exception as exc:  # noqa: BLE001 — 模型失败时不改用代码判断好坏
