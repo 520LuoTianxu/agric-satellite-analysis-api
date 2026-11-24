@@ -33,6 +33,7 @@ from app.services.biweekly_report_flow import (
 from app.services.biweekly_mapping import load_wheat_phase_mapping
 from app.services.biweekly_plans import SmartPlantingCatalog, attach_public_stages, load_smart_planting_calendar
 from app.services.biweekly_scenes import load_scene_observations
+from app.services.biweekly_report_card import build_report_card
 from app.services.biweekly_trigger import annotate_dispatch, build_trigger_service, run_trigger_io, stream_official_download
 
 router = APIRouter(prefix="/lands/{land_id}/biweekly", tags=["biweekly"])
@@ -332,6 +333,34 @@ async def get_job(
         kind = job.get("kind")
         dispatch = job.get("result") if kind in {"backfill", "backfill_season"} else None
         return _public(job, principal, dispatch=dispatch if kind in {"backfill", "backfill_season"} else None)
+    except ReportError as exc:
+        return _http_for(exc)
+
+
+@router.get("/jobs/{job_id}/summary")
+async def get_job_summary(
+    land_id: str,
+    job_id: str,
+    principal: Annotated[BiweeklyPrincipal, Depends(require_biweekly_access)],
+):
+    """A few conclusion lines for the page. The PDF stays on the download route."""
+    del principal
+    try:
+        service = build_trigger_service()
+        job = await run_trigger_io(service.get_job, job_id)
+        if str(job.get("land_id")) != str(land_id):
+            raise ReportError("JOB_NOT_FOUND")
+        if job.get("status") == "dispatched":
+            try:
+                job = (await maybe_finalize_biweekly_job(job_id, service=service)) or job
+            except ReportError:
+                logger.warning(
+                    "biweekly_summary_finalize_failed job_id=%s land_id=%s",
+                    job_id,
+                    land_id,
+                    exc_info=True,
+                )
+        return build_report_card(job)
     except ReportError as exc:
         return _http_for(exc)
 
