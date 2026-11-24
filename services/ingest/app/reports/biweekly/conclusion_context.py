@@ -7,9 +7,11 @@ This module does not call a model and does not invent a measurement.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agric_satellite_analysis_common.biweekly.field_records import select_key_nodes
+from app.reports.land_assessment.soil_labels import soil_texture_zh
 
 
 def _temp(value: Any) -> str | None:
@@ -38,6 +40,14 @@ def _selected_nodes(facts: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def _texture_zh(value: Any) -> str:
+    """USDA 英文质地印出来种植户看不懂，只保留能译成中文的叫法。"""
+    label = soil_texture_zh(value, fallback="")
+    if label and re.search(r"[\u4e00-\u9fff]", label):
+        return label
+    return ""
+
+
 def _acidity(ph: Any) -> str | None:
     number = _temp(ph)
     if number is None:
@@ -58,8 +68,9 @@ def soil_reader_line(facts: dict[str, Any]) -> str:
     if soil.get("status") != "ready":
         return ""
     bits = []
-    if soil.get("texture"):
-        bits.append(f"土质{soil['texture']}")
+    texture = _texture_zh(soil.get("texture"))
+    if texture:
+        bits.append(f"土质{texture}")
     acidity = _acidity(soil.get("ph"))
     if acidity:
         bits.append(acidity)

@@ -490,7 +490,7 @@ class DemoReportTests(unittest.TestCase):
         self.assertEqual(labels, {"s1-tillering": "S1", "s2-jointing": "S2", "s3-grainfill": "S3"})
 
     def test_primary_infield_maps_share_one_page(self):
-        # 改版前 s1 6、s2 8、s3 7。合页并去掉整页数值表后：s1 仍是 6（只有一个主要指标，减不了分布页），s2 7、s3 6。
+        # 主要证据表跟在田内分布图后面，和分布图同一页，页数不另加。
         expected = {"s1-tillering": 6, "s2-jointing": 7, "s3-grainfill": 6}
         for name, pages in self.pages.items():
             self.assertEqual(len(pages), expected[name], (name, len(pages)))
@@ -499,6 +499,10 @@ class DemoReportTests(unittest.TestCase):
             self.assertEqual(len(spatial), 1, name)
             self.assertIn("二、田内空间分布", spatial[0])
             self.assertIn("比整块地偏弱", spatial[0])
+            for page in pages:
+                if "一、本期结论" in page:
+                    self.assertNotIn("主要证据", page, name)
+            self.assertIn("主要证据", spatial[0], name)
             joined_case = "".join(pages)
             if enriched.get("surrounding_comparison_image"):
                 self.assertIn("三、和周围的农田比", joined_case)

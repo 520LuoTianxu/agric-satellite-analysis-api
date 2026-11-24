@@ -147,11 +147,18 @@ class ConclusionContextTests(unittest.TestCase):
         self.assertNotIn("没有对应", joined)
         self.assertIn("出苗检查", joined)
         self.assertIn("土壤底子", joined)
+        self.assertIn("壤土", joined)
         self.assertIn("中性", joined)
         self.assertIn("7.2", joined)
         self.assertNotIn("pH", joined)
         self.assertLessEqual(len(lines), 2)
         self.assertNotIn("不应出现", joined)
+        english = dict(facts)
+        english["soil_context"] = {"status": "ready", "texture": "silt loam", "ph": 8.1}
+        soil_line = "\n".join(build_conclusion_context(english)["lines"])
+        self.assertIn("粉壤土", soil_line)
+        self.assertNotIn("loam", soil_line)
+        self.assertIn("偏碱", soil_line)
 
 
 class PhotoReviewTests(unittest.TestCase):
