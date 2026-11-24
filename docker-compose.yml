@@ -108,8 +108,10 @@ services:
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
       BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
-      BAILIAN_MAX_TOKENS: ${BAILIAN_MAX_TOKENS:-8192}
-      BAILIAN_TIMEOUT_S: ${BAILIAN_TIMEOUT_S:-120}
+      BAILIAN_MAX_TOKENS: ${BAILIAN_MAX_TOKENS:-16384}
+      BAILIAN_TIMEOUT_S: ${BAILIAN_TIMEOUT_S:-300}
+      BAILIAN_ENABLE_THINKING: ${BAILIAN_ENABLE_THINKING:-0}
+      BAILIAN_REASONING_EFFORT: ${BAILIAN_REASONING_EFFORT:-low}
 
       CDFINANCE_SOIL_BASE_URL: ${CDFINANCE_SOIL_BASE_URL:-https://joint-venture.cdfinance.com.cn/agric-api}
       CDFINANCE_APP_KEY: ${CDFINANCE_APP_KEY:-83f94deg-k4d3-5gc4-0a6d-fd995a6f03g5}
@@ -241,8 +243,10 @@ services:
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
       BAILIAN_BASE_URL: ${BAILIAN_BASE_URL:-https://llm-7cudikcfvgf9l1hy.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
       BAILIAN_MODEL: ${BAILIAN_MODEL:-qwen3.7-flash}
-      BAILIAN_MAX_TOKENS: ${BAILIAN_MAX_TOKENS:-8192}
-      BAILIAN_TIMEOUT_S: ${BAILIAN_TIMEOUT_S:-120}
+      BAILIAN_MAX_TOKENS: ${BAILIAN_MAX_TOKENS:-16384}
+      BAILIAN_TIMEOUT_S: ${BAILIAN_TIMEOUT_S:-300}
+      BAILIAN_ENABLE_THINKING: ${BAILIAN_ENABLE_THINKING:-0}
+      BAILIAN_REASONING_EFFORT: ${BAILIAN_REASONING_EFFORT:-low}
     volumes:
       - scratch:/data/scratch
       - ${OPENFARM_LOG_HOST_DIR:-./logs}:/data/logs

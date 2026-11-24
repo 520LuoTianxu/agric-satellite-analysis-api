@@ -183,6 +183,9 @@ class NarrativeAiTests(unittest.TestCase):
                                                 "sentence": "NDRE 由 0.40 到 0.57。",
                                             }
                                         ],
+                                        "conclusion": ["NDRE 由 0.40 到 0.57。"],
+                                        "field_notes": ["西南部值得看一眼。"],
+                                        "metric_notes": ["NDRE 本期是 0.57。"],
                                     },
                                     ensure_ascii=False,
                                 )
@@ -211,7 +214,9 @@ class NarrativeAiTests(unittest.TestCase):
             os.environ.pop("BAILIAN_MAX_TOKENS", None)
             os.environ.pop("BAILIAN_TIMEOUT_S", None)
             out = generate_metric_judgment(_facts(), client=client)
-        self.assertEqual(client.body["max_tokens"], 8192)
+        self.assertEqual(client.body["max_tokens"], 16384)
+        self.assertIs(client.body["enable_thinking"], False)
+        self.assertNotIn("thinking_budget", client.body)
         self.assertEqual(client.body["model"], "deepseek-v4.1-flash-1017")
         self.assertEqual(out["model"], "deepseek-v4.1-flash-1017")
         self.assertEqual(out["changes"][0]["judgment"], "better")
@@ -268,6 +273,7 @@ class NarrativeAiTests(unittest.TestCase):
 
         class _Client:
             def post(self, url, headers, json):  # noqa: A002
+                self.calls.append(json)
                 self.body = json
                 self.headers = headers
                 return _Response()
@@ -276,14 +282,21 @@ class NarrativeAiTests(unittest.TestCase):
                 return None
 
         client = _Client()
+        client.calls = []
         values = {
             "BAILIAN_API_KEY": "test-key",
             "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
         }
         values.update(env or {})
         with patch.dict(os.environ, values, clear=False):
-            os.environ.pop("BAILIAN_MAX_TOKENS", None)
-            os.environ.pop("BAILIAN_TIMEOUT_S", None)
+            for name in (
+                "BAILIAN_MAX_TOKENS",
+                "BAILIAN_TIMEOUT_S",
+                "BAILIAN_ENABLE_THINKING",
+                "BAILIAN_REASONING_EFFORT",
+            ):
+                if name not in (env or {}):
+                    os.environ.pop(name, None)
             for key, value in (env or {}).items():
                 os.environ[key] = value
             out = generate_metric_judgment(_facts(), client=client)
@@ -322,7 +335,11 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertGreater(out["diagnostics"]["reasoning_chars"], 0)
         self.assertEqual(out["diagnostics"]["content_chars"], 0)
         self.assertEqual(out["diagnostics"]["http_status"], 200)
-        self.assertGreaterEqual(client.body["max_tokens"], 4096)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIs(client.calls[0]["enable_thinking"], False)
+        self.assertNotIn("thinking_budget", client.calls[0])
+        self.assertGreater(client.calls[1]["max_tokens"], client.calls[0]["max_tokens"])
+        self.assertIn("输出长度用尽", out["reader_note"])
         self.assertNotEqual(client.body["max_tokens"], 1800)
         self.assertEqual(client.body["model"], "deepseek-v4.1-flash-1017")
         self.assertNotIn("test-key", text)
@@ -360,7 +377,10 @@ class NarrativeAiTests(unittest.TestCase):
             finish_reason="stop",
         )
         self.assertIsNone(out["error"])
-        self.assertEqual(client.body["max_tokens"], 8192)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.body["max_tokens"], 16384)
+        self.assertIs(client.body["enable_thinking"], False)
+        self.assertNotIn("thinking_budget", client.body)
         self.assertEqual(client.body["model"], "deepseek-v4.1-flash-1017")
         shown = section_lines(out, "conclusion")[0]
         self.assertIn("<b>NDRE</b>", shown)
@@ -383,7 +403,7 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertEqual(partial["error"], "truncated_response")
         self.assertEqual(partial["conclusion"], [])
 
-        usable, _client = self._judge(
+        partial_fields, _client = self._judge(
             {
                 "content": json.dumps(
                     {"conclusion": ["NDRE 为 0.57。"]}, ensure_ascii=False
@@ -392,9 +412,38 @@ class NarrativeAiTests(unittest.TestCase):
             finish_reason="length",
             usage={"completion_tokens": 8192},
         )
+        self.assertEqual(partial_fields["error"], "truncated_response")
+        self.assertEqual(partial_fields["conclusion"], ["NDRE 为 0.57。"])
+        self.assertIn("输出长度用尽", partial_fields["reader_note"])
+        self.assertIn("field_notes", partial_fields["diagnostics"]["missing_sections"])
+
+        usable, usable_client = self._judge(
+            {
+                "content": json.dumps(
+                    {
+                        "summary": "NDRE 为 0.57。",
+                        "changes": [
+                            {
+                                "metric": "ndre",
+                                "judgment": "better",
+                                "sentence": "NDRE 为 0.57。",
+                            }
+                        ],
+                        "conclusion": ["NDRE 为 0.57。"],
+                        "field_notes": ["西南部值得看一眼。"],
+                        "metric_notes": ["NDRE 本期是 0.57。"],
+                    },
+                    ensure_ascii=False,
+                )
+            },
+            finish_reason="length",
+            usage={"completion_tokens": 8192},
+        )
         self.assertIsNone(usable["error"])
         self.assertEqual(usable["conclusion"], ["NDRE 为 0.57。"])
         self.assertTrue(usable["diagnostics"]["truncated"])
+        self.assertNotIn("reader_note", usable)
+        self.assertEqual(len(usable_client.calls), 1)
 
         empty, _client = self._judge({"content": "   "}, finish_reason="stop")
         self.assertEqual(empty["error"], "empty_content")
@@ -434,7 +483,9 @@ class NarrativeAiTests(unittest.TestCase):
             timed = generate_metric_judgment(_facts(), client=_TimeoutClient())
         self.assertEqual(timed["error"], "timeout")
         self.assertGreaterEqual(timed["diagnostics"]["timeout_s"], 30)
+        self.assertEqual(timed["diagnostics"]["attempts"], 2)
         self.assertEqual(timed["conclusion"], [])
+        self.assertIn("请求超时", timed["reader_note"])
         self.assertNotIn("test-key", json.dumps(timed))
 
     def test_content_list_ignores_reasoning_part(self) -> None:
@@ -445,7 +496,20 @@ class NarrativeAiTests(unittest.TestCase):
                     {
                         "type": "text",
                         "text": json.dumps(
-                            {"conclusion": ["NDRE 为 0.57。"]}, ensure_ascii=False
+                            {
+                                "summary": "NDRE 为 0.57。",
+                                "changes": [
+                                    {
+                                        "metric": "ndre",
+                                        "judgment": "better",
+                                        "sentence": "NDRE 为 0.57。",
+                                    }
+                                ],
+                                "conclusion": ["NDRE 为 0.57。"],
+                                "field_notes": ["西南部值得看一眼。"],
+                                "metric_notes": ["NDRE 本期是 0.57。"],
+                            },
+                            ensure_ascii=False,
                         ),
                     },
                 ]
@@ -484,15 +548,15 @@ class NarrativeAiTests(unittest.TestCase):
                 def boom(_facts, **_kwargs):
                     raise RuntimeError("narrative blew up")
 
+                facts = {"land_id": "32696"}
                 with patch(
                     "app.reports.biweekly.narrative_ai.generate_metric_judgment",
                     side_effect=boom,
                 ):
-                    written = gen.generate_official_biweekly_pdf(
-                        {"land_id": "32696"}, dest
-                    )
+                    written = gen.generate_official_biweekly_pdf(facts, dest)
                 self.assertTrue(written.is_file())
                 self.assertEqual(captured["narrative"]["error"], "RuntimeError")
+                self.assertIn("模型文字未完成", facts["ai_narrative"]["reader_note"])
                 self.assertEqual(captured["narrative"]["conclusion"], [])
                 self.assertNotIn("narrative blew up", json.dumps(captured["narrative"]))
 
@@ -519,3 +583,336 @@ class NarrativeAiTests(unittest.TestCase):
                     sys.modules.pop(name, None)
                 else:
                     sys.modules[name] = module
+
+    def _complete_message(self) -> dict:
+        return {
+            "content": json.dumps(
+                {
+                    "summary": "NDRE 为 0.57。",
+                    "changes": [
+                        {
+                            "metric": "ndre",
+                            "judgment": "better",
+                            "sentence": "NDRE 为 0.57。",
+                        }
+                    ],
+                    "conclusion": ["NDRE 为 0.57。"],
+                    "field_notes": ["西南部值得看一眼。"],
+                    "metric_notes": ["NDRE 本期是 0.57。"],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    def test_empty_8192_content_recovers_once_and_drops_reasoning(self) -> None:
+        """Fixture shaped like land 32694 P15: length, 8192 tokens, empty content.
+
+        The reasoning string is synthetic padding, not the production trace.
+        """
+        reasoning = "R" * 14791
+        calls = {"n": 0}
+
+        class _Response:
+            def __init__(self, payload: dict):
+                self.status_code = 200
+                self._payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return self._payload
+
+        class _Client:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls.append(json)
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _Response(
+                        {
+                            "choices": [
+                                {
+                                    "finish_reason": "length",
+                                    "message": {
+                                        "content": "",
+                                        "reasoning_content": reasoning,
+                                    },
+                                }
+                            ],
+                            "usage": {"completion_tokens": 8192},
+                        }
+                    )
+                return _Response(
+                    {
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "content": self_message(),
+                                    "reasoning_content": reasoning,
+                                },
+                            }
+                        ],
+                        "usage": {"completion_tokens": 400},
+                    }
+                )
+
+            def close(self) -> None:
+                return None
+
+        def self_message() -> str:
+            return json.dumps(
+                {
+                    "summary": "NDRE 为 0.57。",
+                    "changes": [
+                        {
+                            "metric": "ndre",
+                            "judgment": "better",
+                            "sentence": "NDRE 为 0.57。",
+                        }
+                    ],
+                    "conclusion": ["NDRE 为 0.57。"],
+                    "field_notes": ["西南部值得看一眼。"],
+                    "metric_notes": ["NDRE 本期是 0.57。"],
+                },
+                ensure_ascii=False,
+            )
+
+        client = _Client()
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+            },
+        ):
+            for name in (
+                "BAILIAN_MAX_TOKENS",
+                "BAILIAN_TIMEOUT_S",
+                "BAILIAN_ENABLE_THINKING",
+                "BAILIAN_REASONING_EFFORT",
+            ):
+                os.environ.pop(name, None)
+            out = generate_metric_judgment(_facts(), client=client)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIs(client.calls[0]["enable_thinking"], False)
+        self.assertIs(client.calls[1]["enable_thinking"], False)
+        self.assertNotIn("thinking_budget", client.calls[0])
+        self.assertGreater(client.calls[1]["max_tokens"], 8192)
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["conclusion"], ["NDRE 为 0.57。"])
+        self.assertTrue(out["diagnostics"]["recovered"])
+        self.assertEqual(out["diagnostics"]["attempts"], 2)
+        self.assertNotIn(reasoning, json.dumps(out, ensure_ascii=False))
+        self.assertNotIn("reader_note", out)
+
+    def test_second_empty_stops_and_budget_above_model_max_is_clamped(self) -> None:
+        reasoning = "R" * 14791
+
+        class _Response:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": "", "reasoning_content": reasoning},
+                        }
+                    ],
+                    "usage": {"completion_tokens": 8192},
+                }
+
+        class _Client:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls.append(json)
+                return _Response()
+
+            def close(self) -> None:
+                return None
+
+        client = _Client()
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+                "BAILIAN_MAX_TOKENS": "999999999",
+            },
+        ):
+            out = generate_metric_judgment(_facts(), client=client)
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["max_tokens"], 393216)
+        self.assertTrue(out["diagnostics"]["max_tokens_clamped"])
+        self.assertEqual(out["error"], "truncated_response")
+        self.assertIn("输出长度用尽", out["reader_note"])
+        self.assertNotIn(reasoning, json.dumps(out, ensure_ascii=False))
+
+    def test_http_400_retries_without_thinking_field_and_429_stops_at_two(self) -> None:
+        ok = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "summary": "NDRE 为 0.57。",
+                                "changes": [
+                                    {
+                                        "metric": "ndre",
+                                        "judgment": "better",
+                                        "sentence": "NDRE 为 0.57。",
+                                    }
+                                ],
+                                "conclusion": ["NDRE 为 0.57。"],
+                                "field_notes": ["西南部值得看一眼。"],
+                                "metric_notes": ["NDRE 本期是 0.57。"],
+                            },
+                            ensure_ascii=False,
+                        )
+                    },
+                }
+            ]
+        }
+
+        class _Status:
+            def __init__(self, code: int, payload: dict | None = None):
+                self.status_code = code
+                self._payload = payload or {}
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    request = httpx.Request(
+                        "POST", "https://example.test/v1/chat/completions"
+                    )
+                    response = httpx.Response(self.status_code, request=request)
+                    raise httpx.HTTPStatusError(
+                        "status", request=request, response=response
+                    )
+
+            def json(self) -> dict:
+                return self._payload
+
+        class _Client:
+            def __init__(self, codes: list[int]):
+                self.codes = codes
+                self.calls: list[dict] = []
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls.append(json)
+                code = self.codes[len(self.calls) - 1]
+                return _Status(code, ok if code == 200 else None)
+
+            def close(self) -> None:
+                return None
+
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+                "BAILIAN_ENABLE_THINKING": "1",
+            },
+        ):
+            rejected = _Client([400, 200])
+            out = generate_metric_judgment(_facts(), client=rejected)
+        self.assertEqual(len(rejected.calls), 2)
+        self.assertIs(rejected.calls[0]["enable_thinking"], True)
+        self.assertEqual(rejected.calls[0]["reasoning_effort"], "low")
+        self.assertNotIn("enable_thinking", rejected.calls[1])
+        self.assertNotIn("thinking_budget", rejected.calls[0])
+        self.assertIsNone(out["error"])
+
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+            },
+        ):
+            limited = _Client([429, 429, 200])
+            failed = generate_metric_judgment(_facts(), client=limited)
+        self.assertEqual(len(limited.calls), 2)
+        self.assertEqual(failed["error"], "http_error")
+        self.assertEqual(failed["diagnostics"]["http_status"], 429)
+        self.assertIn("暂时没有返回", failed["reader_note"])
+        self.assertNotIn("test-key", json.dumps(failed))
+
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+            },
+        ):
+            unavailable = _Client([503, 200])
+            recovered = generate_metric_judgment(_facts(), client=unavailable)
+        self.assertEqual(len(unavailable.calls), 2)
+        self.assertIsNone(recovered["error"])
+
+    def test_non_deepseek_does_not_send_thinking_switch(self) -> None:
+        out, client = self._judge(
+            {
+                "content": json.dumps(
+                    {
+                        "summary": "NDRE 为 0.57。",
+                        "changes": [
+                            {
+                                "metric": "ndre",
+                                "judgment": "better",
+                                "sentence": "NDRE 为 0.57。",
+                            }
+                        ],
+                        "conclusion": ["NDRE 为 0.57。"],
+                        "field_notes": ["西南部值得看一眼。"],
+                        "metric_notes": ["NDRE 本期是 0.57。"],
+                    },
+                    ensure_ascii=False,
+                )
+            },
+            env={"BAILIAN_MODEL": "qwen3.7-flash"},
+        )
+        self.assertIsNone(out["error"])
+        self.assertNotIn("enable_thinking", client.body)
+        self.assertNotIn("thinking_budget", client.body)
+        self.assertLessEqual(client.body["max_tokens"], 32768)
+
+    def test_reader_note_is_one_line_without_a_new_page(self) -> None:
+        from reportlab.platypus import PageBreak, Paragraph
+
+        from app.reports.biweekly.official_pdf import _register_fonts, build_story
+
+        _register_fonts()
+
+        facts = {
+            "land_id": "32694",
+            "period": {"start": "2026-03-21", "end_inclusive": "2026-04-03"},
+            "ai_narrative": {
+                "error": "truncated_response",
+                "conclusion": [],
+                "reader_note": "本期模型文字未完成：输出长度用尽。数值和图表仍是程序计算结果。",
+            },
+        }
+        story = build_story(facts, Path("/tmp/biweekly-note-fixture"))
+        texts = []
+        for item in story:
+            if isinstance(item, Paragraph):
+                texts.append(item.getPlainText())
+        joined = "\n".join(texts)
+        self.assertIn("输出长度用尽", joined)
+        self.assertNotIn("reasoning_content", joined)
+        note_at = next(
+            i
+            for i, item in enumerate(story)
+            if isinstance(item, Paragraph) and "输出长度用尽" in item.getPlainText()
+        )
+        self.assertFalse(isinstance(story[note_at - 1], PageBreak))

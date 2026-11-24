@@ -638,6 +638,10 @@ def generate_biweekly_report(
         start = (facts.get("period") or {}).get("start")
         end = (facts.get("period") or {}).get("end_inclusive")
         filename = f"种植双周报_{facts.get('land_id')}_{start}_{end}.pdf"
+        note = "补数阶段已结束，正式报告 PDF 已由下载机生成。"
+        extra = str((facts.get("ai_narrative") or {}).get("reader_note") or "").strip()
+        if extra:
+            note = f"{note} {extra}"
         progress = {
             "stage": "registration_pending",
             "official_status": "ready",
@@ -645,7 +649,7 @@ def generate_biweekly_report(
             "mime": "application/pdf",
             "kind": "official_visual_artifact",
             "facts": facts,
-            "note": "补数阶段已结束，正式报告 PDF 已由下载机生成。",
+            "note": note,
             "oss_artifact": oss_meta,
             "registration_attempts": 0,
         }
