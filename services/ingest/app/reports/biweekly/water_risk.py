@@ -1,6 +1,6 @@
 """Moisture context for the biweekly PDF, from facts the report already has.
 
-不新接气象、雷达或历史服务。正文用白话写叶子含水、雨水和蒸散。
+不新接气象、雷达或历史服务。正文用白话写叶子含水、有效降雨和蒸散。
 两项同向才说要留意浇水或排水；对不上、缺测或只有一项时不写成没有风险。
 
 实际能用的输入：
@@ -71,17 +71,17 @@ def _complete(summary: dict[str, Any] | None) -> tuple[float, float] | None:
 def _weather_sentence(facts: dict[str, Any]) -> tuple[str, float | None]:
     period = facts.get("weather_period") or {}
     if not period or int(period.get("days") or 0) <= 0:
-        return "雨水：没有可用的降水或蒸散记录，不能据此判断这半月是亏是余。", None
+        return "有效降雨：没有可用的降雨或蒸散记录，不能据此判断这半月是亏是余。", None
     days = int(period["days"])
     precip = _num(period.get("precipitation_mm"))
     et0 = _num(period.get("et0_mm"))
     precip_days = int(period.get("precipitation_days") or 0)
     et0_days = int(period.get("et0_days") or 0)
-    parts = [f"雨水：这{days}天"]
+    parts = [f"有效降雨：这{days}天"]
     if precip is None:
-        parts.append("降水缺测")
+        parts.append("有效降雨缺测")
     else:
-        parts.append(f"降水合计{fmt_index(precip, 1)}毫米（记下{precip_days}天）")
+        parts.append(f"有效降雨合计{fmt_index(precip, 1)}毫米（记下{precip_days}天）")
     if et0 is None:
         parts.append("蒸散缺测")
     else:
@@ -89,26 +89,27 @@ def _weather_sentence(facts: dict[str, Any]) -> tuple[str, float | None]:
     balance = _complete(period)
     balance_mm = None
     if balance is None:
-        parts.append("降水或蒸散有缺测，不把缺的那天当成0，也不计算水分收支")
+        parts.append("有效降雨或蒸散有缺测，不把缺的那天当成0，也不计算水分收支")
     else:
         balance_mm = round(balance[0] - balance[1], 1)
         if balance_mm < 0:
-            account = "这半月雨水少于蒸散，是亏的"
+            account = "这半月有效降雨少于蒸散，是亏的"
         elif balance_mm > 0:
-            account = "这半月雨水多于蒸散，是余的"
+            account = "这半月有效降雨多于蒸散，是余的"
         else:
-            account = "这半月雨水和蒸散差不多"
+            account = "这半月有效降雨和蒸散差不多"
         parts.append(
-            f"雨水减去蒸散为{fmt_signed(balance_mm, 1)}毫米，{account}，这是附近气象格子上的账，不是地里的土壤含水量"
+            f"有效降雨减去蒸散为{fmt_signed(balance_mm, 1)}毫米，{account}，"
+            "这是附近气象记录算出的数，不是地里量到的土壤含水量"
         )
     antecedent = facts.get("weather_antecedent") or {}
     if int(antecedent.get("days") or 0) > 0 and _complete(antecedent) is None:
-        parts.append("前期降水或蒸散也不完整，不并入")
+        parts.append("前期有效降雨或蒸散也不完整，不并入")
     elif _complete(antecedent) is not None:
         before = _complete(antecedent)
         assert before is not None
         parts.append(
-            f"本期开始前{int(antecedent['days'])}天降水合计{fmt_index(before[0], 1)}毫米、"
+            f"本期开始前{int(antecedent['days'])}天有效降雨合计{fmt_index(before[0], 1)}毫米、"
             f"蒸散合计{fmt_index(before[1], 1)}毫米"
         )
     return "，".join(parts) + "。", balance_mm
@@ -209,8 +210,14 @@ def _reader_judgment(ndmi_delta: float | None, balance_mm: float | None) -> str:
     rain = 0 if balance_mm in (None, 0) else (1 if balance_mm > 0 else -1)
     if leaf and rain and leaf == rain:
         if leaf < 0:
-            return "叶子里的水和雨水都偏干，这半月要留意浇水。这是本期参考，不是灾损认定。"
-        return "叶子里的水和雨水都偏湿，这半月要留意排水。这是本期参考，不是灾损认定。"
+            return (
+                "叶子里的水和有效降雨都偏干，这半月要留意浇水。"
+                "这是本期参考，不是灾损认定。"
+            )
+        return (
+            "叶子里的水和有效降雨都偏湿，这半月要留意排水。"
+            "这是本期参考，不是灾损认定。"
+        )
     if leaf or rain:
         return "现在只有一项能对上，还不能判断要不要浇水或排水，也不判定干旱或洪涝。"
     return "现有记录还对不齐，现在还不能判断偏干还是偏湿，不能写成无风险。不判定干旱或洪涝。"
@@ -229,7 +236,7 @@ def assess_water_risk(
     ndmi_delta = _num(ndmi.get("delta")) if ndmi_latest is not None and ndmi_base is not None else None
     has_ndmi_pair = ndmi_latest is not None and ndmi_base is not None and bool(latest_day and baseline_day)
     weather_line, balance_mm = _weather_sentence(facts)
-    has_weather = not weather_line.startswith("雨水：没有可用")
+    has_weather = not weather_line.startswith("有效降雨：没有可用")
     lines: list[str] = []
     if has_ndmi_pair:
         if ndmi_delta is None or ndmi_delta == 0:
@@ -251,7 +258,7 @@ def assess_water_risk(
         if (ndmi_delta > 0 and balance_mm < 0) or (ndmi_delta < 0 and balance_mm > 0):
             conflict = True
             lines.append(
-                f"叶子里的水变化为{fmt_signed(ndmi_delta)}，雨水减去蒸散为{fmt_signed(balance_mm, 1)}毫米，"
+                f"叶子里的水变化为{fmt_signed(ndmi_delta)}，有效降雨减去蒸散为{fmt_signed(balance_mm, 1)}毫米，"
                 "两项方向不一致，不合成一个旱涝结论，也不判定干旱或洪涝。"
             )
     radar_line, vv_count = _radar_sentence(facts)
@@ -266,7 +273,7 @@ def assess_water_risk(
     status = "described" if has_ndmi_pair or has_weather else "insufficient"
     if status == "insufficient":
         lines = [
-            "水分状况：没有可对比的叶子含水，也没有可用的雨水或蒸散，证据不足，"
+            "水分状况：没有可对比的叶子含水，也没有可用的有效降雨或蒸散，证据不足，"
             "现在还不能判断偏干还是偏湿，不能写成无风险。不判定干旱或洪涝。"
         ]
     return {

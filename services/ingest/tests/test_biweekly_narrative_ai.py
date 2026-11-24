@@ -85,6 +85,8 @@ class NarrativeAiTests(unittest.TestCase):
         ]
         payload = narrative_input(facts)
         self.assertIn("最近一次有效观测", payload["parameter_guide"]["metrics"])
+        self.assertIn("有效降雨", payload["parameter_guide"]["weather"])
+        self.assertIn("雨水账", payload["parameter_guide"]["weather"])
         self.assertEqual(payload["metrics"]["ndre"]["latest"], "0.57")
         self.assertIn("叶绿素", payload["metrics"]["ndre"]["meaning"])
         self.assertEqual(payload["infield"][0]["p10"], "0.51")

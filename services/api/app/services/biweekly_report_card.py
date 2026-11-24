@@ -8,6 +8,7 @@ and a one-line status when those sentences are not stored yet.
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from typing import Any
 
 _TAG = re.compile(r"<[^>]+>")
@@ -222,6 +223,207 @@ def _program_lines(docs: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+# 页面用已经入库的田块日均值。PDF 里的像元中位数没有写回 result，不能在这里冒充。
+_PRIOR_DAYS = 14
+_INDEX_ROWS = (
+    ("ndvi", "NDVI", "长势"),
+    ("evi", "EVI", "绿度"),
+    ("ndre", "NDRE", "叶绿素"),
+    ("ndmi", "NDMI", "叶片含水"),
+)
+_WEATHER_ROWS = (
+    ("precipitation_mm", "有效降雨", "毫米"),
+    ("et0_mm", "蒸散", "毫米"),
+    ("mean_c", "平均气温", "℃"),
+)
+
+
+def _number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _day(value: Any) -> date | None:
+    text = str(value or "")[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _iso(value: date | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _parameter_document(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The stored facts that still have optical days or weather totals."""
+    for doc in docs:
+        if _rows(doc.get("observations")) or _rows(doc.get("prior_observations")):
+            return doc
+        period = doc.get("weather_period")
+        if isinstance(period, dict) and period:
+            return doc
+        if _rows(doc.get("weather_daily")):
+            return doc
+    return {}
+
+
+def _mean(rows: list[dict[str, Any]], metric: str) -> tuple[float | None, int]:
+    values: list[float] = []
+    for row in rows:
+        number = _number(row.get(f"{metric}_avg"))
+        if number is None:
+            number = _number(row.get(metric))
+        if number is not None:
+            values.append(number)
+    if not values:
+        return None, 0
+    return round(sum(values) / len(values), 2), len(values)
+
+
+def _between(
+    rows: list[dict[str, Any]], start: date | None, end: date | None
+) -> list[dict[str, Any]]:
+    if start is None or end is None:
+        return []
+    chosen = []
+    for row in rows:
+        day = _day(row.get("date"))
+        if day is not None and start <= day <= end:
+            chosen.append(row)
+    return chosen
+
+
+def _sum_mm(rows: list[dict[str, Any]], key: str) -> float | None:
+    values = []
+    for row in rows:
+        number = _number(row.get(key))
+        if number is not None:
+            values.append(number)
+    if not values:
+        return None
+    return round(sum(values), 1)
+
+
+def _mean_temperature(rows: list[dict[str, Any]]) -> float | None:
+    values = []
+    for row in rows:
+        low = _number(row.get("min_c"))
+        high = _number(row.get("max_c"))
+        if low is not None and high is not None:
+            values.append((low + high) / 2)
+    if not values:
+        return None
+    return round(sum(values) / len(values), 1)
+
+
+def _window(
+    period: dict[str, Any],
+) -> tuple[date | None, date | None, date | None, date | None]:
+    start = _day(period.get("start"))
+    end = _day(period.get("end_inclusive")) or _day(period.get("end"))
+    if start is not None and end is None:
+        days = period.get("days")
+        if isinstance(days, int) and days > 0:
+            end = start + timedelta(days=days - 1)
+    if start is None:
+        return None, None, None, None
+    prior_end = start - timedelta(days=1)
+    prior_start = start - timedelta(days=_PRIOR_DAYS)
+    return start, end, prior_start, prior_end
+
+
+def _period_parameters(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Current period and the previous 14 days, from fields stored on the job."""
+    doc = _parameter_document(docs)
+    raw_period = doc.get("period")
+    period = raw_period if isinstance(raw_period, dict) else {}
+    current_start, current_end, prior_start, prior_end = _window(period)
+    current_rows = _rows(doc.get("observations"))
+    prior_rows = _rows(doc.get("prior_observations"))
+    metrics = []
+    for key, abbr, name in _INDEX_ROWS:
+        current, current_days = _mean(current_rows, key)
+        prior, prior_days = _mean(prior_rows, key)
+        if current is None and prior is None:
+            continue
+        metrics.append(
+            {
+                "key": key,
+                "abbr": abbr,
+                "name": name,
+                "unit": "",
+                "decimals": 2,
+                "current": current,
+                "prior": prior,
+                "current_days": current_days,
+                "prior_days": prior_days,
+            }
+        )
+    daily = _rows(doc.get("weather_daily"))
+    raw_weather = doc.get("weather_period")
+    stored = raw_weather if isinstance(raw_weather, dict) else {}
+    current_daily = _between(daily, current_start, current_end)
+    prior_daily = _between(daily, prior_start, prior_end)
+    weather = []
+    for key, name, unit in _WEATHER_ROWS:
+        if key == "mean_c":
+            current = _number(stored.get("mean_c"))
+            if current is None:
+                current = _mean_temperature(current_daily)
+            else:
+                current = round(current, 1)
+            prior = _mean_temperature(prior_daily)
+        else:
+            current = _number(stored.get(key))
+            if current is None:
+                current = _sum_mm(current_daily, key)
+            else:
+                current = round(current, 1)
+            prior = _sum_mm(prior_daily, key)
+        if current is None and prior is None:
+            continue
+        weather.append(
+            {
+                "key": key,
+                "name": name,
+                "unit": unit,
+                "decimals": 1,
+                "current": current,
+                "prior": prior,
+            }
+        )
+    return {
+        "periods": {
+            "current": {
+                "label": "本期",
+                "start": _iso(current_start),
+                "end": _iso(current_end),
+            },
+            "prior": {
+                "label": "上一期",
+                "start": _iso(prior_start),
+                "end": _iso(prior_end),
+            },
+        },
+        "metrics": metrics,
+        "weather": weather,
+    }
+
+
 def build_report_card(job: dict[str, Any], *extra: Any) -> dict[str, Any]:
     """Up to four sentences a reader can show for this official job.
 
@@ -243,10 +445,12 @@ def build_report_card(job: dict[str, Any], *extra: Any) -> dict[str, Any]:
     if not lines:
         lines = [_STATUS_LINE.get(status, "这期还没有可显示的结论。")]
         source = "status"
-    return {
+    card = {
         "job_id": job.get("job_id"),
         "status": status,
         "title": "本期结论",
         "lines": lines,
         "source": source,
     }
+    card.update(_period_parameters(docs))
+    return card
