@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -159,6 +160,69 @@ class BiweeklyRouterTests(unittest.TestCase):
     def _auth(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
+    def test_summary_returns_plain_conclusion_lines(self):
+        self._enable_dev()
+        job_id = "bj-ca85562c28b78c54"
+        jobs = Path(self.work.name) / "jobs"
+        jobs.mkdir()
+        (jobs / f"{job_id}.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "land_id": "6417",
+                    "season_id": "2026/27",
+                    "period_id": "4",
+                    "kind": "generate",
+                    "status": "ready",
+                    "history": [],
+                    "result": {
+                        "ai_narrative": {
+                            "conclusion": [
+                                "叶子里的水少了一些，<b>要留意浇水</b>。",
+                                '<font color="#9C2B1B">东北部有一小片一直偏弱。</font>',
+                                "叶子里的水少了一些，要留意浇水。",
+                            ],
+                            "summary": "这句不应盖过结论。",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        response = self.client.get(
+            f"/v1/lands/6417/biweekly/jobs/{job_id}/summary",
+            headers=self._auth(self._token()),
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["title"], "本期结论")
+        self.assertEqual(body["source"], "conclusion")
+        self.assertEqual(
+            body["lines"],
+            ["叶子里的水少了一些，要留意浇水。", "东北部有一小片一直偏弱。"],
+        )
+        self.assertNotIn("<b>", "".join(body["lines"]))
+        missing = self.client.get(
+            "/v1/lands/6417/biweekly/jobs/bj-0123456789abcdef/summary",
+            headers=self._auth(self._token()),
+        )
+        self.assertEqual(missing.status_code, 404)
+        from app.services.biweekly_report_card import build_report_card
+
+        limited = build_report_card(
+            {
+                "job_id": job_id,
+                "status": "evidence_limited",
+                "result": {"ai_narrative": {"reader_note": "本期模型文字未完成。"}},
+            }
+        )
+        self.assertEqual(limited["source"], "reader_note")
+        self.assertEqual(limited["lines"], ["本期模型文字未完成。"])
+        pending = build_report_card({"job_id": job_id, "status": "dispatched", "result": {}})
+        self.assertEqual(pending["source"], "status")
+        self.assertIn("正在生成", pending["lines"][0])
+
     def test_router_does_not_use_anonymous_auth_bypass(self):
         import ast
 
@@ -196,6 +260,7 @@ class BiweeklyRouterTests(unittest.TestCase):
             "/lands/{land_id}/biweekly/periods/{period_id}/backfill",
             "/lands/{land_id}/biweekly/periods/{period_id}/generate",
             "/lands/{land_id}/biweekly/jobs/{job_id}",
+            "/lands/{land_id}/biweekly/jobs/{job_id}/summary",
             "/lands/{land_id}/biweekly/jobs/{job_id}/download",
         ):
             self.assertIn(path, paths)
