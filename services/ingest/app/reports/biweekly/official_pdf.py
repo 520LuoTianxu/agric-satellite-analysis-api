@@ -569,9 +569,10 @@ def _weather_chart(facts: dict, dest: Path) -> Path | None:
             if any(r.get("et0_mm") is not None for r in rows):
                 # 缺测日为 NaN，折线在该日断开，不连过去。
                 ax.plot(days, series_of(rows, "et0_mm"), color="#4C4C4C", lw=1.0, ls="-.", zorder=3)
-                legend["日参考作物蒸散量ET0"] = Line2D([0], [0], color="#4C4C4C", lw=1.0, ls="-.",
-                                                    label="日参考作物蒸散量ET0")
-            ax.set_ylabel("降水量、ET0（毫米）", fontsize=8)
+                legend["日蒸散"] = Line2D(
+                    [0], [0], color="#4C4C4C", lw=1.0, ls="-.", label="日蒸散"
+                )
+            ax.set_ylabel("降水量、蒸散（毫米）", fontsize=8)
             ax.set_ylim(bottom=0)
             top = ax.get_ylim()[1]
             ax.set_ylim(0, max(top * 1.25, 5))
@@ -582,7 +583,7 @@ def _weather_chart(facts: dict, dest: Path) -> Path | None:
                 # 缺测日用灰色底纹标出，柱子和折线留空，不画成 0。
                 for d in missing:
                     ax.axvspan(d - half_day, d + half_day, facecolor="#D0D0D0", edgecolor="none", zorder=1)
-                legend["降水或ET0缺测日"] = Patch(facecolor="#D0D0D0", label="降水或ET0缺测日")
+                legend["降水或蒸散缺测日"] = Patch(facecolor="#D0D0D0", label="降水或蒸散缺测日")
             ax2 = ax.twinx()
             for key, color, label in (("max_c", "#B5482F", "日最高气温"), ("min_c", "#2F5E9E", "日最低气温")):
                 if any(r.get(key) is not None for r in rows):

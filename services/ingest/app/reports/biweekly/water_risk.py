@@ -1,11 +1,11 @@
 """Moisture context for the biweekly PDF, from facts the report already has.
 
-不新接气象、雷达或历史服务，也不把单一 NDMI 阈值写成干旱或洪涝。
+不新接气象、雷达或历史服务。正文用白话写叶子含水、雨水和蒸散。
+两项同向才说要留意浇水或排水；对不上、缺测或只有一项时不写成没有风险。
 
 实际能用的输入：
-- 指标序列里已经算好的 NDVI、NDMI（中位数或均值）和两者的变化；
-- 由这两项按现有公式算出的 NDDI，只作交叉对照；
-- 事实里的本期和前期格点降水、ET0，缺测日不补 0、不算收支；
+- 指标序列里已经算好的 NDMI（中位数或均值）和它的变化；
+- 事实里的本期和前期格点降水、蒸散，缺测日不补 0、不算收支；
 - 任务载荷里已经读到的哨兵一号景。VV 满 3 景才套用现有同轨规则，
   规则给不出标记时不写成无风险；
 - 像元产品里如果本来就有 MNDWI 列，只描述该列，不换算成面积。
@@ -23,7 +23,6 @@ import numpy as np
 from agric_satellite_analysis_common.agri_classify import (
     MIN_ORBIT_SAMPLES,
     classify_flood_series,
-    compute_nddi,
 )
 from app.reports.biweekly.metric_stats import columns_of
 from app.reports.biweekly.report_text import cn_md, fmt_index, fmt_pct, fmt_signed
@@ -52,14 +51,6 @@ def _metric_item(facts: dict[str, Any], metric: str) -> dict[str, Any]:
     return ((facts.get("comparison") or {}).get("metrics") or {}).get(metric) or {}
 
 
-def _nddi_at(ndvi: float | None, ndmi: float | None) -> float | None:
-    """NDDI from the two-decimal values the report prints, so a reader can recompute it."""
-    if ndvi is None or ndmi is None:
-        return None
-    value = compute_nddi(round(float(ndvi), 2), round(float(ndmi), 2))
-    return None if value is None else float(value)
-
-
 def _complete(summary: dict[str, Any] | None) -> tuple[float, float] | None:
     """Precipitation minus ET0 only when every day in the window has both."""
     summary = summary or {}
@@ -80,39 +71,45 @@ def _complete(summary: dict[str, Any] | None) -> tuple[float, float] | None:
 def _weather_sentence(facts: dict[str, Any]) -> tuple[str, float | None]:
     period = facts.get("weather_period") or {}
     if not period or int(period.get("days") or 0) <= 0:
-        return "气象背景：没有可用的降水或参考蒸散记录，不能据此判断水分收支。", None
+        return "雨水：没有可用的降水或蒸散记录，不能据此判断这半月是亏是余。", None
     days = int(period["days"])
     precip = _num(period.get("precipitation_mm"))
     et0 = _num(period.get("et0_mm"))
     precip_days = int(period.get("precipitation_days") or 0)
     et0_days = int(period.get("et0_days") or 0)
-    parts = [f"气象背景：本期窗口{days}天"]
+    parts = [f"雨水：这{days}天"]
     if precip is None:
         parts.append("降水缺测")
     else:
-        parts.append(f"降水合计{fmt_index(precip, 1)}毫米（有记录{precip_days}天）")
+        parts.append(f"降水合计{fmt_index(precip, 1)}毫米（记下{precip_days}天）")
     if et0 is None:
-        parts.append("ET0缺测")
+        parts.append("蒸散缺测")
     else:
-        parts.append(f"ET0合计{fmt_index(et0, 1)}毫米（有记录{et0_days}天）")
+        parts.append(f"蒸散合计{fmt_index(et0, 1)}毫米（记下{et0_days}天）")
     balance = _complete(period)
     balance_mm = None
     if balance is None:
-        parts.append("降水或ET0有缺测，不把缺测日当成0，也不计算水分收支")
+        parts.append("降水或蒸散有缺测，不把缺的那天当成0，也不计算水分收支")
     else:
         balance_mm = round(balance[0] - balance[1], 1)
+        if balance_mm < 0:
+            account = "这半月雨水少于蒸散，是亏的"
+        elif balance_mm > 0:
+            account = "这半月雨水多于蒸散，是余的"
+        else:
+            account = "这半月雨水和蒸散差不多"
         parts.append(
-            f"降水减ET0为{fmt_signed(balance_mm, 1)}毫米，这是格点气象差，不是土壤含水量"
+            f"雨水减去蒸散为{fmt_signed(balance_mm, 1)}毫米，{account}，这是附近气象格子上的账，不是地里的土壤含水量"
         )
     antecedent = facts.get("weather_antecedent") or {}
     if int(antecedent.get("days") or 0) > 0 and _complete(antecedent) is None:
-        parts.append("前期降水或ET0也不完整，不并入")
+        parts.append("前期降水或蒸散也不完整，不并入")
     elif _complete(antecedent) is not None:
         before = _complete(antecedent)
         assert before is not None
         parts.append(
             f"本期开始前{int(antecedent['days'])}天降水合计{fmt_index(before[0], 1)}毫米、"
-            f"ET0合计{fmt_index(before[1], 1)}毫米"
+            f"蒸散合计{fmt_index(before[1], 1)}毫米"
         )
     return "，".join(parts) + "。", balance_mm
 
@@ -131,11 +128,11 @@ def _radar_sentence(facts: dict[str, Any]) -> tuple[str, int]:
     counted = max(counted, len(rows))
     vv_rows = [row for row in rows if _num(row.get("vv")) is not None]
     if counted <= 0:
-        return "本期没有哨兵一号雷达影像，不能对积水作出判断。", 0
+        return "这半月没有雷达图，不能对积水作出判断。", 0
     if len(vv_rows) < MIN_ORBIT_SAMPLES:
         return (
-            f"本期哨兵一号{counted}景，其中带后向散射的{len(vv_rows)}景。"
-            f"同轨可比样本不足{MIN_ORBIT_SAMPLES}景，不能确认或排除积水。",
+            f"这半月雷达{counted}景，其中能看回波的{len(vv_rows)}景。"
+            f"能拿来比的不到{MIN_ORBIT_SAMPLES}景，不能确认或排除积水。",
             len(vv_rows),
         )
     labelled = classify_flood_series(vv_rows, date_bounded=True)
@@ -154,15 +151,15 @@ def _radar_sentence(facts: dict[str, Any]) -> tuple[str, int]:
         shown = "、".join(cn_md(day) for day in days[:4])
         bits.append(f"{shown}{_FLOOD_WORDS[kind]}")
     if not bits:
-        text = "哨兵一号有记录，但同轨基线仍不足以标记，不能写成无风险。"
+        text = "雷达有记录，但还对不上同一条轨道，不能写成无风险。"
     else:
-        text = "哨兵一号" + "；".join(bits) + "。"
+        text = "雷达：" + "；".join(bits) + "。"
         if "dry" in groups and len(groups) == 1:
-            text += "未达到标记条件不等于没有积水风险。"
+            text += "没有达到标记不等于没有积水风险。"
         else:
-            text += "这是已有同轨规则的输出，需现场核对，不是灾损认定。"
+            text += "这只是已有规则的标记，要到田里核对，不是灾损认定。"
         if unlabeled:
-            text += f"另有{unlabeled}景基线不足，那些日期不能写成无风险。"
+            text += f"另有{unlabeled}景对不上，那些日期不能写成无风险。"
     return text, len(vv_rows)
 
 
@@ -178,7 +175,7 @@ def _mndwi_sentence(products: list[dict[str, Any]], latest_day: str | None) -> s
             if latest_day:
                 break
     if chosen is None:
-        return "像元产品没有 MNDWI，不另作水体指数统计。"
+        return ""
     _product, columns, key = chosen
     values = np.array(
         [np.nan if item is None else float(item) for item in columns.get(key) or []],
@@ -197,13 +194,26 @@ def _mndwi_sentence(products: list[dict[str, Any]], latest_day: str | None) -> s
         valid &= mask
     n_valid = int(valid.sum())
     if n_valid < 30:
-        return f"MNDWI 有效像元只有{n_valid}个，样本不足，不统计水体指数比例。"
+        return "另有一项水体指数，能用的点太少，不统计比例。"
     fraction = float(np.mean(values[valid] > 0))
     median = float(np.median(values[valid]))
     return (
-        f"最新一期 MNDWI 中位数{fmt_index(median)}，大于 0 的有效像元占{fmt_pct(fraction)}。"
-        "大于 0 只按指数定义分开，不是积水面积。"
+        f"另有一项水体指数，中位数{fmt_index(median)}，偏高的地方占{fmt_pct(fraction)}。"
+        "偏高只按这个指数分开，不是积水面积。"
     )
+
+
+def _reader_judgment(ndmi_delta: float | None, balance_mm: float | None) -> str:
+    """两项同向才说浇水或排水。只有一项、或都接近不变时，明说看不出来。"""
+    leaf = 0 if ndmi_delta in (None, 0) else (1 if ndmi_delta > 0 else -1)
+    rain = 0 if balance_mm in (None, 0) else (1 if balance_mm > 0 else -1)
+    if leaf and rain and leaf == rain:
+        if leaf < 0:
+            return "叶子里的水和雨水都偏干，这半月要留意浇水。这是本期参考，不是灾损认定。"
+        return "叶子里的水和雨水都偏湿，这半月要留意排水。这是本期参考，不是灾损认定。"
+    if leaf or rain:
+        return "现在只有一项能对上，还不能判断要不要浇水或排水，也不判定干旱或洪涝。"
+    return "现有记录还对不齐，现在还不能判断偏干还是偏湿，不能写成无风险。不判定干旱或洪涝。"
 
 
 def assess_water_risk(
@@ -212,7 +222,6 @@ def assess_water_risk(
     """Sentences that separate observation, derivation and missing evidence."""
     comparison = facts.get("comparison") or {}
     ndmi = _metric_item(facts, "ndmi")
-    ndvi = _metric_item(facts, "ndvi")
     latest_day = comparison.get("latest_date")
     baseline_day = comparison.get("baseline_date")
     ndmi_latest = _num(ndmi.get("latest"))
@@ -220,49 +229,45 @@ def assess_water_risk(
     ndmi_delta = _num(ndmi.get("delta")) if ndmi_latest is not None and ndmi_base is not None else None
     has_ndmi_pair = ndmi_latest is not None and ndmi_base is not None and bool(latest_day and baseline_day)
     weather_line, balance_mm = _weather_sentence(facts)
-    has_weather = not weather_line.startswith("气象背景：没有可用")
+    has_weather = not weather_line.startswith("雨水：没有可用")
     lines: list[str] = []
     if has_ndmi_pair:
-        stat = "中位数" if ndmi.get("statistic") == "median" else "均值" if ndmi.get("statistic") == "mean" else "数值"
+        if ndmi_delta is None or ndmi_delta == 0:
+            move = "差不多"
+        elif ndmi_delta > 0:
+            move = "多了一些"
+        else:
+            move = "少了一些"
         lines.append(
-            f"观测：NDMI（{stat}）{cn_md(latest_day)}为{fmt_index(ndmi_latest)}，"
-            f"{cn_md(baseline_day)}为{fmt_index(ndmi_base)}，变化{fmt_signed(ndmi_delta)}。"
-            "这是田块水平的指数变化，不是灾害等级。"
+            f"叶子里的水：{cn_md(latest_day)}为{fmt_index(ndmi_latest)}，"
+            f"{cn_md(baseline_day)}为{fmt_index(ndmi_base)}，变化{fmt_signed(ndmi_delta)}，{move}。"
+            "这是整块地的变化，不是灾害等级。"
         )
     else:
-        lines.append("观测：没有可对比的 NDMI，不能描述本期水分指数的变化。")
-    nddi_now = _nddi_at(_num(ndvi.get("latest")), ndmi_latest)
-    nddi_then = _nddi_at(_num(ndvi.get("baseline")), ndmi_base)
-    if nddi_now is not None and nddi_then is not None and has_ndmi_pair:
-        lines.append(
-            f"推算：用已印出的 NDVI 与 NDMI 计算 NDDI，{cn_md(latest_day)}为{fmt_index(nddi_now)}，"
-            f"{cn_md(baseline_day)}为{fmt_index(nddi_then)}。"
-            "NDDI 只作交叉对照，不按单一 NDMI 阈值划分等级，也不判定干旱。"
-        )
-    elif has_ndmi_pair:
-        lines.append("推算：NDVI 或 NDMI 不足以计算 NDDI，不另给水分指数等级。")
+        lines.append("叶子里的水：没有可对比的两期，看不出是多了还是少了。")
     lines.append(weather_line)
     conflict = False
     if ndmi_delta is not None and balance_mm is not None and ndmi_delta != 0 and balance_mm != 0:
         if (ndmi_delta > 0 and balance_mm < 0) or (ndmi_delta < 0 and balance_mm > 0):
             conflict = True
             lines.append(
-                f"NDMI 变化为{fmt_signed(ndmi_delta)}，降水减 ET0 为{fmt_signed(balance_mm, 1)}毫米，"
-                "两项方向不一致，不合并成一个结论，也不判定干旱。"
+                f"叶子里的水变化为{fmt_signed(ndmi_delta)}，雨水减去蒸散为{fmt_signed(balance_mm, 1)}毫米，"
+                "两项方向不一致，不合成一个旱涝结论，也不判定干旱或洪涝。"
             )
     radar_line, vv_count = _radar_sentence(facts)
     mndwi_line = _mndwi_sentence(list(products or []), str(latest_day)[:10] if latest_day else None)
+    closing = "" if conflict else _reader_judgment(ndmi_delta, balance_mm)
     lines.append(
         radar_line
         + mndwi_line
-        + "没有同月历史基线，不能判断是否较往年偏干或偏湿。"
-        + "以上区分观测和推算，不判定干旱或洪涝。"
+        + "没有往年同一个月可以比，看不出比往年更干还是更湿。"
+        + closing
     )
     status = "described" if has_ndmi_pair or has_weather else "insufficient"
     if status == "insufficient":
         lines = [
-            "水分状况：没有可对比的 NDMI，也没有可用的降水或参考蒸散，证据不足，"
-            "不能判断偏干或偏湿，也不能写成无风险。不判定干旱或洪涝。"
+            "水分状况：没有可对比的叶子含水，也没有可用的雨水或蒸散，证据不足，"
+            "现在还不能判断偏干还是偏湿，不能写成无风险。不判定干旱或洪涝。"
         ]
     return {
         "status": status,

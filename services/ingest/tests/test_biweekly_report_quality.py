@@ -513,11 +513,18 @@ class DemoReportTests(unittest.TestCase):
             self.assertEqual(
                 [item["metric"] for item in enriched["infield"]], enriched["report_metrics"]["primary"]
             )
-            self.assertNotIn("观测与数据质量", "".join(pages))
-            self.assertIn("历史可比数据不足，暂不评价", "".join(pages))
-            self.assertIn("持续偏弱", "".join(pages))
-            self.assertIn("均匀度", "".join(pages))
-            self.assertIn("不判定干旱或洪涝", "".join(pages))
+            self.assertNotIn("观测与数据质量", joined_case)
+            self.assertIn("历史可比数据不足，暂不评价", joined_case)
+            self.assertIn("持续偏弱", joined_case)
+            self.assertIn("均匀度", joined_case)
+            self.assertNotIn("配准", spatial[0])
+            self.assertNotIn("个像元", spatial[0])
+            self.assertNotIn("NDDI", joined_case)
+            self.assertNotIn("MNDWI", joined_case)
+            self.assertTrue(
+                any(token in joined_case for token in ("不判定干旱或洪涝", "要留意浇水", "要留意排水")),
+                name,
+            )
 
     def test_formal_metric_names_and_no_colloquial_wording(self):
         for name, text in self.text.items():
