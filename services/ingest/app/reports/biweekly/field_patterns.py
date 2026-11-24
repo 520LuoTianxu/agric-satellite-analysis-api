@@ -91,6 +91,19 @@ def _abbr(metric: str) -> str:
     return spec.abbr if spec is not None else metric_abbr(metric)
 
 
+# 图前和指标页印给种植户看，不用英文缩写。
+_GROWER_METRIC = {
+    "ndvi": "长势",
+    "evi": "叶子绿不绿",
+    "ndre": "叶绿素",
+    "ndmi": "叶子里的水",
+}
+
+
+def _grower(metric: str) -> str:
+    return _GROWER_METRIC.get(metric) or _abbr(metric)
+
+
 def _coord_key(lon: float, lat: float) -> tuple[float, float]:
     return (round(float(lon), 6), round(float(lat), 6))
 
@@ -222,7 +235,6 @@ def _aligned_values(rows: list[dict[str, Any]], interior: np.ndarray) -> list[np
 
 
 def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[str, Any]:
-    abbr = _abbr(metric)
     rows = _dated_tables(products, metric)
     if len(rows) < MIN_PERSISTENT_DATES:
         return {
@@ -230,8 +242,8 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "status": "insufficient",
             "dates": [row["date"] for row in rows],
             "line": (
-                f"持续偏弱（{abbr}）：可配对的有效观测只有{len(rows)}期，少于{MIN_PERSISTENT_DATES}期，"
-                "不能区分持续偏低和偶发偏低。"
+                f"持续偏弱（{_grower(metric)}）：能对上的观测只有{len(rows)}期，少于{MIN_PERSISTENT_DATES}期，"
+                "分不清是一直偏弱，还是只弱了一期。"
             ),
         }
     supported = _supported_mask(rows)
@@ -246,9 +258,8 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "n_supported": n_supported,
             "pair_fraction": pair_fraction,
             "line": (
-                f"持续偏弱（{abbr}）：{len(rows)}期里能配到同一位置的有效像元只有{n_supported}个"
-                f"（占最近一期有效像元{pair_fraction:.0%}），配准或云掩膜支持不足，"
-                "不能区分持续偏低和偶发偏低。"
+                f"持续偏弱（{_grower(metric)}）：这几期对不上同一块地方，"
+                "分不清是一直偏弱，还是只弱了一期。"
             ),
         }
     ref = rows[-1]["table"]
@@ -265,8 +276,7 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "n_supported": n_supported,
             "n_interior": n_interior,
             "line": (
-                f"持续偏弱（{abbr}）：配准后有{n_supported}个像元，扣除边界后剩{n_interior}个，"
-                "样本不足，不能区分持续偏低和偶发偏低。"
+                f"持续偏弱（{_grower(metric)}）：能用的范围太小，看不出哪里一直偏弱。"
             ),
         }
     aligned = _aligned_values(rows, interior)
@@ -285,22 +295,17 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
         for name, share in region_shares(region_labels(xs, ys), clustered)[:2]
     ]
     dates = "、".join(cn_md(row["date"]) for row in rows)
-    where = ""
-    if regions:
-        where = "，主要在" + "、".join(
-            f"{item['name']}（约占成片像元的{round(item['share'] * 100)}%）" for item in regions
-        )
+    where = "、".join(item["name"] for item in regions)
     if n_cluster:
-        detail = f"其中{n_cluster}个连成片{where}"
+        place = f"{where}有一小片一直比整块地弱，值得到田里看一下" if where else "有一小片一直比整块地弱，值得到田里看一下"
     elif n_persistent:
-        detail = f"这{n_persistent}个没有连成片，不作为核查位置"
+        place = "有些地方连续几期都偏弱，但没有连成一片，先不用专门去看"
     else:
-        detail = "没有像元在每一期都低于当期离群界限"
+        place = "没有哪一块连续这几期都比整块地弱"
+    occasional = "另外有些地方只是某一期偏低，不算持续偏弱。" if n_occasional else ""
     line = (
-        f"持续偏弱（{abbr}）：{dates}共{len(rows)}期，配准后{n_supported}个像元各期都有效，"
-        f"扣除边界{n_boundary}个后剩{n_interior}个。{detail}。"
-        f"另有{n_occasional}个像元只在部分日期偏低。"
-        "这是相对本田各期统计离群的遥感差异，不判定缺肥或病虫害。"
+        f"持续偏弱（{_grower(metric)}）：{dates}这几期，{place}。{occasional}"
+        "这只说明位置，不判定缺肥或病虫害。"
     )
     return {
         "metric": metric,
@@ -327,7 +332,7 @@ def _spread(entry: dict[str, Any]) -> float | None:
 
 
 def _uniformity_for_metric(series: list[dict[str, Any]], metric: str) -> dict[str, Any]:
-    abbr = _abbr(metric)
+    name = _grower(metric)
     usable = []
     for row in series:
         entry = (row.get("metrics") or {}).get(metric) or {}
@@ -347,7 +352,7 @@ def _uniformity_for_metric(series: list[dict[str, Any]], metric: str) -> dict[st
         return {
             "metric": metric,
             "status": "insufficient",
-            "line": f"均匀度（{abbr}）：没有两期像元离散可以比较，暂不评价趋同或分化。",
+            "line": f"均匀度（{name}）：没有两期可以比较，暂不评价趋同或分化。",
         }
     first, last = usable[0], usable[-1]
     if first["n_valid"] < MIN_UNIFORM_PIXELS or last["n_valid"] < MIN_UNIFORM_PIXELS:
@@ -358,26 +363,23 @@ def _uniformity_for_metric(series: list[dict[str, Any]], metric: str) -> dict[st
             "n_valid": [first["n_valid"], last["n_valid"]],
             "spread": [first["spread"], last["spread"]],
             "line": (
-                f"均匀度（{abbr}）：{cn_md(first['date'])}有效像元{first['n_valid']}个，"
-                f"{cn_md(last['date'])}有效像元{last['n_valid']}个，样本少，不判断趋同或分化。"
+                f"均匀度（{name}）：能用的观测太少，样本少，不判断地里是变齐了还是更散了。"
             ),
         }
     delta = last["spread"] - first["spread"]
     floor = max(UNIFORM_ABS_FLOOR, UNIFORM_REL_FLOOR * abs(first["spread"]))
     if abs(delta) < floor:
         direction = "similar"
-        change = "离散程度接近，看不出明显趋同或分化"
+        change = "地里各处差不多，看不出明显一块好、一块差"
     elif delta < 0:
         direction = "narrower"
-        change = "离散程度收窄，田内更趋同"
+        change = "地里更齐了，各处更趋同"
     else:
         direction = "wider"
-        change = "离散程度加大，田内更分化"
+        change = "地里更散了，各处更分化"
     line = (
-        f"均匀度（{abbr}）：{cn_md(first['date'])}第10至第90百分位跨度{fmt_index(first['spread'])}"
-        f"（有效像元{first['n_valid']}），{cn_md(last['date'])}跨度{fmt_index(last['spread'])}"
-        f"（有效像元{last['n_valid']}），{change}。"
-        "这只描述像元离散随时间的变化，不判断条带、设施或管理。"
+        f"均匀度（{name}）：{cn_md(first['date'])}到{cn_md(last['date'])}，{change}。"
+        "这只说明地里齐不齐。"
     )
     return {
         "metric": metric,

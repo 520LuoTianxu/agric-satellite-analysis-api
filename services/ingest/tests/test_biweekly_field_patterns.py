@@ -95,7 +95,7 @@ class PersistentWeakTests(unittest.TestCase):
         ]
         item = assess_field_patterns(_facts(), products)["persistent"][0]
         self.assertEqual(item["status"], "insufficient")
-        self.assertIn("配准", item["line"])
+        self.assertIn("对不上同一块地方", item["line"])
 
     def test_small_grid_does_not_invent_a_region(self):
         tiny = np.linspace(0.2, 0.8, 16).reshape(4, 4)
@@ -136,8 +136,10 @@ class UniformityTests(unittest.TestCase):
         self.assertEqual(wide["uniformity"][0]["direction"], "wider")
         self.assertIn("分化", wide["uniformity"][0]["line"])
         self.assertEqual(same["uniformity"][0]["direction"], "similar")
+        self.assertIn("各处差不多", same["uniformity"][0]["line"])
         for item in (narrow, wide, same):
-            self.assertIn("不判断条带、设施或管理", item["uniformity"][0]["line"])
+            self.assertNotIn("百分位", item["uniformity"][0]["line"])
+            self.assertNotIn("像元", item["uniformity"][0]["line"])
 
     def test_low_sample_does_not_claim_a_direction(self):
         item = assess_field_patterns(_facts(metric_series=self._series([0.20, 0.05], [12, 80])))

@@ -1,7 +1,7 @@
 """Render the official winter-wheat biweekly PDF.
 
-版面顺序：封面 → 本期结论 → 田内空间分布 → 和周围的农田比 → 指标变化
-→ 气象条件（水分状况并入此页）→ 说明。两节图在指标变化前面，各自编号。
+版面顺序：封面 → 本期结论 → 田内空间分布（说明在图前，主要证据在图后）
+→ 和周围的农田比 → 指标变化 → 气象条件（水分状况并入此页）→ 说明。
 没有数据的章节整节省略，并在「说明」页的「本期未提供的内容」中列出原因，不留空页，
 也不用 0 或占位图代替。页数随内容变化，页脚页码按实际总页数生成。
 
@@ -569,9 +569,10 @@ def _weather_chart(facts: dict, dest: Path) -> Path | None:
             if any(r.get("et0_mm") is not None for r in rows):
                 # 缺测日为 NaN，折线在该日断开，不连过去。
                 ax.plot(days, series_of(rows, "et0_mm"), color="#4C4C4C", lw=1.0, ls="-.", zorder=3)
-                legend["日参考作物蒸散量ET0"] = Line2D([0], [0], color="#4C4C4C", lw=1.0, ls="-.",
-                                                    label="日参考作物蒸散量ET0")
-            ax.set_ylabel("降水量、ET0（毫米）", fontsize=8)
+                legend["日蒸散"] = Line2D(
+                    [0], [0], color="#4C4C4C", lw=1.0, ls="-.", label="日蒸散"
+                )
+            ax.set_ylabel("降水量、蒸散（毫米）", fontsize=8)
             ax.set_ylim(bottom=0)
             top = ax.get_ylim()[1]
             ax.set_ylim(0, max(top * 1.25, 5))
@@ -582,7 +583,7 @@ def _weather_chart(facts: dict, dest: Path) -> Path | None:
                 # 缺测日用灰色底纹标出，柱子和折线留空，不画成 0。
                 for d in missing:
                     ax.axvspan(d - half_day, d + half_day, facecolor="#D0D0D0", edgecolor="none", zorder=1)
-                legend["降水或ET0缺测日"] = Patch(facecolor="#D0D0D0", label="降水或ET0缺测日")
+                legend["降水或蒸散缺测日"] = Patch(facecolor="#D0D0D0", label="降水或蒸散缺测日")
             ax2 = ax.twinx()
             for key, color, label in (("max_c", "#B5482F", "日最高气温"), ("min_c", "#2F5E9E", "日最低气温")):
                 if any(r.get(key) is not None for r in rows):
@@ -681,11 +682,21 @@ def _data_table(styles: dict, rows: list[list[str]], widths: list[float]) -> Tab
     return table
 
 
-def _shared_image_budget(n_images: int, extra_lines: int) -> float:
-    """Height per map so the maps and the short notes under them stay on one page."""
+def _visual_lines(lines: list[str], chars_per_line: int = 42) -> int:
+    """Estimate wrapped lines. A long note is one string but several printed lines."""
+    total = 0
+    for line in lines:
+        total += max(1, (len(line) + chars_per_line - 1) // chars_per_line)
+    return total
+
+
+def _shared_image_budget(
+    n_images: int, extra_lines: int, extra_height: float = 0
+) -> float:
+    """Height per map so the maps and the notes around them stay on one page."""
     frame = H - TOP - BOTTOM
-    reserve = 46 + 18 + extra_lines * 14 + 10
-    return max(160.0, (frame - reserve) / max(n_images, 1))
+    reserve = 46 + 18 + extra_lines * 14 + 10 + extra_height
+    return max(140.0, (frame - reserve) / max(n_images, 1))
 
 
 def _image_path(raw: Any) -> Path | None:
@@ -711,7 +722,7 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     story: list = []
     counter = iter(_SECTION_NUMBERS)
 
-    # 一、本期结论：基本信息 → 结论 → 主要证据 → 田间核查建议
+    # 一、本期结论：基本信息 → 结论 → 田间核查建议。主要证据跟在田内分布图后面。
     _heading(story, styles, next(counter), "本期结论")
     story.append(_info_table(styles, text.basic_info_rows(facts)))
     story.append(Paragraph("结论", styles["h2"]))
@@ -727,14 +738,16 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
     for line in context.get("lines") or []:
         story.append(Paragraph(str(line), styles["small"]))
     evidence = text.evidence_table(facts)
+    evidence_block = None
     if evidence:
-        block = [
-            Paragraph("主要证据", styles["h2"]),
-            _data_table(styles, evidence, [90, 64, 64, 56, CW - 274]),
-            Spacer(1, 3),
-            Paragraph(text.evidence_caption(facts), styles["small"]),
-        ]
-        story.append(KeepTogether(block))
+        evidence_block = KeepTogether(
+            [
+                Paragraph("主要证据", styles["h2"]),
+                _data_table(styles, evidence, [90, 64, 64, 56, CW - 274]),
+                Spacer(1, 3),
+                Paragraph(text.evidence_caption(facts), styles["small"]),
+            ]
+        )
     story.append(Paragraph("田间核查建议", styles["h2"]))
     _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
 
@@ -761,19 +774,31 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
         model_lines: list[str] = []
         for item in infield:
             model_lines.extend(infield_line(facts.get("ai_narrative"), item["metric"]))
-        budget = _shared_image_budget(len(infield), len(persistent) + len(model_lines) + 1)
+        # 结论写在图前。主要证据表跟在图后，高度先留给表。
+        _model_prose(story, styles, model_lines)
+        for line in persistent:
+            story.append(Paragraph(line, styles["small"]))
+        # 按实际折行预留说明和证据表，避免表被挤到单独一页。
+        budget = _shared_image_budget(
+            len(infield),
+            _visual_lines(persistent) + _visual_lines(model_lines) + 2,
+            170 if evidence_block is not None else 0,
+        )
         for item in infield:
             story.append(
                 FitImage(
                     item["image"],
                     max_height=budget,
-                    min_scale=0.86 if len(infield) > 1 else 0.72,
+                    min_scale=0.55 if evidence_block is not None else (0.86 if len(infield) > 1 else 0.72),
                 )
             )
-        for line in persistent:
-            story.append(Paragraph(line, styles["small"]))
-        _model_prose(story, styles, model_lines)
+        if evidence_block is not None:
+            story.append(evidence_block)
+            evidence_block = None
 
+    if evidence_block is not None:
+        story.append(PageBreak())
+        story.append(evidence_block)
     surround_image = _image_path(facts.get("surrounding_comparison_image"))
     if text.has_surrounding(facts) and surround_image:
         story.append(PageBreak())

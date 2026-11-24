@@ -140,7 +140,8 @@ class WaterRiskTests(unittest.TestCase):
         }
         product = {"date": "2026-05-18", "pixel_data": {"columns": columns}}
         text = _joined(assess_water_risk(_facts(), [product]))
-        self.assertIn("MNDWI", text)
+        self.assertIn("水体指数", text)
+        self.assertNotIn("MNDWI", text)
         self.assertIn("不是积水面积", text)
         self.assertNotIn("亩", text)
 

@@ -564,6 +564,6 @@ def limit_items(facts: dict[str, Any]) -> list[str]:
         items.append("<b>本报告为示例数据生成的样稿，数值并非对任何真实地块的观测，不用于农事决策。</b>" + (str(facts.get("data_source_note") or "")))
     if end:
         items.append(f"本报告只使用 {cn_date(end)}（北京时间）及此前的观测，不包含之后的情况。")
-    items.append("本报告不估算受影响面积和产量，不判定病虫害、缺肥、干旱等原因。")
+    items.append("本报告不估算受影响面积和产量，不判定病虫害、缺肥。旱涝和要不要浇水、排水只作本期参考，不是灾损认定。")
     items.append("本报告用于了解田间状况，不作为灾损认定、保险理赔或交易的依据。")
     return items

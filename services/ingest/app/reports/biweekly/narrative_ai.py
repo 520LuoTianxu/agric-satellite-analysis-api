@@ -68,7 +68,7 @@ SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户�
 
 请直接根据这些参数发挥，写成给种植户看的报告。篇幅按内容来，该写到的都写到，不要为了短而省略。用种植户听得懂的说法把事情讲明白：指标用 name 里的叫法（长势、绿度、叶绿素、叶片含水），并说明这个数在看什么、升高或降低对这块地意味着什么。不要只堆 NDVI、EVI、NDRE、NDMI、EXG、ET0、格点、像元、百分位、中位数和公式。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。
 
-参数里有的指标、日期、田内部位、未采用观测、冷热和雨水、去年同期、已填写的农事、土壤底子和周边对照都要写到，并用白话说明白。某个参数为空就不要编，也不要用“缺失”凑字。不要新写灌溉、施肥、打药处方。农事是人工填写的背景，说清做了哪件、哪一天、填写里人能看懂的内容，不要抄英文字段名和编号，也不要把它说成卫星测到的。有土壤底子就讲清土质、酸碱和能存多少水，不要判断缺肥。
+参数里有的指标、日期、田内部位、未采用观测、冷热和雨水、去年同期、已填写的农事、土壤底子和周边对照都要写到，并用白话说明白。某个参数为空就不要编，也不要用“缺失”凑字。不要写施肥、打药。结论里要用白话判断本期偏干还是偏湿：偏干就说要不要留意浇水，偏湿或有积水迹象就说要不要留意排水。依据只能是已经给出的雨水、叶子含水、土壤能存的水和 water_risk_lines。证据不够就写现在还不能判断，不要写成没有风险，也不要写灌多少毫米。农事是人工填写的背景，说清做了哪件、哪一天、填写里人能看懂的内容，不要抄英文字段名和编号，也不要把它说成卫星测到的。有土壤底子就讲清土质、酸碱和能存多少水，不要判断缺肥。
 
 infield 和 surrounding 是指标变化前面的两章，各自成章，篇幅按内容来。infield 讲地里哪一块和整块地不一样、偏弱的那一片在看什么。surrounding 讲这块地比周围农田更绿还是更弱，并说明周围的地种的不一定一样。不要写中位数、像元、百分位、超绿、EXG 和公式。
 
@@ -84,7 +84,7 @@ infield 和 surrounding 是指标变化前面的两章，各自成章，篇幅�
 metric_notes 是「指标说明」：每个指标按本期数值写成种植户能看懂的说明，讲清这个数在看什么、本期说明了什么。不要复读定义，不要写公式和英文缩写，每个指标的写法不要相同，重点由你标。篇幅不限。
 conclusion 是给种植户看的结论。把遥感变化、冷热雨水、农事和土壤底子写在一起，用通俗说法说明白。context_lines 还会再印很短的农事和土壤底子，不要把那些原句再抄一遍。重点由你用上面的标记标出来。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
-field_pattern_lines 和 water_risk_lines 已经印在报告里，不要再写一遍。不要把叶片含水、降水差或雷达标记写成干旱、洪涝、缺肥、病虫害或产量结论；证据不足时不要改成无风险。
+field_pattern_lines 和 water_risk_lines 已经印在报告里，不要原句再抄一遍。缺肥、病虫害和产量不要下结论。旱涝和要不要浇水、排水写在结论里，按已有水分证据用白话说明；证据不足时不要改成无风险。
 不要输出思考过程，只输出 JSON：
 {"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"带标记的句子"}],"conclusion":["带标记的句子"],"field_notes":["带标记的句子"],"metric_notes":["带标记的句子"],"infield":[{"metric":"ndre","text":"带标记的句子"}],"surrounding":["带标记的句子"],"weather":["带标记的句子"]}
 changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。metric_notes 覆盖 metrics 里的每一个指标。
@@ -103,7 +103,7 @@ PARAMETER_GUIDE = {
     "photo_review": "现场照片的画面检查。status 不是 reviewed 时，不要写照片。",
     "context_lines": "结论下面还会印的短句。不要原句复述。",
     "field_pattern_lines": "已经写好的持续偏弱、均匀度和历史同期句子。报告会印出，不要复述，也不要改数字。",
-    "water_risk_lines": "已经写好的水分状况句子，区分观测、推算和证据不足。报告会印出，不要复述，不要另判干旱或洪涝。",
+    "water_risk_lines": "已经写好的水分观测和推算，结论里要用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述。原文里的“不判定”不要当成省略这个判断的理由。证据不够就说现在看不出来。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
     "stage_background": "这个阶段通常的背景，只供参考，不是必须套用的公式，也不是对本田的结论。",
     "gap_days": "最近一次观测和对比基准之间相隔的天数。",
@@ -361,11 +361,11 @@ def _soil_for_model(facts: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if soil.get("status") != "ready":
         return {"status": soil.get("status") or "absent"}
-    from app.reports.biweekly.conclusion_context import soil_reader_line
+    from app.reports.biweekly.conclusion_context import _texture_zh, soil_reader_line
 
     body = {
         "status": "ready",
-        "texture": soil.get("texture"),
+        "texture": _texture_zh(soil.get("texture")) or None,
         "ph": soil.get("ph"),
         "som_g_kg": soil.get("som_g_kg"),
         "rootzone_awc_mm": soil.get("rootzone_awc_mm"),
@@ -654,10 +654,11 @@ _BANNED = (
 
 
 def _asserts_diagnosis(sentence: str) -> bool:
-    """Drop a drought, flood, nutrient or pest claim unless the sentence refuses it."""
-    if not any(
-        word in sentence for word in ("干旱", "洪涝", "病虫害", "缺肥", "积水面积")
-    ):
+    """Drop a nutrient or pest claim unless the sentence refuses it.
+
+    旱涝和浇水、排水留在结论里，由模型按已有水分证据说明。
+    """
+    if not any(word in sentence for word in ("病虫害", "缺肥", "积水面积")):
         return False
     return not any(
         word in sentence for word in ("不判定", "不能判定", "不诊断", "不是灾损")
