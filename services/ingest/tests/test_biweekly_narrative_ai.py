@@ -488,6 +488,126 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("请求超时", timed["reader_note"])
         self.assertNotIn("test-key", json.dumps(timed))
 
+    def test_dropped_connection_retries_once_and_names_the_interruption(self) -> None:
+        """RemoteProtocolError is one retry, then a named note. Not a length stop."""
+        written = {
+            "summary": "NDRE 为 0.57。",
+            "changes": [
+                {
+                    "metric": "ndre",
+                    "judgment": "better",
+                    "sentence": "NDRE 为 0.57。",
+                }
+            ],
+            "conclusion": ["NDRE 为 0.57。"],
+            "field_notes": ["西南部值得看一眼。"],
+            "metric_notes": ["NDRE 本期是 0.57。"],
+        }
+
+        class _Response:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": json.dumps(written, ensure_ascii=False)
+                            },
+                        }
+                    ]
+                }
+
+        class _Client:
+            def __init__(self, fail_times: int) -> None:
+                self.fail_times = fail_times
+                self.calls = 0
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls += 1
+                self.headers = headers
+                if self.calls <= self.fail_times:
+                    try:
+                        raise ConnectionError("peer closed, token=test-key")
+                    except ConnectionError as cause:
+                        raise httpx.RemoteProtocolError(
+                            "Server disconnected without sending a response."
+                        ) from cause
+                return _Response()
+
+            def close(self) -> None:
+                return None
+
+        env = {
+            "BAILIAN_API_KEY": "test-key",
+            "BAILIAN_MODEL": "deepseek-v4.1-flash-1017",
+        }
+        buf, previous, narrative = self._capture()
+        try:
+            with patch.dict(os.environ, env):
+                dropped = _Client(fail_times=2)
+                failed = generate_metric_judgment(_facts(), client=dropped)
+                recovered_client = _Client(fail_times=1)
+                recovered = generate_metric_judgment(_facts(), client=recovered_client)
+        finally:
+            text = buf.getvalue()
+            self._restore(previous, narrative)
+
+        self.assertEqual(dropped.calls, 2)
+        self.assertEqual(failed["error"], "connection_error")
+        self.assertEqual(failed["diagnostics"]["attempts"], 2)
+        self.assertEqual(failed["diagnostics"]["exception_type"], "RemoteProtocolError")
+        self.assertEqual(failed["diagnostics"]["cause_type"], "ConnectionError")
+        reason = failed["diagnostics"]["disconnect_reason"]
+        self.assertIn("Server disconnected", reason)
+        self.assertIn("peer closed", reason)
+        self.assertIn("token=[redacted]", reason)
+        self.assertNotIn("test-key", reason)
+        self.assertEqual(failed["conclusion"], [])
+        self.assertIn("模型连接中断", failed["reader_note"])
+        self.assertNotIn("输出长度用尽", failed["reader_note"])
+        self.assertNotIn("请求超时", failed["reader_note"])
+        self.assertIn("connection_error", text)
+        self.assertIn("RemoteProtocolError", text)
+        self.assertIn("disconnect_reason", text)
+        self.assertIn("cause_type", text)
+        self.assertNotIn("test-key", text)
+        self.assertNotIn("test-key", json.dumps(failed))
+        self.assertNotIn("exc_info", text)
+
+        self.assertEqual(recovered_client.calls, 2)
+        self.assertIsNone(recovered["error"])
+        self.assertTrue(recovered["diagnostics"]["recovered"])
+        self.assertEqual(recovered["conclusion"], ["NDRE 为 0.57。"])
+        self.assertNotIn("reader_note", recovered)
+
+        class _Once:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls += 1
+                raise RuntimeError("boom test-key")
+
+            def close(self) -> None:
+                return None
+
+        with patch.dict(os.environ, env):
+            unexpected = _Once()
+            broken = generate_metric_judgment(_facts(), client=unexpected)
+        self.assertEqual(unexpected.calls, 1)
+        self.assertEqual(broken["error"], "RuntimeError")
+        self.assertEqual(
+            broken["reader_note"],
+            "本期模型文字未完成。数值和图表仍是程序计算结果。",
+        )
+        self.assertNotIn("boom", json.dumps(broken))
+        self.assertNotIn("test-key", json.dumps(broken))
+
     def test_content_list_ignores_reasoning_part(self) -> None:
         out, _client = self._judge(
             {
