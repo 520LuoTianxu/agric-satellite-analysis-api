@@ -207,6 +207,56 @@ class OssCompleteTests(unittest.TestCase):
             second["job"]["artifact"]["sha256"], first["job"]["artifact"]["sha256"]
         )
 
+    def test_ready_same_key_overwrite_updates_registered_artifact(self):
+        seed_job(self.service, P15_JOB, period="15")
+        key = official_object_key(LAND, P15_JOB)
+        self.storage.put_bytes(key, MIN_PDF)
+        first = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
+        self.assertEqual(first["job"]["status"], "ready")
+        replacement = MIN_PDF + b"x"
+        self.storage.put_bytes(key, replacement)
+        second = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, replacement), None
+            )
+        )
+        self.assertEqual(second["job"]["status"], "ready")
+        self.assertEqual(second["job"]["artifact"]["key"], key)
+        self.assertEqual(second["job"]["artifact"]["sha256"], sha256_bytes(replacement))
+        self.assertEqual(second["job"]["artifact"]["size_bytes"], len(replacement))
+        stored = self.service.get_job(P15_JOB)
+        self.assertEqual(stored["status"], "ready")
+        self.assertEqual(stored["artifact"]["sha256"], sha256_bytes(replacement))
+
+    def test_ready_overwrite_rejected_when_inspect_fails(self):
+        seed_job(self.service, P15_JOB, period="15")
+        key = official_object_key(LAND, P15_JOB)
+        self.storage.put_bytes(key, MIN_PDF)
+        first = asyncio.run(
+            biweekly_mod.biweekly_report_complete(
+                P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+            )
+        )
+        original_sha = first["job"]["artifact"]["sha256"]
+        # Live object changed, but the request still claims the old size/hash.
+        self.storage.put_bytes(key, MIN_PDF + b"x")
+        with self.assertRaises(Exception) as exc:
+            asyncio.run(
+                biweekly_mod.biweekly_report_complete(
+                    P15_JOB, oss_body(P15_JOB, MIN_PDF), None
+                )
+            )
+        detail = getattr(exc.exception, "detail", {})
+        self.assertEqual((detail or {}).get("error"), "ARTIFACT_SIZE_MISMATCH")
+        stored = self.service.get_job(P15_JOB)
+        self.assertEqual(stored["status"], "ready")
+        self.assertEqual(stored["artifact"]["sha256"], original_sha)
+        self.assertEqual(stored["artifact"]["size_bytes"], len(MIN_PDF))
+
     def test_legacy_base64_still_completes(self):
         job = self.service.request_generate("6417", "2025/26", "12", defer_run=True)
         body = biweekly_mod.CompleteRequest(

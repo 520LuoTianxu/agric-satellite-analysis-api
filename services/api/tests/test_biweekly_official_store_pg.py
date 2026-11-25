@@ -165,7 +165,7 @@ class SqlAlchemyOfficialStorePgTests(unittest.TestCase):
         self.assertEqual(outcome, "ignored_stale_fail")
         self.assertEqual(kept["status"], "ready")
 
-    def test_conflicting_hash_is_rejected(self):
+    def test_same_key_hash_change_updates_ready_artifact(self):
         first = {
             "storage": "oss",
             "bucket": "agric-test",
@@ -176,10 +176,36 @@ class SqlAlchemyOfficialStorePgTests(unittest.TestCase):
         other = {**first, "sha256": sha256_bytes(MIN_PDF + b"x"), "size_bytes": len(MIN_PDF) + 1}
         self.store.upsert(self._job(P15, period="15"))
         self.store.apply_event(P15, {"status": "ready", "artifact": first})
+        job, outcome = self.store.apply_event(P15, {"status": "ready", "artifact": other})
+        self.assertEqual(outcome, "replaced")
+        self.assertEqual(job["status"], "ready")
+        stored = self.store.get(P15)
+        self.assertEqual(stored["status"], "ready")
+        self.assertEqual(stored["artifact"]["sha256"], other["sha256"])
+        self.assertEqual(stored["artifact"]["size_bytes"], other["size_bytes"])
+        self.assertEqual(stored["artifact"]["key"], first["key"])
+
+    def test_conflicting_key_is_rejected(self):
+        first = {
+            "storage": "oss",
+            "bucket": "agric-test",
+            "key": official_object_key(LAND, P15),
+            "size_bytes": len(MIN_PDF),
+            "sha256": sha256_bytes(MIN_PDF),
+        }
+        other = {
+            **first,
+            "key": official_object_key(LAND, P12),
+            "sha256": sha256_bytes(MIN_PDF + b"x"),
+            "size_bytes": len(MIN_PDF) + 1,
+        }
+        self.store.upsert(self._job(P15, period="15"))
+        self.store.apply_event(P15, {"status": "ready", "artifact": first})
         with self.assertRaises(ReportError) as exc:
             self.store.apply_event(P15, {"status": "ready", "artifact": other})
         self.assertEqual(exc.exception.code, "ARTIFACT_CONFLICT")
         self.assertEqual(self.store.get(P15)["artifact"]["sha256"], first["sha256"])
+        self.assertEqual(self.store.get(P15)["artifact"]["key"], first["key"])
 
     def test_concurrent_complete_is_idempotent(self):
         artifact = {
