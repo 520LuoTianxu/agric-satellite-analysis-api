@@ -169,6 +169,38 @@ class TriggerServiceTests(unittest.TestCase):
         self.assertTrue(data.startswith(b"%PDF"))
         self.assertGreater(len(data), 1000)
 
+    def test_radar_baseline_rows_are_kept_outside_the_period(self):
+        job = self.service.request_generate(
+            "6417",
+            "2025/26",
+            "1",
+            defer_run=True,
+            observations_override=[
+                {
+                    "date": "2025-11-08",
+                    "sensor": "S1",
+                    "scene_id": "in-period",
+                    "vv_avg": -12.0,
+                    "relative_orbit": 113,
+                }
+            ],
+        )
+        self.service.set_payload_fields(
+            job["job_id"],
+            radar_baseline_observations=[
+                {"date": "2025-10-01", "vv": -11.0, "relative_orbit": 113, "scene_id": "earlier"},
+                {"date": "2025-11-08", "vv": -12.0, "relative_orbit": 113, "scene_id": "in-period"},
+            ],
+        )
+        facts, _status = self.service.prepare_generate_facts(self.service.get_job(job["job_id"]))
+        self.assertEqual(
+            [row["date"] for row in facts["radar_baseline_observations"]],
+            ["2025-10-01", "2025-11-08"],
+        )
+        self.assertEqual([row["date"] for row in facts["radar_observations"]], ["2025-11-08"])
+        self.assertEqual(facts["radar_observations"][0]["vv"], -12.0)
+        self.assertEqual(facts["radar_observations"][0]["relative_orbit"], 113)
+
 
     def test_record_generate_backfill_separates_hard_failure_from_not_needed(self):
         queued = self.service.request_generate("6417", "2025/26", "12", defer_run=True)

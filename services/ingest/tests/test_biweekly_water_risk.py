@@ -134,6 +134,140 @@ class WaterRiskTests(unittest.TestCase):
         self.assertNotIn("没有洪涝", text)
         self.assertNotIn("未见积水", text)
 
+    def test_earlier_same_orbit_scenes_label_a_single_period_scene(self):
+        earlier = [
+            {
+                "date": "2026-04-01",
+                "vv": -10.0,
+                "vh": -16.0,
+                "scene_id": "early-a",
+                "relative_orbit": 113,
+                "platform": "S1A",
+            },
+            {
+                "date": "2026-04-13",
+                "vv": -10.0,
+                "vh": -16.0,
+                "scene_id": "early-b",
+                "relative_orbit": 113,
+                "platform": "S1A",
+            },
+        ]
+        current = [
+            {
+                "date": "2026-05-18",
+                "vv": -21.0,
+                "vh": -24.0,
+                "scene_id": "now",
+                "relative_orbit": 113,
+                "platform": "S1A",
+            }
+        ]
+        result = assess_water_risk(
+            _facts(
+                radar_observations=current,
+                radar_baseline_observations=earlier + current,
+                s1_count=1,
+                data_quality={"radar_count": 1},
+            )
+        )
+        text = _joined(result)
+        self.assertTrue(result["radar_baseline_sufficient"])
+        self.assertEqual(result["radar_vv_count"], 1)
+        self.assertIn("积水候选", text)
+        self.assertIn("不必凑满3景", text)
+        self.assertNotIn("4月1日", text)
+        self.assertNotIn("4月13日", text)
+        self.assertNotIn("不能确认或排除积水", text)
+
+    def test_one_earlier_scene_is_still_not_enough(self):
+        earlier = [
+            {
+                "date": "2026-04-13",
+                "vv": -10.0,
+                "vh": -16.0,
+                "scene_id": "early",
+                "relative_orbit": 113,
+                "platform": "S1A",
+            }
+        ]
+        current = [
+            {
+                "date": "2026-05-18",
+                "vv": -21.0,
+                "vh": -24.0,
+                "scene_id": "now",
+                "relative_orbit": 113,
+                "platform": "S1A",
+            }
+        ]
+        result = assess_water_risk(
+            _facts(
+                radar_observations=current,
+                radar_baseline_observations=earlier + current,
+                s1_count=1,
+                data_quality={"radar_count": 1},
+            )
+        )
+        text = _joined(result)
+        self.assertFalse(result["radar_baseline_sufficient"])
+        self.assertIn("更早", text)
+        self.assertIn("不能确认或排除积水", text)
+        self.assertNotIn("积水候选", text)
+        self.assertNotIn("接近", text)
+
+    def test_different_calibration_history_is_not_a_baseline(self):
+        earlier = [
+            {
+                "date": f"2026-04-{day:02d}",
+                "vv": -10.0,
+                "vh": -16.0,
+                "scene_id": f"early-{day}",
+                "relative_orbit": 10,
+                "platform": "S1A",
+            }
+            for day in (1, 13, 25)
+        ]
+        current = [
+            {
+                "date": "2026-05-18",
+                "vv": -21.0,
+                "vh": -24.0,
+                "scene_id": "now",
+                "relative_orbit": 40,
+                "platform": "S1C",
+            }
+        ]
+        result = assess_water_risk(
+            _facts(
+                radar_observations=current,
+                radar_baseline_observations=earlier + current,
+                s1_count=1,
+                data_quality={"radar_count": 1},
+            )
+        )
+        text = _joined(result)
+        self.assertFalse(result["radar_baseline_sufficient"])
+        self.assertNotIn("积水候选", text)
+        self.assertIn("不能确认或排除积水", text)
+
+    def test_notes_use_the_baseline_flag_rather_than_this_period_count(self):
+        from app.reports.biweekly.report_text import omitted_items
+
+        facts = {
+            "data_quality": {"radar_count": 1},
+            "water_risk": {
+                "radar_vv_count": 1,
+                "radar_baseline_sufficient": True,
+                "lines": [],
+            },
+        }
+        ready = " ".join(omitted_items(facts))
+        self.assertNotIn("不能确认或排除积水", ready)
+        facts["water_risk"]["radar_baseline_sufficient"] = False
+        short = " ".join(omitted_items(facts))
+        self.assertIn("不能确认或排除积水", short)
+
     def test_mndwi_fraction_is_not_called_area(self):
         columns = {
             "lon": [115.5] * 40,

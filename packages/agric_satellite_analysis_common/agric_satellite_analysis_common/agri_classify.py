@@ -1563,7 +1563,7 @@ def _percentile_from_sorted(values: list[float], p: float) -> float | None:
 
 def _classify_flood_series_date_bounded(
     observations: list[SarObs],
-) -> list[tuple[str, FloodClass | None]]:
+) -> tuple[dict[int, FloodClass | None], dict[int, int]]:
     """按日期前缀累计同轨/同定标样本，供需要回看历史标签的报告使用。"""
     observations_by_date: dict[
         str,
@@ -1583,6 +1583,8 @@ def _classify_flood_series_date_bounded(
         tuple[str, str, str, str, str], tuple[list[float], list[float]]
     ] = defaultdict(lambda: ([], []))
     classes: dict[int, FloodClass | None] = {}
+    # 与分类用的是同一组样本数。绝对阈值可以在样本不足时给出关注，报告要靠这个数拦住。
+    sample_counts: dict[int, int] = {}
 
     for day in sorted(observations_by_date):
         groups = observations_by_date[day]
@@ -1620,6 +1622,7 @@ def _classify_flood_series_date_bounded(
                 else None
             )
             for index, obs in rows:
+                sample_counts[index] = len(vv_samples)
                 classes[index] = classify_flood_scene(
                     _num(obs.get("vv")),
                     _num(obs.get("vh")),
@@ -1627,10 +1630,20 @@ def _classify_flood_series_date_bounded(
                     diff_p40,
                 )
 
-    return [
-        (str(obs.get("date") or ""), classes.get(index))
-        for index, obs in enumerate(observations)
-    ]
+    return classes, sample_counts
+
+
+def flood_comparable_counts(observations: list[SarObs]) -> list[int]:
+    """Date-bounded count of VV samples the flood rule can compare.
+
+    Matches ``classify_flood_series(..., date_bounded=True)``: same relative
+    orbit and calibration first, then the same-calibration fallback. A scene
+    without VV counts as 0. The absolute watch shortcut can still label a
+    lone low scene; callers that require a baseline should ignore labels
+    whose count is below ``MIN_ORBIT_SAMPLES``.
+    """
+    _classes, sample_counts = _classify_flood_series_date_bounded(observations)
+    return [sample_counts.get(index, 0) for index in range(len(observations))]
 
 
 def classify_flood_series(
@@ -1640,7 +1653,11 @@ def classify_flood_series(
 ) -> list[tuple[str, FloodClass | None]]:
     """按轨道和定标口径建VV基线；历史报告可启用逐日期截止，避免未来影像泄漏。"""
     if date_bounded:
-        return _classify_flood_series_date_bounded(observations)
+        classes, _sample_counts = _classify_flood_series_date_bounded(observations)
+        return [
+            (str(obs.get("date") or ""), classes.get(index))
+            for index, obs in enumerate(observations)
+        ]
 
     groups: dict[tuple[str, tuple[str, str, str, str, str]], list[SarObs]] = defaultdict(list)
     calibration_groups: dict[tuple[str, str, str, str, str], list[SarObs]] = defaultdict(list)

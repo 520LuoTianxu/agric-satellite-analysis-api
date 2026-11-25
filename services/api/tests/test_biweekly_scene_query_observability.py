@@ -340,6 +340,38 @@ class LoadSceneObservationsTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(raised.exception.code, "SCENE_QUERY_FAILED")
 
+    async def test_enrich_payload_attaches_earlier_radar_for_the_baseline(self) -> None:
+        period = {
+            "period_id": "1",
+            "start": "2026-05-06",
+            "end_inclusive": "2026-05-19",
+            "end_exclusive": "2026-05-20",
+        }
+        baseline = [{"date": "2026-04-01", "vv": -11.0, "relative_orbit": 113, "scene_id": "early"}]
+        with (
+            patch(
+                "app.services.biweekly_report_flow.load_scene_observations",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "app.services.biweekly_report_flow.load_radar_baseline",
+                new=AsyncMock(return_value=baseline),
+            ) as load_radar,
+            patch(
+                "app.services.biweekly_report_flow.load_land_meta",
+                new=AsyncMock(return_value={"land_name": "试验田"}),
+            ),
+            patch(
+                "app.services.biweekly_report_flow.load_weather_series",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            fields = await _enrich_payload("32696", period, [period], job_id="bj-radar")
+        self.assertEqual(fields["radar_baseline_observations"], baseline)
+        self.assertEqual(fields["radar_baseline_lookback_days"], 90)
+        self.assertEqual(load_radar.await_args.args[1], "2026-02-19")
+        self.assertEqual(load_radar.await_args.args[2], "2026-05-20")
+
 
 class UserDmsRowsEligibilityTests(unittest.TestCase):
     """Existing eligibility only — do not change decloud quality rules here."""

@@ -123,7 +123,11 @@ def generate_official_biweekly_pdf(
             facts["field_patterns"] = kept
     water = filled.get("water_risk")
     if isinstance(water, dict) and water.get("lines"):
-        facts["water_risk"] = {"lines": list(water.get("lines") or [])}
+        facts["water_risk"] = {
+            "lines": list(water.get("lines") or []),
+            "radar_vv_count": water.get("radar_vv_count"),
+            "radar_baseline_sufficient": water.get("radar_baseline_sufficient"),
+        }
     rendered = render_official_biweekly_pdf(filled, dest_path, figures_dir=figures)
     if facts_sidecar:
         side = Path(facts_sidecar)

@@ -6,7 +6,8 @@
 实际能用的输入：
 - 指标序列里已经算好的 NDMI（中位数或均值）和它的变化；
 - 事实里的本期和前期格点降水、蒸散，缺测日不补 0、不算收支；
-- 任务载荷里已经读到的哨兵一号景。VV 满 3 景才套用现有同轨规则，
+- 任务载荷里本期的哨兵一号景，加上事实里已经附带的更早回波。
+  同一轨道、同一定标凑满 3 景才套用现有规则；这 3 景不必都落在这 14 天里。
   规则给不出标记时不写成无风险；
 - 像元产品里如果本来就有 MNDWI 列，只描述该列，不换算成面积。
 
@@ -23,6 +24,7 @@ import numpy as np
 from agric_satellite_analysis_common.agri_classify import (
     MIN_ORBIT_SAMPLES,
     classify_flood_series,
+    flood_comparable_counts,
 )
 from app.reports.biweekly.metric_stats import columns_of
 from app.reports.biweekly.report_text import cn_md, fmt_index, fmt_pct, fmt_signed
@@ -115,32 +117,116 @@ def _weather_sentence(facts: dict[str, Any]) -> tuple[str, float | None]:
     return "，".join(parts) + "。", balance_mm
 
 
-def _radar_rows(facts: dict[str, Any]) -> list[dict[str, Any]]:
+def _radar_rows(value: Any) -> list[dict[str, Any]]:
     rows = []
-    for row in facts.get("radar_observations") or []:
-        if isinstance(row, dict) and row.get("date"):
-            rows.append(row)
+    for row in value or []:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        vv = row.get("vv")
+        if vv is None:
+            vv = row.get("vv_avg")
+        if vv is None:
+            vv = metrics.get("vv")
+        vh = row.get("vh")
+        if vh is None:
+            vh = row.get("vh_avg")
+        if vh is None:
+            vh = metrics.get("vh")
+        item = dict(row)
+        item["date"] = str(row.get("date"))[:10]
+        item["vv"] = vv
+        item["vh"] = vh
+        rows.append(item)
     return rows
 
 
-def _radar_sentence(facts: dict[str, Any]) -> tuple[str, int]:
-    rows = _radar_rows(facts)
+def _scene_key(row: dict[str, Any]) -> tuple[str, str]:
+    scene = str(row.get("scene_id") or row.get("stac_item_id") or "").strip()
+    if scene:
+        return (row["date"], scene)
+    return (row["date"], str(row.get("relative_orbit") or ""))
+
+
+def _fill_gaps(preferred: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Keep the preferred backscatter, and copy orbit or calibration the other row has."""
+    merged = dict(preferred)
+    for key, value in extra.items():
+        if key in {"vv", "vh"}:
+            if _num(merged.get(key)) is None and _num(value) is not None:
+                merged[key] = value
+            continue
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _dedupe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = _scene_key(row)
+        current = chosen.get(key)
+        chosen[key] = row if current is None else _fill_gaps(current, row)
+    return [chosen[key] for key in sorted(chosen)]
+
+
+def _period_window(facts: dict[str, Any]) -> tuple[str, str] | None:
+    period = facts.get("period") or {}
+    start = str(period.get("start") or "")[:10]
+    end = str(period.get("end_exclusive") or "")[:10]
+    if len(start) == 10 and len(end) == 10 and start < end:
+        return start, end
+    return None
+
+
+def _radar_series(facts: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """Split this period's scenes from earlier baseline scenes.
+
+    本期景决定「这半月有没有雷达」。更早的景只参加同轨基线，不把历史日期写成这一期的积水。
+    """
+    period_rows = _radar_rows(facts.get("radar_observations"))
+    baseline_rows = _radar_rows(facts.get("radar_baseline_observations"))
+    window = _period_window(facts)
     counted = int((facts.get("data_quality") or {}).get("radar_count") or facts.get("s1_count") or 0)
-    counted = max(counted, len(rows))
-    vv_rows = [row for row in rows if _num(row.get("vv")) is not None]
+    if window is None:
+        counted = max(counted, len(period_rows))
+        return _dedupe(period_rows), [], counted
+    start, end = window
+    in_period = [row for row in period_rows if start <= row["date"] < end]
+    in_period.extend(row for row in baseline_rows if start <= row["date"] < end)
+    earlier = [row for row in baseline_rows if row["date"] < start]
+    period = _dedupe(in_period)
+    counted = max(counted, len(period_rows), len(period))
+    return period, _dedupe(earlier), counted
+
+
+def _radar_sentence(facts: dict[str, Any]) -> tuple[str, int, bool]:
+    period_rows, earlier_rows, counted = _radar_series(facts)
+    period_vv = [row for row in period_rows if _num(row.get("vv")) is not None]
+    earlier_vv = [row for row in earlier_rows if _num(row.get("vv")) is not None]
     if counted <= 0:
-        return "这半月没有雷达图，不能对积水作出判断。", 0
-    if len(vv_rows) < MIN_ORBIT_SAMPLES:
+        return "这半月没有雷达图，不能对积水作出判断。", 0, False
+    if not period_vv:
         return (
-            f"这半月雷达{counted}景，其中能看回波的{len(vv_rows)}景。"
+            f"这半月雷达{counted}景，其中能看回波的0景。"
             f"能拿来比的不到{MIN_ORBIT_SAMPLES}景，不能确认或排除积水。",
-            len(vv_rows),
+            0,
+            False,
         )
-    labelled = classify_flood_series(vv_rows, date_bounded=True)
+    combined = sorted(
+        earlier_rows + period_rows,
+        key=lambda row: (row["date"], str(row.get("scene_id") or "")),
+    )
+    period_ids = {id(row) for row in period_rows}
+    labelled = classify_flood_series(combined, date_bounded=True)
+    comparable = flood_comparable_counts(combined)
     groups: dict[str, list[str]] = {}
     unlabeled = 0
-    for day, kind in labelled:
-        if kind is None:
+    # 回波特别低时，规则在没有基线时也会标成关注。可比样本不满 3 景时不引用这个标记。
+    for obs, (day, kind), count in zip(combined, labelled, comparable):
+        if id(obs) not in period_ids or _num(obs.get("vv")) is None:
+            continue
+        if kind is None or count < MIN_ORBIT_SAMPLES:
             unlabeled += 1
             continue
         groups.setdefault(str(kind), []).append(str(day)[:10])
@@ -152,16 +238,30 @@ def _radar_sentence(facts: dict[str, Any]) -> tuple[str, int]:
         shown = "、".join(cn_md(day) for day in days[:4])
         bits.append(f"{shown}{_FLOOD_WORDS[kind]}")
     if not bits:
-        text = "雷达有记录，但还对不上同一条轨道，不能写成无风险。"
-    else:
-        text = "雷达：" + "；".join(bits) + "。"
-        if "dry" in groups and len(groups) == 1:
-            text += "没有达到标记不等于没有积水风险。"
+        if earlier_vv:
+            text = (
+                f"这半月雷达{counted}景，其中能看回波的{len(period_vv)}景。"
+                f"加上更早的同轨、同定标记录，仍不足{MIN_ORBIT_SAMPLES}景或对不上同一条轨道，"
+                "不能确认或排除积水。"
+            )
+        elif len(period_vv) < MIN_ORBIT_SAMPLES:
+            text = (
+                f"这半月雷达{counted}景，其中能看回波的{len(period_vv)}景。"
+                f"能拿来比的不到{MIN_ORBIT_SAMPLES}景，不能确认或排除积水。"
+            )
         else:
-            text += "这只是已有规则的标记，要到田里核对，不是灾损认定。"
-        if unlabeled:
-            text += f"另有{unlabeled}景对不上，那些日期不能写成无风险。"
-    return text, len(vv_rows)
+            text = "雷达有记录，但还对不上同一条轨道，不能写成无风险。"
+        return text, len(period_vv), False
+    text = "雷达：" + "；".join(bits) + "。"
+    if len(period_vv) < MIN_ORBIT_SAMPLES and earlier_vv:
+        text += "比较用的是本期之前已经入库、轨道和定标可以对照的回波，这半月自己不必凑满3景。"
+    if "dry" in groups and len(groups) == 1:
+        text += "没有达到标记不等于没有积水风险。"
+    else:
+        text += "这只是已有规则的标记，要到田里核对，不是灾损认定。"
+    if unlabeled:
+        text += f"另有{unlabeled}景对不上，那些日期不能写成无风险。"
+    return text, len(period_vv), True
 
 
 def _mndwi_sentence(products: list[dict[str, Any]], latest_day: str | None) -> str:
@@ -261,7 +361,7 @@ def assess_water_risk(
                 f"叶子里的水变化为{fmt_signed(ndmi_delta)}，有效降雨减去蒸散为{fmt_signed(balance_mm, 1)}毫米，"
                 "两项方向不一致，不合成一个旱涝结论，也不判定干旱或洪涝。"
             )
-    radar_line, vv_count = _radar_sentence(facts)
+    radar_line, vv_count, baseline_ready = _radar_sentence(facts)
     mndwi_line = _mndwi_sentence(list(products or []), str(latest_day)[:10] if latest_day else None)
     closing = "" if conflict else _reader_judgment(ndmi_delta, balance_mm)
     lines.append(
@@ -283,6 +383,7 @@ def assess_water_risk(
         "balance_mm": balance_mm,
         "conflict": conflict,
         "radar_vv_count": vv_count,
+        "radar_baseline_sufficient": baseline_ready,
         "has_ndmi_pair": has_ndmi_pair,
         "has_weather": has_weather,
     }

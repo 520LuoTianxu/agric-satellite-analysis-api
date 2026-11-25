@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -20,6 +20,7 @@ from agric_satellite_analysis_common.biweekly.scene_rows import (  # noqa: F401
     eligible_optical as _eligible_optical,
     exclusion_reason as _exclusion_reason,
     to_observation as _to_observation,
+    to_radar_observation as _to_radar_observation,
     weather_row as _weather_row,
 )
 
@@ -33,6 +34,30 @@ WHERE land_id = :land_id
   AND date >= :start
   AND date < :end_exclusive
 ORDER BY date, sensor, scene_id
+"""
+
+# 同一条相对轨道大约 12 天过一次，双星约 6 天。半月窗口里通常只有 1–2 景，
+# 积水规则仍要 3 景同轨同定标回波才能做基线。向前看 90 天，覆盖几次重复过境和漏拍，
+# 又不到跨整季把上一茬作物的裸地回波当成常态。
+RADAR_BASELINE_LOOKBACK_DAYS = 90
+
+RADAR_BASELINE_SQL = """
+SELECT date, scene_id,
+       vv_avg, vh_avg,
+       pixel_data->>'relative_orbit' AS relative_orbit,
+       pixel_data->>'stac_item_id' AS stac_item_id,
+       pixel_data->'radiometric_calibration'->>'platform' AS platform,
+       pixel_data->'radiometric_calibration'->>'processing_version' AS processing_version,
+       pixel_data->'radiometric_calibration'->>'calibration_epoch' AS calibration_epoch,
+       pixel_data->'radiometric_calibration'->>'acquisition_datetime' AS acquisition_datetime,
+       pixel_data->'radiometric_calibration'->>'method' AS calibration_method,
+       pixel_data->'radiometric_calibration'->>'fallback_scale' AS calibration_scale
+FROM agric_satellite.parcel_scene_products
+WHERE land_id = :land_id
+  AND sensor = 'S1'
+  AND date >= :start
+  AND date < :end_exclusive
+ORDER BY date, scene_id
 """
 
 
@@ -255,6 +280,58 @@ async def load_scene_observations(
         # never a silent empty-optics or evidence-limited brief.
         _log_query_failed(
             "biweekly_scene_query_failed",
+            exc,
+            land_id=land_id,
+            start=start,
+            end_exclusive=end_exclusive,
+            job_id=job_id,
+        )
+        return None
+
+
+def radar_baseline_start(end_exclusive: str, *, lookback_days: int = RADAR_BASELINE_LOOKBACK_DAYS) -> str:
+    """First day of the radar baseline window. The period end stays exclusive."""
+    end = _as_bind_date(end_exclusive)
+    return (end - timedelta(days=lookback_days)).isoformat()
+
+
+async def load_radar_baseline(
+    land_id: str,
+    start: str,
+    end_exclusive: str,
+    *,
+    job_id: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """Earlier and in-period Sentinel-1 rows for the flood baseline.
+
+    None means the table could not be read. An empty list means the window
+    really has no radar. Callers must not treat None as “no standing water”.
+    """
+    if not (settings.database_url or "").strip():
+        return None
+    try:
+        from app.core.database import async_session
+
+        async with async_session() as db:
+            result = await db.execute(
+                text(RADAR_BASELINE_SQL),
+                {
+                    "land_id": str(land_id),
+                    "start": _as_bind_date(start),
+                    "end_exclusive": _as_bind_date(end_exclusive),
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+        observations = []
+        for row in rows:
+            item = _to_radar_observation({**row, "sensor": "S1"})
+            if item is not None:
+                observations.append(item)
+        return observations
+    except Exception as exc:  # noqa: BLE001
+        # 基线读失败时出报仍用本期雷达，不能把整份双周报打成失败，也不能写成无积水。
+        _log_query_failed(
+            "biweekly_radar_baseline_query_failed",
             exc,
             land_id=land_id,
             start=start,
