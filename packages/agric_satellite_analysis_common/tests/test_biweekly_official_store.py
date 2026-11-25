@@ -196,7 +196,7 @@ class OfficialStateTests(unittest.TestCase):
         self.assertEqual(outcome, "idempotent")
         self.assertEqual(again["status"], "ready")
 
-    def test_conflict_on_different_artifact(self):
+    def test_ready_same_key_overwrite_updates_artifact(self):
         first = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
         other_pdf = MIN_PDF + b"x"
         second = {
@@ -205,12 +205,77 @@ class OfficialStateTests(unittest.TestCase):
             "sha256": sha256_bytes(other_pdf),
             "size_bytes": len(other_pdf),
         }
+        self.assertEqual(first["bucket"], second["bucket"])
+        self.assertEqual(first["key"], second["key"])
+        current, _ = apply_status_event(
+            self._job("dispatched"), {"status": "ready", "artifact": first}
+        )
+        next_job, outcome = apply_status_event(
+            current, {"status": "ready", "artifact": second}
+        )
+        self.assertEqual(outcome, "replaced")
+        self.assertEqual(next_job["status"], "ready")
+        self.assertEqual(next_job["artifact"]["sha256"], second["sha256"])
+        self.assertEqual(next_job["artifact"]["size_bytes"], second["size_bytes"])
+        self.assertEqual(next_job["artifact"]["key"], first["key"])
+        self.assertEqual(next_job["history"][-1].get("outcome"), "replaced")
+
+    def test_conflict_on_different_key(self):
+        first = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
+        other_pdf = MIN_PDF + b"x"
+        second = {
+            **_ref(P12_JOB, other_pdf),
+            "kind": "official_visual_artifact",
+            "sha256": sha256_bytes(other_pdf),
+            "size_bytes": len(other_pdf),
+        }
+        self.assertNotEqual(first["key"], second["key"])
         current, _ = apply_status_event(
             self._job("dispatched"), {"status": "ready", "artifact": first}
         )
         with self.assertRaises(ReportError) as exc:
             apply_status_event(current, {"status": "ready", "artifact": second})
         self.assertEqual(exc.exception.code, "ARTIFACT_CONFLICT")
+        self.assertEqual(current["artifact"]["sha256"], first["sha256"])
+
+    def test_conflict_on_different_bucket(self):
+        first = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
+        other_pdf = MIN_PDF + b"x"
+        second = {
+            **_ref(P15_JOB, other_pdf, bucket="other-bucket"),
+            "kind": "official_visual_artifact",
+            "sha256": sha256_bytes(other_pdf),
+            "size_bytes": len(other_pdf),
+        }
+        self.assertEqual(first["key"], second["key"])
+        self.assertNotEqual(first["bucket"], second["bucket"])
+        current, _ = apply_status_event(
+            self._job("dispatched"), {"status": "ready", "artifact": first}
+        )
+        with self.assertRaises(ReportError) as exc:
+            apply_status_event(current, {"status": "ready", "artifact": second})
+        self.assertEqual(exc.exception.code, "ARTIFACT_CONFLICT")
+        self.assertEqual(current["artifact"]["sha256"], first["sha256"])
+
+    def test_memory_store_persists_same_key_replace(self):
+        store = MemoryOfficialStore()
+        first = {**_ref(P15_JOB, MIN_PDF), "kind": "official_visual_artifact"}
+        other_pdf = MIN_PDF + b"x"
+        second = {
+            **_ref(P15_JOB, other_pdf),
+            "kind": "official_visual_artifact",
+        }
+        store.upsert(self._job("dispatched"))
+        store.apply_event(P15_JOB, {"status": "ready", "artifact": first})
+        job, outcome = store.apply_event(
+            P15_JOB, {"status": "ready", "artifact": second}
+        )
+        self.assertEqual(outcome, "replaced")
+        self.assertEqual(job["status"], "ready")
+        stored = store.get(P15_JOB)
+        self.assertEqual(stored["status"], "ready")
+        self.assertEqual(stored["artifact"]["sha256"], second["sha256"])
+        self.assertEqual(stored["artifact"]["size_bytes"], second["size_bytes"])
 
 
 class DurableStoreRestartTests(unittest.TestCase):

@@ -31,11 +31,22 @@ def _now() -> str:
     return datetime.now(SHANGHAI).isoformat(timespec="seconds")
 
 
+def _same_oss_location(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    """True when both refs name the same OSS object (bucket + key)."""
+    if not left or not right:
+        return False
+    bucket = left.get("bucket")
+    key = left.get("key")
+    if not bucket or not key:
+        return False
+    return bucket == right.get("bucket") and key == right.get("key")
+
+
 def apply_status_event(current: dict[str, Any] | None, event: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """Pure official-job state machine. Returns (next_job, outcome).
 
     Outcomes:
-      applied, idempotent, ignored_stale_fail, recovered, conflict, created
+      applied, idempotent, ignored_stale_fail, recovered, replaced, conflict, created
     """
     incoming_status = event.get("status")
     if incoming_status not in OFFICIAL_STATES:
@@ -85,6 +96,27 @@ def apply_status_event(current: dict[str, Any] | None, event: dict[str, Any]) ->
                 not incoming_artifact and current_artifact
             ):
                 return current, "idempotent"
+            if incoming_artifact is not None and _same_oss_location(
+                current_artifact, incoming_artifact
+            ):
+                # Same OSS object was overwritten in place; update checksum
+                # metadata and stay ready. A different bucket/key still conflicts.
+                job["status"] = incoming_status
+                job["updated_at"] = now
+                job["artifact"] = incoming_artifact
+                job["error_code"] = event.get("error_code")
+                if event.get("result") is not None:
+                    job["result"] = event["result"]
+                if event.get("note"):
+                    result = dict(job.get("result") or {})
+                    result["note"] = event["note"]
+                    job["result"] = result
+                if event.get("facts") is not None:
+                    job["facts"] = event["facts"]
+                job.setdefault("history", []).append(
+                    {"status": incoming_status, "at": now, "outcome": "replaced"}
+                )
+                return job, "replaced"
             raise ReportError("ARTIFACT_CONFLICT")
         outcome = "recovered" if current_status == "failed" else "applied"
         job["status"] = incoming_status
