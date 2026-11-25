@@ -76,8 +76,10 @@ class PersistentWeakTests(unittest.TestCase):
         self.assertGreater(held["n_persistent_clustered"], 0)
         self.assertEqual(once["n_persistent"], 0)
         self.assertGreater(once["n_occasional"], 0)
-        self.assertIn("不判定缺肥或病虫害", held["line"])
-        self.assertNotIn("缺肥导致", held["line"])
+        self.assertIn("建议去地里看看确认一下", held["line"])
+        self.assertNotIn("不判定", held["line"])
+        self.assertNotIn("缺肥", held["line"])
+        self.assertNotIn("病虫害", held["line"])
 
     def test_two_dates_are_not_called_persistent(self):
         products = [_product("2026-05-12", _field(True)), _product("2026-05-18", _field(True))]

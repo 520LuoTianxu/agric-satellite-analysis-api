@@ -111,6 +111,50 @@ def radar_count(rows: list[dict] | None) -> int:
     return sum(1 for row in rows if as_sensor(row.get("sensor")) == "S1")
 
 
+def to_radar_observation(row: dict[str, Any]) -> dict[str, Any] | None:
+    """把一景哨兵一号收成积水规则要的回波和定标字段，不带像元。
+
+    相对轨道优先用已写入的值，缺了再从产品号解析，避免升降轨被当成同一组。
+    """
+    sensor = as_sensor(row.get("sensor"))
+    if sensor and sensor != "S1":
+        return None
+    if not row.get("date"):
+        return None
+    day = as_day(row["date"])
+    if len(day) < 10:
+        return None
+    from agric_satellite_analysis_common.agri_classify import parse_s1_relative_orbit
+
+    scene_id = row.get("scene_id")
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    vv = as_float(row.get("vv"))
+    if vv is None:
+        vv = as_float(row.get("vv_avg"))
+    if vv is None:
+        vv = as_float(metrics.get("vv"))
+    vh = as_float(row.get("vh"))
+    if vh is None:
+        vh = as_float(row.get("vh_avg"))
+    if vh is None:
+        vh = as_float(metrics.get("vh"))
+    platform = str(row.get("platform") or "").strip() or None
+    return {
+        "date": day,
+        "scene_id": scene_id,
+        "stac_item_id": row.get("stac_item_id"),
+        "relative_orbit": parse_s1_relative_orbit(scene_id, row.get("relative_orbit")),
+        "platform": platform,
+        "vv": vv,
+        "vh": vh,
+        "processing_version": str(row.get("processing_version") or "").strip() or None,
+        "calibration_epoch": str(row.get("calibration_epoch") or "").strip() or None,
+        "calibration_method": str(row.get("calibration_method") or "").strip() or None,
+        "calibration_scale": as_float(row.get("calibration_scale")),
+        "acquisition_datetime": row.get("acquisition_datetime") or None,
+    }
+
+
 def weather_row(row: dict[str, Any]) -> dict[str, Any]:
     """One ``weather_daily`` row in the shape the report reads."""
 

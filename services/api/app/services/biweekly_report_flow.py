@@ -33,9 +33,12 @@ from app.services.biweekly_dispatch import (
     dispatch_biweekly_report,
 )
 from app.services.biweekly_scenes import (
+    RADAR_BASELINE_LOOKBACK_DAYS,
     load_land_meta,
+    load_radar_baseline,
     load_scene_observations,
     load_weather_series,
+    radar_baseline_start,
     summarize_weather,
 )
 from app.services.biweekly_trigger import build_trigger_service
@@ -155,6 +158,18 @@ async def _enrich_payload(
         "weather_antecedent": weather_antecedent,
         "s1_count": _s1_count(observations),
     }
+    # 积水基线用本期结束日前 90 天的哨兵一号，含本期。下载机不再查库。
+    # 读失败记为 None，出报退回「只看这半月」，不把报告打成失败。
+    end_exclusive = str(period.get("end_exclusive") or "")[:10]
+    try:
+        baseline_start = radar_baseline_start(end_exclusive) if end_exclusive else None
+    except ValueError:
+        baseline_start = None
+    if baseline_start:
+        fields["radar_baseline_observations"] = await load_radar_baseline(
+            land_id, baseline_start, end_exclusive, job_id=job_id
+        )
+        fields["radar_baseline_lookback_days"] = RADAR_BASELINE_LOOKBACK_DAYS
     crop_type = (meta or {}).get("crop_type")
     if crop_type:
         fields["crop_type"] = crop_type

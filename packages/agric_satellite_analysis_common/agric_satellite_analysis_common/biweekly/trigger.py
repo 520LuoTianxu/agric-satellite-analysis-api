@@ -55,6 +55,17 @@ def reference_fixture_path() -> Path:
     return _repo_root() / "examples" / "biweekly" / "reference_plan_15933.json"
 
 
+def _radar_baseline_rows(rows: object) -> list[dict]:
+    """Keep pre-period radar rows the API already attached. Do not query here."""
+    if not isinstance(rows, list):
+        return []
+    kept = []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("date") or "")[:10]:
+            kept.append(row)
+    return kept
+
+
 def _now() -> str:
     return datetime.now(SHANGHAI).isoformat(timespec="seconds")
 
@@ -789,6 +800,7 @@ class TriggerService:
                         "calibration_epoch": row.get("calibration_epoch"),
                         "calibration_method": row.get("calibration_method"),
                         "calibration_scale": row.get("calibration_scale"),
+                        "acquisition_datetime": row.get("acquisition_datetime"),
                     }
                 )
                 continue
@@ -898,6 +910,10 @@ class TriggerService:
             "in_period_radar": int(s1_count or 0) > 0,
             # 只转交调用方已经放进载荷的雷达景和同田往年归档，不在这里查询或回填。
             "radar_observations": radar_observations,
+            # 本期之前的同轨回波由 API 查好放进载荷。这里不按本期日期裁掉，否则基线又只剩 14 天。
+            "radar_baseline_observations": _radar_baseline_rows(
+                payload.get("radar_baseline_observations")
+            ),
             "historical_same_period": payload.get("historical_same_period")
             if isinstance(payload.get("historical_same_period"), list)
             else None,

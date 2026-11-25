@@ -544,10 +544,14 @@ def omitted_items(facts: dict[str, Any]) -> list[str]:
         )
     quality = facts.get("data_quality") or {}
     radar = int(quality.get("radar_count") or 0)
-    vv_count = int((facts.get("water_risk") or {}).get("radar_vv_count") or 0)
-    if radar and vv_count < 3:
+    risk = facts.get("water_risk") or {}
+    vv_count = int(risk.get("radar_vv_count") or 0)
+    sufficient = risk.get("radar_baseline_sufficient")
+    if sufficient is None:
+        sufficient = vv_count >= 3
+    if radar and not sufficient:
         items.append(
-            f"雷达：本期有 {radar} 景哨兵一号。同轨可比的后向散射样本不足，不能确认或排除积水。"
+            f"雷达：本期有 {radar} 景哨兵一号。同一条轨道、同一定标下可比较的回波仍不足 3 景，不能确认或排除积水。"
         )
     elif radar:
         items.append(f"雷达：本期有 {radar} 景哨兵一号。积水只转述已有同轨规则的标记，不作为灾损结论。")

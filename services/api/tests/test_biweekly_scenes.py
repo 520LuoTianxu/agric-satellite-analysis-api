@@ -6,7 +6,13 @@ import unittest
 from datetime import date, datetime
 from decimal import Decimal
 
-from app.services.biweekly_scenes import _eligible_optical, _to_observation
+from agric_satellite_analysis_common.biweekly.scene_rows import to_radar_observation
+
+from app.services.biweekly_scenes import (
+    _eligible_optical,
+    _to_observation,
+    radar_baseline_start,
+)
 
 
 class EligibleOpticalTests(unittest.TestCase):
@@ -123,3 +129,27 @@ class EligibleOpticalTests(unittest.TestCase):
         self.assertEqual(obs["sensor"], "S1")
         self.assertIsNone(obs["exclusion_reason"])
         self.assertIsNone(obs["cloud_cover"])
+
+    def test_radar_baseline_starts_ninety_days_before_the_period_end(self) -> None:
+        self.assertEqual(radar_baseline_start("2026-05-20"), "2026-02-19")
+
+    def test_radar_observation_keeps_orbit_and_backscatter(self) -> None:
+        row = to_radar_observation(
+            {
+                "sensor": "S1",
+                "date": date(2026, 5, 18),
+                "scene_id": "S1A_example",
+                "vv_avg": Decimal("-12.5"),
+                "vh_avg": -18,
+                "relative_orbit": "113",
+                "platform": "sentinel-1a",
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["date"], "2026-05-18")
+        self.assertEqual(row["vv"], -12.5)
+        self.assertEqual(row["vh"], -18.0)
+        self.assertEqual(row["relative_orbit"], 113)
+        self.assertEqual(row["platform"], "sentinel-1a")
+        self.assertIsNone(to_radar_observation({"sensor": "S2", "date": "2026-05-18", "vv_avg": -1}))
