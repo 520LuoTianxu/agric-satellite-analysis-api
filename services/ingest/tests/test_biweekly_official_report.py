@@ -12,6 +12,31 @@ from unittest.mock import MagicMock, patch
 
 from agric_satellite_analysis_common.biweekly.models import ReportError
 
+# Keep these tests off a live OSS HEAD during registration refresh.
+_REFRESH_PATCH = None
+
+
+def setUpModule():
+    global _REFRESH_PATCH
+    from app.tasks import biweekly_report as _br
+    from unittest.mock import patch
+
+    _REFRESH_PATCH = patch.object(
+        _br,
+        "_try_refresh_oss_artifact",
+        side_effect=lambda oss, **_kwargs: dict(oss),
+    )
+    _REFRESH_PATCH.start()
+
+
+def tearDownModule():
+    global _REFRESH_PATCH
+    if _REFRESH_PATCH is not None:
+        _REFRESH_PATCH.stop()
+        _REFRESH_PATCH = None
+
+
+
 
 class BundledFontTests(unittest.TestCase):
     def test_resolves_bundled_fonts_without_env(self):

@@ -1104,6 +1104,44 @@ def generate_metric_judgment(
             http.close()
 
 
+# ReportLab HexColor 需要 #RRGGBB。模型有时会丢掉 #，或写来路不明的底色。
+# 这里只保留提示里的三套颜色，缺 # 就补上，非法属性丢掉，不要把整段标记原样送去排版。
+_PALETTE_BACK = {
+    "1F4D38": "D9F2E3",
+    "9C2B1B": "F8D6D2",
+    "8A5A12": "F8E8C8",
+}
+_HEX6 = re.compile(r"^#?([0-9A-Fa-f]{6})$")
+_FONT_ATTR = re.compile(
+    r"""([A-Za-z]+)\s*=\s*(['\"])(.*?)\2""",
+    re.DOTALL,
+)
+
+
+def _hex6(value: str | None) -> str | None:
+    if not value:
+        return None
+    matched = _HEX6.fullmatch(str(value).strip())
+    return matched.group(1).upper() if matched else None
+
+
+def _safe_font_open(tag: str) -> str:
+    """Rebuild a ReportLab-safe <font> tag from a model opening tag."""
+    attrs = {name.lower(): value for name, _q, value in _FONT_ATTR.findall(tag)}
+    color = _hex6(attrs.get("color"))
+    back = _hex6(attrs.get("backcolor") or attrs.get("bgcolor"))
+    face = (attrs.get("face") or "YaHei-Bold").strip() or "YaHei-Bold"
+    if color not in _PALETTE_BACK:
+        if "face" in attrs:
+            return f'<font face="{face}">'
+        return ""
+    parts = [f'face="{face}"', f'color="#{color}"']
+    allowed_back = _PALETTE_BACK[color]
+    if back == allowed_back:
+        parts.append(f'backColor="#{back}"')
+    return "<font " + " ".join(parts) + ">"
+
+
 _FONT_OPEN = re.compile(
     r"<\s*font\b[^>]*color\s*=\s*['\"]#?(1F4D38|9C2B1B|8A5A12)['\"][^>]*>",
     re.IGNORECASE,
@@ -1163,7 +1201,7 @@ def _present(value: str) -> str:
         slots.append(html)
         return f"\u0000{len(slots) - 1}\u0000"
 
-    text = _FONT_OPEN.sub(lambda match: stash(match.group(0)), value)
+    text = _FONT_OPEN.sub(lambda match: stash(_safe_font_open(match.group(0))), value)
     text = _BOLD_FACE.sub(lambda match: stash(match.group(0)), text)
     text = _FONT_CLOSE.sub(lambda _match: stash("</font>"), text)
     text = _BOLD_OPEN.sub(lambda _match: stash("<b>"), text)

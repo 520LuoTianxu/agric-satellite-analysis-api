@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,58 @@ def _is_retry(exc: BaseException) -> bool:
     except ImportError:
         return False
     return isinstance(exc, CeleryRetry)
+
+
+def _artifact_error_code(exc: BaseException) -> str | None:
+    text = str(exc)
+    for code in (
+        "ARTIFACT_SIZE_MISMATCH",
+        "ARTIFACT_CONFLICT",
+        "ARTIFACT_CORRUPT",
+        "ARTIFACT_UNAVAILABLE",
+    ):
+        if code in text:
+            return code
+    return None
+
+
+def _refresh_oss_artifact(oss: dict[str, Any]) -> dict[str, Any]:
+    """Replace size/sha256 with the live OSS object after an overwrite.
+
+    Registration must not keep a stale checksum from an earlier upload of the
+    same key. If the object cannot be read, the original ref is kept.
+    """
+    if not oss or not oss.get("key"):
+        return oss
+    from agric_satellite_analysis_common.storage import get_storage
+
+    storage = get_storage()
+    key = str(oss["key"])
+    if not storage.exists(key):
+        return oss
+    stat = storage.stat_object(key)
+    hasher = hashlib.sha256()
+    seen = 0
+    for chunk in storage.iter_bytes(key):
+        hasher.update(chunk)
+        seen += len(chunk)
+    size = int(stat.get("size_bytes") or 0) or seen
+    if seen and size != seen:
+        size = seen
+    updated = dict(oss)
+    updated["size_bytes"] = size
+    updated["sha256"] = hasher.hexdigest()
+    if stat.get("content_type") and not updated.get("content_type"):
+        updated["content_type"] = stat["content_type"]
+    return updated
+
+
+def _try_refresh_oss_artifact(oss: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _refresh_oss_artifact(oss)
+    except Exception:  # noqa: BLE001
+        _log_exc("biweekly_oss_refresh_failed")
+        return oss
 
 
 def _job_status(job: dict | None) -> str:
@@ -441,8 +494,11 @@ def generate_biweekly_report(
         )
 
     def _register(progress: dict[str, Any]) -> dict:
-        oss = progress["oss_artifact"]
+        oss = _try_refresh_oss_artifact(dict(progress["oss_artifact"]))
+        progress = {**progress, "oss_artifact": oss}
         attempts = int(progress.get("registration_attempts") or 0)
+        result = None
+        exc = None
         try:
             result = _complete(
                 bj_id,
@@ -455,21 +511,48 @@ def generate_biweekly_report(
                 report_job_id=report_id,
                 oss=oss,
             )
-        except Exception as exc:  # noqa: BLE001
-            if _is_retry(exc):
+        except Exception as first:  # noqa: BLE001
+            if _is_retry(first):
                 raise
+            # 覆盖后若仍带着旧 size 去登记，API 会按现对象头校验并返回 409。
+            # 再读一次活对象，用新 size/hash 重试一次，不重新渲染。
+            if _artifact_error_code(first) == "ARTIFACT_SIZE_MISMATCH":
+                try:
+                    oss = _try_refresh_oss_artifact(oss)
+                    progress = {**progress, "oss_artifact": oss}
+                    result = _complete(
+                        bj_id,
+                        status=str(progress.get("official_status") or "ready"),
+                        filename=progress.get("filename"),
+                        mime=progress.get("mime"),
+                        kind=progress.get("kind"),
+                        facts=progress.get("facts"),
+                        note=progress.get("note"),
+                        report_job_id=report_id,
+                        oss=oss,
+                    )
+                except Exception as second:  # noqa: BLE001
+                    if _is_retry(second):
+                        raise
+                    exc = second
+            else:
+                exc = first
+        if exc is not None:
             attempts += 1
             saved = _persist_registration(
                 progress, attempts=attempts, error_type=type(exc).__name__
             )
             if attempts < REGISTRATION_MAX_ATTEMPTS:
                 _retry_registration(saved, attempts)
-            _log_exc(
-                "biweekly_registration_exhausted",
-                land_id=land,
-                biweekly_job_id=bj_id,
-                attempts=attempts,
-            )
+            try:
+                raise exc
+            except Exception:
+                _log_exc(
+                    "biweekly_registration_exhausted",
+                    land_id=land,
+                    biweekly_job_id=bj_id,
+                    attempts=attempts,
+                )
             try:
                 fail_work_item_http(
                     work_item_id,

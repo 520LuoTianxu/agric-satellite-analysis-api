@@ -38,6 +38,31 @@ def _run(task, **kwargs):
     return br.generate_biweekly_report.run.__func__(task, **kwargs)
 
 
+# Keep existing registration tests off the live OSS client. Overwrite-refresh
+# coverage lives in test_biweekly_oss_overwrite_register.py.
+_REFRESH_PATCH = None
+
+
+def setUpModule():
+    global _REFRESH_PATCH
+    from app.tasks import biweekly_report as _br
+
+    _REFRESH_PATCH = patch.object(
+        _br,
+        "_try_refresh_oss_artifact",
+        side_effect=lambda oss, **_kwargs: dict(oss),
+    )
+    _REFRESH_PATCH.start()
+
+
+def tearDownModule():
+    global _REFRESH_PATCH
+    if _REFRESH_PATCH is not None:
+        _REFRESH_PATCH.stop()
+        _REFRESH_PATCH = None
+
+
+
 class RegistrationRetryTests(unittest.TestCase):
     def test_timeout_after_upload_retries_without_rerender_or_reupload(self):
         renders = []
