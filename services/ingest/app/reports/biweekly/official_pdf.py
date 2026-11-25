@@ -11,6 +11,8 @@ area are never invented.
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -632,9 +634,40 @@ def _heading(story: list, styles: dict, number: str, title: str) -> None:
     story.append(HRFlowable(width="100%", thickness=0.6, color=RULE, spaceBefore=2, spaceAfter=8))
 
 
+logger = logging.getLogger(__name__)
+_MODEL_TAG = re.compile(r"</?\s*(?:font|b|i|u)\b[^>]*>", re.IGNORECASE)
+
+
+def _plain_markup(text: str) -> str:
+    """Strip model font/bold tags so ReportLab can still print the sentence."""
+    text = _MODEL_TAG.sub("", text)
+    text = (
+        text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    return text
+
+
+def _append_paragraph(story: list, text: str, style, **kwargs) -> None:
+    """Keep the sentence if a model mark is illegal; never fail the whole PDF."""
+    try:
+        story.append(Paragraph(text, style, **kwargs))
+        return
+    except Exception:
+        logger.warning("biweekly_paragraph_markup_dropped", exc_info=True)
+    try:
+        story.append(Paragraph(_plain_markup(text), style, **kwargs))
+    except Exception:
+        logger.warning("biweekly_paragraph_skipped", exc_info=True)
+
+
 def _bullets(story: list, styles: dict, items: list[str], *, style: str = "bullet") -> None:
     for item in items:
-        story.append(Paragraph(item, styles[style], bulletText="•"))
+        _append_paragraph(story, item, styles[style], bulletText="•")
 
 
 def _model_prose(story: list, styles: dict, items: list[str]) -> None:
