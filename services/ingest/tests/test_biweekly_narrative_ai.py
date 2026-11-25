@@ -19,6 +19,7 @@ import structlog
 
 from agric_satellite_analysis_common.logging import processor_chain
 from app.reports.biweekly.narrative_ai import (
+    SYSTEM_PROMPT,
     generate_metric_judgment,
     judgment_paragraphs,
     narrative_input,
@@ -87,6 +88,12 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("最近一次有效观测", payload["parameter_guide"]["metrics"])
         self.assertIn("有效降雨", payload["parameter_guide"]["weather"])
         self.assertIn("雨水账", payload["parameter_guide"]["weather"])
+        self.assertIn("建议去地里看看确认一下", SYSTEM_PROMPT)
+        self.assertIn("建议去地里看看确认一下", payload["parameter_guide"]["infield"])
+        self.assertIn(
+            "建议去地里看看确认一下", payload["parameter_guide"]["surrounding"]
+        )
+        self.assertNotIn("先别下结论", payload["parameter_guide"]["surrounding"])
         self.assertEqual(payload["metrics"]["ndre"]["latest"], "0.57")
         self.assertIn("叶绿素", payload["metrics"]["ndre"]["meaning"])
         self.assertEqual(payload["infield"][0]["p10"], "0.51")
@@ -163,11 +170,21 @@ class NarrativeAiTests(unittest.TestCase):
             "这是缺肥。",
             "不判定缺肥。",
             "本期雨水少，要留意浇水。",
+            "地里东北部有一小片一直比整块地弱，建议抽空去田里看看那一块，但先别急着下结论说缺什么或闹病。",
+            "和周围大约一公里的农田比，这块地稍微弱一点，不过周围种的不一定和咱一样，只能当个参考。",
         ]
         diagnosed = normalize_judgment(parsed, payload)
         self.assertEqual(
-            diagnosed["conclusion"], ["不判定缺肥。", "本期雨水少，要留意浇水。"]
+            diagnosed["conclusion"],
+            [
+                "本期有效降雨少，要留意浇水。",
+                "地里东北部有一小片一直比整块地弱，建议抽空去田里看看那一块。",
+                "和周围大约一公里的农田比，这块地稍微弱一点，不过周围种的不一定和咱一样，建议去地里看看确认一下。",
+            ],
         )
+        self.assertNotIn("先别", "\n".join(diagnosed["conclusion"]))
+        self.assertNotIn("只能当", "\n".join(diagnosed["conclusion"]))
+        self.assertNotIn("雨水", "\n".join(diagnosed["conclusion"]))
 
     def test_http_response_is_used_without_a_local_good_bad_rule(self) -> None:
         class _Response:
@@ -396,7 +413,7 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn('backColor="#D9F2E3"', shown)
         self.assertIn("0.57", shown)
         self.assertEqual(out["metric_notes"], ["NDRE 本期是 0.57。"])
-        self.assertEqual(out["weather"], ["这期雨水不多。"])
+        self.assertEqual(out["weather"], ["这期有效降雨不多。"])
         self.assertEqual(out["field_notes"], ["西南部值得看一眼。"])
         self.assertNotIn("9.99", json.dumps(out["changes"], ensure_ascii=False))
         self.assertNotIn("9.99", json.dumps(out["conclusion"], ensure_ascii=False))

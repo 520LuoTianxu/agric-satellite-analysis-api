@@ -297,16 +297,15 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
     dates = "、".join(cn_md(row["date"]) for row in rows)
     where = "、".join(item["name"] for item in regions)
     if n_cluster:
-        place = f"{where}有一小片一直比整块地弱，值得到田里看一下" if where else "有一小片一直比整块地弱，值得到田里看一下"
+        # 只说哪一块偏弱，并建议到地里核对。不写缺肥、病虫害，也不写「先不下结论」。
+        spot = f"{where}有一小片一直比整块地弱" if where else "有一小片一直比整块地弱"
+        place = f"{spot}，建议去地里看看确认一下"
     elif n_persistent:
         place = "有些地方连续几期都偏弱，但没有连成一片，先不用专门去看"
     else:
         place = "没有哪一块连续这几期都比整块地弱"
     occasional = "另外有些地方只是某一期偏低，不算持续偏弱。" if n_occasional else ""
-    line = (
-        f"持续偏弱（{_grower(metric)}）：{dates}这几期，{place}。{occasional}"
-        "这只说明位置，不判定缺肥或病虫害。"
-    )
+    line = f"持续偏弱（{_grower(metric)}）：{dates}这几期，{place}。{occasional}"
     return {
         "metric": metric,
         "status": "ok",
