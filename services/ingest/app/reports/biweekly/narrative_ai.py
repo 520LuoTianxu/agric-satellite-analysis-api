@@ -51,19 +51,23 @@ _RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 JUDGMENTS = {"better", "worse", "unclear"}
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
-SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户和农技人员。用户消息里有 parameter_guide 和本期参数。parameter_guide 只解释字段含义，其余字段是程序已经算好的事实。请按本期事实写，不要为了把每一项都提到而补句子。
+SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户和农技人员。用户消息里有 parameter_guide 和本期参数。parameter_guide 只解释字段含义，其余字段是程序已经算好的事实。请按本期事实写。按本期生育阶段自己组织判断：不同阶段要回答的问题不一样，不要套同一套句子。本期真有的遥感、天气和土壤，只要会改变这个阶段的读法，就写进结论，不要为了短而省掉。
 
 指标用正式名称：归一化植被指数（NDVI）、增强型植被指数（EVI）、归一化差值红边指数（NDRE）、归一化差值水分指数（NDMI）。第一次出现可以带中文全称，后面用缩写。不要把它们改叫「绿度」「叶片含水」或「长势」。不要写像元、百分位、中位数、格点、ET0、EXG 和公式。句子按事实来组织，不要每条都写成“由A升到B，提高C”，也不要只写“全部上升、方向一致”。
 
-结论从本期生育阶段写起，但不要复述 stage_context。stage_context 只用来判断什么值得写：这个阶段通常应看到什么，本期观测里哪一点不一样。全田都符合这个阶段的常态时，用一两句说清即可。某个参数为空就不要编，也不要用“缺失”凑字。
+结论从本期生育阶段要回答的问题写起，不要复述 stage_context 或 conclusion_task。某个参数为空就不要编，也不要用“缺失”凑字。
 
-空间上有差别时，写出 zones 或 field_patterns 里的方位，并写明那个方位的指数和整块地差在哪里。不要只说「不齐」或「更散了」。出苗期：level 为 lower 的方位写成植被信号弱或仍看不出苗，level 为 unreadable 的方位写成这次看不清、不能判断出苗；全田一起偏低是这一阶段的常态，不要把常态写成异常。成熟期和灌浆期：全田一起下降是成熟本身。若有的方位已经明显更低、有的仍高，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收；指数拉不开就写这次分不出收获范围，不要改写成笼统的长势句。
+遥感按 zones 写空间，点出方位和指数，不要只说「不齐」或「其余方位」。level=higher 是这一方位已经高出整块地，level=lower 是明显更低，level=similar 是接近整块地，level=unreadable 是这一方位这次大部分读不到。出苗期：higher 写成这些方位已经有植被信号、更像先出苗；similar 而全田仍低时，写成这些方位仍看不出苗，把方位名写出来；lower 写成比已经偏低的全田还弱，是要重点看的地方；unreadable 写成这次看不清、不能判断出苗。全田一起偏低是出苗期的常态，用一句说清，不要把常态写成异常。spatial_split=even 时方位没有拉开，不要逐个报数，出苗期就写这次还分不出哪一块先出苗。分蘖、返青、拔节看覆盖或冠层是全田一起变，还是只在部分方位，没跟上的方位要写出来。越冬看指数是否稳住。灌浆期和成熟期：全田一起下降是成熟本身。若有的方位已经明显更低、有的仍高，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收；指数拉不开就写这次分不出收获范围，不要改写成笼统的长势句。
 
-key_nodes 是人填写的农事。有记录就写做了什么、哪一天、填写里能看懂的内容，再按 compare_with 的意思说明本期指数和这件事对得上、还看不出来，还是对不上。compare_with 不要原句抄进正文。没有记录就不要写农事。不要把农事说成卫星测到的，不要建议施肥或打药，不要写缺肥、病虫害、闹病。有土壤底子就用土质、酸碱和能存多少水说明，不要另作诊断。
+天气写进结论，不要留到气象那一节才第一次出现。有气温就写冷热，有去年同期就比去年高还是低；有降水毫米数就写有效降雨，并按毫米数说比去年多还是少。前期 antecedent 有有效降雨时，和本期连着看。再按这个阶段说明意味着什么：出苗看冷和雨会不会让苗出得慢，越冬看冷，返青和拔节看回升时水分够不够参照，灌浆和成熟看热和干。缺哪一项就跳过。不要写「雨水」或「雨水账」，不要写格点、ET0。干湿只在有效降雨、NDMI 和 water_risk_lines 够用时判断要不要留意浇水或排水；不够就说一次看不准，不要写成没有风险，也不要写灌多少毫米。
 
-不要按「整体情况、田内不齐、和周围比、天气」四段来写，也不要把每个参数都写进结论。没有新信息的话题整段省略。周围对照只在差得清楚时写一句，并说明周围作物未必相同。天气只写本期真有数的冷热和有效降雨；降雨写成「有效降雨」，按毫米数说比去年多还是少，不要写「雨水」或「雨水账」。干湿只在有效降雨、NDMI 和 water_risk_lines 够用时判断要不要留意浇水或排水；不够就说一次看不准，不要写成没有风险，也不要写灌多少毫米。
+有土壤底子就写进结论：用土质、酸碱和能存多少水，说明它和本期出苗或干湿怎么一起看。保水差、又碰上有效降雨少时，仍看不出苗的方位更要盯。不要另作缺肥、病虫害诊断，也不要把 context_lines 里的土壤原句再抄一遍。status 不是 ready 就不要写土壤。
 
-缺了的资料只说一次。不要用同一句巡查套话收尾，也不要每段都劝人下地。field_notes 只在某个写明的方位、或某件对不上的农事值得到地里看时才写，并写明看哪里、看什么；没有这样的点就给空数组。
+key_nodes 是人填写的农事。有记录就写做了什么、哪一天、填写里能看懂的内容，再按 compare_with 的意思说明本期指数和这件事对得上、还看不出来，还是对不上。compare_with 不要原句抄进正文。没有记录就不要写农事。不要把农事说成卫星测到的，不要建议施肥或打药，不要写缺肥、病虫害、闹病。
+
+不要按「整体情况、田内不齐、和周围比、天气」四段标题来写。把遥感、天气、土壤里会改变本期读法的内容写成连贯判断。周围对照只在差得清楚时写一句，并说明周围作物未必相同。没有数的话题不要编。
+
+缺了的资料只说一次。不要用同一句巡查套话收尾，也不要每段都劝人下地。出苗期如果已经能分出仍看不出苗或看不清的方位，field_notes 写重点看哪里、看什么（苗有没有出来、有没有断垄）。其他阶段只在某个写明的方位、或某件对不上的农事值得到地里看时才写。没有这样的点就给空数组。
 
 数值升高或降低只表示大小，不等于好坏。哪几个字需要标出，由你决定，不要每句末尾都补同一个词。
 
@@ -75,9 +79,9 @@ key_nodes 是人填写的农事。有记录就写做了什么、哪一天、填�
 没有把握的字保持正文。不要用别的颜色，不要用 Markdown。
 
 metric_notes 是「指标说明」：每个指标按本期数值写成说明，讲清这个数在看什么、本期说明了什么。不要复读定义，不要写公式，每个指标不要写成同一句式。
-conclusion 是本期焦点，通常两三句，把生育阶段里真正值得注意的方位、指数或农事说完。context_lines 还会再印很短的农事和土壤底子，不要把那些原句再抄一遍。
+conclusion 是本期判断。按这个阶段把遥感上哪里已经起来、哪里还没有、要重点看哪里写清楚；有天气就写进冷热和有效降雨；有土壤底子就写进土质和能存多少水。通常是几句到一小段，每句单独放进 conclusion 数组。不要压成只剩一个指数和几个偏高方位，也不要把 changes 里每个指标的升幅再报一遍。context_lines 还会再印很短的农事和土壤底子，不要把那些原句再抄一遍。
 changes 每个指标一句，只写数值变化说明了什么，不要把周围、天气和农事再写进去。
-infield、surrounding、weather 各自只写该节证据里有的内容，不要互相重复，也不要互相用同一句话收尾。
+infield、surrounding、weather 是后面各节的展开。结论里已经写过的判断，这些节不要换词再抄一遍；可以补结论里没展开的细节。没有可写的内容就给空数组。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
 field_patterns 和 water_risk_lines 对应的句子已经印在报告里，不要换词再抄一遍。结论里不要出现缺肥、病虫害、闹病、产量，也不要写「先别下结论」「先别急着」「不下结论」「不能下结论」「只能当参考」「仅供参考」「不判定」「现在还不能判断」。
 不要输出思考过程，只输出 JSON：
@@ -90,17 +94,18 @@ PARAMETER_GUIDE = {
     "metrics": "每个指标的全田结果。name 是正式名称，正文用其中的缩写。meaning 只说明这个数在看什么，不要照抄，也不要改叫绿度、叶片含水或长势。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。role 是本期主要指标还是辅助指标。",
     "used_observations": "本期采用的观测日期。",
     "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。没有未采用日期就不要写。",
-    "infield": "田块内部。median、p10、p90 是整块地的水平，写的时候直接说指数数值，不要说中位数、百分位、像元。zones 只列出和整块地明显分开、或这次大部分看不清的方位。level=lower 是这一方位更低，higher 是更高，unreadable 是这一方位多数地方这次读不到。spatial_split=even 表示方位之间没有拉开，不要写某一块偏弱；unreadable 表示有方位看不清；split 表示高低分开了。area_percent 是这一方位占整块地的百分比，valid_percent 是这一方位里能读到的百分比。delta_median 是这一方位相对上一次的变化。regions.name 是连成片偏低的位置，share_percent 是这些偏低地方里这一方位占的百分比。出苗期把 lower 写成植被信号弱或看不出苗，把 unreadable 写成不能判断出苗。成熟期和灌浆期：lower 且降幅明显时可以写成更像已经收获或覆盖已经掉下去，没有一起掉的方位写成仍像未收；拉不开就不要编收获范围。",
+    "infield": "田块内部。median、p10、p90 是整块地的水平，写的时候直接说指数数值，不要说中位数、百分位、像元。zones 含有这一指标各方位的水平：level=lower 更低，higher 更高，similar 接近整块地，unreadable 是这一方位多数地方这次读不到。出苗期 similar 且全田仍低，就是仍看不出苗的方位，要把方位名写出来，不要写成「其余方位」。spatial_split=even 表示方位之间没有拉开，不要写某一块偏弱，也不要逐个报数；unreadable 表示有方位看不清；split 表示高低分开了。area_percent 是这一方位占整块地的百分比，valid_percent 是这一方位里能读到的百分比。delta_median 是这一方位相对上一次的变化。regions.name 是连成片偏低的位置，share_percent 是这些偏低地方里这一方位占的百分比。出苗期把 higher 写成已有植被信号，把 lower 写成仍看不出苗或更弱、要重点看，把 unreadable 写成不能判断出苗。成熟期和灌浆期：lower 且降幅明显时可以写成更像已经收获或覆盖已经掉下去，没有一起掉的方位写成仍像未收；拉不开就不要编收获范围。",
     "surrounding": "这块地和周围大约一公里农田比。field_minus_nearby 是这块地减去周围，正数表示这块地更高。差得清楚再写，并说明周围作物未必相同。不要每篇都写同一句免责，也不要写只能当参考。不要说超绿、EXG。没有比较就不要写这一节。",
-    "weather": "地块附近的天气，不是田间实测。有气温就写冷热和比去年高还是低；有降水毫米数就直接说有效降雨比去年多还是少。缺哪一项就跳过。不要说格点、ET0、雨水账、雨水或账。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。prior_year 是去年同一段日期。",
+    "weather": "地块附近的天气，不是田间实测。这些数要写进结论，不要只留在 weather 数组。有气温就写冷热和比去年高还是低；有降水毫米数就直接说有效降雨比去年多还是少，并说明对当前生育阶段意味着什么。缺哪一项就跳过。不要说格点、ET0、雨水账、雨水或账。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。antecedent_precipitation_mm 是本期开始前一段时间的有效降雨。prior_year 是去年同一段日期。weather 数组再写气象条件这一节，不要和结论用同一句话。",
     "key_nodes": "人工填写的农事。task_name 是事项，submitted_on 是填写日期，answers 是人能看懂的填写内容。compare_with 是对照提示，不是要抄进正文的句子：用它判断指数和这件事对得上、还看不出来，还是对不上。没有记录就不要写农事，也不要写“没有关键节点”。",
-    "soil": "地块原来的土壤底子，不是这次新测的土。有 reader_sentence 就用这句的意思改写。status 不是 ready 就不要写土壤。不要出现缺肥、病虫害这些词。",
+    "soil": "地块原来的土壤底子，不是这次新测的土。status 为 ready 时写进结论：用土质、酸碱和能存多少水，说明它和本期出苗或干湿怎么一起看。有 reader_sentence 就用这句的意思改写，不要原句复述。status 不是 ready 就不要写土壤。不要出现缺肥、病虫害这些词。",
     "photo_review": "现场照片的画面检查。status 不是 reviewed 时，不要写照片。",
     "context_lines": "结论下面还会印的短句。不要原句复述。",
     "field_patterns": "持续偏低和均匀度的结构化结果，不是要复述的句子。persistent.regions 是连续几期都偏低并且连成片的方位；scattered 为 true 表示有偏低但没有连成一片；status 不是 ok 就不要写成持续偏弱。uniformity.direction：wider 是各处拉开，narrower 是更接近，similar 是看不出拉开。history_status 不是 compared 时，不要在结论里再写历史暂不评价。图下已经印有对应句子，结论里改用方位和指数写本期焦点。",
     "water_risk_lines": "已经写好的水分观测。只用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述，也不要把「不判定」写进结论。看不准就说看不准，不要写成没有风险，也不要写现在还不能判断、先别下结论、只能当参考。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
-    "stage_context": "当前生育阶段的对照，不是要写进正文的句子，也不是对本田的结论。focus 是这一阶段通常该看的问题，expected 是什么算常态、什么才值得写，background 是季节走向上的一句背景。不要复述这三句。观测和常态一致时用一两句带过；不一致时写出方位和指数。",
+    "stage_context": "当前生育阶段的对照，不是要写进正文的句子，也不是对本田的结论。focus 是这一阶段通常该看的问题，expected 是什么算常态、什么才值得写，ask 是这一阶段要回答的问题，background 是季节走向上的一句背景。不要复述这些句子。按这个阶段用遥感、天气和土壤写出本期不一样的地方。",
+    "conclusion_task": "本期结论要回答的问题，不是要抄的句子。按这些问题用事实写判断。没有列出的资料不要编。",
     "gap_days": "最近一次观测和对比基准之间相隔的天数。",
 }
 
@@ -110,38 +115,47 @@ _STAGE_CONTEXT: dict[str, dict[str, str]] = {
     "播种期": {
         "focus": "播种之后是否已经能看出苗的迹象",
         "expected": "播种当周通常仍看不到成片植被。低 NDVI 本身不是苗弱。只有已经能按方位分出有信号和没有信号时，才写出苗不齐的位置。",
+        "ask": "看播种之后有没有方位已经出现植被信号。低覆盖本身不写苗弱。有天气和土壤时，说明它们对出苗是顺还是紧。",
     },
     "出苗期": {
         "focus": "出苗是否形成，以及何处没有植被信号或这次看不清",
-        "expected": "覆盖低、NDVI 整体偏低是常态。值得写的是地块内部：哪些方位已经高出其余地方，哪些方位仍明显更低，哪些方位这次读不到、不能判断出苗。",
+        "expected": "覆盖低、NDVI 整体偏低是常态。值得写的是地块内部：哪些方位已经高出其余地方，更像已经出苗；哪些方位接近全田或仍明显更低，仍看不出苗；哪些方位这次读不到、不能判断出苗。有天气和土壤时，一起说明出苗条件和要重点看的方位。",
+        "ask": "分清哪些方位已经出苗、哪些还没有、哪些看不清，并点出要重点看的方位。全田偏低只是背景。冷热、有效降雨和土壤能存多少水，用来说明出苗条件。",
     },
     "分蘖期": {
         "focus": "覆盖是否在增加，以及增加是否只发生在部分方位",
         "expected": "覆盖通常缓慢增加。全田一起上升点明即可。只有部分方位上升、另一部分仍很低时，写出没有跟上的方位。",
+        "ask": "看覆盖增加是全田一起，还是只在部分方位。没跟上的方位要写出来。天气和土壤用来看这期水分和出苗基础，不要只报指数升了多少。",
     },
     "越冬期": {
         "focus": "越冬期间指数是否稳定，有没有成片异常低的方位",
         "expected": "生长基本停滞，指数持平或小幅下降是常态。不要把小幅下降写成苗情问题。只有方位之间拉开，或有成片持续偏低时，才作为本期重点。",
+        "ask": "看指数是否稳住。冷热和有效降雨是这期要写的。小幅下降不要写成苗情问题。只有方位拉开或成片持续偏低，才作为空间重点。",
     },
     "返青期": {
         "focus": "恢复生长是否开始，哪些方位还没有回升",
         "expected": "指数通常由低位回升。回升如果只出现在部分方位，写出还没回升的方位。全田一起回升就不要再写成不齐。",
+        "ask": "看恢复是全田回升，还是有方位还没起来。冷热和有效降雨用来看回升的条件。没回升的方位要写出来。",
     },
     "拔节孕穗期": {
         "focus": "冠层是否在快速形成，偏低是否集中在某些方位",
         "expected": "生物量通常快速增加，NDVI 容易饱和，NDRE 和 EVI 更能看出差别。全田上升是常态。只有明显落后的方位，或该升未升，才作为本期重点。",
+        "ask": "看冠层是否在形成。NDRE 和 EVI 上哪些方位落后要写出来。有效降雨和土壤保水用来看这期水分条件，不要只写指数。",
     },
     "抽穗期": {
         "focus": "冠层是否维持在高位，有没有成片掉下去的方位",
         "expected": "冠层通常在全季高位附近。小幅波动不必展开。成片明显低于其余方位时，写出方位和哪个指数偏低。",
+        "ask": "看冠层是否还在高位，有没有方位已经掉下去。天气只写真有的冷热和有效降雨，并说明和冠层怎么一起看。",
     },
     "灌浆期": {
         "focus": "下降是全田同步，还是局部已经更像低覆盖",
         "expected": "叶片逐步衰老，指数由高位缓慢下降是常态。一部分方位已经落到明显低位、另一部分仍高时，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收。分不开就说明分不开。",
+        "ask": "看下降是全田一起，还是有的方位已经更像低覆盖、有的仍高。热和有效降雨用来看灌浆条件。分不开就写分不开。",
     },
     "成熟期": {
         "focus": "哪些方位更像已经收获，哪些仍保持冠层",
         "expected": "转黄和含水下降会让 NDVI、NDRE、NDMI 一起下降，这是成熟本身。能分开时，用方位上的高低和相对上期的降幅说明更像已收还是仍未收。拉不开或有效观测不够时，直接说这次分不出收获范围。",
+        "ask": "看哪些方位更像已经收获，哪些仍有冠层。拉不开就写这次分不出收获范围。天气不要改写成产量。",
     },
 }
 
@@ -470,7 +484,7 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
     quality = facts.get("data_quality") or {}
-    return {
+    payload = {
         "parameter_guide": PARAMETER_GUIDE,
         "period": period_text(facts),
         "stage": stage.get("text"),
@@ -498,6 +512,8 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
         "field_patterns": _pattern_facts(facts),
         "water_risk_lines": list((facts.get("water_risk") or {}).get("lines") or []),
     }
+    payload["conclusion_task"] = _conclusion_task(payload)
+    return payload
 
 
 def _listed_stages(facts: dict[str, Any]) -> list[str]:
@@ -533,7 +549,28 @@ def _stage_context(stage: dict[str, Any], facts: dict[str, Any]) -> dict[str, An
         body["focus"] = reading["focus"]
     if reading.get("expected"):
         body["expected"] = reading["expected"]
+    if reading.get("ask"):
+        body["ask"] = reading["ask"]
     return body
+
+
+def _conclusion_task(payload: dict[str, Any]) -> list[str]:
+    """Questions for this period. The model answers them; it does not copy them."""
+    stage = str((payload.get("stage_context") or {}).get("stage") or "")
+    lines: list[str] = []
+    ask = (_STAGE_CONTEXT.get(stage) or {}).get("ask")
+    if ask:
+        lines.append(ask)
+    if _weather_has_numbers(payload.get("weather")):
+        lines.append(
+            "天气里有本期冷热或有效降雨。写进结论，并说明对这个生育阶段意味着什么。有去年同期就比较。"
+        )
+    soil = payload.get("soil")
+    if isinstance(soil, dict) and soil.get("status") == "ready":
+        lines.append(
+            "土壤底子是现成的。用土质、酸碱和能存多少水，跟本期遥感和干湿一起看，不要另作诊断。"
+        )
+    return lines
 
 
 def _task_hint(node: dict[str, Any]) -> str | None:
@@ -930,7 +967,7 @@ def normalize_judgment(
     return {
         "summary": summary,
         "changes": changes,
-        "conclusion": _clean_list((parsed or {}).get("conclusion"), blob),
+        "conclusion": _clean_list((parsed or {}).get("conclusion"), blob, 640),
         "field_notes": _clean_list((parsed or {}).get("field_notes"), blob),
         "metric_notes": _clean_list((parsed or {}).get("metric_notes"), blob),
         "infield": infield,
@@ -1014,6 +1051,120 @@ def _filled_score(judgment: dict[str, Any]) -> int:
     return score
 
 
+_WEATHER_MARKS = ("有效降雨", "降雨", "气温", "温度", "偏冷", "偏热", "偏暖", "低温", "高温")
+_SOIL_MARKS = ("土壤", "土质", "酸碱")
+# 结论漏了已有事实时，第二次请求只补这几句，不另给数字。
+_REPAIR_NOTES = {
+    "weather": "把本期冷热和有效降雨写进结论，有去年同期就比较，并说明对当前生育阶段意味着什么",
+    "soil": "用土壤底子的土质、酸碱和能存多少水，跟本期遥感和干湿一起看，不要另作缺肥诊断",
+    "emergence": "写明哪些方位已经有植被信号、哪些方位仍看不出苗、哪些这次看不清，并点出要重点看的方位",
+}
+
+
+def _weather_has_numbers(weather: Any) -> bool:
+    if not isinstance(weather, dict):
+        return False
+    for key in (
+        "min_c",
+        "max_c",
+        "mean_c",
+        "precipitation_mm",
+        "antecedent_precipitation_mm",
+    ):
+        if weather.get(key) not in (None, ""):
+            return True
+    prior = weather.get("prior_year")
+    if isinstance(prior, dict) and any(
+        prior.get(key) not in (None, "")
+        for key in ("min_c", "max_c", "mean_c", "precipitation_mm")
+    ):
+        return True
+    return False
+
+
+def _conclusion_text(narrative: dict[str, Any]) -> str:
+    parts = [str(narrative.get("summary") or "")]
+    parts.extend(str(item) for item in (narrative.get("conclusion") or []))
+    return _visible_text("\n".join(parts))
+
+
+def _zone_names(payload: dict[str, Any], levels: set[str]) -> list[str]:
+    names: list[str] = []
+    for item in payload.get("infield") or []:
+        if not isinstance(item, dict):
+            continue
+        for zone in item.get("zones") or []:
+            if not isinstance(zone, dict):
+                continue
+            name = str(zone.get("name") or "")
+            if name and str(zone.get("level") or "") in levels and name not in names:
+                names.append(name)
+    return names
+
+
+def conclusion_gaps(
+    narrative: dict[str, Any] | None, payload: dict[str, Any]
+) -> list[str]:
+    """Facts the conclusion still skipped. Empty when this draft can be printed.
+
+    只检查结论正文。天气写在后面的气象节、土壤只印在灰色短句里，都算没写进结论。
+    """
+    if not narrative:
+        return []
+    text = _conclusion_text(narrative)
+    gaps: list[str] = []
+    if _weather_has_numbers(payload.get("weather")) and not any(
+        mark in text for mark in _WEATHER_MARKS
+    ):
+        gaps.append("weather")
+    soil = payload.get("soil")
+    if isinstance(soil, dict) and soil.get("status") == "ready" and not any(
+        mark in text for mark in _SOIL_MARKS
+    ):
+        gaps.append("soil")
+    stage = str((payload.get("stage_context") or {}).get("stage") or "")
+    if stage == "出苗期" and not _emergence_covered(text, payload):
+        gaps.append("emergence")
+    return gaps
+
+
+def _emergence_covered(text: str, payload: dict[str, Any]) -> bool:
+    """出苗期高低已经拉开时，结论要同时点出有信号的方位和仍低或看不清的方位。"""
+    higher = _zone_names(payload, {"higher"})
+    quiet = [
+        name
+        for name in _zone_names(payload, {"lower", "similar", "unreadable"})
+        if name not in set(higher)
+    ]
+    split = any(
+        isinstance(item, dict) and item.get("spatial_split") == "split"
+        for item in (payload.get("infield") or [])
+    )
+    if split and higher and quiet:
+        return any(name in text for name in higher) and any(name in text for name in quiet)
+    if "出苗" in text:
+        return True
+    named = higher or quiet
+    return any(name in text for name in named) if named else True
+
+
+def _user_message(payload: dict[str, Any], repair: list[str] | None) -> str:
+    text = (
+        "下面是参数说明和本期参数。请按本期事实写成报告，只输出 JSON：\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+    if repair:
+        notes = "；".join(
+            _REPAIR_NOTES[item] for item in repair if item in _REPAIR_NOTES
+        )
+        text += (
+            "\n上一稿结论没有写全已经给出的事实。请重写 JSON，在 conclusion 里补上："
+            + notes
+            + "。数字和日期仍只能用参数里已有的。"
+        )
+    return text
+
+
 def _chat_body(
     cfg: dict[str, str],
     payload: dict[str, Any],
@@ -1021,6 +1172,7 @@ def _chat_body(
     max_tokens: int,
     thinking: bool | None,
     send_thinking: bool,
+    repair: list[str] | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": cfg["model"],
@@ -1028,11 +1180,7 @@ def _chat_body(
         "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": "下面是参数说明和本期参数。请按本期事实写成报告，只输出 JSON：\n"
-                + json.dumps(payload, ensure_ascii=False),
-            },
+            {"role": "user", "content": _user_message(payload, repair)},
         ],
     }
     # 原始 HTTP，不是 OpenAI SDK，所以 enable_thinking 放在正文顶层。
@@ -1072,9 +1220,10 @@ def generate_metric_judgment(
     """Ask the configured model for wording. A failed body stays empty and named.
 
     Does not raise. Does not copy reasoning into the report. At most two calls:
-    the second turns thinking off, raises the budget after a length stop, or
-    repeats once after timeout, a dropped connection, 429, or 5xx. It does not
-    invent sentences.
+    the second turns thinking off, raises the budget after a length stop,
+    repeats once after timeout, a dropped connection, 429, or 5xx, or asks
+    again when the conclusion skipped weather, soil, or emergence places that
+    were already in the facts. It does not invent sentences.
     """
     cfg = bailian_settings()
     payload = narrative_input(facts)
@@ -1100,6 +1249,7 @@ def generate_metric_judgment(
     http = client or httpx.Client(timeout=completion_timeout_s(timeout, ceiling)[0])
     best: dict[str, Any] | None = None
     best_score = -1
+    repair: list[str] | None = None
     try:
         for attempt in range(1, MAX_MODEL_CALLS + 1):
             timeout_s, timeout_clamped = completion_timeout_s(timeout, tokens)
@@ -1109,6 +1259,7 @@ def generate_metric_judgment(
                 max_tokens=tokens,
                 thinking=thinking,
                 send_thinking=send_thinking,
+                repair=repair,
             )
             # 加预算的第二次请求不是“被上限截断”。只有请求值被夹到模型上限时才记 clamped。
             at_model_cap = tokens == ceiling and configured_tokens > ceiling
@@ -1225,17 +1376,30 @@ def generate_metric_judgment(
             kind, missing = _unusable_kind(text, parsed, normalized, diag, payload)
             if missing:
                 diag["missing_sections"] = missing
+            gaps = conclusion_gaps(normalized, payload)
+            if gaps:
+                # 正文结构完整但结论漏了天气、土壤或出苗方位时，用同一次重试补上。
+                diag["conclusion_gaps"] = gaps
+                if attempt < MAX_MODEL_CALLS:
+                    repair = gaps
             if kind is None:
                 if diag.get("finish_reason") == "length":
                     diag["truncated"] = True
                 diag["recovered"] = attempt > 1
-                return {
+                result = {
                     "llm_configured": True,
                     "model": cfg["model"],
                     **(normalized or {}),
                     "error": None,
                     "diagnostics": diag,
                 }
+                if not gaps or attempt >= MAX_MODEL_CALLS:
+                    return result
+                score = _filled_score(result)
+                if score > best_score:
+                    best, best_score = result, score
+                _log_unusable("conclusion_gaps", diag, model=cfg["model"])
+                continue
             _log_unusable(kind, diag, model=cfg["model"])
             result = _apply_reader_note(
                 empty_judgment(

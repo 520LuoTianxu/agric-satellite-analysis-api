@@ -274,10 +274,12 @@ def describe_zones(
     iqr: float | None,
     delta: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Where the field splits, using positions already drawn on the in-field map.
+    """Where each part of the field sits, using positions already on the map.
 
-    Only zones that sit clearly above or below the field median, or that are
-    mostly unreadable, are returned. An even field comes back with no zones.
+    Zones close to the field median are kept as ``similar``. Emergence reports
+    need those names: a low field median is normal, and the directions that
+    match it are the ones that still show no seedling signal. ``spatial_split``
+    stays ``even`` when nothing is clearly higher, lower, or unreadable.
     """
     labels = region_labels(xs, ys)
     n_pixels = len(labels)
@@ -329,16 +331,19 @@ def describe_zones(
             paired = paired[np.isfinite(paired)]
             if paired.size >= MIN_CLUSTER_PIXELS:
                 entry["delta_median"] = float(np.median(paired))
-        if entry["level"] != "similar":
-            zones.append(entry)
-    levels = {item["level"] for item in zones}
-    if levels & {"lower", "higher"}:
+        # 接近全田的方位也留下。出苗期全田本来就低，这些方位才是还没出苗的位置。
+        # 只留明显高于或低于全田的方位时，结论只能写成「其余方位」。
+        if entry["level"] == "similar" and entry.get("median") is None:
+            continue
+        zones.append(entry)
+    notable = {item["level"] for item in zones if item["level"] != "similar"}
+    if notable & {"lower", "higher"}:
         split = "split"
-    elif "unreadable" in levels:
+    elif "unreadable" in notable:
         split = "unreadable"
     else:
         split = "even"
-    order = {"lower": 0, "unreadable": 1, "higher": 2}
+    order = {"lower": 0, "unreadable": 1, "higher": 2, "similar": 3}
     zones.sort(key=lambda item: (order.get(str(item["level"]), 9), -float(item["area_fraction"])))
     return {"spatial_split": split, "zones": zones}
 
