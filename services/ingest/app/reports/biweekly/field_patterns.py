@@ -91,17 +91,9 @@ def _abbr(metric: str) -> str:
     return spec.abbr if spec is not None else metric_abbr(metric)
 
 
-# 图前和指标页印给种植户看，不用英文缩写。
-_GROWER_METRIC = {
-    "ndvi": "长势",
-    "evi": "叶子绿不绿",
-    "ndre": "叶绿素",
-    "ndmi": "叶子里的水",
-}
-
-
-def _grower(metric: str) -> str:
-    return _GROWER_METRIC.get(metric) or _abbr(metric)
+def _metric_name(metric: str) -> str:
+    """Printed pattern lines use the same index abbreviation as the rest of the report."""
+    return _abbr(metric)
 
 
 def _coord_key(lon: float, lat: float) -> tuple[float, float]:
@@ -242,7 +234,7 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "status": "insufficient",
             "dates": [row["date"] for row in rows],
             "line": (
-                f"持续偏弱（{_grower(metric)}）：能对上的观测只有{len(rows)}期，少于{MIN_PERSISTENT_DATES}期，"
+                f"持续偏弱（{_metric_name(metric)}）：能对上的观测只有{len(rows)}期，少于{MIN_PERSISTENT_DATES}期，"
                 "分不清是一直偏弱，还是只弱了一期。"
             ),
         }
@@ -258,7 +250,7 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "n_supported": n_supported,
             "pair_fraction": pair_fraction,
             "line": (
-                f"持续偏弱（{_grower(metric)}）：这几期对不上同一块地方，"
+                f"持续偏弱（{_metric_name(metric)}）：这几期对不上同一块地方，"
                 "分不清是一直偏弱，还是只弱了一期。"
             ),
         }
@@ -276,7 +268,7 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
             "n_supported": n_supported,
             "n_interior": n_interior,
             "line": (
-                f"持续偏弱（{_grower(metric)}）：能用的范围太小，看不出哪里一直偏弱。"
+                f"持续偏弱（{_metric_name(metric)}）：能用的范围太小，看不出哪里一直偏弱。"
             ),
         }
     aligned = _aligned_values(rows, interior)
@@ -297,15 +289,14 @@ def _persistent_for_metric(products: list[dict[str, Any]], metric: str) -> dict[
     dates = "、".join(cn_md(row["date"]) for row in rows)
     where = "、".join(item["name"] for item in regions)
     if n_cluster:
-        # 只说哪一块偏弱，并建议到地里核对。不写缺肥、病虫害，也不写「先不下结论」。
-        spot = f"{where}有一小片一直比整块地弱" if where else "有一小片一直比整块地弱"
-        place = f"{spot}，建议去地里看看确认一下"
+        # 只点出方位。巡查套话不写进这句，避免结论把同一句话再抄一遍。
+        place = f"{where}有一小片一直比整块地弱" if where else "有一小片一直比整块地弱"
     elif n_persistent:
         place = "有些地方连续几期都偏弱，但没有连成一片，先不用专门去看"
     else:
         place = "没有哪一块连续这几期都比整块地弱"
     occasional = "另外有些地方只是某一期偏低，不算持续偏弱。" if n_occasional else ""
-    line = f"持续偏弱（{_grower(metric)}）：{dates}这几期，{place}。{occasional}"
+    line = f"持续偏弱（{_metric_name(metric)}）：{dates}这几期，{place}。{occasional}"
     return {
         "metric": metric,
         "status": "ok",
@@ -331,7 +322,7 @@ def _spread(entry: dict[str, Any]) -> float | None:
 
 
 def _uniformity_for_metric(series: list[dict[str, Any]], metric: str) -> dict[str, Any]:
-    name = _grower(metric)
+    name = _metric_name(metric)
     usable = []
     for row in series:
         entry = (row.get("metrics") or {}).get(metric) or {}

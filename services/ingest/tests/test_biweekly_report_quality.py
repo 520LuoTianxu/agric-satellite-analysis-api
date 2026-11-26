@@ -294,6 +294,41 @@ class RobustStatisticsTests(unittest.TestCase):
         self.assertEqual(relative["clustered_below_low_reference"], 0)
         self.assertEqual(analysis["stats"]["below_low_reference_fraction"], 0.0)
 
+    def test_zone_summary_names_a_low_side_and_an_unreadable_side(self):
+        from app.reports.biweekly.infield_maps import analyse_metric
+
+        low_side = np.full((12, 12), 0.62)
+        low_side[:, :4] = 0.22
+        split = analyse_metric("ndvi", _grid_product("2026-04-09", low_side), None)
+        self.assertEqual(split["spatial_split"], "split")
+        lower = [zone["name"] for zone in split["zones"] if zone["level"] == "lower"]
+        self.assertTrue(lower)
+        self.assertTrue(all("西" in name for name in lower))
+
+        clear = np.ones((12, 12))
+        clear[:, :4] = 0
+        cloudy = analyse_metric(
+            "ndvi",
+            _grid_product("2026-04-09", np.full((12, 12), 0.46), clear=clear),
+            None,
+        )
+        self.assertEqual(cloudy["spatial_split"], "unreadable")
+        unread = [zone["name"] for zone in cloudy["zones"] if zone["level"] == "unreadable"]
+        self.assertTrue(unread)
+        self.assertTrue(all("西" in name for name in unread))
+
+        earlier = np.full((12, 12), 0.72)
+        later = np.full((12, 12), 0.68)
+        later[:, :4] = 0.18
+        dropped = analyse_metric(
+            "ndvi",
+            _grid_product("2026-04-09", later),
+            _grid_product("2026-04-04", earlier),
+        )
+        harvested_looking = [zone for zone in dropped["zones"] if zone["level"] == "lower"]
+        self.assertTrue(harvested_looking)
+        self.assertLess(harvested_looking[0]["delta_median"], -0.3)
+
     def test_change_only_counts_pixels_valid_on_both_dates(self):
         from app.reports.biweekly.infield_maps import analyse_metric
 

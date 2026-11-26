@@ -781,8 +781,11 @@ def build_story(facts: dict[str, Any], fig_dir: Path) -> list:
                 Paragraph(text.evidence_caption(facts), styles["small"]),
             ]
         )
-    story.append(Paragraph("田间核查建议", styles["h2"]))
-    _model_prose(story, styles, section_lines(facts.get("ai_narrative"), "field_notes"))
+    # 没有具体核查点时不留空标题，避免用一节套话把结论页撑长。
+    field_notes = section_lines(facts.get("ai_narrative"), "field_notes")
+    if field_notes:
+        story.append(Paragraph("田间核查建议", styles["h2"]))
+        _model_prose(story, styles, field_notes)
 
     # 田内空间分布、和周围的农田比各自成章，排在指标变化前面。
     patterns = facts.get("field_patterns") or {}
