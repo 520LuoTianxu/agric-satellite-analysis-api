@@ -50,6 +50,10 @@ class AutumnEmergenceOut(BaseModel):
     eligible: bool
     pending: bool = False
     season_key: str
+    sowing_date: date | None = Field(
+        None,
+        description="观测窗口起点。人工触发时为播种日（含）；未指定时为空，仍用整季。",
+    )
     status: Literal["not_emerged", "emerging", "emerged", "uncertain"] | None = None
     status_zh: str | None = Field(None, description="未出苗 / 出苗中 / 已出苗 / 不确定")
     emerged_flag: bool = False
@@ -117,3 +121,35 @@ def class_labels() -> dict[str, str]:
     from app.core.autumn_emergence import CLASS_LABELS_ZH
 
     return dict(CLASS_LABELS_ZH)
+
+
+class AutumnEmergenceTriggerIn(BaseModel):
+    """前端选定播种日后的手动触发。season 缺省为当前秋季。"""
+
+    sowing_date: date = Field(
+        description="播种日，ISO 日期。观测和土壤本底从这天开始。"
+    )
+    season: str | None = Field(
+        None, description="播种年秋季，例如 2026-autumn。缺省为当前或最近一季。"
+    )
+
+
+class AutumnEmergenceScheduleOut(BaseModel):
+    """排期结果。pending 为 true 时轮询 GET，不要把这次响应当成出苗结论。"""
+
+    land_id: str
+    field_id: str
+    season_key: str
+    sowing_date: date | None = None
+    pending: bool
+    eligible: bool = True
+    dispatch: Literal["compute", "s2_download", "frozen"]
+    status: Literal["scheduled", "ready", "frozen"]
+    date_from: date
+    date_to: date
+    sensors: list[str] = Field(
+        default_factory=list,
+        description="交给下载机的传感器。只计算时为空；缺景时只有 S2。",
+    )
+    job_ids: list[str] = Field(default_factory=list)
+    message: str

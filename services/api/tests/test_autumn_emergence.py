@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import unittest
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -27,6 +30,7 @@ from agric_satellite_analysis_common.biweekly.metric_specs import METRIC_SPECS
 from app.schemas.autumn_emergence import (
     AutumnEmergenceOut,
     AutumnEmergencePixelsOut,
+    AutumnEmergenceScheduleOut,
     class_labels,
 )
 from app.services import autumn_emergence as svc
@@ -89,29 +93,76 @@ class _Result:
 
 
 class FakeDB:
-    def __init__(self, crop: str = "冬小麦", scenes: list[dict] | None = None) -> None:
+    def __init__(
+        self, crop: str | None = "冬小麦", scenes: list[dict] | None = None
+    ) -> None:
         self.crop = crop
         self.scenes = scenes or []
         self.row: dict | None = None
+        self.request: dict | None = None
+        self.enqueued: list[dict] = []
+        self.open_jobs: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
+
+    async def get(self, model, key):
+        del model
+        return type("Land", (), {"land_id": str(key), "deleted_at": None})()
+
+    async def commit(self):
+        self.committed = True
 
     async def execute(self, stmt, params=None):
         sql = str(stmt)
         bound = dict(params or {})
         self.calls.append((sql, bound))
+        if "parcel_autumn_emergence_requests" in sql:
+            if "INSERT" in sql:
+                self.request = {
+                    "land_id": bound.get("land_id"),
+                    "season_key": bound.get("season_key"),
+                    "sowing_date": bound.get("sowing_date"),
+                    "status": bound.get("status"),
+                    "dispatch": bound.get("dispatch"),
+                    "date_from": bound.get("date_from"),
+                    "date_to": bound.get("date_to"),
+                    "job_ids": bound.get("job_ids"),
+                }
+                return _Result()
+            if "UPDATE" in sql:
+                if self.request is not None:
+                    self.request["status"] = bound.get("status", "ready")
+                return _Result()
+            return _Result(one=None if self.request is None else _Row(self.request))
+        if "parcel_autumn_emergence_outbox" in sql and "INSERT" in sql:
+            self.enqueued.append(bound)
+            return _Result()
+        if "FROM agric_satellite.jobs" in sql:
+            return _Result(many=[_Row(row) for row in self.open_jobs])
         if "FROM agric_satellite.land_parcels" in sql:
             return _Result(
                 one=_Row({"land_id": bound["land_id"], "crop_type": self.crop})
             )
         if (
             "FROM agric_satellite.parcel_autumn_emergence" in sql
+            and "requests" not in sql
             and "INSERT" not in sql
         ):
             return _Result(one=None if self.row is None else _Row(self.row))
         if "parcel_scene_products" in sql:
-            return _Result(many=[_Row(row) for row in self.scenes])
-        if sql.lstrip().startswith(
-            "INSERT INTO agric_satellite.parcel_autumn_emergence"
+            start = bound.get("date_from")
+            end = bound.get("date_to")
+            rows = self.scenes
+            if start is not None or end is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if (start is None or row["date"] >= start)
+                    and (end is None or row["date"] <= end)
+                ]
+            return _Result(many=[_Row(row) for row in rows])
+        if (
+            "INSERT INTO agric_satellite.parcel_autumn_emergence" in sql
+            and "requests" not in sql
         ):
             if self.row and self.row.get("frozen"):
                 return _Result(one=None)
@@ -409,6 +460,318 @@ class PersistAndSkipTests(unittest.TestCase):
             {"scene_upserts": 1},
         )
         self.assertIsNone(s1)
+
+
+class _Session:
+    def __init__(self, db: FakeDB) -> None:
+        self.db = db
+
+    async def __aenter__(self) -> FakeDB:
+        return self.db
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        del exc_type, exc, tb
+        return False
+
+
+def _forbid_download(*_args, **_kwargs):
+    raise AssertionError("API host must not download imagery")
+
+
+class ManualTriggerTests(unittest.TestCase):
+    def test_missing_clear_s2_schedules_s2_only(self) -> None:
+        db = FakeDB(crop="", scenes=[])
+        created: dict = {}
+
+        async def create(_db, lands, **kwargs):
+            created["lands"] = lands
+            created["kwargs"] = kwargs
+            return [], [SimpleNamespace(id="job-s2-1")], {}
+
+        with (
+            patch(
+                "app.services.satellite_batch.create_satellite_batch_jobs",
+                new=create,
+            ),
+            patch("httpx.Client", _forbid_download),
+            patch("httpx.AsyncClient", _forbid_download),
+            patch("urllib.request.urlopen", _forbid_download),
+        ):
+            payload = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    date(2026, 10, 15),
+                    "2026-autumn",
+                    today=date(2026, 11, 26),
+                )
+            )
+        schedule = AutumnEmergenceScheduleOut.model_validate(payload)
+        self.assertEqual(schedule.dispatch, "s2_download")
+        self.assertTrue(schedule.pending)
+        self.assertEqual(schedule.status, "scheduled")
+        self.assertEqual(schedule.sensors, ["S2"])
+        self.assertEqual(schedule.job_ids, ["job-s2-1"])
+        self.assertEqual(schedule.sowing_date, date(2026, 10, 15))
+        self.assertEqual(schedule.date_from, date(2026, 10, 15))
+        self.assertEqual(schedule.date_to, date(2026, 11, 26))
+        kwargs = created["kwargs"]
+        self.assertEqual(tuple(kwargs["sensors"]), ("S2",))
+        self.assertNotIn("S1", kwargs["sensors"])
+        self.assertEqual(kwargs["date_from"], date(2026, 10, 15))
+        self.assertEqual(kwargs["date_to"], date(2026, 11, 26))
+        self.assertFalse(kwargs["force"])
+        extra = kwargs["extra_params"]
+        self.assertTrue(extra["autumn_emergence_manual"])
+        self.assertTrue(extra["bypass_schedule_land_filter"])
+        self.assertNotIn("is_backfill", extra)
+        self.assertEqual(db.enqueued, [])
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+        for fn in (svc.schedule_manual_emergence, svc.dispatch_s2_download):
+            source = inspect.getsource(fn)
+            self.assertNotIn("httpx", source)
+            self.assertNotIn("urlopen", source)
+            self.assertNotIn("rasterio", source)
+            self.assertNotIn("app.tasks", source)
+        waiting = asyncio.run(
+            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=MemStorage())
+        )
+        self.assertEqual(waiting["action"], "waiting_for_scenes")
+        self.assertIsNone(db.row)
+        view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
+        parsed = AutumnEmergenceOut.model_validate(view)
+        self.assertTrue(parsed.eligible)
+        self.assertTrue(parsed.pending)
+        self.assertIsNone(parsed.status)
+        self.assertEqual(parsed.sowing_date, date(2026, 10, 15))
+
+    def test_open_s2_job_is_not_dispatched_twice(self) -> None:
+        db = FakeDB(crop=None, scenes=[])
+        calls = {"n": 0}
+
+        async def create(_db, _lands, **_kwargs):
+            calls["n"] += 1
+            return [], [SimpleNamespace(id="job-s2-1")], {}
+
+        with patch(
+            "app.services.satellite_batch.create_satellite_batch_jobs",
+            new=create,
+        ):
+            first = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    date(2026, 10, 15),
+                    today=date(2026, 11, 26),
+                )
+            )
+            db.open_jobs = [{"id": "job-s2-1", "status": "pending"}]
+            second = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    date(2026, 10, 15),
+                    today=date(2026, 11, 26),
+                )
+            )
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(first["season_key"], "2026-autumn")
+        self.assertEqual(second["job_ids"], ["job-s2-1"])
+        self.assertIn("未重复派发", second["message"])
+        self.assertEqual(db.crop, None)
+
+    def test_ingested_clear_s2_enqueues_compute_only(self) -> None:
+        sowing = date(2026, 10, 15)
+        scenes = _rows_from_stacks(_plateau_series())
+        scenes.append(_scene_row("2026-09-20", [0.4] * 40))
+        db = FakeDB(crop="", scenes=scenes)
+
+        async def create(*_args, **_kwargs):
+            raise AssertionError("clear S2 is already ingested")
+
+        with (
+            patch(
+                "app.services.satellite_batch.create_satellite_batch_jobs",
+                new=create,
+            ),
+            patch("httpx.Client", _forbid_download),
+            patch("urllib.request.urlopen", _forbid_download),
+        ):
+            payload = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    sowing,
+                    "2026-autumn",
+                    today=date(2026, 11, 26),
+                )
+            )
+        schedule = AutumnEmergenceScheduleOut.model_validate(payload)
+        self.assertEqual(schedule.dispatch, "compute")
+        self.assertEqual(schedule.sensors, [])
+        self.assertEqual(schedule.job_ids, [])
+        self.assertTrue(schedule.pending)
+        self.assertEqual(len(db.enqueued), 1)
+        self.assertEqual(db.request["dispatch"], "compute")
+        self.assertEqual(db.request["sowing_date"], sowing)
+        self.assertNotIn("S1", schedule.sensors)
+        scene_params = [
+            params for sql, params in db.calls if "parcel_scene_products" in sql
+        ]
+        self.assertEqual(scene_params[0]["date_from"], sowing)
+
+    def test_callback_computes_empty_crop_from_sowing_date(self) -> None:
+        sowing = date(2026, 10, 15)
+        scenes = _rows_from_stacks(_plateau_series())
+        scenes.insert(0, _scene_row("2026-09-20", [0.55] * 40))
+        db = FakeDB(crop="", scenes=scenes)
+        db.request = {
+            "land_id": "33052",
+            "season_key": "2026-autumn",
+            "sowing_date": sowing,
+            "status": "scheduled",
+            "dispatch": "s2_download",
+            "date_from": sowing,
+            "date_to": date(2026, 11, 26),
+            "job_ids": "[]",
+        }
+        storage = MemStorage()
+        with patch(
+            "app.core.database.async_session",
+            return_value=_Session(db),
+        ):
+            queued = asyncio.run(
+                svc.enqueue_from_scene_result(
+                    {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
+                    {"scene_upserts": 1},
+                )
+            )
+            ignored = asyncio.run(
+                svc.enqueue_from_scene_result(
+                    {"land_id": "33052", "sensor": "S1", "date": "2026-11-24"},
+                    {"scene_upserts": 1},
+                )
+            )
+        self.assertTrue(queued)
+        self.assertFalse(ignored)
+        self.assertEqual(len(db.enqueued), 1)
+        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 24))
+        outcome = asyncio.run(
+            svc.recompute_land(db, "33052", date(2026, 11, 24), storage=storage)
+        )
+        self.assertEqual(outcome["action"], "updated")
+        self.assertEqual(outcome["sowing_date"], sowing.isoformat())
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+        upserts = [
+            params
+            for sql, params in db.calls
+            if "INSERT INTO agric_satellite.parcel_autumn_emergence" in sql
+            and "requests" not in sql
+        ]
+        self.assertEqual(upserts[-1]["sowing_date"], sowing)
+        summary = json.loads(upserts[-1]["summary"])
+        self.assertEqual(summary["sowing_date"], sowing.isoformat())
+        self.assertTrue(
+            all(day >= sowing.isoformat() for day in summary["baseline_dates"])
+        )
+        self.assertNotIn("2026-09-20", summary["baseline_dates"])
+        scene_windows = [
+            params for sql, params in db.calls if "parcel_scene_products" in sql
+        ]
+        self.assertTrue(scene_windows)
+        self.assertTrue(all(params["date_from"] == sowing for params in scene_windows))
+        self.assertEqual(db.request["status"], "ready")
+        view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
+        parsed = AutumnEmergenceOut.model_validate(view)
+        self.assertTrue(parsed.eligible)
+        self.assertFalse(parsed.pending)
+        self.assertEqual(parsed.sowing_date, sowing)
+        self.assertEqual(parsed.method_version, METHOD_VERSION)
+        self.assertIsNotNone(parsed.status)
+
+    def test_automatic_hook_still_skips_empty_crop(self) -> None:
+        for crop in ("", None):
+            db = FakeDB(crop=crop, scenes=_rows_from_stacks(_plateau_series()))
+            outcome = asyncio.run(
+                svc.recompute_land(
+                    db, "33052", date(2026, 11, 24), storage=MemStorage()
+                )
+            )
+            self.assertEqual(outcome["action"], "skipped_ineligible")
+            self.assertIsNone(db.row)
+            self.assertEqual(db.crop, crop)
+            self.assertNotIn(
+                "update agric_satellite.land_parcels", db.sql_text().lower()
+            )
+            self.assertNotIn("parcel_scene_products", db.sql_text())
+            view = asyncio.run(
+                svc.get_summary(
+                    db, "33052", "2026-autumn", today=date(2026, 11, 26), enqueue=False
+                )
+            )
+            self.assertFalse(view["eligible"])
+            self.assertFalse(view["pending"])
+
+    def test_sowing_date_outside_autumn_window_is_rejected(self) -> None:
+        db = FakeDB(crop="")
+        with self.assertRaises(svc.EmergenceScheduleError) as caught:
+            asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    date(2026, 8, 20),
+                    "2026-autumn",
+                    today=date(2026, 11, 26),
+                )
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(db.enqueued, [])
+        self.assertIsNone(db.request)
+
+    def test_frozen_season_does_not_download_or_rewrite_crop(self) -> None:
+        db = FakeDB(crop="")
+        db.row = {
+            "frozen": True,
+            "emerged_flag": True,
+            "status": "emerged",
+            "sowing_date": date(2026, 10, 1),
+        }
+
+        async def create(*_args, **_kwargs):
+            raise AssertionError("frozen season must not dispatch")
+
+        with patch(
+            "app.services.satellite_batch.create_satellite_batch_jobs",
+            new=create,
+        ):
+            payload = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db,
+                    "33052",
+                    date(2026, 10, 20),
+                    "2026-autumn",
+                    today=date(2026, 11, 26),
+                )
+            )
+        self.assertEqual(payload["dispatch"], "frozen")
+        self.assertFalse(payload["pending"])
+        self.assertEqual(payload["sowing_date"], date(2026, 10, 1))
+        self.assertEqual(db.enqueued, [])
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+
+    def test_post_route_is_registered_beside_get(self) -> None:
+        from app.routers.autumn_emergence import router
+
+        path = "/agri/lands/{land_id}/autumn-emergence"
+        matched = [
+            route for route in router.routes if getattr(route, "path", None) == path
+        ]
+        methods = {method for route in matched for method in (route.methods or set())}
+        self.assertIn("POST", methods)
+        self.assertIn("GET", methods)
 
 
 if __name__ == "__main__":
