@@ -256,6 +256,93 @@ def region_labels(xs: np.ndarray, ys: np.ndarray) -> list[str]:
     return out
 
 
+# 方位中位数和全田中位数至少差这么多，才算这一方位分开。半个四分位距更大时用那个，
+# 避免把噪声写成一块高、一块低。这不是出苗或收获阈值。
+ZONE_SPLIT_ABS = 0.05
+ZONE_SPLIT_IQR = 0.5
+# 这一方位里能读到的像元不到一半时，中位数不能代表这一块是否出苗或已收获。
+ZONE_UNREADABLE_FRACTION = 0.5
+
+
+def describe_zones(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    values: np.ndarray,
+    valid: np.ndarray,
+    *,
+    field_median: float | None,
+    iqr: float | None,
+    delta: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Where the field splits, using positions already drawn on the in-field map.
+
+    Only zones that sit clearly above or below the field median, or that are
+    mostly unreadable, are returned. An even field comes back with no zones.
+    """
+    labels = region_labels(xs, ys)
+    n_pixels = len(labels)
+    if n_pixels == 0:
+        return {"spatial_split": "even", "zones": []}
+    valid_mask = np.asarray(valid, dtype=bool)
+    readings = np.asarray(values, dtype=float)
+    groups: dict[str, list[int]] = {}
+    for index, name in enumerate(labels):
+        groups.setdefault(name, []).append(index)
+    try:
+        median = None if field_median is None else float(field_median)
+    except (TypeError, ValueError):
+        median = None
+    if median is not None and not np.isfinite(median):
+        median = None
+    try:
+        spread = 0.0 if iqr is None else abs(float(iqr))
+    except (TypeError, ValueError):
+        spread = 0.0
+    if not np.isfinite(spread):
+        spread = 0.0
+    gap = max(ZONE_SPLIT_ABS, ZONE_SPLIT_IQR * spread)
+    zones: list[dict[str, Any]] = []
+    for name, members in groups.items():
+        idx = np.asarray(members, dtype=int)
+        n_total = int(idx.size)
+        if n_total < MIN_CLUSTER_PIXELS:
+            continue
+        zone_valid = valid_mask[idx]
+        n_valid = int(zone_valid.sum())
+        readable = n_valid / n_total
+        entry: dict[str, Any] = {
+            "name": name,
+            "level": "unreadable" if readable < ZONE_UNREADABLE_FRACTION else "similar",
+            "valid_fraction": readable,
+            "area_fraction": n_total / n_pixels,
+        }
+        if n_valid >= MIN_CLUSTER_PIXELS:
+            zone_median = float(np.median(readings[idx][zone_valid]))
+            entry["median"] = zone_median
+            if entry["level"] != "unreadable" and median is not None:
+                if zone_median < median - gap:
+                    entry["level"] = "lower"
+                elif zone_median > median + gap:
+                    entry["level"] = "higher"
+        if delta is not None:
+            paired = np.asarray(delta, dtype=float)[idx]
+            paired = paired[np.isfinite(paired)]
+            if paired.size >= MIN_CLUSTER_PIXELS:
+                entry["delta_median"] = float(np.median(paired))
+        if entry["level"] != "similar":
+            zones.append(entry)
+    levels = {item["level"] for item in zones}
+    if levels & {"lower", "higher"}:
+        split = "split"
+    elif "unreadable" in levels:
+        split = "unreadable"
+    else:
+        split = "even"
+    order = {"lower": 0, "unreadable": 1, "higher": 2}
+    zones.sort(key=lambda item: (order.get(str(item["level"]), 9), -float(item["area_fraction"])))
+    return {"spatial_split": split, "zones": zones}
+
+
 def region_shares(labels: list[str], mask: np.ndarray) -> list[tuple[str, float]]:
     """Where flagged pixels sit: (region, share of flagged pixels), largest first."""
     flagged = [label for label, hit in zip(labels, mask) if hit]

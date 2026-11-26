@@ -27,6 +27,7 @@ from app.reports.biweekly.metric_stats import (
     match_pixels,
     pixel_spacing_m,
     pixel_table,
+    describe_zones,
     region_labels,
     region_shares,
     summarize_values,
@@ -235,9 +236,11 @@ def analyse_metric(
         },
     }
     if baseline is None:
+        _attach_zones(out, xs, ys, values, table["valid"])
         return out
     earlier = pixel_table(baseline, metric)
     if earlier is None or int(earlier["valid"].sum()) < MIN_FIELD_PIXELS:
+        _attach_zones(out, xs, ys, values, table["valid"])
         return out
     out["baseline_date"] = _as_day(baseline.get("date"))
     out["baseline_stats"] = field_stats(baseline, metric)
@@ -258,7 +261,38 @@ def analyse_metric(
         # 显著偏低像元在基准日是否同样低于当时的田块显著偏低界限。
         earlier_flag = tukey_low_mask(aligned)
         out["relative"]["clustered_also_on_baseline"] = int((clustered & earlier_flag).sum())
+    _attach_zones(
+        out,
+        xs,
+        ys,
+        values,
+        table["valid"],
+        delta if summary is not None else None,
+    )
     return out
+
+
+def _attach_zones(
+    out: dict[str, Any],
+    xs: np.ndarray,
+    ys: np.ndarray,
+    values: np.ndarray,
+    valid: np.ndarray,
+    delta: np.ndarray | None = None,
+) -> None:
+    """Keep a JSON-safe zone summary on the analysis the narrative later reads."""
+    stats = out.get("stats") or {}
+    described = describe_zones(
+        xs,
+        ys,
+        values,
+        valid,
+        field_median=stats.get("median"),
+        iqr=stats.get("iqr"),
+        delta=delta,
+    )
+    out["spatial_split"] = described["spatial_split"]
+    out["zones"] = described["zones"]
 
 
 def render_metric_figure(analysis: dict[str, Any], dest: str | Path, *, compact: bool = False) -> Path | None:

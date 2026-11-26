@@ -84,20 +84,136 @@ class NarrativeAiTests(unittest.TestCase):
                 },
             }
         ]
+        facts["infield"][0]["spatial_split"] = "split"
+        facts["infield"][0]["zones"] = [
+            {
+                "name": "西南部",
+                "level": "lower",
+                "median": 0.41,
+                "valid_fraction": 0.96,
+                "area_fraction": 0.18,
+                "delta_median": -0.06,
+            }
+        ]
         payload = narrative_input(facts)
         self.assertIn("最近一次有效观测", payload["parameter_guide"]["metrics"])
         self.assertIn("有效降雨", payload["parameter_guide"]["weather"])
         self.assertIn("雨水账", payload["parameter_guide"]["weather"])
-        self.assertIn("建议去地里看看确认一下", SYSTEM_PROMPT)
-        self.assertIn("建议去地里看看确认一下", payload["parameter_guide"]["infield"])
-        self.assertIn(
+        self.assertNotIn("建议去地里看看确认一下", SYSTEM_PROMPT)
+        self.assertNotIn("建议去地里看看确认一下", payload["parameter_guide"]["infield"])
+        self.assertNotIn(
             "建议去地里看看确认一下", payload["parameter_guide"]["surrounding"]
         )
+        self.assertIn("出苗", SYSTEM_PROMPT)
+        self.assertIn("收获", SYSTEM_PROMPT)
+        self.assertIn("方位", payload["parameter_guide"]["infield"])
+        self.assertIn("compare_with", payload["parameter_guide"]["key_nodes"])
         self.assertNotIn("先别下结论", payload["parameter_guide"]["surrounding"])
+        self.assertNotIn("四段", payload["parameter_guide"]["infield"])
+        self.assertIn("不要按", SYSTEM_PROMPT)
         self.assertEqual(payload["metrics"]["ndre"]["latest"], "0.57")
+        self.assertIn("NDRE", payload["metrics"]["ndre"]["name"])
         self.assertIn("叶绿素", payload["metrics"]["ndre"]["meaning"])
+        self.assertNotIn("绿度", payload["metrics"]["ndre"]["name"])
         self.assertEqual(payload["infield"][0]["p10"], "0.51")
         self.assertEqual(payload["infield"][0]["regions"][0]["share_percent"], 40)
+        self.assertEqual(payload["infield"][0]["spatial_split"], "split")
+        self.assertEqual(payload["infield"][0]["zones"][0]["name"], "西南部")
+        self.assertEqual(payload["infield"][0]["zones"][0]["median"], "0.41")
+        self.assertEqual(payload["infield"][0]["zones"][0]["level"], "lower")
+        self.assertEqual(payload["stage_context"]["stage"], "拔节孕穗期")
+        self.assertIn("NDRE", payload["stage_context"]["expected"])
+
+    def test_stage_tasks_and_patterns_are_evidence_not_a_script(self) -> None:
+        facts = _facts()
+        facts["phase"] = {
+            "observation_stages": [{"stage_code": "出苗期", "phase_label": "S1"}]
+        }
+        facts["key_node_records"] = {
+            "nodes": [
+                {
+                    "task_name": "出苗水",
+                    "task_code": "EMERGENCE_WATER",
+                    "submitted_on": "2026-03-20",
+                    "answers": [{"label": "说明", "value": "已灌一遍"}],
+                },
+                {
+                    "task_name": "收获",
+                    "task_code": "HARVEST",
+                    "submitted_on": "2026-03-22",
+                    "answers": [{"label": "说明", "value": "西南部已收"}],
+                },
+            ]
+        }
+        facts["field_patterns"] = {
+            "persistent": [
+                {
+                    "metric": "ndvi",
+                    "status": "ok",
+                    "dates": ["2026-03-01", "2026-03-10", "2026-03-20"],
+                    "regions": [{"name": "西南部", "share": 0.7}],
+                    "n_persistent": 12,
+                    "n_persistent_clustered": 12,
+                }
+            ],
+            "uniformity": [
+                {
+                    "metric": "ndvi",
+                    "status": "ok",
+                    "direction": "wider",
+                    "dates": ["2026-03-10", "2026-03-20"],
+                    "spread": [0.08, 0.22],
+                }
+            ],
+            "history": {"status": "absent", "line": "历史可比数据不足，暂不评价。"},
+            "persistent_lines": ["持续偏弱（NDVI）：西南部有一小片一直比整块地弱。"],
+        }
+        payload = narrative_input(facts)
+        self.assertEqual(payload["stage_context"]["stage"], "出苗期")
+        self.assertIn("不能判断出苗", payload["stage_context"]["expected"])
+        packed = json.dumps(payload["field_patterns"], ensure_ascii=False)
+        self.assertNotIn("持续偏弱（NDVI）", packed)
+        self.assertNotIn("暂不评价", packed)
+        self.assertEqual(payload["field_patterns"]["persistent"][0]["regions"], ["西南部"])
+        self.assertEqual(payload["field_patterns"]["uniformity"][0]["direction"], "wider")
+        self.assertEqual(payload["field_patterns"]["uniformity"][0]["spread"], ["0.08", "0.22"])
+        self.assertEqual(payload["field_patterns"]["history_status"], "absent")
+        hints = {node["task_name"]: node.get("compare_with") for node in payload["key_nodes"]}
+        self.assertIn("NDMI", hints["出苗水"])
+        self.assertIn("低覆盖", hints["收获"])
+        self.assertNotIn("EMERGENCE_WATER", json.dumps(payload["key_nodes"], ensure_ascii=False))
+        cleaned = normalize_judgment(
+            {
+                "conclusion": [
+                    "西南部 NDVI 仍低，建议去地里看看确认一下。",
+                    "建议去地里看看确认一下。",
+                    "东北部这次看不清。",
+                ]
+            },
+            {"metrics": {}},
+        )
+        self.assertEqual(cleaned["conclusion"], ["西南部 NDVI 仍低。", "东北部这次看不清。"])
+
+    def test_empty_field_notes_do_not_fail_the_narrative(self) -> None:
+        content = {
+            "summary": "NDRE 为 0.57。",
+            "changes": [
+                {
+                    "metric": "ndre",
+                    "judgment": "better",
+                    "sentence": "NDRE 为 0.57。",
+                }
+            ],
+            "conclusion": ["NDRE 为 0.57。"],
+            "field_notes": [],
+            "metric_notes": ["NDRE 本期是 0.57。"],
+        }
+        out, _client = self._judge(
+            {"content": json.dumps(content, ensure_ascii=False)}
+        )
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["field_notes"], [])
+        self.assertEqual(out["conclusion"], ["NDRE 为 0.57。"])
 
     def test_missing_key_does_not_invent_better_or_worse(self) -> None:
         with patch.dict(os.environ, {"BAILIAN_API_KEY": ""}, clear=False):
@@ -179,7 +295,7 @@ class NarrativeAiTests(unittest.TestCase):
             [
                 "本期有效降雨少，要留意浇水。",
                 "地里东北部有一小片一直比整块地弱，建议抽空去田里看看那一块。",
-                "和周围大约一公里的农田比，这块地稍微弱一点，不过周围种的不一定和咱一样，建议去地里看看确认一下。",
+                "和周围大约一公里的农田比，这块地稍微弱一点，不过周围种的不一定和咱一样。",
             ],
         )
         self.assertNotIn("先别", "\n".join(diagnosed["conclusion"]))
@@ -251,9 +367,11 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertNotIn("往好变化必须", prompt)
         self.assertIn("#1F4D38", prompt)
         self.assertIn("<b>", prompt)
-        self.assertIn("发挥", prompt)
+        self.assertIn("本期事实", prompt)
         self.assertIn("metric_notes", prompt)
         self.assertIn("backColor", prompt)
+        self.assertIn("生育阶段", prompt)
+        self.assertNotIn("建议去地里看看确认一下", prompt)
         self.assertNotIn("delta > 0", prompt)
         self.assertNotIn('direction == "up"', prompt)
         user = client.body["messages"][1]["content"]
@@ -440,7 +558,8 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertEqual(partial_fields["error"], "truncated_response")
         self.assertEqual(partial_fields["conclusion"], ["NDRE 为 0.57。"])
         self.assertIn("输出长度用尽", partial_fields["reader_note"])
-        self.assertIn("field_notes", partial_fields["diagnostics"]["missing_sections"])
+        self.assertIn("changes", partial_fields["diagnostics"]["missing_sections"])
+        self.assertNotIn("field_notes", partial_fields["diagnostics"]["missing_sections"])
 
         usable, usable_client = self._judge(
             {

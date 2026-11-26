@@ -49,65 +49,133 @@ MAX_TIMEOUT_S = 600
 MAX_MODEL_CALLS = 2
 _RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 JUDGMENTS = {"better", "worse", "unclear"}
-# 结论里用这几个说法，不把英文缩写交给模型复读。
-_PLAIN_METRIC = {
-    "ndvi": "长势",
-    "evi": "绿度",
-    "ndre": "叶绿素",
-    "ndmi": "叶片含水",
-}
-_PLAIN_MEANING = {
-    "ndvi": "看这块地的庄稼盖得密不密、长得旺不旺",
-    "evi": "看庄稼绿不绿；长得很密时，这个数比长势更不容易看满",
-    "ndre": "看叶子里的叶绿素够不够，庄稼长密以后更有用",
-    "ndmi": "看叶子里的水多不多",
-}
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
-SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户，不是遥感人员。用户消息里有 parameter_guide 和本期参数。parameter_guide 说明每个参数是什么意思，其余字段是程序已经算好的参数值。
+SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户和农技人员。用户消息里有 parameter_guide 和本期参数。parameter_guide 只解释字段含义，其余字段是程序已经算好的事实。请按本期事实写，不要为了把每一项都提到而补句子。
 
-请直接根据这些参数发挥，写成给种植户看的报告。篇幅按内容来，该写到的都写到，不要为了短而省略。用种植户听得懂的说法把事情讲明白：指标用 name 里的叫法（长势、绿度、叶绿素、叶片含水），并说明这个数在看什么、升高或降低对这块地意味着什么。不要只堆 NDVI、EVI、NDRE、NDMI、EXG、ET0、格点、像元、百分位、中位数和公式。自己组织句子，不要每条都写成“由A升到B，提高C”这一种句式，也不要只写“全部上升、方向一致”。
+指标用正式名称：归一化植被指数（NDVI）、增强型植被指数（EVI）、归一化差值红边指数（NDRE）、归一化差值水分指数（NDMI）。第一次出现可以带中文全称，后面用缩写。不要把它们改叫「绿度」「叶片含水」或「长势」。不要写像元、百分位、中位数、格点、ET0、EXG 和公式。句子按事实来组织，不要每条都写成“由A升到B，提高C”，也不要只写“全部上升、方向一致”。
 
-参数里有的指标、日期、田内部位、未采用观测、冷热和有效降雨、去年同期、已填写的农事、土壤底子和周边对照都要写到，并用白话说明白。某个参数为空就不要编，也不要用“缺失”凑字。不要写施肥、打药。结论里要用白话判断本期偏干还是偏湿：偏干就说要不要留意浇水，偏湿或有积水迹象就说要不要留意排水。依据只能是已经给出的有效降雨、叶子含水、土壤能存的水和 water_risk_lines。干湿看不准就说这半月还看不准，并写「建议去地里看看确认一下」，不要写成没有风险，也不要写灌多少毫米，也不要写「现在还不能判断」。降雨一律写成「有效降雨」，按给出的毫米数直接说比去年多还是少，不要写「雨水账」「雨水」或「账」。农事是人工填写的背景，说清做了哪件、哪一天、填写里人能看懂的内容，不要抄英文字段名和编号，也不要把它说成卫星测到的。有土壤底子就讲清土质、酸碱和能存多少水。正文不要出现缺肥、病虫害、闹病这些词。
+结论从本期生育阶段写起，但不要复述 stage_context。stage_context 只用来判断什么值得写：这个阶段通常应看到什么，本期观测里哪一点不一样。全田都符合这个阶段的常态时，用一两句说清即可。某个参数为空就不要编，也不要用“缺失”凑字。
 
-infield 和 surrounding 是指标变化前面的两章，各自成章，篇幅按内容来。infield 讲地里哪一块和整块地不一样、偏弱的那一片在看什么。surrounding 讲这块地比周围农田更绿还是更弱，并说明周围的地种的不一定一样。某一块偏弱，或和周围不一样时，先说清差在哪里，再写「建议去地里看看确认一下」。不要写中位数、像元、百分位、超绿、EXG 和公式。
+空间上有差别时，写出 zones 或 field_patterns 里的方位，并写明那个方位的指数和整块地差在哪里。不要只说「不齐」或「更散了」。出苗期：level 为 lower 的方位写成植被信号弱或仍看不出苗，level 为 unreadable 的方位写成这次看不清、不能判断出苗；全田一起偏低是这一阶段的常态，不要把常态写成异常。成熟期和灌浆期：全田一起下降是成熟本身。若有的方位已经明显更低、有的仍高，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收；指数拉不开就写这次分不出收获范围，不要改写成笼统的长势句。
 
-数值升高或降低只表示大小，不等于好坏。哪一句、哪个数字是重点，由你决定，再给那几个字加粗或上色。不要规定成某几个固定词，也不要每句末尾都补同一个词。
+key_nodes 是人填写的农事。有记录就写做了什么、哪一天、填写里能看懂的内容，再按 compare_with 的意思说明本期指数和这件事对得上、还看不出来，还是对不上。compare_with 不要原句抄进正文。没有记录就不要写农事。不要把农事说成卫星测到的，不要建议施肥或打药，不要写缺肥、病虫害、闹病。有土壤底子就用土质、酸碱和能存多少水说明，不要另作诊断。
 
-正文是雅黑 10 磅。你可以用这些标记，标记里面放你选中的字，不要把整句都包进去：
+不要按「整体情况、田内不齐、和周围比、天气」四段来写，也不要把每个参数都写进结论。没有新信息的话题整段省略。周围对照只在差得清楚时写一句，并说明周围作物未必相同。天气只写本期真有数的冷热和有效降雨；降雨写成「有效降雨」，按毫米数说比去年多还是少，不要写「雨水」或「雨水账」。干湿只在有效降雨、NDMI 和 water_risk_lines 够用时判断要不要留意浇水或排水；不够就说一次看不准，不要写成没有风险，也不要写灌多少毫米。
+
+缺了的资料只说一次。不要用同一句巡查套话收尾，也不要每段都劝人下地。field_notes 只在某个写明的方位、或某件对不上的农事值得到地里看时才写，并写明看哪里、看什么；没有这样的点就给空数组。
+
+数值升高或降低只表示大小，不等于好坏。哪几个字需要标出，由你决定，不要每句末尾都补同一个词。
+
+正文是雅黑 10 磅。标记里面只放选中的字，不要把整句包进去：
 - 加粗：<b>…</b>
-- 你认为往好处、值得注意的字：<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">…</font>
-- 你认为往差处、需要留意的字：<font face="YaHei-Bold" color="#9C2B1B" backColor="#F8D6D2">…</font>
-- 需要到地里核对的字：<font face="YaHei-Bold" color="#8A5A12" backColor="#F8E8C8">…</font>
-没有把握的地方保持正文，并写成「建议去地里看看确认一下」。不要用别的颜色，不要用 Markdown。
+- 往好处、值得注意的字：<font face="YaHei-Bold" color="#1F4D38" backColor="#D9F2E3">…</font>
+- 往差处、需要留意的字：<font face="YaHei-Bold" color="#9C2B1B" backColor="#F8D6D2">…</font>
+- 某一具体位置值得核对的字：<font face="YaHei-Bold" color="#8A5A12" backColor="#F8E8C8">…</font>
+没有把握的字保持正文。不要用别的颜色，不要用 Markdown。
 
-metric_notes 是「指标说明」：每个指标按本期数值写成种植户能看懂的说明，讲清这个数在看什么、本期说明了什么。不要复读定义，不要写公式和英文缩写，每个指标的写法不要相同，重点由你标。篇幅不限。
-conclusion 是给种植户看的结论。先告诉他这半月这块地怎么样：长势、哪一块偏弱、和周围比、冷热、有效降雨比去年多还是少。把遥感变化、冷热和有效降雨、农事和土壤底子写在一起，用通俗说法说明白。降雨写成「有效降雨」，不要写「雨水账」或「雨水」。context_lines 还会再印很短的农事和土壤底子，不要把那些原句再抄一遍。重点由你用上面的标记标出来。
+metric_notes 是「指标说明」：每个指标按本期数值写成说明，讲清这个数在看什么、本期说明了什么。不要复读定义，不要写公式，每个指标不要写成同一句式。
+conclusion 是本期焦点，通常两三句，把生育阶段里真正值得注意的方位、指数或农事说完。context_lines 还会再印很短的农事和土壤底子，不要把那些原句再抄一遍。
+changes 每个指标一句，只写数值变化说明了什么，不要把周围、天气和农事再写进去。
+infield、surrounding、weather 各自只写该节证据里有的内容，不要互相重复，也不要互相用同一句话收尾。
 数字和日期只能照抄参数里已经出现的写法。不要写「低值」「参考线」「预警线」「达标」「确诊」「灾损」「产量」「好转」「变差」，也不要提到模型或 AI。
-field_pattern_lines 和 water_risk_lines 已经印在报告里，不要原句再抄一遍。结论里不要出现缺肥、病虫害、闹病、产量，也不要写「先别下结论」「先别急着」「不下结论」「不能下结论」「只能当参考」「仅供参考」「不判定」「现在还不能判断」。某一块偏弱、和周围不一样、或干湿看不准时，写「建议去地里看看确认一下」。旱涝和要不要浇水、排水按已有水分证据直接说；看不准不要改成没有风险。
+field_patterns 和 water_risk_lines 对应的句子已经印在报告里，不要换词再抄一遍。结论里不要出现缺肥、病虫害、闹病、产量，也不要写「先别下结论」「先别急着」「不下结论」「不能下结论」「只能当参考」「仅供参考」「不判定」「现在还不能判断」。
 不要输出思考过程，只输出 JSON：
 {"summary":"一段话","changes":[{"metric":"ndvi","judgment":"better|worse|unclear","sentence":"带标记的句子"}],"conclusion":["带标记的句子"],"field_notes":["带标记的句子"],"metric_notes":["带标记的句子"],"infield":[{"metric":"ndre","text":"带标记的句子"}],"surrounding":["带标记的句子"],"weather":["带标记的句子"]}
-changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。metric_notes 覆盖 metrics 里的每一个指标。
+changes 和 infield 的 metric 只能是 metrics 里的键。judgment 只能是 better、worse、unclear。句中的颜色由你选，不必和某个固定词对应。有指标时 metric_notes 覆盖每一个指标。weather、surrounding、infield、field_notes 没有可写的内容就给空数组，不要用套话填。
 """
 
 # 跟参数一起交给模型，只解释含义，不另给可以引用的数字。
 PARAMETER_GUIDE = {
-    "metrics": "每个指标的全田结果。name 是写给种植户的叫法。meaning 只说明这个数在看什么，不要照抄。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。role 是本期主要指标还是辅助指标。",
+    "metrics": "每个指标的全田结果。name 是正式名称，正文用其中的缩写。meaning 只说明这个数在看什么，不要照抄，也不要改叫绿度、叶片含水或长势。latest 是最近一次有效观测的数值，baseline 是拿来对比的上一次，delta 是 latest 减 baseline。value_direction 只表示数值升高、降低或持平。role 是本期主要指标还是辅助指标。",
     "used_observations": "本期采用的观测日期。",
-    "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。",
-    "infield": "地里哪一块和整块地不一样。median 是整块地的一般水平，p10 是偏低的一头，p90 是偏高的一头。regions.name 是哪一块，share_percent 是这一块占偏弱地方的百分比。写成给种植户看的说明，说清部位和这个数在看什么。某一块偏弱就写建议去地里看看确认一下。不要说像元、百分位、中位数，也不要写缺肥、病虫害、闹病、先别下结论、只能当参考。",
-    "surrounding": "这块地和周围大约一公里农田比，谁更绿。field_minus_nearby 是这块地减去周围，正数表示这块地更绿。写成给种植户看的说明，直接说这块地更绿还是更弱。周围种的不一定一样时，接着写建议去地里看看确认一下，不要写只能当参考。不要说超绿、EXG。",
-    "weather": "地块附近的天气，不是田间实测。写的时候说冷热、比去年高还是低，并用毫米数直接说有效降雨比去年多还是少。不要说格点、ET0、雨水账、雨水或账，也不要只写少了很多。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。prior_year 是去年同一段日期。",
-    "key_nodes": "人工填写的农事。用白话说明做了哪件、哪一天、answers 里人能看懂的内容。没有记录就不要写农事，也不要写“没有关键节点”。",
+    "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。没有未采用日期就不要写。",
+    "infield": "田块内部。median、p10、p90 是整块地的水平，写的时候直接说指数数值，不要说中位数、百分位、像元。zones 只列出和整块地明显分开、或这次大部分看不清的方位。level=lower 是这一方位更低，higher 是更高，unreadable 是这一方位多数地方这次读不到。spatial_split=even 表示方位之间没有拉开，不要写某一块偏弱；unreadable 表示有方位看不清；split 表示高低分开了。area_percent 是这一方位占整块地的百分比，valid_percent 是这一方位里能读到的百分比。delta_median 是这一方位相对上一次的变化。regions.name 是连成片偏低的位置，share_percent 是这些偏低地方里这一方位占的百分比。出苗期把 lower 写成植被信号弱或看不出苗，把 unreadable 写成不能判断出苗。成熟期和灌浆期：lower 且降幅明显时可以写成更像已经收获或覆盖已经掉下去，没有一起掉的方位写成仍像未收；拉不开就不要编收获范围。",
+    "surrounding": "这块地和周围大约一公里农田比。field_minus_nearby 是这块地减去周围，正数表示这块地更高。差得清楚再写，并说明周围作物未必相同。不要每篇都写同一句免责，也不要写只能当参考。不要说超绿、EXG。没有比较就不要写这一节。",
+    "weather": "地块附近的天气，不是田间实测。有气温就写冷热和比去年高还是低；有降水毫米数就直接说有效降雨比去年多还是少。缺哪一项就跳过。不要说格点、ET0、雨水账、雨水或账。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。prior_year 是去年同一段日期。",
+    "key_nodes": "人工填写的农事。task_name 是事项，submitted_on 是填写日期，answers 是人能看懂的填写内容。compare_with 是对照提示，不是要抄进正文的句子：用它判断指数和这件事对得上、还看不出来，还是对不上。没有记录就不要写农事，也不要写“没有关键节点”。",
     "soil": "地块原来的土壤底子，不是这次新测的土。有 reader_sentence 就用这句的意思改写。status 不是 ready 就不要写土壤。不要出现缺肥、病虫害这些词。",
     "photo_review": "现场照片的画面检查。status 不是 reviewed 时，不要写照片。",
     "context_lines": "结论下面还会印的短句。不要原句复述。",
-    "field_pattern_lines": "已经写好的持续偏弱、均匀度和历史同期句子。报告会印出，不要复述，也不要改数字。",
-    "water_risk_lines": "已经写好的水分观测和推算，结论里要用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述，也不要把原文里的「不判定」「本期参考」写进结论。干湿看不准就说这半月还看不准，并写建议去地里看看确认一下。不要写成没有风险，也不要写现在还不能判断、先别下结论、只能当参考。",
+    "field_patterns": "持续偏低和均匀度的结构化结果，不是要复述的句子。persistent.regions 是连续几期都偏低并且连成片的方位；scattered 为 true 表示有偏低但没有连成一片；status 不是 ok 就不要写成持续偏弱。uniformity.direction：wider 是各处拉开，narrower 是更接近，similar 是看不出拉开。history_status 不是 compared 时，不要在结论里再写历史暂不评价。图下已经印有对应句子，结论里改用方位和指数写本期焦点。",
+    "water_risk_lines": "已经写好的水分观测。只用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述，也不要把「不判定」写进结论。看不准就说看不准，不要写成没有风险，也不要写现在还不能判断、先别下结论、只能当参考。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
-    "stage_background": "这个阶段通常的背景，不是必须套用的公式，也不是对本田的结论。不要在正文里写仅供参考或只能当参考。",
+    "stage_context": "当前生育阶段的对照，不是要写进正文的句子，也不是对本田的结论。focus 是这一阶段通常该看的问题，expected 是什么算常态、什么才值得写，background 是季节走向上的一句背景。不要复述这三句。观测和常态一致时用一两句带过；不一致时写出方位和指数。",
     "gap_days": "最近一次观测和对比基准之间相隔的天数。",
 }
+
+
+# 生育阶段对照：告诉模型这一阶段什么算常态、什么才值得写。不是结论模板。
+_STAGE_CONTEXT: dict[str, dict[str, str]] = {
+    "播种期": {
+        "focus": "播种之后是否已经能看出苗的迹象",
+        "expected": "播种当周通常仍看不到成片植被。低 NDVI 本身不是苗弱。只有已经能按方位分出有信号和没有信号时，才写出苗不齐的位置。",
+    },
+    "出苗期": {
+        "focus": "出苗是否形成，以及何处没有植被信号或这次看不清",
+        "expected": "覆盖低、NDVI 整体偏低是常态。值得写的是地块内部：哪些方位已经高出其余地方，哪些方位仍明显更低，哪些方位这次读不到、不能判断出苗。",
+    },
+    "分蘖期": {
+        "focus": "覆盖是否在增加，以及增加是否只发生在部分方位",
+        "expected": "覆盖通常缓慢增加。全田一起上升点明即可。只有部分方位上升、另一部分仍很低时，写出没有跟上的方位。",
+    },
+    "越冬期": {
+        "focus": "越冬期间指数是否稳定，有没有成片异常低的方位",
+        "expected": "生长基本停滞，指数持平或小幅下降是常态。不要把小幅下降写成苗情问题。只有方位之间拉开，或有成片持续偏低时，才作为本期重点。",
+    },
+    "返青期": {
+        "focus": "恢复生长是否开始，哪些方位还没有回升",
+        "expected": "指数通常由低位回升。回升如果只出现在部分方位，写出还没回升的方位。全田一起回升就不要再写成不齐。",
+    },
+    "拔节孕穗期": {
+        "focus": "冠层是否在快速形成，偏低是否集中在某些方位",
+        "expected": "生物量通常快速增加，NDVI 容易饱和，NDRE 和 EVI 更能看出差别。全田上升是常态。只有明显落后的方位，或该升未升，才作为本期重点。",
+    },
+    "抽穗期": {
+        "focus": "冠层是否维持在高位，有没有成片掉下去的方位",
+        "expected": "冠层通常在全季高位附近。小幅波动不必展开。成片明显低于其余方位时，写出方位和哪个指数偏低。",
+    },
+    "灌浆期": {
+        "focus": "下降是全田同步，还是局部已经更像低覆盖",
+        "expected": "叶片逐步衰老，指数由高位缓慢下降是常态。一部分方位已经落到明显低位、另一部分仍高时，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收。分不开就说明分不开。",
+    },
+    "成熟期": {
+        "focus": "哪些方位更像已经收获，哪些仍保持冠层",
+        "expected": "转黄和含水下降会让 NDVI、NDRE、NDMI 一起下降，这是成熟本身。能分开时，用方位上的高低和相对上期的降幅说明更像已收还是仍未收。拉不开或有效观测不够时，直接说这次分不出收获范围。",
+    },
+}
+
+# 农事对照提示。只解释记录和指数该怎么看，不规定结论原句。
+_TASK_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("收获", "收割"),
+        "收获后相应范围的 NDVI、NDRE 应落到低覆盖。用方位上的高低和降幅对照记录里的时间；对不上就写对不上。",
+    ),
+    (
+        ("出苗水", "灌溉", "浇水", "灌水", "滴灌", "喷灌", "EMERGENCE_WATER", "OVERWINTER_WATER"),
+        "灌溉后 NDMI 不一定当天变化。对照的是其后水分指数和干湿证据是否与这次灌溉相符。",
+    ),
+    (
+        ("出苗", "EMERGENCE_CHECK"),
+        "这是人填写的出苗情况。用它对照哪些方位已有植被信号、哪些仍低或看不清，不要把它说成卫星测到的苗数。",
+    ),
+    (
+        ("播种", "补种", "PRECISION_SOWING"),
+        "播种之后要过一段时间才应出现成片植被信号。对照的是其后 NDVI 是否按方位出现，而不是播种当周偏低本身。",
+    ),
+    (
+        ("施肥", "追肥", "基肥", "BASE_FERTILIZER"),
+        "记录只说明施过肥，不能据此诊断缺肥。施肥后若主要指数上升，可以说时间上对得上；没有变化就只说指数上还看不出。",
+    ),
+    (
+        ("打药", "喷药", "植保"),
+        "记录只说明做过植保。不要诊断病虫害，也不要建议再打药。只在指数变化和时间对得上或对不上时提一句。",
+    ),
+    (
+        ("镇压", "POST_SOWING_ROLL"),
+        "镇压不直接改变植被指数，不要从指数评价镇压质量。",
+    ),
+)
 
 
 def bailian_settings() -> dict[str, str]:
@@ -261,8 +329,7 @@ def missing_required_sections(
     missing: list[str] = []
     if not narrative.get("conclusion"):
         missing.append("conclusion")
-    if not narrative.get("field_notes"):
-        missing.append("field_notes")
+    # field_notes 可以是空的：没有具体方位或对不上的农事时，不要求用巡查套话填一节。
     changes = narrative.get("changes") or []
     has_change = any(isinstance(row, dict) and row.get("sentence") for row in changes)
     if payload.get("metrics") and not has_change:
@@ -383,7 +450,6 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
     comparison = facts.get("comparison") or {}
     plan = facts.get("report_metrics") or {}
     stage = stage_summary(facts)
-    background = STAGE_BACKGROUND.get(stage.get("latest_stage") or "") or {}
     metrics: dict[str, Any] = {}
     for role, keys in (
         ("primary", plan.get("primary")),
@@ -393,8 +459,8 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
             item = (comparison.get("metrics") or {}).get(key) or {}
             spec = METRIC_SPECS.get(key)
             metrics[key] = {
-                "name": _PLAIN_METRIC.get(key, spec.name if spec else metric_abbr(key)),
-                "meaning": _PLAIN_MEANING.get(key) or (spec.purpose if spec else ""),
+                "name": spec.label if spec else metric_abbr(key),
+                "meaning": spec.purpose if spec else "",
                 "role": "主要" if role == "primary" else "辅助",
                 "latest": _index(item.get("latest")),
                 "baseline": _index(item.get("baseline")),
@@ -409,7 +475,7 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
         "period": period_text(facts),
         "stage": stage.get("text"),
         "stage_note": stage.get("source"),
-        "stage_background": background.get("text"),
+        "stage_context": _stage_context(stage, facts),
         "latest_date": comparison.get("latest_date"),
         "baseline_date": comparison.get("baseline_date"),
         "gap_days": comparison.get("gap_days"),
@@ -429,9 +495,62 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
         "context_lines": list(
             (facts.get("conclusion_context") or {}).get("lines") or []
         ),
-        "field_pattern_lines": _pattern_lines(facts),
+        "field_patterns": _pattern_facts(facts),
         "water_risk_lines": list((facts.get("water_risk") or {}).get("lines") or []),
     }
+
+
+def _listed_stages(facts: dict[str, Any]) -> list[str]:
+    """Stage names on the facts, even when the plan source sentence is absent."""
+    phase = facts.get("phase") or {}
+    rows = [
+        row
+        for row in (phase.get("observation_stages") or phase.get("planned_days") or [])
+        if isinstance(row, dict) and row.get("stage_code")
+    ]
+    return list(dict.fromkeys(str(row["stage_code"]) for row in rows))
+
+
+def _stage_context(stage: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Stage reading brief. Empty when the period has no planned stage."""
+    latest = str(stage.get("latest_stage") or "")
+    stages = [str(item) for item in (stage.get("stages") or []) if item]
+    if not latest:
+        stages = _listed_stages(facts)
+        latest = stages[-1] if stages else ""
+    if not latest:
+        return None
+    background = STAGE_BACKGROUND.get(latest) or {}
+    reading = _STAGE_CONTEXT.get(latest) or {}
+    body: dict[str, Any] = {"stage": latest}
+    if stages:
+        body["stages"] = stages
+    if stage.get("kind") == "split":
+        body["spans_stages"] = True
+    if background.get("text"):
+        body["background"] = background["text"]
+    if reading.get("focus"):
+        body["focus"] = reading["focus"]
+    if reading.get("expected"):
+        body["expected"] = reading["expected"]
+    return body
+
+
+def _task_hint(node: dict[str, Any]) -> str | None:
+    """Short comparison note for a recorded task. Not a sentence to copy."""
+    name = str(node.get("task_name") or "")
+    code = str(node.get("task_code") or "").upper()
+    tokens = {part for part in re.split(r"[^A-Za-z0-9]+", code) if part}
+    if code:
+        tokens.add(code)
+    for keys, hint in _TASK_HINTS:
+        for key in keys:
+            if re.search(r"[\u4e00-\u9fff]", key):
+                if key in name:
+                    return hint
+            elif key.upper() in tokens:
+                return hint
+    return None
 
 
 def _index(value: Any) -> str | None:
@@ -483,15 +602,35 @@ def _infield_facts(facts: dict[str, Any]) -> list[dict[str, Any]]:
             if region.get("share") is not None:
                 entry["share_percent"] = _whole(float(region["share"]) * 100)
             regions.append(entry)
-        rows.append(
-            {
-                "metric": item.get("metric"),
-                "median": _index(stats.get("median")),
-                "p10": _index(stats.get("p10")),
-                "p90": _index(stats.get("p90")),
-                "regions": regions,
+        zones = []
+        for zone in item.get("zones") or []:
+            if not isinstance(zone, dict) or not zone.get("name"):
+                continue
+            packed: dict[str, Any] = {
+                "name": zone["name"],
+                "level": zone.get("level"),
             }
-        )
+            if zone.get("median") is not None:
+                packed["median"] = _index(zone.get("median"))
+            if zone.get("delta_median") is not None:
+                packed["delta_median"] = _index(zone.get("delta_median"))
+            if zone.get("valid_fraction") is not None:
+                packed["valid_percent"] = _whole(float(zone["valid_fraction"]) * 100)
+            if zone.get("area_fraction") is not None:
+                packed["area_percent"] = _whole(float(zone["area_fraction"]) * 100)
+            zones.append(packed)
+        row: dict[str, Any] = {
+            "metric": item.get("metric"),
+            "median": _index(stats.get("median")),
+            "p10": _index(stats.get("p10")),
+            "p90": _index(stats.get("p90")),
+            "regions": regions,
+        }
+        if item.get("spatial_split"):
+            row["spatial_split"] = item.get("spatial_split")
+        if zones:
+            row["zones"] = zones
+        rows.append(row)
     return rows
 
 
@@ -550,30 +689,65 @@ def _key_nodes_for_model(facts: dict[str, Any]) -> list[dict[str, Any]]:
     )
     compact = []
     for node in selected:
-        compact.append(
-            {
-                "task_name": node.get("task_name"),
-                "submitted_on": node.get("submitted_on"),
-                "relevance": "本期"
-                if node.get("relevance") == "in_period"
-                else "当前阶段",
-                "answers": [
-                    {"label": item.get("label"), "value": item.get("value")}
-                    for item in (node.get("answers") or [])
-                ],
-            }
-        )
+        item = {
+            "task_name": node.get("task_name"),
+            "submitted_on": node.get("submitted_on"),
+            "relevance": "本期" if node.get("relevance") == "in_period" else "当前阶段",
+            "answers": [
+                {"label": answer.get("label"), "value": answer.get("value")}
+                for answer in (node.get("answers") or [])
+            ],
+        }
+        hint = _task_hint(node)
+        if hint:
+            item["compare_with"] = hint
+        compact.append(item)
     return compact
 
 
-def _pattern_lines(facts: dict[str, Any]) -> list[str]:
+def _pattern_facts(facts: dict[str, Any]) -> dict[str, Any]:
+    """Structured within-field pattern. The printed sentences stay off the prompt."""
     patterns = facts.get("field_patterns") or {}
-    lines = []
-    lines.extend(patterns.get("persistent_lines") or [])
-    lines.extend(patterns.get("uniformity_lines") or [])
-    if patterns.get("history_line"):
-        lines.append(patterns["history_line"])
-    return [str(line) for line in lines if line]
+    persistent = []
+    for item in patterns.get("persistent") or []:
+        if not isinstance(item, dict):
+            continue
+        regions = [
+            region.get("name")
+            for region in (item.get("regions") or [])
+            if isinstance(region, dict) and region.get("name")
+        ]
+        persistent.append(
+            {
+                "metric": metric_abbr(str(item.get("metric") or "")),
+                "status": item.get("status"),
+                "dates": list(item.get("dates") or []),
+                "regions": regions,
+                "clustered": bool(item.get("n_persistent_clustered")),
+                "scattered": bool(item.get("n_persistent"))
+                and not item.get("n_persistent_clustered"),
+            }
+        )
+    uniformity = []
+    for item in patterns.get("uniformity") or []:
+        if not isinstance(item, dict):
+            continue
+        spread = item.get("spread")
+        uniformity.append(
+            {
+                "metric": metric_abbr(str(item.get("metric") or "")),
+                "status": item.get("status"),
+                "direction": item.get("direction"),
+                "dates": list(item.get("dates") or []),
+                "spread": [_index(value) for value in spread] if spread else None,
+            }
+        )
+    history = patterns.get("history") if isinstance(patterns.get("history"), dict) else {}
+    return {
+        "persistent": persistent,
+        "uniformity": uniformity,
+        "history_status": history.get("status"),
+    }
 
 
 def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
@@ -652,8 +826,8 @@ _BANNED = (
     "人工智能",
 )
 
-# 模型会把「不要下结论」写进给种植户看的句子。这些整段删掉，改成去地里核对。
-_VISIT = "建议去地里看看确认一下"
+# 模型会把推脱判断的话写进给种植户看的句子。删掉这些说法，不另补同一句巡查套话。
+_CANNED_VISIT = re.compile(r"[，,；;、]?\s*建议去地里看看确认一下[。．.]?")
 _HEDGE_RES = (
     re.compile(
         r"[，,；;]?\s*(?:但|不过|而且|并且)?\s*"
@@ -673,17 +847,12 @@ _HEDGE_RES = (
         r"[，,；;]?\s*(?:可能是|也许是|就是|这是|说)?(?:缺肥|病虫害|闹病|缺什么)[^。，；]*"
     ),
 )
-_LOOK = re.compile(r"看看|确认一下|到田里|去地里|去田里")
-_CHECK_WORTHY = re.compile(r"偏弱|弱一点|不一样|周围|那一块|那一片|积水|偏干|偏湿|干湿")
-
-
 def _plain_voice(text: str) -> str:
-    """结论要说这块地怎么样。推脱判断的话删掉，需要核对时建议去地里看。"""
+    """删掉推脱判断的话和反复出现的巡查套话，不另写一句代替。"""
     text = text.replace("雨水账", "有效降雨").replace("雨水", "有效降雨")
-    hedged = False
     for pattern in _HEDGE_RES:
-        text, count = pattern.subn("", text)
-        hedged = hedged or count > 0
+        text = pattern.sub("", text)
+    text = _CANNED_VISIT.sub("", text)
     text = re.sub(r"<font\b[^>]*>\s*</font>", "", text)
     text = re.sub(r"<b>\s*</b>", "", text)
     text = re.sub(r"\s+", " ", text)
@@ -693,9 +862,8 @@ def _plain_voice(text: str) -> str:
     text = text.strip()
     if not text or text in {"。", "，"}:
         return ""
-    if hedged and _CHECK_WORTHY.search(text) and not _LOOK.search(text):
-        body = text[:-1] if text.endswith("。") else text
-        text = f"{body.rstrip('，,；; ')}，{_VISIT}。"
+    if not text.endswith("。"):
+        text = f"{text.rstrip('，,；; ')}。"
     return text
 
 
@@ -862,7 +1030,7 @@ def _chat_body(
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "下面是参数说明和本期参数。请直接发挥写成报告，只输出 JSON：\n"
+                "content": "下面是参数说明和本期参数。请按本期事实写成报告，只输出 JSON：\n"
                 + json.dumps(payload, ensure_ascii=False),
             },
         ],
