@@ -1095,8 +1095,19 @@ def stack_from_pixel_data(day: date, pixel_data) -> tuple[DateStack | None, int]
 
 
 def official_stack_from_product(product: dict) -> tuple[DateStack | None, int]:
-    """DateStack from an official autumn S2 product, or (None, total) if unusable."""
-    from agric_satellite_analysis_common.agri_classify import is_official_optical_product
+    """DateStack from an autumn S2 product with usable pixels, or (None, total).
+
+    The official biweekly / drought 30% cloud gate is not applied here. A raw
+    S2 product with usable per-pixel NDVI is stacked even when
+    ``cloud_cover_over_30`` is true or scene cloud exceeds ``CLOUD_MAX_PCT``.
+    Decloud rows still follow official quality rules (good only). Products
+    without a date, without a pixel NDVI stack, or with clear fraction below
+    ``MIN_CLEAR_FRACTION`` are skipped.
+    """
+    from agric_satellite_analysis_common.agri_classify import (
+        is_decloud_product,
+        is_official_optical_product,
+    )
 
     if not isinstance(product, dict):
         return None, 0
@@ -1116,7 +1127,9 @@ def official_stack_from_product(product: dict) -> tuple[DateStack | None, int]:
         source = source or pixel_data.get("source")
         decloud_quality = decloud_quality or pixel_data.get("decloud_quality")
         parcel_cloud_source = parcel_cloud_source or pixel_data.get("parcel_cloud_source")
-    if not is_official_optical_product(
+    # Decloud still uses official quality (good only). Raw S2 skips the
+    # scene-level 30% cloud gate; clear-fraction decides usability.
+    if is_decloud_product(source, product.get("scene_id")) and not is_official_optical_product(
         source=source,
         scene_id=product.get("scene_id"),
         decloud_quality=decloud_quality,
