@@ -57,8 +57,11 @@ python scripts/biweekly_offline_render.py periods --land-id 19994 --plan plan.js
 {"batches": [...], "tasks": [...], "mapping_rows": [...]}
 ```
 
-`batches`：`crop_batch_land_scheme` 联 `agriculture_crop_batch`，条件
-`s.land_id = <地块> AND s.del_flag = '0' AND b.del_flag = '0' AND b.crop_id = 4`。
+`batches`：先从 `agriculture_batch_task` 取出仍在种植中的批次，再联
+`agriculture_crop_batch`。条件是 `t.land_id = <地块> AND t.del_flag = '0'
+AND t.status IN ('0','1','2')`（status 3、4 为已完成，不取），以及
+`b.del_flag = '0' AND b.crop_id = 4`。地块以任务表的 `land_id` 为准，
+不用 `crop_batch_land_scheme`，也不用 `agriculture_crop_batch.land_id`。
 
 | 字段 | 必需 | 说明 |
 | --- | --- | --- |
