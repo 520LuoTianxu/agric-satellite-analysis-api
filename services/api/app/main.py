@@ -52,6 +52,7 @@ from app.routers import (
     internal_admin,
     satellite_batch,
     biweekly,
+    autumn_emergence,
 )
 
 
@@ -115,6 +116,18 @@ async def lifespan(app: FastAPI):
             run_harvest_progress_outbox(),
             name="harvest-progress-outbox",
         )
+    app.state.autumn_emergence_outbox_task = None
+    from app.services.autumn_emergence import (
+        autumn_emergence_enabled,
+        run_autumn_emergence_outbox,
+    )
+
+    if autumn_emergence_enabled():
+        # 秋季出苗与收获占比一样在 API 本机重算，下载机不写 Postgres。
+        app.state.autumn_emergence_outbox_task = asyncio.create_task(
+            run_autumn_emergence_outbox(),
+            name="autumn-emergence-outbox",
+        )
     # API 进程负责从 Redis 消费下载结果，下载机只做 HTTP 入队，不参与数据库写入。
     scene_result_consumer = asyncio.create_task(
         consume_cached_scene_results(app.state.redis_client)
@@ -128,9 +141,7 @@ async def lifespan(app: FastAPI):
             app.state.s1_sigma0_dispatch_outbox_task.cancel()
         if app.state.satellite_batch_dispatch_outbox_task is not None:
             app.state.satellite_batch_dispatch_outbox_task.cancel()
-        await asyncio.gather(
-            app.state.api_admin_recovery_task, return_exceptions=True
-        )
+        await asyncio.gather(app.state.api_admin_recovery_task, return_exceptions=True)
         if app.state.s1_sigma0_dispatch_outbox_task is not None:
             await asyncio.gather(
                 app.state.s1_sigma0_dispatch_outbox_task,
@@ -145,6 +156,12 @@ async def lifespan(app: FastAPI):
             app.state.harvest_progress_outbox_task.cancel()
             await asyncio.gather(
                 app.state.harvest_progress_outbox_task,
+                return_exceptions=True,
+            )
+        if app.state.autumn_emergence_outbox_task is not None:
+            app.state.autumn_emergence_outbox_task.cancel()
+            await asyncio.gather(
+                app.state.autumn_emergence_outbox_task,
                 return_exceptions=True,
             )
         scene_result_consumer.cancel()
@@ -210,13 +227,16 @@ app.include_router(orgs.router, prefix=PREFIX, tags=["orgs"])
 app.include_router(farms.router, prefix=PREFIX, tags=["farms"])
 app.include_router(lands.router, prefix=PREFIX, tags=["lands"])
 app.include_router(project_monitoring.router, prefix=PREFIX, tags=["projects"])
-app.include_router(project_harvest.router, prefix=PREFIX)  # 项目级收获分析 proj_ts_m1_v1
+app.include_router(
+    project_harvest.router, prefix=PREFIX
+)  # 项目级收获分析 proj_ts_m1_v1
 app.include_router(project_harvest.internal_router, prefix=PREFIX)
 app.include_router(satellite_batch.router, prefix=PREFIX, tags=["lands"])
 app.include_router(assessment.router, prefix=PREFIX, tags=["assessment"])
 app.include_router(season_growth.router, prefix=PREFIX, tags=["season-growth"])
 app.include_router(crops.router, prefix=PREFIX, tags=["crops"])
 app.include_router(agri.router, prefix=PREFIX)  # agri-first: 项目区/地块/S1·S2
+app.include_router(autumn_emergence.router, prefix=PREFIX)
 app.include_router(harvest_report.router, prefix=PREFIX)  # 全部地块收获报表
 app.include_router(monitoring.router, prefix=PREFIX, tags=["monitoring"])
 app.include_router(jobs.router, prefix=PREFIX, tags=["jobs"])
