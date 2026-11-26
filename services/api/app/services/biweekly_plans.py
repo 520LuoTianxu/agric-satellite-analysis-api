@@ -1,17 +1,19 @@
 """Read wheat planting calendars from Smart (smart_agric) via MYSQL_SOURCE_URL.
 
-Land association is crop_batch_land_scheme.land_id = :land_id (exact match,
-never LIKE). agriculture_crop_batch.land_id is not used as the land key:
-live wheat batches are stored with land_id=0 and linked through the scheme
-table.
+A land is in season only when agriculture_batch_task has a live row for that
+land. Status 0, 1 and 2 are still planting; 3 and 4 are finished and are not
+listed. The land key is agriculture_batch_task.land_id (exact match, never
+LIKE). crop_batch_land_scheme is not used, and agriculture_crop_batch.land_id
+is not the land key: wheat batches are often stored with land_id=0.
 
 agriculture_plant_plan is referenced by agriculture_plant_task.plan_id
 comments, but that table does not exist in smart_agric. plan_id equals
 agriculture_crop_batch.batch_id.
 
-Phenology windows come from agriculture_plant_task, not from every
-agriculture_batch_task farm-work row. Missing plans are returned as an
-empty, documented state — never by substituting another land's plan.
+Phenology windows still come from agriculture_plant_task. The batch-task
+table only decides which batches are currently planting; its farm-work rows
+are not turned into stages. Missing plans are returned as an empty,
+documented state — never by substituting another land's plan.
 """
 
 from __future__ import annotations
@@ -27,13 +29,17 @@ from agric_satellite_analysis_common.biweekly.plan_calendar import (
     SmartPlantingCatalog,
     build_seasons_from_rows,
 )
-from agric_satellite_analysis_common.biweekly.plan_calendar import empty_calendar as _empty
-from sqlalchemy import text
+from agric_satellite_analysis_common.biweekly.plan_calendar import (
+    empty_calendar as _empty,
+)
+from sqlalchemy import bindparam, text
 
 from app.core.config import settings
 
 __all__ = [
     "MISSING_NOTE",
+    "NO_ACTIVE_BATCH_NOTE",
+    "PLANTING_TASK_STATUSES",
     "QUERY_FAILED_NOTE",
     "SOURCE_UNAVAILABLE_NOTE",
     "SmartPlantingCatalog",
@@ -44,8 +50,16 @@ __all__ = [
     "public_stage_intervals",
 ]
 
-SOURCE_UNAVAILABLE_NOTE = "API 机未配置 MYSQL_SOURCE_URL，无法读取 Smart 种植方案。不会改用其他地块的方案。"
+SOURCE_UNAVAILABLE_NOTE = (
+    "API 机未配置 MYSQL_SOURCE_URL，无法读取 Smart 种植方案。不会改用其他地块的方案。"
+)
 QUERY_FAILED_NOTE = "读取 Smart 种植方案失败。不会改用其他地块的方案。"
+# agriculture_batch_task.status：0、1、2 为种植中，3、4 为已完成。已完成的批次不进入双周报。
+PLANTING_TASK_STATUSES = ("0", "1", "2")
+NO_ACTIVE_BATCH_NOTE = (
+    "本田没有种植中的批次（agriculture_batch_task.status 为 0、1、2）。"
+    "已完成（3、4）不列出。不会改用其他地块的方案。"
+)
 
 
 def exact_land_id(land_id: str) -> int | str:
@@ -91,7 +105,9 @@ def public_stage_intervals(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
     return stages
 
 
-def attach_public_stages(payload: dict[str, Any], calendar: dict[str, Any] | None = None) -> dict[str, Any]:
+def attach_public_stages(
+    payload: dict[str, Any], calendar: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Expose `stages` (and native_plan on period lists) for the frontend timeline."""
     calendar_by_id = {
         str(row["season_id"]): row
@@ -99,15 +115,17 @@ def attach_public_stages(payload: dict[str, Any], calendar: dict[str, Any] | Non
         if row.get("season_id")
     }
     for season in payload.get("seasons") or []:
-        plan = season.get("native_plan") or (calendar_by_id.get(str(season.get("season_id"))) or {}).get(
-            "native_plan"
-        )
+        plan = season.get("native_plan") or (
+            calendar_by_id.get(str(season.get("season_id"))) or {}
+        ).get("native_plan")
         if plan and not season.get("native_plan"):
             season["native_plan"] = plan
         season["stages"] = public_stage_intervals(plan)
     if "periods" in payload:
         season_id = str(payload.get("season_id") or "")
-        plan = payload.get("native_plan") or (calendar_by_id.get(season_id) or {}).get("native_plan")
+        plan = payload.get("native_plan") or (calendar_by_id.get(season_id) or {}).get(
+            "native_plan"
+        )
         if plan:
             payload["native_plan"] = plan
         payload["stages"] = public_stage_intervals(plan)
@@ -119,19 +137,27 @@ async def load_smart_planting_calendar(
     *,
     mapping_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if not settings.mysql_source_enabled or not (settings.mysql_source_url or "").strip():
-        return _empty(land_id=str(land_id), plan_status="smart_source_unavailable", note=SOURCE_UNAVAILABLE_NOTE)
+    if (
+        not settings.mysql_source_enabled
+        or not (settings.mysql_source_url or "").strip()
+    ):
+        return _empty(
+            land_id=str(land_id),
+            plan_status="smart_source_unavailable",
+            note=SOURCE_UNAVAILABLE_NOTE,
+        )
     try:
         land_key = exact_land_id(land_id)
         from app.services.mysql_land_sync import _mysql_engine
 
         engine = _mysql_engine()
+        # 地块和是否种植中只看 agriculture_batch_task。status 3、4 已完成，不取。
+        # 批次作物信息仍来自 agriculture_crop_batch，但不用它的 land_id，也不再走方案地块表。
         batch_sql = text(
             """
             SELECT
-              s.batch_id,
-              s.land_id,
-              s.scheme_id AS land_scheme_id,
+              b.batch_id,
+              t.land_id,
               b.batch_name,
               b.crop_id,
               b.crop_name,
@@ -140,44 +166,61 @@ async def load_smart_planting_calendar(
               b.crop_planting_season_type_id,
               b.scheme_handling_profile,
               b.scheme_id
-            FROM crop_batch_land_scheme AS s
+            FROM (
+              SELECT DISTINCT batch_id, land_id
+              FROM agriculture_batch_task
+              WHERE land_id = :land_id
+                AND del_flag = '0'
+                AND status IN :planting_statuses
+            ) AS t
             INNER JOIN agriculture_crop_batch AS b
-              ON b.batch_id = s.batch_id
-            WHERE s.land_id = :land_id
-              AND s.del_flag = '0'
-              AND b.del_flag = '0'
+              ON b.batch_id = t.batch_id
+            WHERE b.del_flag = '0'
               AND b.crop_id = :crop_id
             ORDER BY b.start_time, b.batch_id
             """
-        )
+        ).bindparams(bindparam("planting_statuses", expanding=True))
         async with engine.connect() as conn:
             batch_result = await conn.execute(
-                batch_sql, {"land_id": land_key, "crop_id": CROP_ID}
+                batch_sql,
+                {
+                    "land_id": land_key,
+                    "crop_id": CROP_ID,
+                    "planting_statuses": list(PLANTING_TASK_STATUSES),
+                },
             )
             batches = [dict(row) for row in batch_result.mappings().all()]
-            # Guard against a driver coercing the bind into a pattern match.
-            batches = [row for row in batches if str(row.get("land_id")) == str(land_key)]
+            # 防止驱动把绑定参数放宽成模糊匹配，只留下本次请求的地块。
+            batches = [
+                row for row in batches if str(row.get("land_id")) == str(land_key)
+            ]
+            if not batches:
+                return _empty(
+                    land_id=str(land_key),
+                    plan_status="missing",
+                    note=NO_ACTIVE_BATCH_NOTE,
+                )
             plan_ids = [row["batch_id"] for row in batches]
-            tasks: list[dict[str, Any]] = []
-            if plan_ids:
-                from sqlalchemy import bindparam
-
-                task_sql = text(
-                    """
-                    SELECT
-                      plant_task_id, plan_id, task_name, external_cycle_id, job_id,
-                      plan_start, plan_finish, species_name, component_crop_id,
-                      del_flag, order_num
-                    FROM agriculture_plant_task
-                    WHERE plan_id IN :plan_ids
-                      AND (del_flag = '0' OR del_flag IS NULL)
-                    ORDER BY plan_id, plan_start, order_num, plant_task_id
-                    """
-                ).bindparams(bindparam("plan_ids", expanding=True))
-                task_result = await conn.execute(task_sql, {"plan_ids": list(plan_ids)})
-                tasks = [dict(row) for row in task_result.mappings().all()]
-        return build_seasons_from_rows(str(land_key), batches, tasks, mapping_rows=mapping_rows)
+            task_sql = text(
+                """
+                SELECT
+                  plant_task_id, plan_id, task_name, external_cycle_id, job_id,
+                  plan_start, plan_finish, species_name, component_crop_id,
+                  del_flag, order_num
+                FROM agriculture_plant_task
+                WHERE plan_id IN :plan_ids
+                  AND (del_flag = '0' OR del_flag IS NULL)
+                ORDER BY plan_id, plan_start, order_num, plant_task_id
+                """
+            ).bindparams(bindparam("plan_ids", expanding=True))
+            task_result = await conn.execute(task_sql, {"plan_ids": list(plan_ids)})
+            tasks = [dict(row) for row in task_result.mappings().all()]
+        return build_seasons_from_rows(
+            str(land_key), batches, tasks, mapping_rows=mapping_rows
+        )
     except ReportError:
         raise
     except Exception:  # noqa: BLE001 — plan lookup must not crash the API process
-        return _empty(land_id=str(land_id), plan_status="query_failed", note=QUERY_FAILED_NOTE)
+        return _empty(
+            land_id=str(land_id), plan_status="query_failed", note=QUERY_FAILED_NOTE
+        )
