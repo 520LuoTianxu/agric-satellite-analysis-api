@@ -13,7 +13,7 @@ import os
 from datetime import date, datetime
 from typing import Any
 
-from agric_satellite_analysis_common.agri_classify import official_s2_sql
+from agric_satellite_analysis_common.agri_classify import CLOUD_MAX_PCT, official_s2_sql
 from agric_satellite_analysis_common.autumn_emergence import (
     DAILY_FIELD_KEY,
     DISCLAIMER_ZH,
@@ -448,7 +448,9 @@ async def land_context(db: AsyncSession, land_id: str) -> dict[str, Any] | None:
     start, end = season_bounds(season)
     if sowing is not None:
         start = max(start, sowing)
-    rows = (await db.execute(_LOAD_DAILY, {"land_id": land_id, "date_from": start, "date_to": end})).fetchall()
+    rows = (
+        await db.execute(_LOAD_DAILY, _daily_query_params(land_id, start, end))
+    ).fetchall()
     dates = []
     seen = set()
     for row in rows:
@@ -642,6 +644,15 @@ def _apply_daily_summary(
         view["first_emerged_date"] = first_emerged or view.get("first_emerged_date")
 
 
+def _daily_query_params(land_id: str, start: date, end: date) -> dict[str, Any]:
+    return {
+        "land_id": land_id,
+        "date_from": start,
+        "date_to": end,
+        "cloud_max": CLOUD_MAX_PCT,
+    }
+
+
 async def _load_daily_fields(
     db: AsyncSession,
     land_id: str,
@@ -653,9 +664,7 @@ async def _load_daily_fields(
     if sowing is not None:
         start = max(start, sowing)
     rows = (
-        await db.execute(
-            _LOAD_DAILY, {"land_id": land_id, "date_from": start, "date_to": end}
-        )
+        await db.execute(_LOAD_DAILY, _daily_query_params(land_id, start, end))
     ).fetchall()
     out: dict[str, dict[str, Any]] = {}
     for row in rows:

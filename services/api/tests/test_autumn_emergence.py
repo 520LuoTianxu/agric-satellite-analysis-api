@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.exc import InvalidRequestError, StatementError
 
 from app.core.autumn_emergence import (
     METHOD_VERSION,
@@ -26,6 +28,7 @@ from app.core.autumn_emergence import (
     is_winter_wheat,
     pixels_lonlat_for_date,
 )
+from agric_satellite_analysis_common.agri_classify import CLOUD_MAX_PCT
 from agric_satellite_analysis_common.biweekly.metric_specs import METRIC_SPECS
 
 from app.schemas.autumn_emergence import (
@@ -572,6 +575,65 @@ class ManualTriggerNoCropRewriteTests(unittest.TestCase):
         self.assertNotIn("sowing", db.updates)
 
 
+def _missing_cloud_max_bind(exc: BaseException) -> bool:
+    orig = getattr(exc, "orig", exc)
+    return isinstance(orig, InvalidRequestError) and "cloud_max" in str(exc)
+
+
+def _compile_daily_query(statement, params) -> None:
+    """Compile _LOAD_DAILY the same way a real engine would, so a missing
+    :cloud_max bind fails here instead of only in production."""
+    engine = create_engine("sqlite://")
+    try:
+        with engine.connect() as conn:
+            try:
+                conn.execute(statement, params or {})
+            except StatementError as exc:
+                if _missing_cloud_max_bind(exc):
+                    raise
+                # OperationalError (no such table) is also a StatementError;
+                # it means the binds were accepted. The predicate is Postgres-only.
+            except Exception:
+                return
+    finally:
+        engine.dispose()
+
+
+class LoadDailyBindTests(unittest.TestCase):
+    def test_load_daily_requires_cloud_max_on_a_real_engine(self) -> None:
+        params = {
+            "land_id": "33052",
+            "date_from": date(2026, 10, 20),
+            "date_to": date(2026, 11, 30),
+        }
+        engine = create_engine("sqlite://")
+        try:
+            with engine.connect() as conn:
+                with self.assertRaises(StatementError) as raised:
+                    conn.execute(svc._LOAD_DAILY, params)
+                self.assertIsInstance(raised.exception.orig, InvalidRequestError)
+                self.assertIn("cloud_max", str(raised.exception))
+
+                try:
+                    conn.execute(
+                        svc._LOAD_DAILY, {**params, "cloud_max": CLOUD_MAX_PCT}
+                    )
+                except StatementError as exc:
+                    if _missing_cloud_max_bind(exc):
+                        self.fail(f"cloud_max bind still rejected: {exc}")
+                except Exception:
+                    pass
+        finally:
+            engine.dispose()
+        self.assertEqual(CLOUD_MAX_PCT, 30.0)
+        self.assertEqual(
+            svc._daily_query_params("33052", date(2026, 10, 20), date(2026, 11, 30))[
+                "cloud_max"
+            ],
+            CLOUD_MAX_PCT,
+        )
+
+
 class _ProductDB:
     def __init__(self, *, land: dict, daily: dict | None = None, jobs: list | None = None) -> None:
         self.land = land
@@ -596,6 +658,7 @@ class _ProductDB:
         if "pg_advisory_xact_lock" in low:
             return _Result([])
         if "from agric_satellite.parcel_scene_products" in low:
+            _compile_daily_query(statement, params)
             rows = []
             for day, field in self.daily.items():
                 rows.append(
