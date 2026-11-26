@@ -33,6 +33,10 @@ from app.reports.biweekly.context_maps import (
 )
 from app.reports.biweekly.infield_maps import build_infield_metric
 from app.reports.biweekly.metric_stats import field_stats
+from app.reports.biweekly.sowing_gdd import (
+    antecedent_days_for,
+    needs_sowing_temperatures,
+)
 from app.reports.biweekly.weather_fetch import (
     apply_fetched_weather,
     fetch_period_weather,
@@ -608,12 +612,19 @@ def enrich_official_report_facts(
     plan = filled["report_metrics"]
     comparison = filled["comparison"]
     # 库里有日期但气温、降水全空，或只有本期之前的日子，都要再拉。
+    # 播种日早于现有气温时也要往前补，否则算不出播后积温。
     # 已有的非空值会留下来，拉失败也不把它们清掉。
     needs_period = not period_has_usable_weather(
         filled, start=start, end_inclusive=end_inclusive
     )
     needs_antecedent = not _has_antecedent_daily(filled, start)
-    if not offline and start and end_inclusive and (needs_period or needs_antecedent):
+    needs_sowing = needs_sowing_temperatures(filled)
+    if (
+        not offline
+        and start
+        and end_inclusive
+        and (needs_period or needs_antecedent or needs_sowing)
+    ):
         point = resolve_report_lat_lon(
             land_id=_land_id(filled) or None,
             latitude=latitude,
@@ -632,6 +643,7 @@ def enrich_official_report_facts(
                     longitude=lon,
                     period_start=start,
                     period_end_inclusive=end_inclusive,
+                    antecedent_days=antecedent_days_for(filled, start),
                 )
             except Exception as exc:  # noqa: BLE001
                 weather = {"weather_error": f"{type(exc).__name__}"}
