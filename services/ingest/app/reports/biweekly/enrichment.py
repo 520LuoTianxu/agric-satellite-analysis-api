@@ -33,7 +33,12 @@ from app.reports.biweekly.context_maps import (
 )
 from app.reports.biweekly.infield_maps import build_infield_metric
 from app.reports.biweekly.metric_stats import field_stats
-from app.reports.biweekly.weather_fetch import fetch_period_weather, resolve_report_lat_lon
+from app.reports.biweekly.weather_fetch import (
+    apply_fetched_weather,
+    fetch_period_weather,
+    period_has_usable_weather,
+    resolve_report_lat_lon,
+)
 
 _S2 = "S2"
 
@@ -602,12 +607,13 @@ def enrich_official_report_facts(
     product_by_date = attach_report_inputs(filled, loaded)
     plan = filled["report_metrics"]
     comparison = filled["comparison"]
-    if (
-        not offline
-        and start
-        and end_inclusive
-        and (not filled.get("weather_daily") or not _has_antecedent_daily(filled, start))
-    ):
+    # 库里有日期但气温、降水全空，或只有本期之前的日子，都要再拉。
+    # 已有的非空值会留下来，拉失败也不把它们清掉。
+    needs_period = not period_has_usable_weather(
+        filled, start=start, end_inclusive=end_inclusive
+    )
+    needs_antecedent = not _has_antecedent_daily(filled, start)
+    if not offline and start and end_inclusive and (needs_period or needs_antecedent):
         point = resolve_report_lat_lon(
             land_id=_land_id(filled) or None,
             latitude=latitude,
@@ -615,7 +621,8 @@ def enrich_official_report_facts(
             products=loaded,
         )
         if point is None:
-            filled["weather_error"] = "no_centroid"
+            if needs_period:
+                filled["weather_error"] = "no_centroid"
         else:
             lat, lon = point
             getter = fetch_weather or fetch_period_weather
@@ -628,7 +635,16 @@ def enrich_official_report_facts(
                 )
             except Exception as exc:  # noqa: BLE001
                 weather = {"weather_error": f"{type(exc).__name__}"}
-            filled.update({k: v for k, v in weather.items() if v is not None or k == "weather_error"})
+            compensated = apply_fetched_weather(
+                filled, weather, start=start, end_inclusive=end_inclusive
+            )
+            filled.update(
+                {
+                    key: value
+                    for key, value in compensated.items()
+                    if value is not None or key == "weather_error"
+                }
+            )
 
     # 田内图：每个主要指标一幅，日期与结论中的对比口径（comparison）一致。
     infield: list[dict[str, Any]] = []

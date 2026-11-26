@@ -174,6 +174,196 @@ class WeatherFetchTests(unittest.TestCase):
         resolved = resolve_report_lat_lon(products=[product])
         self.assertEqual(resolved, (lat, lon))
 
+    def test_blank_period_is_filled_from_forecast_without_replacing_older_days(self):
+        from app.reports.biweekly.weather_fetch import _supplement_period_climate
+
+        existing = [
+            {
+                "date": "2026-03-20",
+                "precipitation_mm": 1.0,
+                "min_c": 0.0,
+                "max_c": 8.0,
+                "et0_mm": 1.2,
+            }
+        ]
+
+        def _forecast(_lat, _lon, start, end, *, use_archive=False):
+            self.assertFalse(use_archive)
+            self.assertEqual(start, date(2026, 4, 2))
+            self.assertEqual(end, date(2026, 4, 15))
+            return {
+                "daily": {
+                    "time": ["2026-04-02", "2026-04-03"],
+                    "precipitation_sum": [3.0, 0.0],
+                    "temperature_2m_min": [2.0, 3.0],
+                    "temperature_2m_max": [12.0, 13.0],
+                    "et0_fao_evapotranspiration": [1.5, 1.6],
+                }
+            }
+
+        rows, source, error = _supplement_period_climate(
+            37.25,
+            112.08,
+            "2026-04-02",
+            "2026-04-15",
+            existing,
+            "open-meteo",
+            None,
+            forecast_fetcher=_forecast,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(source, "open-meteo")
+        by_date = {row["date"]: row for row in rows}
+        self.assertEqual(by_date["2026-03-20"]["precipitation_mm"], 1.0)
+        self.assertEqual(by_date["2026-04-02"]["precipitation_mm"], 3.0)
+        self.assertEqual(by_date["2026-04-03"]["min_c"], 3.0)
+
+    def test_period_gap_uses_nasa_when_forecast_fails(self):
+        from app.reports.biweekly.weather_fetch import _supplement_period_climate
+
+        def _forecast(*_args, **_kwargs):
+            raise RuntimeError("forecast down")
+
+        def _nasa(_lat, _lon, start, end):
+            self.assertEqual(start, date(2026, 4, 2))
+            return {
+                "daily": {
+                    "time": ["2026-04-02"],
+                    "precipitation_sum": [4.5],
+                    "temperature_2m_min": [1.0],
+                    "temperature_2m_max": [10.0],
+                }
+            }
+
+        rows, source, error = _supplement_period_climate(
+            37.25,
+            112.08,
+            "2026-04-02",
+            "2026-04-15",
+            [],
+            "open-meteo",
+            "no_data",
+            forecast_fetcher=_forecast,
+            nasa_fetcher=_nasa,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(source, "nasa-power")
+        self.assertEqual(rows[0]["precipitation_mm"], 4.5)
+        self.assertEqual(rows[0]["min_c"], 1.0)
+
+    def test_apply_fills_nulls_and_keeps_a_measured_day(self):
+        from app.reports.biweekly.weather_fetch import (
+            apply_fetched_weather,
+            period_has_usable_weather,
+        )
+
+        blank = {
+            "weather_daily": [
+                {
+                    "date": "2026-04-02",
+                    "precipitation_mm": None,
+                    "min_c": None,
+                    "max_c": None,
+                }
+            ],
+            "weather_period": {"days": 1, "precipitation_mm": None, "min_c": None},
+        }
+        self.assertFalse(
+            period_has_usable_weather(
+                blank, start="2026-04-02", end_inclusive="2026-04-15"
+            )
+        )
+        self.assertTrue(
+            period_has_usable_weather(
+                {"weather_period": {"precipitation_mm": 0.0}},
+                start="2026-04-02",
+                end_inclusive="2026-04-15",
+            )
+        )
+        out = apply_fetched_weather(
+            {
+                "weather_daily": [
+                    {
+                        "date": "2026-04-02",
+                        "precipitation_mm": 4.0,
+                        "min_c": None,
+                        "max_c": None,
+                        "et0_mm": None,
+                    },
+                    {
+                        "date": "2026-04-03",
+                        "precipitation_mm": None,
+                        "min_c": None,
+                        "max_c": None,
+                        "et0_mm": None,
+                    },
+                ]
+            },
+            {
+                "weather_daily": [
+                    {
+                        "date": "2026-04-02",
+                        "precipitation_mm": 9.0,
+                        "min_c": 1.0,
+                        "max_c": 12.0,
+                        "et0_mm": 2.0,
+                    },
+                    {
+                        "date": "2026-04-03",
+                        "precipitation_mm": 0.0,
+                        "min_c": 2.0,
+                        "max_c": 13.0,
+                        "et0_mm": 2.0,
+                    },
+                ],
+                "weather_source": "open-meteo",
+                "weather_same_period_prior_year": {
+                    "mean_c": 6.0,
+                    "precipitation_mm": 8.0,
+                },
+            },
+            start="2026-04-02",
+            end_inclusive="2026-04-15",
+        )
+        by_date = {row["date"]: row for row in out["weather_daily"]}
+        self.assertEqual(by_date["2026-04-02"]["precipitation_mm"], 4.0)
+        self.assertEqual(by_date["2026-04-02"]["min_c"], 1.0)
+        self.assertEqual(by_date["2026-04-03"]["precipitation_mm"], 0.0)
+        self.assertEqual(out["weather_period"]["precipitation_mm"], 4.0)
+        self.assertEqual(out["weather_period"]["min_c"], 1.0)
+        self.assertEqual(out["weather_source"], "open-meteo")
+        self.assertEqual(out["weather_same_period_prior_year"]["precipitation_mm"], 8.0)
+        self.assertIsNone(out["weather_error"])
+
+    def test_apply_keeps_usable_weather_when_fetch_is_empty(self):
+        from app.reports.biweekly.weather_fetch import apply_fetched_weather
+
+        out = apply_fetched_weather(
+            {
+                "weather_daily": [
+                    {
+                        "date": "2026-04-02",
+                        "precipitation_mm": 4.0,
+                        "min_c": 2.0,
+                        "max_c": 11.0,
+                        "et0_mm": 1.0,
+                    }
+                ],
+                "weather_source": "stored",
+            },
+            {
+                "weather_daily": [],
+                "weather_error": "open_meteo_down",
+                "weather_source": None,
+            },
+            start="2026-04-02",
+            end_inclusive="2026-04-15",
+        )
+        self.assertEqual(out["weather_period"]["precipitation_mm"], 4.0)
+        self.assertEqual(out["weather_period"]["min_c"], 2.0)
+        self.assertEqual(out["weather_source"], "stored")
+        self.assertIsNone(out["weather_error"])
+
 
 class ContextMapTests(unittest.TestCase):
     def test_infield_variation_from_synthetic_pixels(self):
@@ -410,6 +600,88 @@ class EnrichmentAndGenerateTests(unittest.TestCase):
         self.assertTrue(filled["surrounding_missing_reason"])
         self.assertEqual(filled["infield"], [])
         self.assertNotIn("spatial_variation_image", filled)
+
+    def test_blank_stored_weather_is_compensated_before_the_report(self):
+        from app.reports.biweekly.enrichment import enrich_official_report_facts
+
+        calls = {}
+
+        def _weather(**kwargs):
+            calls["start"] = kwargs["period_start"]
+            calls["end"] = kwargs["period_end_inclusive"]
+            return {
+                "weather_daily": [
+                    {
+                        "date": "2026-03-20",
+                        "precipitation_mm": 2.0,
+                        "min_c": 1.0,
+                        "max_c": 9.0,
+                        "et0_mm": 1.5,
+                    },
+                    {
+                        "date": "2026-04-02",
+                        "precipitation_mm": 6.5,
+                        "min_c": 3.0,
+                        "max_c": 14.0,
+                        "et0_mm": 2.0,
+                    },
+                ],
+                "weather_source": "open-meteo",
+                "weather_same_period_prior_year": {
+                    "mean_c": 5.0,
+                    "precipitation_mm": 11.0,
+                },
+                "weather_error": None,
+            }
+
+        filled = enrich_official_report_facts(
+            {
+                "land_id": "19994",
+                "period": {
+                    "start": "2026-04-02",
+                    "end_inclusive": "2026-04-15",
+                    "end_exclusive": "2026-04-16",
+                },
+                "phase": {"primary_metrics": ["ndre"]},
+                "weather_daily": [
+                    {
+                        "date": "2026-03-20",
+                        "precipitation_mm": None,
+                        "min_c": None,
+                        "max_c": None,
+                    },
+                    {
+                        "date": "2026-04-02",
+                        "precipitation_mm": None,
+                        "min_c": None,
+                        "max_c": None,
+                    },
+                ],
+                "weather_period": {
+                    "days": 1,
+                    "precipitation_mm": None,
+                    "min_c": None,
+                    "max_c": None,
+                },
+            },
+            figures_dir=Path(tempfile.mkdtemp()),
+            products=[],
+            latitude=37.25,
+            longitude=112.08,
+            fetch_weather=_weather,
+            fetch_truecolor=lambda **_k: None,
+        )
+        self.assertEqual(calls["start"], "2026-04-02")
+        self.assertEqual(calls["end"], "2026-04-15")
+        self.assertEqual(filled["weather_period"]["precipitation_mm"], 6.5)
+        self.assertEqual(filled["weather_period"]["min_c"], 3.0)
+        self.assertEqual(filled["weather_period"]["max_c"], 14.0)
+        self.assertEqual(filled["weather_antecedent"]["precipitation_mm"], 2.0)
+        self.assertEqual(
+            filled["weather_same_period_prior_year"]["precipitation_mm"], 11.0
+        )
+        self.assertEqual(filled["weather_source"], "open-meteo")
+        self.assertIsNone(filled["weather_error"])
 
     def test_generate_entry_renders_pdf_with_context_images(self):
         from app.reports.biweekly.generate import generate_official_biweekly_pdf

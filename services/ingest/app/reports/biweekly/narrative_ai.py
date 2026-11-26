@@ -59,7 +59,7 @@ SYSTEM_PROMPT = """你在写农业遥感双周报的正文。读者是种植户�
 
 遥感按 zones 写空间，点出方位和指数，不要只说「不齐」或「其余方位」。level=higher 是这一方位已经高出整块地，level=lower 是明显更低，level=similar 是接近整块地，level=unreadable 是这一方位这次大部分读不到。出苗期：higher 写成这些方位已经有植被信号、更像先出苗；similar 而全田仍低时，写成这些方位仍看不出苗，把方位名写出来；lower 写成比已经偏低的全田还弱，是要重点看的地方；unreadable 写成这次看不清、不能判断出苗。全田一起偏低是出苗期的常态，用一句说清，不要把常态写成异常。spatial_split=even 时方位没有拉开，不要逐个报数，出苗期就写这次还分不出哪一块先出苗。分蘖、返青、拔节看覆盖或冠层是全田一起变，还是只在部分方位，没跟上的方位要写出来。越冬看指数是否稳住。灌浆期和成熟期：全田一起下降是成熟本身。若有的方位已经明显更低、有的仍高，按方位说明哪些更像已经收获或覆盖已经掉下去，哪些仍像未收；指数拉不开就写这次分不出收获范围，不要改写成笼统的长势句。
 
-天气写进结论，不要留到气象那一节才第一次出现。有气温就写冷热，有去年同期就比去年高还是低；有降水毫米数就写有效降雨，并按毫米数说比去年多还是少。前期 antecedent 有有效降雨时，和本期连着看。再按这个阶段说明意味着什么：出苗看冷和雨会不会让苗出得慢，越冬看冷，返青和拔节看回升时水分够不够参照，灌浆和成熟看热和干。缺哪一项就跳过。不要写「雨水」或「雨水账」，不要写格点、ET0。干湿只在有效降雨、NDMI 和 water_risk_lines 够用时判断要不要留意浇水或排水；不够就说一次看不准，不要写成没有风险，也不要写灌多少毫米。
+天气写进结论，不要留到气象那一节才第一次出现。有气温就写冷热，有去年同期就比去年高还是低；有降水毫米数就写有效降雨，并按毫米数说比去年多还是少。前期 antecedent 有有效降雨时，和本期连着看。再按这个阶段说明意味着什么：出苗看冷和雨会不会让苗出得慢，越冬看冷，返青和拔节看回升时水分够不够参照，灌浆和成熟看热和干。缺哪一项就跳过，不要写「没有可用」「没有记录」「无从对照」或「未取得」。weather 为空就不要提天气。不要写「雨水」或「雨水账」，不要写格点、ET0。干湿只在有效降雨、NDMI 和 water_risk_lines 够用时判断要不要留意浇水或排水；不够就说一次看不准，不要写成没有风险，也不要写灌多少毫米。
 
 有土壤底子就写进结论：用土质、酸碱和能存多少水，说明它和本期出苗或干湿怎么一起看。保水差、又碰上有效降雨少时，仍看不出苗的方位更要盯。不要另作缺肥、病虫害诊断，也不要把 context_lines 里的土壤原句再抄一遍。status 不是 ready 就不要写土壤。
 
@@ -96,13 +96,13 @@ PARAMETER_GUIDE = {
     "rejected_observations": "卫星过境但没有采用的日期。reason 是未采用的原因，cloud_pct 是地块云量的百分比。没有未采用日期就不要写。",
     "infield": "田块内部。median、p10、p90 是整块地的水平，写的时候直接说指数数值，不要说中位数、百分位、像元。zones 含有这一指标各方位的水平：level=lower 更低，higher 更高，similar 接近整块地，unreadable 是这一方位多数地方这次读不到。出苗期 similar 且全田仍低，就是仍看不出苗的方位，要把方位名写出来，不要写成「其余方位」。spatial_split=even 表示方位之间没有拉开，不要写某一块偏弱，也不要逐个报数；unreadable 表示有方位看不清；split 表示高低分开了。area_percent 是这一方位占整块地的百分比，valid_percent 是这一方位里能读到的百分比。delta_median 是这一方位相对上一次的变化。regions.name 是连成片偏低的位置，share_percent 是这些偏低地方里这一方位占的百分比。出苗期把 higher 写成已有植被信号，把 lower 写成仍看不出苗或更弱、要重点看，把 unreadable 写成不能判断出苗。成熟期和灌浆期：lower 且降幅明显时可以写成更像已经收获或覆盖已经掉下去，没有一起掉的方位写成仍像未收；拉不开就不要编收获范围。",
     "surrounding": "这块地和周围大约一公里农田比。field_minus_nearby 是这块地减去周围，正数表示这块地更高。差得清楚再写，并说明周围作物未必相同。不要每篇都写同一句免责，也不要写只能当参考。不要说超绿、EXG。没有比较就不要写这一节。",
-    "weather": "地块附近的天气，不是田间实测。这些数要写进结论，不要只留在 weather 数组。有气温就写冷热和比去年高还是低；有降水毫米数就直接说有效降雨比去年多还是少，并说明对当前生育阶段意味着什么。缺哪一项就跳过。不要说格点、ET0、雨水账、雨水或账。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。antecedent_precipitation_mm 是本期开始前一段时间的有效降雨。prior_year 是去年同一段日期。weather 数组再写气象条件这一节，不要和结论用同一句话。",
+    "weather": "地块附近的天气，不是田间实测。这些数要写进结论，不要只留在 weather 数组。有气温就写冷热和比去年高还是低；有降水毫米数就直接说有效降雨比去年多还是少，并说明对当前生育阶段意味着什么。缺哪一项就跳过。weather 为空就不要写天气，不要写没有可用、没有记录或无从对照。不要说格点、ET0、雨水账、雨水或账。min_c、max_c、mean_c 是气温摄氏度，precipitation_mm 是有效降雨的毫米数。antecedent_precipitation_mm 是本期开始前一段时间的有效降雨。prior_year 是去年同一段日期。weather 数组再写气象条件这一节，不要和结论用同一句话。",
     "key_nodes": "人工填写的农事。task_name 是事项，submitted_on 是填写日期，answers 是人能看懂的填写内容。compare_with 是对照提示，不是要抄进正文的句子：用它判断指数和这件事对得上、还看不出来，还是对不上。没有记录就不要写农事，也不要写“没有关键节点”。",
     "soil": "地块原来的土壤底子，不是这次新测的土。status 为 ready 时写进结论：用土质、酸碱和能存多少水，说明它和本期出苗或干湿怎么一起看。有 reader_sentence 就用这句的意思改写，不要原句复述。status 不是 ready 就不要写土壤。不要出现缺肥、病虫害这些词。",
     "photo_review": "现场照片的画面检查。status 不是 reviewed 时，不要写照片。",
     "context_lines": "结论下面还会印的短句。不要原句复述。",
     "field_patterns": "持续偏低和均匀度的结构化结果，不是要复述的句子。persistent.regions 是连续几期都偏低并且连成片的方位；scattered 为 true 表示有偏低但没有连成一片；status 不是 ok 就不要写成持续偏弱。uniformity.direction：wider 是各处拉开，narrower 是更接近，similar 是看不出拉开。history_status 不是 compared 时，不要在结论里再写历史暂不评价。图下已经印有对应句子，结论里改用方位和指数写本期焦点。",
-    "water_risk_lines": "已经写好的水分观测。只用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述，也不要把「不判定」写进结论。看不准就说看不准，不要写成没有风险，也不要写现在还不能判断、先别下结论、只能当参考。",
+    "water_risk_lines": "已经写好的水分观测。只用这些数判断偏干还是偏湿，以及要不要留意浇水或排水。不要原句复述，也不要把「不判定」写进结论。看不准就说看不准，不要写成没有风险，也不要写现在还不能判断、先别下结论、只能当参考。不要把没有可用、没有记录或证据不足写进结论。",
     "stage": "种植方案里的计划生育阶段，不是田间实测的物候。",
     "stage_context": "当前生育阶段的对照，不是要写进正文的句子，也不是对本田的结论。focus 是这一阶段通常该看的问题，expected 是什么算常态、什么才值得写，ask 是这一阶段要回答的问题，background 是季节走向上的一句背景。不要复述这些句子。按这个阶段用遥感、天气和土壤写出本期不一样的地方。",
     "conclusion_task": "本期结论要回答的问题，不是要抄的句子。按这些问题用事实写判断。没有列出的资料不要编。",
@@ -510,7 +510,9 @@ def narrative_input(facts: dict[str, Any]) -> dict[str, Any]:
             (facts.get("conclusion_context") or {}).get("lines") or []
         ),
         "field_patterns": _pattern_facts(facts),
-        "water_risk_lines": list((facts.get("water_risk") or {}).get("lines") or []),
+        "water_risk_lines": _without_missing_weather_lines(
+            (facts.get("water_risk") or {}).get("lines")
+        ),
     }
     payload["conclusion_task"] = _conclusion_task(payload)
     return payload
@@ -787,10 +789,10 @@ def _pattern_facts(facts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
+def _weather_facts(facts: dict[str, Any]) -> dict[str, Any] | None:
     period = facts.get("weather_period") or {}
     antecedent = facts.get("weather_antecedent") or {}
-    return {
+    body = {
         "period_days": period.get("days"),
         "min_c": _index(period.get("min_c")),
         "max_c": _index(period.get("max_c")),
@@ -802,6 +804,10 @@ def _weather_facts(facts: dict[str, Any]) -> dict[str, Any]:
         "antecedent_precipitation_mm": _index(antecedent.get("precipitation_mm")),
         "prior_year": _prior_year_weather(facts.get("weather_same_period_prior_year")),
     }
+    # 没有气温和降水时不把一串空值交给模型，避免结论写成「没有记录」。
+    if not _weather_has_numbers(body):
+        return None
+    return body
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -849,6 +855,53 @@ def _numbers_are_copied(sentence: str, blob: str) -> bool:
     return True
 
 
+_MISSING_WEATHER_TALK = (
+    "没有可用",
+    "没有记录",
+    "无从对照",
+    "未取得",
+    "证据不足",
+)
+
+
+def _without_missing_weather_lines(lines: Any) -> list[str]:
+    """缺测说明留给说明页，不交给模型改写成结论。"""
+    kept: list[str] = []
+    for line in lines or []:
+        text = str(line)
+        if any(word in text for word in _MISSING_WEATHER_TALK):
+            continue
+        kept.append(text)
+    return kept
+
+
+def _drop_missing_weather_talk(text: str) -> str:
+    """删掉「没有可用记录」这类分句，留下同一句里已经写出的数值。"""
+    sentences = re.split(r"(?<=。)", text)
+    kept_sentences: list[str] = []
+    for sentence in sentences:
+        parts = re.split(r"([，,；;])", sentence)
+        rebuilt: list[str] = []
+        index = 0
+        while index < len(parts):
+            piece = parts[index]
+            sep = parts[index + 1] if index + 1 < len(parts) else ""
+            if any(word in piece for word in _MISSING_WEATHER_TALK):
+                index += 2
+                continue
+            rebuilt.append(piece)
+            if sep:
+                rebuilt.append(sep)
+            index += 2
+        piece = "".join(rebuilt)
+        piece = re.sub(r"^[，,；;\s]+", "", piece)
+        piece = re.sub(r"[，,；;]+\s*(?=。)", "", piece)
+        piece = piece.strip()
+        if piece and piece not in {"。", "，"}:
+            kept_sentences.append(piece)
+    return "".join(kept_sentences)
+
+
 _BANNED = (
     "低值",
     "参考线",
@@ -886,6 +939,7 @@ _HEDGE_RES = (
 )
 def _plain_voice(text: str) -> str:
     """删掉推脱判断的话和反复出现的巡查套话，不另写一句代替。"""
+    text = _drop_missing_weather_talk(text)
     text = text.replace("雨水账", "有效降雨").replace("雨水", "有效降雨")
     for pattern in _HEDGE_RES:
         text = pattern.sub("", text)
