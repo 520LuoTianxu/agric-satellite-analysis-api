@@ -21,6 +21,8 @@ class EmergenceSummaryStats(BaseModel):
     median_increment: float | None = None
     share_above_noise: float | None = None
     share_sustained: float | None = None
+    status: str | None = None
+    share_sustained: float | None = None
     share_ndvi_ge_0_30: float | None = Field(
         None,
         description="截至日 NDVI≥0.30 的像元比例，只对照产品参考刻度，不参与出苗判定。",

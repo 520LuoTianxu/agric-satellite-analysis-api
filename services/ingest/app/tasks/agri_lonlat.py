@@ -288,6 +288,17 @@ def publish_optical_lonlat_to_oss_mq(
         "ndti_max": row.get("ndti_max"),
         "pixel_data": pixel_obj or json.loads(row["pixel_data"]),
     }
+    if oss_sensor == "S2":
+        try:
+            from app.tasks.autumn_emergence_product import enrich_official_product
+
+            product = enrich_official_product(product) or product
+        except Exception:
+            logger.exception(
+                "autumn_emergence_enrich_hook_failed",
+                land_id=row.get("land_id"),
+                date=row.get("date"),
+            )
     key, json_url = upload_scene_product_json(
         land_id=row["land_id"],
         date_str=row["date"],

@@ -119,6 +119,16 @@ class LandParcel(Base):
     area_ha: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     crop_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     season: Mapped[str | None] = mapped_column(Text, nullable=True)
+    autumn_emerged: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    autumn_emerged_season: Mapped[str | None] = mapped_column(Text, nullable=True)
+    autumn_emerged_date: Mapped[_date | None] = mapped_column(Date, nullable=True)
+    autumn_emerged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    autumn_sowing_date: Mapped[_date | None] = mapped_column(Date, nullable=True)
+    autumn_sowing_season: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags_json = mapped_column(JSONB, nullable=True)
     source_properties = mapped_column(JSONB, nullable=False, default=dict)
     source_file: Mapped[str] = mapped_column(Text, nullable=False)

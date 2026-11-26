@@ -116,18 +116,7 @@ async def lifespan(app: FastAPI):
             run_harvest_progress_outbox(),
             name="harvest-progress-outbox",
         )
-    app.state.autumn_emergence_outbox_task = None
-    from app.services.autumn_emergence import (
-        autumn_emergence_enabled,
-        run_autumn_emergence_outbox,
-    )
-
-    if autumn_emergence_enabled():
-        # 秋季出苗与收获占比一样在 API 本机重算，下载机不写 Postgres。
-        app.state.autumn_emergence_outbox_task = asyncio.create_task(
-            run_autumn_emergence_outbox(),
-            name="autumn-emergence-outbox",
-        )
+    # 秋季出苗在下载机计算并写入官方日 JSON，API 不再跑 outbox。
     # API 进程负责从 Redis 消费下载结果，下载机只做 HTTP 入队，不参与数据库写入。
     scene_result_consumer = asyncio.create_task(
         consume_cached_scene_results(app.state.redis_client)
@@ -156,12 +145,6 @@ async def lifespan(app: FastAPI):
             app.state.harvest_progress_outbox_task.cancel()
             await asyncio.gather(
                 app.state.harvest_progress_outbox_task,
-                return_exceptions=True,
-            )
-        if app.state.autumn_emergence_outbox_task is not None:
-            app.state.autumn_emergence_outbox_task.cancel()
-            await asyncio.gather(
-                app.state.autumn_emergence_outbox_task,
                 return_exceptions=True,
             )
         scene_result_consumer.cancel()

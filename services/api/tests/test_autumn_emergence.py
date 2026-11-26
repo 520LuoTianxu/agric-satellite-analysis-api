@@ -92,6 +92,22 @@ class _Result:
     def fetchall(self):
         return self._many
 
+    def first(self):
+        if self._one is not None:
+            return self._one
+        return self._many[0] if self._many else None
+
+    def scalar(self):
+        row = self.first()
+        if row is None:
+            return None
+        if hasattr(row, "_mapping"):
+            values = list(row._mapping.values())
+            return values[0] if values else None
+        if isinstance(row, dict):
+            return next(iter(row.values()), None)
+        return row
+
 
 class FakeDB:
     def __init__(
@@ -368,899 +384,249 @@ class SeasonAndCropTests(unittest.TestCase):
         self.assertFalse(is_winter_wheat(None))
 
 
-class PersistAndSkipTests(unittest.TestCase):
-    def _run(self, db: FakeDB, storage: MemStorage, scene_date: date):
-        return asyncio.run(svc.recompute_land(db, "33052", scene_date, storage=storage))
 
-    def test_writes_new_record_and_oss_prefix_not_ndvi_columns(self) -> None:
-        stacks = _plateau_series()
-        db = FakeDB(scenes=_rows_from_stacks(stacks))
-        storage = MemStorage()
-        outcome = self._run(db, storage, date(2026, 11, 24))
-        self.assertEqual(outcome["action"], "updated")
-        self.assertEqual(outcome["status"], STATUS_EMERGED)
-        self.assertTrue(outcome["frozen"])
-        self.assertEqual(outcome["method_version"], METHOD_VERSION)
-        blob = db.sql_text().lower()
-        self.assertNotIn("ndvi_avg", blob)
-        self.assertNotIn("ndvi_min", blob)
-        self.assertNotIn("ndvi_max", blob)
-        self.assertNotIn("field_stats", blob)
-        self.assertNotIn("raster_layers", blob)
-        self.assertNotIn("update agric_satellite.parcel_scene_products", blob)
-        self.assertIn("insert into agric_satellite.parcel_autumn_emergence", blob)
-        self.assertEqual(len(storage.objects), 1)
-        key = next(iter(storage.objects))
-        self.assertTrue(key.startswith("emergence/autumn/33052/2026-autumn/frozen-"))
-        self.assertNotIn("s1s2_parcel", key)
-        body = json.loads(storage.objects[key])
-        self.assertEqual(body["kind"], "autumn_emergence")
-        self.assertEqual(body["noise_floor"], outcome["noise_floor"])
-        self.assertNotEqual(body["noise_floor"], 0.30)
-        upserts = [
-            p
-            for sql, p in db.calls
-            if "INSERT INTO agric_satellite.parcel_autumn_emergence" in sql
+class DailyAsOfTests(unittest.TestCase):
+    """A day's result uses all clear official dates from sowing through that day."""
+
+    def _through(self, last: str, *days_to_drop: str):
+        stacks = [
+            stack
+            for stack in _plateau_series()
+            if stack.day <= date.fromisoformat(last)
+            and stack.day.isoformat() not in days_to_drop
         ]
-        self.assertEqual(len(upserts), 1)
-        self.assertEqual(upserts[0]["noise_floor"], outcome["noise_floor"])
-        self.assertTrue(upserts[0]["emerged_flag"])
-        self.assertTrue(upserts[0]["frozen"])
-        self.assertEqual(upserts[0]["method_version"], METHOD_VERSION)
-        self.assertNotIn("ndvi_avg", upserts[0])
-        summary = asyncio.run(
-            svc.get_summary(db, "33052", "2026-autumn", enqueue=False)
-        )
-        parsed = AutumnEmergenceOut.model_validate(summary)
-        self.assertEqual(parsed.status, "emerged")
-        self.assertEqual(parsed.status_zh, "已出苗")
-        self.assertTrue(parsed.frozen)
-        self.assertTrue(parsed.pixel_oss_key.startswith("emergence/autumn/"))
-        pixels = asyncio.run(
-            svc.get_pixels(db, "33052", "2026-autumn", storage=storage)
-        )
-        layer = AutumnEmergencePixelsOut.model_validate(
-            {**pixels, "class_labels": class_labels()}
-        )
-        self.assertGreater(layer.pixel_count, 0)
-        self.assertEqual(layer.value, "increment")
-        self.assertNotIn("NDVI", layer.pixels_lonlat[0].model_dump(by_alias=True))
+        from agric_satellite_analysis_common.autumn_emergence import analyze_through
 
-    def test_skip_when_frozen_does_not_recompute_or_upload(self) -> None:
+        return analyze_through(stacks, date.fromisoformat(last))
+
+    def test_user_pattern_33052_baseline_then_unsustained_then_emerged(self) -> None:
+        # Discussed 33052 pattern: 10-28/10-30/11-02 baseline, 11-14 unsustained,
+        # 11-24 may become emerged. Drop the mid 11-09 date so 11-14 is first post.
+        drop = ("2026-11-09",)
+        mid = self._through("2026-11-02", *drop)
+        self.assertEqual(mid.status, STATUS_NOT_EMERGED)
+        self.assertFalse(mid.emerged_flag)
+        if mid.classes is not None and mid.n_pixels:
+            self.assertGreaterEqual(int((mid.classes == 0).sum()), mid.n_pixels - 2)
+
+        first_rise = self._through("2026-11-14", *drop)
+        self.assertEqual(first_rise.status, STATUS_EMERGING)
+        self.assertFalse(first_rise.emerged_flag)
+        self.assertIsNotNone(first_rise.classes)
+        assert first_rise.classes is not None
+        self.assertGreater(int((first_rise.classes == 1).sum()), 0)
+        self.assertEqual(int((first_rise.classes == 2).sum()), 0)
+        field = first_rise.to_daily_field("33052", sowing_date=date(2026, 10, 20))
+        self.assertEqual(field["as_of_date"], "2026-11-14")
+        self.assertEqual(field["status"], STATUS_EMERGING)
+        self.assertIn("pixels", field)
+        self.assertNotIn(2, field["pixels"]["class"])
+
+        emerged = self._through("2026-11-24", *drop)
+        self.assertEqual(emerged.status, STATUS_EMERGED)
+        self.assertTrue(emerged.emerged_flag)
+        self.assertGreaterEqual(emerged.share_sustained or 0.0, 0.80)
+        assert emerged.classes is not None
+        self.assertGreater(int((emerged.classes == 2).sum()), 0)
+        daily = emerged.to_daily_field("33052")
+        self.assertEqual(daily["as_of_date"], "2026-11-24")
+        self.assertTrue(daily["emerged_flag"])
+        from agric_satellite_analysis_common.autumn_emergence import (
+            attach_daily_field,
+            daily_field_of,
+            pixels_from_daily_field,
+        )
+
+        product = {"land_id": "33052", "date": "2026-11-24", "pixel_data": {"source": "stac_direct"}}
+        attach_daily_field(product, daily)
+        self.assertEqual(daily_field_of(product)["status"], STATUS_EMERGED)
+        points = pixels_from_daily_field(product["pixel_data"]["autumn_emergence"])
+        self.assertGreater(points["pixel_count"], 0)
+        self.assertIn("class", points["pixels_lonlat"][0])
+
+    def test_daily_result_is_not_from_that_day_alone(self) -> None:
         stacks = _plateau_series()
-        db = FakeDB(scenes=_rows_from_stacks(stacks))
-        storage = MemStorage()
-        first = self._run(db, storage, date(2026, 11, 24))
-        self.assertEqual(first["action"], "updated")
-        calls_after_first = len(db.calls)
-        objects_after_first = dict(storage.objects)
-        second = self._run(db, storage, date(2026, 11, 30))
-        self.assertEqual(second["action"], "skipped_frozen")
-        self.assertEqual(storage.objects, objects_after_first)
-        new_sql = "\n".join(sql for sql, _p in db.calls[calls_after_first:])
-        self.assertNotIn("parcel_scene_products", new_sql)
-        self.assertNotIn("INSERT INTO agric_satellite.parcel_autumn_emergence", new_sql)
-        self.assertNotIn("ndvi_avg", new_sql.lower())
+        from agric_satellite_analysis_common.autumn_emergence import analyze_through
 
-    def test_other_crops_do_not_write(self) -> None:
-        db = FakeDB(crop="玉米", scenes=_rows_from_stacks(_plateau_series()))
-        storage = MemStorage()
-        outcome = self._run(db, storage, date(2026, 11, 24))
-        self.assertEqual(outcome["action"], "skipped_ineligible")
-        self.assertEqual(storage.objects, {})
-        self.assertNotIn("parcel_scene_products", db.sql_text())
-        self.assertNotIn("ndvi_avg", db.sql_text().lower())
+        only_last = analyze([stacks[-1]])
+        through = analyze_through(stacks, stacks[-1].day)
+        self.assertEqual(only_last.status, STATUS_UNCERTAIN)
+        self.assertEqual(through.status, STATUS_EMERGED)
 
-    def test_march_scene_is_not_an_emergence_target(self) -> None:
-        target = svc.emergence_target_from_scene_result(
-            {"land_id": "33052", "sensor": "S2", "date": "2027-03-20"},
-            {"scene_upserts": 1},
+
+class SummaryFromDailyFieldsTests(unittest.TestCase):
+    def test_get_summary_reads_daily_json_and_land_flag(self) -> None:
+        emerged = analyze(_plateau_series())
+        field = emerged.to_daily_field("33052")
+        db = _ProductDB(
+            land={
+                "land_id": "33052",
+                "crop_type": "冬小麦",
+                "autumn_emerged": True,
+                "autumn_emerged_season": "2026-autumn",
+                "autumn_emerged_date": date(2026, 11, 24),
+                "autumn_emerged_at": datetime(2026, 11, 24, 8, tzinfo=timezone.utc),
+                "autumn_sowing_date": date(2026, 10, 20),
+                "autumn_sowing_season": "2026-autumn",
+            },
+            daily={"2026-11-24": field},
         )
-        self.assertEqual(target[0], "33052")
-        self.assertIsNone(autumn_season_key(target[1]))
-        skipped = asyncio.run(
-            svc.enqueue_from_scene_result(
-                {"land_id": "33052", "sensor": "S2", "date": "2027-03-20"},
-                {"scene_upserts": 1},
-            )
+        view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        assert view is not None
+        self.assertTrue(view["eligible"])
+        self.assertTrue(view["emerged_flag"])
+        self.assertTrue(view["frozen"])
+        self.assertEqual(view["status"], STATUS_EMERGED)
+        self.assertEqual(view["sowing_date"], date(2026, 10, 20))
+        self.assertEqual(len(view["timeseries"]), 1)
+        self.assertIsNone(view["pixel_oss_key"])
+
+    def test_get_pixels_uses_selected_day_field_not_oss(self) -> None:
+        stacks = [
+            s
+            for s in _plateau_series()
+            if s.day.isoformat() != "2026-11-09"
+        ]
+        mid = analyze([s for s in stacks if s.day <= date(2026, 11, 14)])
+        last = analyze(stacks)
+        db = _ProductDB(
+            land={
+                "land_id": "33052",
+                "crop_type": "冬小麦",
+                "autumn_emerged": False,
+                "autumn_emerged_season": None,
+                "autumn_sowing_date": date(2026, 10, 20),
+                "autumn_sowing_season": "2026-autumn",
+            },
+            daily={
+                "2026-11-14": mid.to_daily_field("33052"),
+                "2026-11-24": last.to_daily_field("33052"),
+            },
         )
-        self.assertFalse(skipped)
-        s1 = svc.emergence_target_from_scene_result(
-            {"land_id": "33052", "sensor": "S1", "date": "2026-10-28"},
-            {"scene_upserts": 1},
+        view = asyncio.run(
+            svc.get_pixels(db, "33052", "2026-autumn", date(2026, 11, 14))
         )
-        self.assertIsNone(s1)
+        assert view is not None
+        self.assertEqual(str(view["date"]), "2026-11-14")
+        self.assertEqual(view["status"], STATUS_EMERGING)
+        self.assertGreater(view["pixel_count"], 0)
+        self.assertFalse(view.get("missing"))
 
 
-class _Session:
-    def __init__(self, db: FakeDB) -> None:
-        self.db = db
+class ManualTriggerNoCropRewriteTests(unittest.TestCase):
+    def test_empty_crop_type_still_dispatches_and_never_writes_crop_type(self) -> None:
+        created = {}
 
-    async def __aenter__(self) -> FakeDB:
-        return self.db
-
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        del exc_type, exc, tb
-        return False
-
-
-def _forbid_download(*_args, **_kwargs):
-    raise AssertionError("API host must not download imagery")
-
-
-class ManualTriggerTests(unittest.TestCase):
-    def test_manual_pull_always_creates_claimable_s2_job(self) -> None:
-        db = FakeDB(crop="", scenes=[])
-        created: dict = {}
-
-        async def create(_db, lands, **kwargs):
-            created["lands"] = lands
+        async def fake_dispatch(db, land_id, **kwargs):
+            created["land_id"] = land_id
             created["kwargs"] = kwargs
-            return [], [SimpleNamespace(id="job-s2-1")], {}
+            return ["job-1"]
 
-        with (
-            patch(
-                "app.services.satellite_batch.create_satellite_batch_jobs",
-                new=create,
-            ),
-            patch("httpx.Client", _forbid_download),
-            patch("httpx.AsyncClient", _forbid_download),
-            patch("urllib.request.urlopen", _forbid_download),
-        ):
-            payload = asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    date(2026, 10, 15),
-                    "2026-autumn",
-                    today=date(2026, 11, 26),
-                )
-            )
-        schedule = AutumnEmergenceScheduleOut.model_validate(payload)
-        self.assertEqual(schedule.status, "dispatched")
-        self.assertEqual(schedule.claim_type, "satellite_batch")
-        self.assertEqual(schedule.display_name, "出苗")
-        self.assertEqual(schedule.purpose, "autumn_emergence")
-        self.assertEqual(schedule.job_status, "pending")
-        self.assertEqual(schedule.sensors, ["S2"])
-        self.assertEqual(schedule.job_ids, ["job-s2-1"])
-        self.assertEqual(schedule.sowing_date, date(2026, 10, 15))
-        self.assertEqual(schedule.date_from, date(2026, 10, 15))
-        self.assertEqual(schedule.date_to, date(2026, 11, 26))
-        self.assertNotIn("pending 为 false", schedule.message)
-        kwargs = created["kwargs"]
-        self.assertEqual(tuple(kwargs["sensors"]), ("S2",))
-        self.assertNotIn("S1", kwargs["sensors"])
-        self.assertEqual(kwargs["date_from"], date(2026, 10, 15))
-        self.assertEqual(kwargs["date_to"], date(2026, 11, 26))
-        self.assertFalse(kwargs["force"])
-        self.assertEqual(kwargs["dispatch_extras"]["display_name"], "出苗")
-        self.assertEqual(kwargs["dispatch_extras"]["purpose"], "autumn_emergence")
-        extra = kwargs["extra_params"]
-        self.assertTrue(extra["autumn_emergence_manual"])
-        self.assertEqual(extra["display_name"], "出苗")
-        self.assertTrue(extra["bypass_schedule_land_filter"])
-        self.assertNotIn("is_backfill", extra)
-        self.assertEqual(db.enqueued, [])
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("parcel_scene_products", db.sql_text())
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-        for fn in (svc.schedule_manual_emergence, svc.dispatch_s2_download):
-            source = inspect.getsource(fn)
-            self.assertNotIn("httpx", source)
-            self.assertNotIn("urlopen", source)
-            self.assertNotIn("rasterio", source)
-            self.assertNotIn("app.tasks", source)
-        db.open_jobs = [{"id": "job-s2-1", "status": "pending"}]
-        waiting = asyncio.run(
-            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=MemStorage())
+        db = _ProductDB(
+            land={
+                "land_id": "33052",
+                "crop_type": "",
+                "autumn_emerged": False,
+                "autumn_emerged_season": None,
+                "autumn_sowing_date": None,
+                "autumn_sowing_season": None,
+            }
         )
-        self.assertEqual(waiting["action"], "waiting_for_scenes")
-        self.assertIsNone(db.row)
-        db.open_jobs = []
-        finished = asyncio.run(
-            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=MemStorage())
+        with patch.object(svc, "dispatch_s2_download", fake_dispatch):
+            scheduled = asyncio.run(
+                svc.schedule_manual_emergence(
+                    db, "33052", date(2026, 10, 20), "2026-autumn", today=date(2026, 11, 26)
+                )
+            )
+        assert scheduled is not None
+        self.assertEqual(scheduled["status"], "dispatched")
+        self.assertEqual(scheduled["job_ids"], ["job-1"])
+        self.assertEqual(scheduled["display_name"], "出苗")
+        self.assertIn("sowing", db.updates)
+        self.assertEqual(db.updates["sowing"]["sowing_date"], date(2026, 10, 20))
+        self.assertNotIn("crop_type", db.updates["sowing"])
+        updates = [sql for sql in db.executed_sql if "update" in sql.lower()]
+        self.assertTrue(updates)
+        self.assertFalse(any("crop_type" in sql.lower() for sql in updates))
+
+    def test_frozen_season_does_not_dispatch(self) -> None:
+        db = _ProductDB(
+            land={
+                "land_id": "33052",
+                "crop_type": None,
+                "autumn_emerged": True,
+                "autumn_emerged_season": "2026-autumn",
+                "autumn_sowing_date": date(2026, 10, 20),
+                "autumn_sowing_season": "2026-autumn",
+            }
         )
-        self.assertEqual(finished["action"], "updated")
-        self.assertEqual(finished["status"], "uncertain")
-
-    def test_open_s2_job_is_not_dispatched_twice(self) -> None:
-        db = FakeDB(crop=None, scenes=[])
-        calls = {"n": 0}
-
-        async def create(_db, _lands, **_kwargs):
-            calls["n"] += 1
-            return [], [SimpleNamespace(id="job-s2-1")], {}
-
-        with patch(
-            "app.services.satellite_batch.create_satellite_batch_jobs",
-            new=create,
-        ):
-            first = asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    date(2026, 10, 15),
-                    today=date(2026, 11, 26),
-                )
+        scheduled = asyncio.run(
+            svc.schedule_manual_emergence(
+                db, "33052", date(2026, 10, 22), "2026-autumn", today=date(2026, 11, 26)
             )
-            db.open_jobs = [{"id": "job-s2-1", "status": "pending"}]
-            second = asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    date(2026, 10, 15),
-                    today=date(2026, 11, 26),
-                )
-            )
-        self.assertEqual(calls["n"], 1)
-        self.assertEqual(first["season_key"], "2026-autumn")
-        self.assertEqual(first["status"], "dispatched")
-        self.assertEqual(second["status"], "already_running")
-        self.assertEqual(second["job_ids"], ["job-s2-1"])
-        self.assertIn("未重复派发", second["message"])
-        self.assertEqual(db.crop, None)
+        )
+        assert scheduled is not None
+        self.assertEqual(scheduled["status"], "frozen")
+        self.assertEqual(scheduled["job_ids"], [])
+        self.assertEqual(scheduled["sowing_date"], date(2026, 10, 20))
+        self.assertNotIn("sowing", db.updates)
 
-    def test_ingested_clear_s2_still_creates_job_then_callback_computes(self) -> None:
-        sowing = date(2026, 10, 15)
-        scenes = _rows_from_stacks(_plateau_series())
-        scenes.append(_scene_row("2026-09-20", [0.55] * 40))
-        db = FakeDB(crop="", scenes=scenes)
-        created: dict = {}
 
-        async def create(_db, _lands, **kwargs):
-            created["kwargs"] = kwargs
-            return [], [SimpleNamespace(id="job-s2-existing")], {}
+class _ProductDB:
+    def __init__(self, *, land: dict, daily: dict | None = None, jobs: list | None = None) -> None:
+        self.land = land
+        self.daily = daily or {}
+        self.jobs = jobs or []
+        self.updates: dict = {}
+        self.executed_sql: list[str] = []
 
-        with (
-            patch(
-                "app.services.satellite_batch.create_satellite_batch_jobs",
-                new=create,
-            ),
-            patch("httpx.Client", _forbid_download),
-            patch("urllib.request.urlopen", _forbid_download),
-        ):
-            payload = asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    sowing,
-                    "2026-autumn",
-                    today=date(2026, 11, 26),
-                )
-            )
-        schedule = AutumnEmergenceScheduleOut.model_validate(payload)
-        self.assertEqual(schedule.status, "dispatched")
-        self.assertEqual(schedule.job_ids, ["job-s2-existing"])
-        self.assertEqual(schedule.sensors, ["S2"])
-        self.assertFalse(created["kwargs"]["force"])
-        self.assertEqual(db.enqueued, [])
-        self.assertNotIn("parcel_scene_products", db.sql_text())
-        self.assertEqual(db.request["dispatch"], "s2_download")
-        self.assertEqual(db.request["sowing_date"], sowing)
-        with patch(
-            "app.core.database.async_session",
-            return_value=_Session(db),
-        ):
-            queued = asyncio.run(
-                svc.enqueue_after_satellite_job(
-                    "33052",
+    async def execute(self, statement, params=None):
+        sql = str(getattr(statement, "text", statement))
+        self.executed_sql.append(sql)
+        params = params or {}
+        low = sql.lower()
+        if "from agric_satellite.land_parcels" in low and "select" in low:
+            if not self.land:
+                return _Result()
+            row = _Row(self.land)
+            return _Result(one=row, many=[row])
+        if "update agric_satellite.land_parcels" in low:
+            self.updates["sowing"] = dict(params)
+            return _Result([])
+        if "pg_advisory_xact_lock" in low:
+            return _Result([])
+        if "from agric_satellite.parcel_scene_products" in low:
+            rows = []
+            for day, field in self.daily.items():
+                rows.append(
                     {
-                        "autumn_emergence_manual": True,
-                        "purpose": "autumn_emergence",
-                        "sowing_date": sowing.isoformat(),
-                        "date_to": "2026-11-26",
-                        "sensor": "S2",
-                    },
-                    "completed",
+                        "date": date.fromisoformat(day),
+                        "scene_id": f"S2-{day}",
+                        "pixel_data": {"autumn_emergence": field, "source": "stac_direct"},
+                        "json_oss_key": f"s1s2_parcel/json/33052/{day}_S2.json",
+                        "parcel_cloud_cover_pct": 0,
+                        "cloud_cover": 0,
+                        "product_source": "stac_direct",
+                    }
                 )
-            )
-        self.assertTrue(queued)
-        self.assertEqual(len(db.enqueued), 1)
-        db.open_jobs = []
-        storage = MemStorage()
-        outcome = asyncio.run(
-            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=storage)
-        )
-        self.assertEqual(outcome["action"], "updated")
-        self.assertEqual(outcome["sowing_date"], sowing.isoformat())
-        self.assertEqual(db.crop, "")
-        summary = json.loads(
-            next(
-                params["summary"]
-                for sql, params in reversed(db.calls)
-                if "INSERT INTO agric_satellite.parcel_autumn_emergence" in sql
-                and "requests" not in sql
-            )
-        )
-        self.assertNotIn("2026-09-20", summary["baseline_dates"])
-        self.assertTrue(
-            all(day >= sowing.isoformat() for day in summary["baseline_dates"])
-        )
+            return _Result(many=rows)
+        if "from agric_satellite.jobs" in low:
+            return _Result(many=self.jobs)
+        return _Result([])
 
-    def test_callback_computes_empty_crop_from_sowing_date(self) -> None:
-        sowing = date(2026, 10, 15)
-        scenes = _rows_from_stacks(_plateau_series())
-        scenes.insert(0, _scene_row("2026-09-20", [0.55] * 40))
-        db = FakeDB(crop="", scenes=scenes)
-        db.request = {
-            "land_id": "33052",
-            "season_key": "2026-autumn",
-            "sowing_date": sowing,
-            "status": "scheduled",
-            "dispatch": "s2_download",
-            "date_from": sowing,
-            "date_to": date(2026, 11, 26),
-            "job_ids": "[]",
-        }
-        storage = MemStorage()
-        with patch(
-            "app.core.database.async_session",
-            return_value=_Session(db),
-        ):
-            queued = asyncio.run(
-                svc.enqueue_from_scene_result(
-                    {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
-                    {"scene_upserts": 1},
-                )
-            )
-            ignored = asyncio.run(
-                svc.enqueue_from_scene_result(
-                    {"land_id": "33052", "sensor": "S1", "date": "2026-11-24"},
-                    {"scene_upserts": 1},
-                )
-            )
-        self.assertTrue(queued)
-        self.assertFalse(ignored)
-        self.assertEqual(len(db.enqueued), 1)
-        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 24))
-        outcome = asyncio.run(
-            svc.recompute_land(db, "33052", date(2026, 11, 24), storage=storage)
-        )
-        self.assertEqual(outcome["action"], "updated")
-        self.assertEqual(outcome["sowing_date"], sowing.isoformat())
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-        upserts = [
-            params
-            for sql, params in db.calls
-            if "INSERT INTO agric_satellite.parcel_autumn_emergence" in sql
-            and "requests" not in sql
-        ]
-        self.assertEqual(upserts[-1]["sowing_date"], sowing)
-        summary = json.loads(upserts[-1]["summary"])
-        self.assertEqual(summary["sowing_date"], sowing.isoformat())
-        self.assertTrue(
-            all(day >= sowing.isoformat() for day in summary["baseline_dates"])
-        )
-        self.assertNotIn("2026-09-20", summary["baseline_dates"])
-        scene_windows = [
-            params for sql, params in db.calls if "parcel_scene_products" in sql
-        ]
-        self.assertTrue(scene_windows)
-        self.assertTrue(all(params["date_from"] == sowing for params in scene_windows))
-        self.assertEqual(db.request["status"], "ready")
-        view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
-        parsed = AutumnEmergenceOut.model_validate(view)
-        self.assertTrue(parsed.eligible)
-        self.assertFalse(parsed.pending)
-        self.assertEqual(parsed.sowing_date, sowing)
-        self.assertEqual(parsed.method_version, METHOD_VERSION)
-        self.assertIsNotNone(parsed.status)
-
-    def test_automatic_hook_still_skips_empty_crop(self) -> None:
-        for crop in ("", None):
-            db = FakeDB(crop=crop, scenes=_rows_from_stacks(_plateau_series()))
-            outcome = asyncio.run(
-                svc.recompute_land(
-                    db, "33052", date(2026, 11, 24), storage=MemStorage()
-                )
-            )
-            self.assertEqual(outcome["action"], "skipped_ineligible")
-            self.assertIsNone(db.row)
-            self.assertEqual(db.crop, crop)
-            self.assertNotIn(
-                "update agric_satellite.land_parcels", db.sql_text().lower()
-            )
-            self.assertNotIn("parcel_scene_products", db.sql_text())
-            view = asyncio.run(
-                svc.get_summary(
-                    db, "33052", "2026-autumn", today=date(2026, 11, 26), enqueue=False
-                )
-            )
-            self.assertFalse(view["eligible"])
-            self.assertFalse(view["pending"])
-
-    def test_sowing_date_outside_autumn_window_is_rejected(self) -> None:
-        db = FakeDB(crop="")
-        with self.assertRaises(svc.EmergenceScheduleError) as caught:
-            asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    date(2026, 8, 20),
-                    "2026-autumn",
-                    today=date(2026, 11, 26),
-                )
-            )
-        self.assertEqual(caught.exception.status_code, 422)
-        self.assertEqual(db.enqueued, [])
-        self.assertIsNone(db.request)
-
-    def test_frozen_season_does_not_download_or_rewrite_crop(self) -> None:
-        db = FakeDB(crop="")
-        db.row = {
-            "frozen": True,
-            "emerged_flag": True,
-            "status": "emerged",
-            "sowing_date": date(2026, 10, 1),
-        }
-
-        async def create(*_args, **_kwargs):
-            raise AssertionError("frozen season must not dispatch")
-
-        with patch(
-            "app.services.satellite_batch.create_satellite_batch_jobs",
-            new=create,
-        ):
-            payload = asyncio.run(
-                svc.schedule_manual_emergence(
-                    db,
-                    "33052",
-                    date(2026, 10, 20),
-                    "2026-autumn",
-                    today=date(2026, 11, 26),
-                )
-            )
-        self.assertEqual(payload["status"], "frozen")
-        self.assertEqual(payload["job_ids"], [])
-        self.assertIsNone(payload["claim_type"])
-        self.assertEqual(payload["sowing_date"], date(2026, 10, 1))
-        self.assertEqual(db.enqueued, [])
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-
-    def test_plain_backfill_completion_does_not_enqueue_emergence(self) -> None:
-        db = FakeDB(crop="冬小麦")
-        with patch(
-            "app.core.database.async_session",
-            return_value=_Session(db),
-        ):
-            queued = asyncio.run(
-                svc.enqueue_after_satellite_job(
-                    "33052",
-                    {"is_backfill": True, "sensor": "S2", "date_to": "2026-11-26"},
-                    "completed",
-                )
-            )
-            failed = asyncio.run(
-                svc.enqueue_after_satellite_job(
-                    "33052",
-                    {"autumn_emergence_manual": True, "purpose": "autumn_emergence"},
-                    "failed",
-                )
-            )
-        self.assertFalse(queued)
-        self.assertFalse(failed)
-        self.assertEqual(db.enqueued, [])
-
-    def test_get_exposes_job_progress_and_failure(self) -> None:
-        db = FakeDB(crop="")
-        db.request = {
-            "land_id": "33052",
-            "season_key": "2026-autumn",
-            "sowing_date": date(2026, 10, 20),
-            "status": "scheduled",
-            "dispatch": "s2_download",
-            "date_from": date(2026, 10, 20),
-            "date_to": date(2026, 11, 26),
-            "job_ids": '["job-running", "job-failed"]',
-        }
-        db.job_progress = [
-            {
-                "id": "job-running",
-                "status": "running",
-                "error": None,
-                "progress_json": {"scenes_total": 4, "scenes_done": 1},
-                "work_status": "leased",
-                "lease_owner": "download-host-a",
-                "last_claimed_by": "download-host-a",
-                "work_error": None,
-            },
-            {
-                "id": "job-failed",
-                "status": "pending",
-                "error": None,
-                "progress_json": {"scenes_total": 2, "scenes_done": 0},
-                "work_status": "pending",
-                "lease_owner": None,
-                "last_claimed_by": None,
-                "work_error": None,
-            },
-        ]
-        view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
-        parsed = AutumnEmergenceOut.model_validate(view)
-        self.assertTrue(parsed.eligible)
-        self.assertTrue(parsed.pending)
-        self.assertIsNone(parsed.status)
-        self.assertEqual(parsed.display_name, "出苗")
-        self.assertEqual(parsed.claim_type, "satellite_batch")
-        self.assertEqual(parsed.job_status, "running")
-        self.assertEqual(parsed.claimed_by, "download-host-a")
-        self.assertEqual(parsed.job_ids, ["job-running", "job-failed"])
-        self.assertEqual(parsed.running_jobs, 1)
-        self.assertEqual(parsed.pending_jobs, 1)
-        self.assertEqual(parsed.scenes_total, 6)
-        self.assertEqual(parsed.scenes_done, 1)
-        self.assertEqual(parsed.scenes_remaining, 5)
-        self.assertEqual(parsed.date_from, date(2026, 10, 20))
-        self.assertEqual(parsed.phase, "stac")
-        self.assertIsNone(parsed.failure_reason)
-
-        db.job_progress = [
-            {
-                "id": "job-failed",
-                "status": "failed",
-                "error": "STAC search failed",
-                "progress_json": {"scenes_total": 2, "scenes_done": 0},
-                "work_status": "completed",
-                "lease_owner": None,
-                "last_claimed_by": "download-host-b",
-                "work_error": None,
-            }
-        ]
-        db.request["job_ids"] = '["job-failed"]'
-        failed_view = asyncio.run(
-            svc.get_summary(db, "33052", "2026-autumn", enqueue=False)
-        )
-        failed = AutumnEmergenceOut.model_validate(failed_view)
-        self.assertFalse(failed.pending)
-        self.assertIsNone(failed.status)
-        self.assertEqual(failed.job_status, "failed")
-        self.assertEqual(failed.failure_reason, "STAC search failed")
-        self.assertEqual(failed.claimed_by, "download-host-b")
-        self.assertEqual(failed.phase, "failed")
-        self.assertEqual(failed.failed_jobs, 1)
-
-    def test_post_route_is_registered_beside_get(self) -> None:
-        from app.routers.autumn_emergence import router
-
-        path = "/agri/lands/{land_id}/autumn-emergence"
-        matched = [
-            route for route in router.routes if getattr(route, "path", None) == path
-        ]
-        methods = {method for route in matched for method in (route.methods or set())}
-        self.assertIn("POST", methods)
-        self.assertIn("GET", methods)
+    async def get(self, model, key):
+        if self.land and str(self.land.get("land_id")) == str(key):
+            return SimpleNamespace(**self.land, deleted_at=None)
+        return None
 
 
-class _OrderDB:
-    """记录 SQL 与 COMMIT 的先后，证明 outbox 写在任务提交之前。"""
-
-    def __init__(self, inner: FakeDB, job: SimpleNamespace) -> None:
-        self.inner = inner
-        self.job = job
-        self.order: list[str] = []
-
-    async def get(self, model, key, with_for_update=False):
-        del model, key, with_for_update
-        return self.job
-
-    async def execute(self, stmt, params=None):
-        self.order.append(" ".join(str(stmt).split()))
-        return await self.inner.execute(stmt, params)
-
-    async def commit(self):
-        self.order.append("COMMIT")
-        await self.inner.commit()
-
-    async def refresh(self, obj):
-        del obj
-
-
-def _emergence_job() -> SimpleNamespace:
-    return SimpleNamespace(
-        id=uuid.uuid4(),
-        land_id="33052",
-        type="satellite_batch",
-        parent_job_id=None,
-        status="running",
-        progress_json={"scenes_total": 19, "scenes_done": 19},
-        error=None,
-        params_json={
-            "autumn_emergence_manual": True,
-            "purpose": "autumn_emergence",
-            "display_name": "出苗",
-            "season_key": "2026-autumn",
-            "sowing_date": "2026-10-20",
-            "date_from": "2026-10-20",
-            "date_to": "2026-11-26",
-            "sensor": "S2",
-            "force": False,
-        },
-        created_at=datetime.now(timezone.utc),
-        started_at=datetime.now(timezone.utc),
-        finished_at=None,
-    )
-
-
-def _patch_status(db: FakeDB, job: SimpleNamespace, status: str):
-    from app.routers import internal_jobs as jobs_mod
-
-    scheduled: list[str] = []
-
-    def _capture(coro, *args, **kwargs):
-        del args, kwargs
-        scheduled.append(getattr(coro.cr_code, "co_name", ""))
-        coro.close()
-        return object()
-
-    session = _OrderDB(db, job)
-    with patch("asyncio.create_task", _capture):
-        out = asyncio.run(
-            jobs_mod.patch_job(
-                job.id,
-                jobs_mod.InternalJobPatch(status=status),
-                None,
-                session,
-            )
-        )
-    return out, session, scheduled
-
-
-def _completed_pull_row() -> dict:
-    return {
-        "id": "job-done",
-        "status": "completed",
-        "error": None,
-        "progress_json": {"scenes_total": 19, "scenes_done": 19},
-        "work_status": "completed",
-        "lease_owner": None,
-        "last_claimed_by": "download-boen",
-        "work_error": None,
-    }
-
-
-class CompletionEnqueueTests(unittest.TestCase):
-    def test_job_completion_enqueues_compute_in_same_commit(self) -> None:
-        from app.routers import internal_jobs as jobs_mod
-
-        db = FakeDB(crop="")
-        job = _emergence_job()
-        out, session, scheduled = _patch_status(db, job, "completed")
-        self.assertEqual(out.status, "completed")
-        self.assertEqual(len(db.enqueued), 1)
-        self.assertEqual(db.enqueued[0]["land_id"], "33052")
-        self.assertEqual(db.enqueued[0]["delay"], 0)
-        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 26))
-        insert_at = next(
-            index
-            for index, sql in enumerate(session.order)
-            if "parcel_autumn_emergence_outbox" in sql and "INSERT" in sql
-        )
-        self.assertLess(insert_at, session.order.index("COMMIT"))
-        self.assertNotIn("enqueue_after_satellite_job", scheduled)
-        receipt = inspect.getsource(jobs_mod._enqueue_emergence_before_commit)
-        self.assertNotIn("create_task", receipt)
-        self.assertNotIn("enqueue_after_satellite_job", receipt)
-        self.assertNotIn(
-            "enqueue_after_satellite_job", inspect.getsource(jobs_mod.patch_job)
-        )
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-
-        # 结果行已经在时，重复的成功回执不再把 outbox 打回 pending。
-        done = FakeDB(crop="")
-        done.row = {
-            "land_id": "33052",
-            "season_key": "2026-autumn",
-            "status": "emerged",
-            "pixel_oss_key": "emergence/autumn/33052/2026-autumn/frozen-abc",
-            "frozen": True,
-        }
-        _out, again, _scheduled = _patch_status(done, _emergence_job(), "succeeded")
-        self.assertEqual(done.enqueued, [])
-        self.assertNotIn("parcel_autumn_emergence_outbox", "\n".join(again.order))
-
-    def test_failed_and_backfill_jobs_do_not_enqueue_compute(self) -> None:
-        failed_db = FakeDB(crop="")
-        failed_job = _emergence_job()
-        failed_job.error = "STAC search failed"
-        out, session, scheduled = _patch_status(failed_db, failed_job, "failed")
-        self.assertEqual(out.status, "failed")
-        self.assertEqual(failed_db.enqueued, [])
-        self.assertNotIn("parcel_autumn_emergence_outbox", "\n".join(session.order))
-        self.assertNotIn("enqueue_after_satellite_job", scheduled)
-        self.assertIn("COMMIT", session.order)
-
-        backfill = FakeDB(crop="冬小麦")
-        job = _emergence_job()
-        job.params_json = {
-            "is_backfill": True,
-            "sensor": "S2",
-            "date_to": "2026-11-26",
-            "force": False,
-        }
-        _out, backfill_session, _scheduled = _patch_status(backfill, job, "completed")
-        self.assertEqual(backfill.enqueued, [])
-        self.assertNotIn(
-            "parcel_autumn_emergence_outbox", "\n".join(backfill_session.order)
-        )
-
-    def test_skipped_scenes_still_compute_and_pixels_after_job_completes(self) -> None:
-        sowing = date(2026, 10, 20)
-        db = FakeDB(crop="", scenes=_rows_from_stacks(_plateau_series()))
-        db.request = {
-            "land_id": "33052",
-            "season_key": "2026-autumn",
-            "sowing_date": sowing,
-            "status": "scheduled",
-            "dispatch": "s2_download",
-            "date_from": sowing,
-            "date_to": date(2026, 11, 26),
-            "job_ids": "[]",
-        }
-        with patch("app.core.database.async_session", return_value=_Session(db)):
-            skipped = asyncio.run(
-                svc.enqueue_from_scene_result(
-                    {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
-                    {"scene_upserts": 0, "oss": {"scene_upserts": 0}},
-                )
-            )
-        self.assertFalse(skipped)
-        self.assertIsNone(
-            svc.emergence_target_from_scene_result(
-                {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
-                {"scene_upserts": 0},
-            )
-        )
-        self.assertEqual(db.enqueued, [])
-
-        out, session, scheduled = _patch_status(db, _emergence_job(), "completed")
-        self.assertEqual(out.status, "completed")
-        self.assertFalse(session.job.params_json["force"])
-        self.assertEqual(len(db.enqueued), 1)
-        self.assertLess(
-            next(
-                index
-                for index, sql in enumerate(session.order)
-                if "parcel_autumn_emergence_outbox" in sql
-            ),
-            session.order.index("COMMIT"),
-        )
-        self.assertNotIn("enqueue_after_satellite_job", scheduled)
-
-        storage = MemStorage()
-        missing = asyncio.run(
-            svc.get_pixels(
-                db, "33052", "2026-autumn", date(2026, 11, 24), storage=storage
-            )
-        )
-        self.assertTrue(missing["missing"])
-        outcome = asyncio.run(
-            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=storage)
-        )
-        self.assertEqual(outcome["action"], "updated")
-        self.assertIsNotNone(outcome["status"])
-        self.assertEqual(outcome["sowing_date"], sowing.isoformat())
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-        pixels = asyncio.run(
-            svc.get_pixels(
-                db, "33052", "2026-autumn", date(2026, 11, 24), storage=storage
-            )
-        )
-        self.assertFalse(pixels["missing"])
-        layer = AutumnEmergencePixelsOut.model_validate(
-            {**pixels, "class_labels": class_labels()}
-        )
-        self.assertEqual(layer.date, date(2026, 11, 24))
-        self.assertGreater(layer.pixel_count, 0)
-        self.assertEqual(layer.status, outcome["status"])
-
-    def test_get_reenqueues_when_completed_without_result(self) -> None:
-        db = FakeDB(crop="")
-        db.request = {
-            "land_id": "33052",
-            "season_key": "2026-autumn",
-            "sowing_date": date(2026, 10, 20),
-            "status": "scheduled",
-            "dispatch": "s2_download",
-            "date_from": date(2026, 10, 20),
-            "date_to": date(2026, 11, 26),
-            "job_ids": '["job-done"]',
-        }
-        db.job_progress = [_completed_pull_row()]
-
-        def _forbid_download(*_args, **_kwargs):
-            raise AssertionError("GET must not dispatch a download")
-
-        with patch(
-            "app.services.satellite_batch.create_satellite_batch_jobs",
-            new=_forbid_download,
-        ):
-            view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
-        parsed = AutumnEmergenceOut.model_validate(view)
-        self.assertTrue(parsed.eligible)
-        self.assertFalse(parsed.pending)
-        self.assertIsNone(parsed.status)
-        self.assertIsNone(parsed.pixel_oss_key)
-        self.assertEqual(parsed.job_status, "completed")
-        self.assertEqual(parsed.percent, 100.0)
-        self.assertEqual(parsed.scenes_done, 19)
-        self.assertEqual(parsed.scenes_total, 19)
-        self.assertEqual(parsed.claimed_by, "download-boen")
-        self.assertEqual(parsed.failed_jobs, 0)
-        self.assertIsNone(parsed.failure_reason)
-        self.assertEqual(len(db.enqueued), 1)
-        self.assertEqual(db.enqueued[0]["land_id"], "33052")
-        self.assertEqual(db.enqueued[0]["delay"], 0)
-        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 26))
-        self.assertEqual(db.crop, "")
-        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
-
-        # 客户端继续轮询时，已在队列里的计算不能被清掉租约再入一次。
-        polled = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
-        self.assertIsNone(polled["status"])
-        self.assertEqual(len(db.enqueued), 1)
-
-        db.enqueued.clear()
-        asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
-        self.assertEqual(db.enqueued, [])
-
-        db.job_progress = [
-            {
-                "id": "job-failed",
-                "status": "failed",
-                "error": "STAC search failed",
-                "progress_json": {"scenes_total": 19, "scenes_done": 0},
-                "work_status": "failed",
-                "lease_owner": None,
-                "last_claimed_by": "download-boen",
-                "work_error": None,
-            }
-        ]
-        db.request["job_ids"] = '["job-failed"]'
-        failed = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
-        self.assertEqual(failed["job_status"], "failed")
-        self.assertFalse(failed["pending"])
-        self.assertIsNone(failed["status"])
-        self.assertEqual(db.enqueued, [])
-
-        db.job_progress = [
-            {
-                "id": "job-running",
-                "status": "running",
-                "error": None,
-                "progress_json": {"scenes_total": 19, "scenes_done": 4},
-                "work_status": "leased",
-                "lease_owner": "download-boen",
-                "last_claimed_by": "download-boen",
-                "work_error": None,
-            }
-        ]
-        db.request["job_ids"] = '["job-running"]'
-        running = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
-        self.assertEqual(running["job_status"], "running")
-        self.assertTrue(running["pending"])
-        self.assertEqual(db.enqueued, [])
-
-        db.job_progress = [_completed_pull_row()]
-        db.request["job_ids"] = '["job-done"]'
-        db.row = {
-            "season_key": "2026-autumn",
-            "status": "emerged",
-            "emerged_flag": True,
-            "frozen": True,
-            "sowing_date": date(2026, 10, 20),
-            "pixel_oss_key": "emergence/autumn/33052/2026-autumn/frozen-abc",
-            "summary": "{}",
-            "timeseries": "[]",
-        }
-        ready = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
-        self.assertEqual(ready["status"], "emerged")
-        self.assertEqual(db.enqueued, [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+class ServiceSurfaceTests(unittest.TestCase):
+    def test_api_no_longer_computes_or_runs_outbox(self) -> None:
+        self.assertFalse(hasattr(svc, "recompute_land"))
+        self.assertFalse(hasattr(svc, "run_autumn_emergence_outbox"))
+        self.assertFalse(hasattr(svc, "enqueue_from_scene_result"))
+        source = inspect.getsource(svc)
+        self.assertNotIn("mkdir(", source)
+        self.assertNotIn("put_bytes(", source)
+        self.assertNotIn("get_parcel_product_storage", source)
+        self.assertNotIn("parcel_autumn_emergence_outbox", source)

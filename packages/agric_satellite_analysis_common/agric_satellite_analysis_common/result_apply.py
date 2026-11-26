@@ -42,6 +42,7 @@ __all__ = [
     "UPSERT_WEATHER_SQL",
     "apply_complete_result",
     "apply_domain_from_payload",
+    "apply_autumn_emergence_flag",
     "apply_parcel_scene_product",
     "apply_result_envelope",
     "apply_soil_payload",
@@ -417,12 +418,61 @@ def apply_parcel_scene_product(
         # SyncSession uses SQLAlchemy; for %-format params use connection.exec_driver_sql
         conn = session.connection()
         conn.exec_driver_sql(UPSERT_SCENE_SQL, params)
+        apply_autumn_emergence_flag(conn, obj, pixel_data_obj)
         session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+
+
+def apply_autumn_emergence_flag(conn, obj: dict[str, Any], pixel_data_obj: dict[str, Any] | None) -> None:
+    """Set the land-level emerged-this-season flag. Never writes crop_type."""
+    field = None
+    if isinstance(pixel_data_obj, dict):
+        field = pixel_data_obj.get("autumn_emergence")
+    if not isinstance(field, dict):
+        field = obj.get("autumn_emergence") if isinstance(obj, dict) else None
+    if not isinstance(field, dict) or not field.get("emerged_flag"):
+        return
+    land_id = str((obj or {}).get("land_id") or field.get("land_id") or "").strip()
+    season = str(field.get("season_key") or "").strip()
+    if not land_id or not season:
+        return
+    emerged_date = field.get("first_emerged_date") or field.get("as_of_date")
+    try:
+        conn.exec_driver_sql(
+            """
+            UPDATE agric_satellite.land_parcels
+            SET autumn_emerged = true,
+                autumn_emerged_season = %(season_key)s,
+                autumn_emerged_date = COALESCE(
+                    %(emerged_date)s::date,
+                    autumn_emerged_date
+                ),
+                autumn_emerged_at = COALESCE(autumn_emerged_at, now()),
+                updated_at = now()
+            WHERE land_id = %(land_id)s
+              AND deleted_at IS NULL
+              AND NOT (
+                  COALESCE(autumn_emerged, false)
+                  AND autumn_emerged_season IS NOT DISTINCT FROM %(season_key)s
+              )
+            """,
+            {
+                "land_id": land_id,
+                "season_key": season,
+                "emerged_date": str(emerged_date)[:10] if emerged_date else None,
+            },
+        )
+    except Exception:
+        # Migration may not be applied yet; product upsert must still succeed.
+        logger.exception(
+            "autumn_emergence_flag_apply_failed land_id=%s season=%s",
+            land_id,
+            season,
+        )
 
 
 def apply_weather_payload(payload: dict[str, Any]) -> int:
