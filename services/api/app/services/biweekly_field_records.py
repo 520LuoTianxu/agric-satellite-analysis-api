@@ -47,7 +47,9 @@ _SQL = text(
           OR TRIM(n.branch_manager_json) NOT IN ('', '{}', 'null')
           OR TRIM(n.regional_manager_json) NOT IN ('', '{}', 'null')
       )
-    ORDER BY n.sort_no, n.task_code, n.node_no, n.id
+    ORDER BY
+        CASE WHEN n.task_code = 'PRECISION_SOWING' THEN 0 ELSE 1 END,
+        n.sort_no, n.task_code, n.node_no, n.id
     LIMIT 16
     """
 ).bindparams(bindparam("season_keys", expanding=True))

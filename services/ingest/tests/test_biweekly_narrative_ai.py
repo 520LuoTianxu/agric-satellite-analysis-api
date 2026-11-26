@@ -114,6 +114,8 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("不要按", SYSTEM_PROMPT)
         self.assertIn("写进结论", SYSTEM_PROMPT)
         self.assertNotIn("通常两三句", SYSTEM_PROMPT)
+        self.assertIn("六到十句", SYSTEM_PROMPT)
+        self.assertNotIn("通常是几句到一小段", SYSTEM_PROMPT)
         self.assertIn("写进结论", payload["parameter_guide"]["weather"])
         self.assertIn("similar", payload["parameter_guide"]["infield"])
         self.assertIn("NDRE", payload["stage_context"]["ask"])
@@ -202,6 +204,15 @@ class NarrativeAiTests(unittest.TestCase):
             {"metrics": {}},
         )
         self.assertEqual(cleaned["conclusion"], ["西南部 NDVI 仍低。", "东北部这次看不清。"])
+        many = normalize_judgment(
+            {
+                "conclusion": ["西南部仍低。"] * 10,
+                "field_notes": ["看西南部。"] * 10,
+            },
+            {"metrics": {}},
+        )
+        self.assertEqual(len(many["conclusion"]), 10)
+        self.assertEqual(len(many["field_notes"]), 8)
 
     def test_thin_conclusion_is_asked_to_add_weather_soil_and_quiet_zones(self) -> None:
         facts = _facts()
@@ -255,17 +266,22 @@ class NarrativeAiTests(unittest.TestCase):
                 normalize_judgment(thin, payload),
                 payload,
             ),
-            ["weather", "soil", "emergence"],
+            ["weather", "soil", "emergence", "length"],
         )
+        fuller_lines = [
+            "出苗期西北部 0.41 已有植被信号，东部 0.16 仍看不出苗，要重点看东部。",
+            "全田 NDVI 是 0.71，东部 0.16 还没有跟上来。",
+            "本期平均气温 4.50 度，有效降雨 3.20 毫米，比去年少。",
+            "土壤是壤土，东部在这期雨少时更要盯。",
+            "西北部 0.41 已经有信号，不要把全田偏低单独写成苗弱。",
+            "这期先看东部苗有没有出来，再看西北部 0.41 是不是还在。",
+        ]
         fuller = {
             "summary": "出苗期西北部已有信号，东部还没有。",
             "changes": [
                 {"metric": "ndvi", "judgment": "unclear", "sentence": "NDVI 为 0.71。"}
             ],
-            "conclusion": [
-                "出苗期西北部 0.41 已有植被信号，东部 0.16 仍看不出苗，要重点看东部。",
-                "本期平均气温 4.50 度，有效降雨 3.20 毫米，比去年少。土壤是壤土，东部更要盯。",
-            ],
+            "conclusion": fuller_lines,
             "field_notes": ["重点看东部，看苗有没有出来。"],
             "metric_notes": ["NDVI 本期是 0.71。"],
             "infield": [{"metric": "ndvi", "text": "西北部 0.41，东部 0.16。"}],
@@ -320,6 +336,7 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertIn("上一稿结论没有写全", repair)
         self.assertIn("有效降雨", repair)
         self.assertIn("仍看不出苗", repair)
+        self.assertIn("六到十句", repair)
         self.assertIsNone(out["error"])
         written = "\n".join(out["conclusion"])
         self.assertIn("东部", written)
