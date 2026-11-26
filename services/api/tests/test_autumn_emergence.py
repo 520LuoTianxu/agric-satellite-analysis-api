@@ -6,7 +6,8 @@ import asyncio
 import inspect
 import json
 import unittest
-from datetime import date
+import uuid
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -101,6 +102,7 @@ class FakeDB:
         self.row: dict | None = None
         self.request: dict | None = None
         self.enqueued: list[dict] = []
+        self.outbox_status: str | None = None
         self.open_jobs: list[dict] = []
         self.job_progress: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
@@ -136,7 +138,12 @@ class FakeDB:
             return _Result(one=None if self.request is None else _Row(self.request))
         if "parcel_autumn_emergence_outbox" in sql and "INSERT" in sql:
             self.enqueued.append(bound)
+            self.outbox_status = "pending"
             return _Result()
+        if "parcel_autumn_emergence_outbox" in sql and "SELECT" in sql:
+            if self.outbox_status is None:
+                return _Result(one=None)
+            return _Result(one=_Row({"status": self.outbox_status}))
         if "work_items" in sql:
             return _Result(many=[_Row(row) for row in self.job_progress])
         if "FROM agric_satellite.jobs" in sql:
@@ -925,6 +932,334 @@ class ManualTriggerTests(unittest.TestCase):
         methods = {method for route in matched for method in (route.methods or set())}
         self.assertIn("POST", methods)
         self.assertIn("GET", methods)
+
+
+class _OrderDB:
+    """记录 SQL 与 COMMIT 的先后，证明 outbox 写在任务提交之前。"""
+
+    def __init__(self, inner: FakeDB, job: SimpleNamespace) -> None:
+        self.inner = inner
+        self.job = job
+        self.order: list[str] = []
+
+    async def get(self, model, key, with_for_update=False):
+        del model, key, with_for_update
+        return self.job
+
+    async def execute(self, stmt, params=None):
+        self.order.append(" ".join(str(stmt).split()))
+        return await self.inner.execute(stmt, params)
+
+    async def commit(self):
+        self.order.append("COMMIT")
+        await self.inner.commit()
+
+    async def refresh(self, obj):
+        del obj
+
+
+def _emergence_job() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        land_id="33052",
+        type="satellite_batch",
+        parent_job_id=None,
+        status="running",
+        progress_json={"scenes_total": 19, "scenes_done": 19},
+        error=None,
+        params_json={
+            "autumn_emergence_manual": True,
+            "purpose": "autumn_emergence",
+            "display_name": "出苗",
+            "season_key": "2026-autumn",
+            "sowing_date": "2026-10-20",
+            "date_from": "2026-10-20",
+            "date_to": "2026-11-26",
+            "sensor": "S2",
+            "force": False,
+        },
+        created_at=datetime.now(timezone.utc),
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+
+
+def _patch_status(db: FakeDB, job: SimpleNamespace, status: str):
+    from app.routers import internal_jobs as jobs_mod
+
+    scheduled: list[str] = []
+
+    def _capture(coro, *args, **kwargs):
+        del args, kwargs
+        scheduled.append(getattr(coro.cr_code, "co_name", ""))
+        coro.close()
+        return object()
+
+    session = _OrderDB(db, job)
+    with patch("asyncio.create_task", _capture):
+        out = asyncio.run(
+            jobs_mod.patch_job(
+                job.id,
+                jobs_mod.InternalJobPatch(status=status),
+                None,
+                session,
+            )
+        )
+    return out, session, scheduled
+
+
+def _completed_pull_row() -> dict:
+    return {
+        "id": "job-done",
+        "status": "completed",
+        "error": None,
+        "progress_json": {"scenes_total": 19, "scenes_done": 19},
+        "work_status": "completed",
+        "lease_owner": None,
+        "last_claimed_by": "download-boen",
+        "work_error": None,
+    }
+
+
+class CompletionEnqueueTests(unittest.TestCase):
+    def test_job_completion_enqueues_compute_in_same_commit(self) -> None:
+        from app.routers import internal_jobs as jobs_mod
+
+        db = FakeDB(crop="")
+        job = _emergence_job()
+        out, session, scheduled = _patch_status(db, job, "completed")
+        self.assertEqual(out.status, "completed")
+        self.assertEqual(len(db.enqueued), 1)
+        self.assertEqual(db.enqueued[0]["land_id"], "33052")
+        self.assertEqual(db.enqueued[0]["delay"], 0)
+        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 26))
+        insert_at = next(
+            index
+            for index, sql in enumerate(session.order)
+            if "parcel_autumn_emergence_outbox" in sql and "INSERT" in sql
+        )
+        self.assertLess(insert_at, session.order.index("COMMIT"))
+        self.assertNotIn("enqueue_after_satellite_job", scheduled)
+        receipt = inspect.getsource(jobs_mod._enqueue_emergence_before_commit)
+        self.assertNotIn("create_task", receipt)
+        self.assertNotIn("enqueue_after_satellite_job", receipt)
+        self.assertNotIn(
+            "enqueue_after_satellite_job", inspect.getsource(jobs_mod.patch_job)
+        )
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+
+        # 结果行已经在时，重复的成功回执不再把 outbox 打回 pending。
+        done = FakeDB(crop="")
+        done.row = {
+            "land_id": "33052",
+            "season_key": "2026-autumn",
+            "status": "emerged",
+            "pixel_oss_key": "emergence/autumn/33052/2026-autumn/frozen-abc",
+            "frozen": True,
+        }
+        _out, again, _scheduled = _patch_status(done, _emergence_job(), "succeeded")
+        self.assertEqual(done.enqueued, [])
+        self.assertNotIn("parcel_autumn_emergence_outbox", "\n".join(again.order))
+
+    def test_failed_and_backfill_jobs_do_not_enqueue_compute(self) -> None:
+        failed_db = FakeDB(crop="")
+        failed_job = _emergence_job()
+        failed_job.error = "STAC search failed"
+        out, session, scheduled = _patch_status(failed_db, failed_job, "failed")
+        self.assertEqual(out.status, "failed")
+        self.assertEqual(failed_db.enqueued, [])
+        self.assertNotIn("parcel_autumn_emergence_outbox", "\n".join(session.order))
+        self.assertNotIn("enqueue_after_satellite_job", scheduled)
+        self.assertIn("COMMIT", session.order)
+
+        backfill = FakeDB(crop="冬小麦")
+        job = _emergence_job()
+        job.params_json = {
+            "is_backfill": True,
+            "sensor": "S2",
+            "date_to": "2026-11-26",
+            "force": False,
+        }
+        _out, backfill_session, _scheduled = _patch_status(backfill, job, "completed")
+        self.assertEqual(backfill.enqueued, [])
+        self.assertNotIn(
+            "parcel_autumn_emergence_outbox", "\n".join(backfill_session.order)
+        )
+
+    def test_skipped_scenes_still_compute_and_pixels_after_job_completes(self) -> None:
+        sowing = date(2026, 10, 20)
+        db = FakeDB(crop="", scenes=_rows_from_stacks(_plateau_series()))
+        db.request = {
+            "land_id": "33052",
+            "season_key": "2026-autumn",
+            "sowing_date": sowing,
+            "status": "scheduled",
+            "dispatch": "s2_download",
+            "date_from": sowing,
+            "date_to": date(2026, 11, 26),
+            "job_ids": "[]",
+        }
+        with patch("app.core.database.async_session", return_value=_Session(db)):
+            skipped = asyncio.run(
+                svc.enqueue_from_scene_result(
+                    {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
+                    {"scene_upserts": 0, "oss": {"scene_upserts": 0}},
+                )
+            )
+        self.assertFalse(skipped)
+        self.assertIsNone(
+            svc.emergence_target_from_scene_result(
+                {"land_id": "33052", "sensor": "S2", "date": "2026-11-24"},
+                {"scene_upserts": 0},
+            )
+        )
+        self.assertEqual(db.enqueued, [])
+
+        out, session, scheduled = _patch_status(db, _emergence_job(), "completed")
+        self.assertEqual(out.status, "completed")
+        self.assertFalse(session.job.params_json["force"])
+        self.assertEqual(len(db.enqueued), 1)
+        self.assertLess(
+            next(
+                index
+                for index, sql in enumerate(session.order)
+                if "parcel_autumn_emergence_outbox" in sql
+            ),
+            session.order.index("COMMIT"),
+        )
+        self.assertNotIn("enqueue_after_satellite_job", scheduled)
+
+        storage = MemStorage()
+        missing = asyncio.run(
+            svc.get_pixels(
+                db, "33052", "2026-autumn", date(2026, 11, 24), storage=storage
+            )
+        )
+        self.assertTrue(missing["missing"])
+        outcome = asyncio.run(
+            svc.recompute_land(db, "33052", date(2026, 11, 26), storage=storage)
+        )
+        self.assertEqual(outcome["action"], "updated")
+        self.assertIsNotNone(outcome["status"])
+        self.assertEqual(outcome["sowing_date"], sowing.isoformat())
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+        pixels = asyncio.run(
+            svc.get_pixels(
+                db, "33052", "2026-autumn", date(2026, 11, 24), storage=storage
+            )
+        )
+        self.assertFalse(pixels["missing"])
+        layer = AutumnEmergencePixelsOut.model_validate(
+            {**pixels, "class_labels": class_labels()}
+        )
+        self.assertEqual(layer.date, date(2026, 11, 24))
+        self.assertGreater(layer.pixel_count, 0)
+        self.assertEqual(layer.status, outcome["status"])
+
+    def test_get_reenqueues_when_completed_without_result(self) -> None:
+        db = FakeDB(crop="")
+        db.request = {
+            "land_id": "33052",
+            "season_key": "2026-autumn",
+            "sowing_date": date(2026, 10, 20),
+            "status": "scheduled",
+            "dispatch": "s2_download",
+            "date_from": date(2026, 10, 20),
+            "date_to": date(2026, 11, 26),
+            "job_ids": '["job-done"]',
+        }
+        db.job_progress = [_completed_pull_row()]
+
+        def _forbid_download(*_args, **_kwargs):
+            raise AssertionError("GET must not dispatch a download")
+
+        with patch(
+            "app.services.satellite_batch.create_satellite_batch_jobs",
+            new=_forbid_download,
+        ):
+            view = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        parsed = AutumnEmergenceOut.model_validate(view)
+        self.assertTrue(parsed.eligible)
+        self.assertFalse(parsed.pending)
+        self.assertIsNone(parsed.status)
+        self.assertIsNone(parsed.pixel_oss_key)
+        self.assertEqual(parsed.job_status, "completed")
+        self.assertEqual(parsed.percent, 100.0)
+        self.assertEqual(parsed.scenes_done, 19)
+        self.assertEqual(parsed.scenes_total, 19)
+        self.assertEqual(parsed.claimed_by, "download-boen")
+        self.assertEqual(parsed.failed_jobs, 0)
+        self.assertIsNone(parsed.failure_reason)
+        self.assertEqual(len(db.enqueued), 1)
+        self.assertEqual(db.enqueued[0]["land_id"], "33052")
+        self.assertEqual(db.enqueued[0]["delay"], 0)
+        self.assertEqual(db.enqueued[0]["scene_date"], date(2026, 11, 26))
+        self.assertEqual(db.crop, "")
+        self.assertNotIn("update agric_satellite.land_parcels", db.sql_text().lower())
+
+        # 客户端继续轮询时，已在队列里的计算不能被清掉租约再入一次。
+        polled = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        self.assertIsNone(polled["status"])
+        self.assertEqual(len(db.enqueued), 1)
+
+        db.enqueued.clear()
+        asyncio.run(svc.get_summary(db, "33052", "2026-autumn", enqueue=False))
+        self.assertEqual(db.enqueued, [])
+
+        db.job_progress = [
+            {
+                "id": "job-failed",
+                "status": "failed",
+                "error": "STAC search failed",
+                "progress_json": {"scenes_total": 19, "scenes_done": 0},
+                "work_status": "failed",
+                "lease_owner": None,
+                "last_claimed_by": "download-boen",
+                "work_error": None,
+            }
+        ]
+        db.request["job_ids"] = '["job-failed"]'
+        failed = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        self.assertEqual(failed["job_status"], "failed")
+        self.assertFalse(failed["pending"])
+        self.assertIsNone(failed["status"])
+        self.assertEqual(db.enqueued, [])
+
+        db.job_progress = [
+            {
+                "id": "job-running",
+                "status": "running",
+                "error": None,
+                "progress_json": {"scenes_total": 19, "scenes_done": 4},
+                "work_status": "leased",
+                "lease_owner": "download-boen",
+                "last_claimed_by": "download-boen",
+                "work_error": None,
+            }
+        ]
+        db.request["job_ids"] = '["job-running"]'
+        running = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        self.assertEqual(running["job_status"], "running")
+        self.assertTrue(running["pending"])
+        self.assertEqual(db.enqueued, [])
+
+        db.job_progress = [_completed_pull_row()]
+        db.request["job_ids"] = '["job-done"]'
+        db.row = {
+            "season_key": "2026-autumn",
+            "status": "emerged",
+            "emerged_flag": True,
+            "frozen": True,
+            "sowing_date": date(2026, 10, 20),
+            "pixel_oss_key": "emergence/autumn/33052/2026-autumn/frozen-abc",
+            "summary": "{}",
+            "timeseries": "[]",
+        }
+        ready = asyncio.run(svc.get_summary(db, "33052", "2026-autumn"))
+        self.assertEqual(ready["status"], "emerged")
+        self.assertEqual(db.enqueued, [])
 
 
 if __name__ == "__main__":

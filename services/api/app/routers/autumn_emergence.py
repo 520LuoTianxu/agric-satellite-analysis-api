@@ -123,7 +123,9 @@ async def trigger_autumn_emergence(
 
     始终创建 satellite_batch（展示名「出苗」，date_from 为播种日，只有 S2）。
     下载机领取；已入库的晴空景由该任务跳过而不重下。官方 S2 回执入库后，
-    或该任务完成回执后，API 再算出苗。本接口不下载影像，也不修改 crop_type。
+    或该任务完成回执在同一事务写入计算 outbox 后，API 再算出苗。
+    完成回执若丢失，GET 在任务已完成且尚无结果时补入计算队列。
+    本接口不下载影像，也不修改 crop_type。
     进度查询返回的 job_ids：GET /v1/jobs/{job_id}。已冻结的季不重新派发。
     """
     await _agri_ready(db)

@@ -8,8 +8,9 @@
 
 人工「拉取出苗数据」与「更新影像」同一条领取队列：API 只创建
 ``satellite_batch`` / work item，下载机领取。窗口从播种日起，任务名是「出苗」，
-传感器只有 S2。库里已有的晴空景由下载机按 ``force=false`` 跳过，任务完成回执
-后再算。API 不因「景已经在库里」改走本机 outbox 而省掉这条任务。
+传感器只有 S2。库里已有的晴空景由下载机按 ``force=false`` 跳过。跳过不会产生
+新的场景 upsert，所以任务成功回执必须在同一事务写入计算 outbox；若该写入被
+错过，GET 在任务已完成且还没有结果行时再入队。API 不下载影像。
 """
 
 from __future__ import annotations
@@ -242,6 +243,14 @@ _RETRY = text(
         ),
         lease_owner = NULL, lease_until = NULL, last_error = :error, updated_at = now()
     WHERE land_id = :land_id AND status = 'processing' AND lease_owner = :worker_id
+    """
+)
+
+_OUTBOX_STATUS = text(
+    """
+    SELECT status
+    FROM agric_satellite.parcel_autumn_emergence_outbox
+    WHERE land_id = :land_id
     """
 )
 
@@ -482,7 +491,8 @@ async def get_summary(
     """地块不存在返回 None。结果字段不变，人工拉取另附任务进度。
 
     进度来自 satellite_batch 任务和 work item，字段与更新影像的回填计数一致。
-    GET 不派发下载，也不在已有人工任务时再入计算队列。
+    GET 不派发下载。进行中或失败的出苗任务不入计算队列。
+    任务已经完成但还没有结果行时补写 outbox，避免完成回执丢失后一直没有像元。
     """
     land = await _load_land(db, land_id)
     if land is None:
@@ -508,7 +518,27 @@ async def get_summary(
         )
         if waiting_download:
             # 有任务就看 job_status。失败或已完成不再用 pending=true 空转。
-            base["pending"] = pull.get("job_status") in {"pending", "running"}
+            job_status = str(pull.get("job_status") or "")
+            base["pending"] = job_status in {"pending", "running"}
+            if (
+                enqueue
+                and job_status in {"completed", "succeeded"}
+                and not await _compute_already_queued(db, land_id)
+            ):
+                # 完成回执若没落进 outbox，客户端会停在 100% 且像元 404。
+                # 已在排队或计算中的行不能被轮询打回 pending。这里不创建下载任务。
+                await enqueue_completed_pull(
+                    db,
+                    land_id=land_id,
+                    params={
+                        "autumn_emergence_manual": True,
+                        "purpose": PULL_PURPOSE,
+                        "season_key": season,
+                        "sowing_date": sowing,
+                        "date_to": (request or {}).get("date_to") or sowing,
+                    },
+                    status=job_status,
+                )
         else:
             base["pending"] = True
             if enqueue and autumn_emergence_enabled():
@@ -595,6 +625,14 @@ async def get_pixels(
         "source": "stored",
         **points,
     }
+
+
+async def _compute_already_queued(db: AsyncSession, land_id: str) -> bool:
+    """pending / processing 的 outbox 已经会算出苗，GET 轮询不得清掉租约。"""
+    row = (await db.execute(_OUTBOX_STATUS, {"land_id": land_id})).fetchone()
+    if row is None:
+        return False
+    return str(_as_dict(row).get("status") or "") in {"pending", "processing"}
 
 
 async def enqueue_lands(
@@ -905,12 +943,30 @@ def is_emergence_pull(params: dict[str, Any] | None) -> bool:
     )
 
 
-async def enqueue_after_satellite_job(
-    land_id: str, params: dict[str, Any] | None, status: str
-) -> bool:
-    """satellite_batch 完成回执。已有景被跳过时没有新的场景 upsert，仍要算。
+def _season_for_pull_params(params: dict[str, Any]) -> str | None:
+    raw = params.get("season_key")
+    if isinstance(raw, str) and len(raw) >= 11 and raw.endswith("-autumn"):
+        year = raw.split("-", 1)[0]
+        if year.isdigit():
+            return raw
+    anchor = _as_date(params.get("sowing_date")) or _as_date(params.get("date_to"))
+    if anchor is None:
+        return None
+    return autumn_season_key(anchor) or default_season_key(anchor)
 
-    与官方 S2 入库钩子写入同一个 outbox。失败状态不计算，失败原因留在任务上。
+
+async def enqueue_completed_pull(
+    db: AsyncSession,
+    *,
+    land_id: str,
+    params: dict[str, Any] | None,
+    status: str,
+) -> bool:
+    """出苗 satellite_batch 成功结束、且该季还没有结果行时，写入计算 outbox。
+
+    不提交。调用方把这条 INSERT 放进任务状态的同一事务，PATCH 结束后不会丢。
+    失败、进行中、普通回填，以及结果行已经存在时，不入队。
+    ``force=false`` 跳过已入库景时没有场景 upsert，仍靠这次写入计算。
     """
     if not autumn_emergence_enabled() or not is_emergence_pull(params):
         return False
@@ -921,20 +977,50 @@ async def enqueue_after_satellite_job(
     if not resolved:
         raw_ids = params.get("land_ids")
         if isinstance(raw_ids, list) and raw_ids:
-            resolved = str(raw_ids[0])
+            resolved = str(raw_ids[0] or "").strip()
     if not resolved:
         return False
+    season = _season_for_pull_params(params)
+    if season is not None:
+        existing = await _load_row(db, resolved, season)
+        if existing is not None:
+            return False
     scene_date = _as_date(params.get("date_to")) or _as_date(params.get("sowing_date"))
+    await enqueue_lands(db, [resolved], scene_date, delay_seconds=0)
+    logger.info(
+        "autumn_emergence_job_enqueued",
+        land_id=resolved,
+        season_key=season,
+        scene_date=scene_date.isoformat() if scene_date else None,
+    )
+    return True
+
+
+async def enqueue_after_satellite_job(
+    land_id: str, params: dict[str, Any] | None, status: str
+) -> bool:
+    """单独会话的完成回执。PATCH 路径改用同一事务的 :func:`enqueue_completed_pull`。
+
+    已有景被跳过时没有新的场景 upsert，仍要算。失败状态不计算。
+    """
+    if not autumn_emergence_enabled() or not is_emergence_pull(params):
+        return False
+    if status not in {"completed", "succeeded"}:
+        return False
+    resolved = str(land_id or "").strip()
     try:
         from app.core.database import async_session
 
         async with async_session() as db:
-            await enqueue_lands(db, [resolved], scene_date)
-            await db.commit()
+            queued = await enqueue_completed_pull(
+                db, land_id=land_id, params=params, status=status
+            )
+            if queued:
+                await db.commit()
+            return queued
     except Exception:
         logger.exception("autumn_emergence_job_callback_failed", land_id=resolved)
         return False
-    return True
 
 
 def _idle_pull() -> dict[str, Any]:
@@ -1062,7 +1148,7 @@ def _pull_message(summary: dict[str, Any]) -> str | None:
     if status == "failed":
         return summary.get("failure_reason") or "出苗拉取失败"
     if status == "completed":
-        return "出苗影像任务已完成。官方 S2 回执写入后，结果出现在本次 GET。"
+        return "出苗影像任务已完成。尚无出苗结果时会补入计算队列，随后的 GET 返回摘要。"
     failed = int(summary.get("failed_jobs") or 0)
     return (
         "正在拉取出苗影像… "
