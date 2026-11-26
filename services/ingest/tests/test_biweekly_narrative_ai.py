@@ -20,6 +20,7 @@ import structlog
 from agric_satellite_analysis_common.logging import processor_chain
 from app.reports.biweekly.narrative_ai import (
     SYSTEM_PROMPT,
+    conclusion_gaps,
     generate_metric_judgment,
     judgment_paragraphs,
     narrative_input,
@@ -111,6 +112,12 @@ class NarrativeAiTests(unittest.TestCase):
         self.assertNotIn("先别下结论", payload["parameter_guide"]["surrounding"])
         self.assertNotIn("四段", payload["parameter_guide"]["infield"])
         self.assertIn("不要按", SYSTEM_PROMPT)
+        self.assertIn("写进结论", SYSTEM_PROMPT)
+        self.assertNotIn("通常两三句", SYSTEM_PROMPT)
+        self.assertIn("写进结论", payload["parameter_guide"]["weather"])
+        self.assertIn("similar", payload["parameter_guide"]["infield"])
+        self.assertIn("NDRE", payload["stage_context"]["ask"])
+        self.assertTrue(payload["conclusion_task"])
         self.assertEqual(payload["metrics"]["ndre"]["latest"], "0.57")
         self.assertIn("NDRE", payload["metrics"]["ndre"]["name"])
         self.assertIn("叶绿素", payload["metrics"]["ndre"]["meaning"])
@@ -171,6 +178,8 @@ class NarrativeAiTests(unittest.TestCase):
         payload = narrative_input(facts)
         self.assertEqual(payload["stage_context"]["stage"], "出苗期")
         self.assertIn("不能判断出苗", payload["stage_context"]["expected"])
+        self.assertIn("哪些方位已经出苗", payload["stage_context"]["ask"])
+        self.assertIn("重点看", "\n".join(payload["conclusion_task"]))
         packed = json.dumps(payload["field_patterns"], ensure_ascii=False)
         self.assertNotIn("持续偏弱（NDVI）", packed)
         self.assertNotIn("暂不评价", packed)
@@ -193,6 +202,131 @@ class NarrativeAiTests(unittest.TestCase):
             {"metrics": {}},
         )
         self.assertEqual(cleaned["conclusion"], ["西南部 NDVI 仍低。", "东北部这次看不清。"])
+
+    def test_thin_conclusion_is_asked_to_add_weather_soil_and_quiet_zones(self) -> None:
+        facts = _facts()
+        facts["phase"] = {
+            "observation_stages": [{"stage_code": "出苗期", "phase_label": "S1"}]
+        }
+        facts["weather_period"] = {
+            "days": 14,
+            "min_c": -1.2,
+            "max_c": 11.0,
+            "mean_c": 4.5,
+            "precipitation_mm": 3.2,
+            "temperature_days": 14,
+            "precipitation_days": 2,
+        }
+        facts["weather_same_period_prior_year"] = {
+            "mean_c": 6.1,
+            "precipitation_mm": 18.4,
+        }
+        facts["soil_context"] = {
+            "status": "ready",
+            "texture": "壤土",
+            "ph": 7.2,
+            "rootzone_awc_mm": 86,
+        }
+        facts["infield"] = [
+            {
+                "metric": "ndvi",
+                "spatial_split": "split",
+                "stats": {"median": 0.17, "p10": 0.12, "p90": 0.35},
+                "zones": [
+                    {"name": "西北部", "level": "higher", "median": 0.41},
+                    {"name": "东部", "level": "similar", "median": 0.16},
+                ],
+            }
+        ]
+        payload = narrative_input(facts)
+        thin = {
+            "summary": "出苗期西北部已有信号。",
+            "changes": [
+                {"metric": "ndvi", "judgment": "unclear", "sentence": "NDVI 为 0.71。"}
+            ],
+            "conclusion": ["出苗期西北部 0.41 已有信号，其余方位仍低。"],
+            "field_notes": [],
+            "metric_notes": ["NDVI 本期是 0.71。"],
+            "infield": [{"metric": "ndvi", "text": "西北部 0.41，东部 0.16。"}],
+            "weather": ["这期有效降雨 3.20 毫米。"],
+        }
+        self.assertEqual(
+            conclusion_gaps(
+                normalize_judgment(thin, payload),
+                payload,
+            ),
+            ["weather", "soil", "emergence"],
+        )
+        fuller = {
+            "summary": "出苗期西北部已有信号，东部还没有。",
+            "changes": [
+                {"metric": "ndvi", "judgment": "unclear", "sentence": "NDVI 为 0.71。"}
+            ],
+            "conclusion": [
+                "出苗期西北部 0.41 已有植被信号，东部 0.16 仍看不出苗，要重点看东部。",
+                "本期平均气温 4.50 度，有效降雨 3.20 毫米，比去年少。土壤是壤土，东部更要盯。",
+            ],
+            "field_notes": ["重点看东部，看苗有没有出来。"],
+            "metric_notes": ["NDVI 本期是 0.71。"],
+            "infield": [{"metric": "ndvi", "text": "西北部 0.41，东部 0.16。"}],
+            "weather": ["这期有效降雨 3.20 毫米，平均气温 4.50 度。"],
+        }
+        bodies = [thin, fuller]
+
+        class _Response:
+            def __init__(self, content: dict) -> None:
+                self.status_code = 200
+                self._content = content
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": json.dumps(self._content, ensure_ascii=False)
+                            },
+                        }
+                    ],
+                    "usage": {"completion_tokens": 400},
+                }
+
+        class _Client:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def post(self, url, headers, json):  # noqa: A002
+                self.calls.append(json)
+                return _Response(bodies[len(self.calls) - 1])
+
+            def close(self) -> None:
+                return None
+
+        client = _Client()
+        with patch.dict(
+            os.environ,
+            {
+                "BAILIAN_API_KEY": "test-key",
+                "BAILIAN_MODEL": "qwen3.7-flash",
+            },
+        ):
+            out = generate_metric_judgment(facts, client=client)
+        self.assertEqual(len(client.calls), 2)
+        self.assertNotIn("上一稿", client.calls[0]["messages"][1]["content"])
+        repair = client.calls[1]["messages"][1]["content"]
+        self.assertIn("上一稿结论没有写全", repair)
+        self.assertIn("有效降雨", repair)
+        self.assertIn("仍看不出苗", repair)
+        self.assertIsNone(out["error"])
+        written = "\n".join(out["conclusion"])
+        self.assertIn("东部", written)
+        self.assertIn("西北部", written)
+        self.assertIn("有效降雨", written)
+        self.assertIn("壤土", written)
+        self.assertNotIn("conclusion_gaps", out["diagnostics"])
 
     def test_empty_field_notes_do_not_fail_the_narrative(self) -> None:
         content = {

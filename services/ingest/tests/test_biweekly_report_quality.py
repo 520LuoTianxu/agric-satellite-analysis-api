@@ -260,6 +260,9 @@ class RobustStatisticsTests(unittest.TestCase):
         self.assertEqual(analysis["relative"]["clustered_pixels"], 0)
         self.assertEqual(analysis["relative"]["regions"], [])
         self.assertAlmostEqual(analysis["stats"]["iqr"], 0.0)
+        self.assertEqual(analysis["spatial_split"], "even")
+        self.assertTrue(analysis["zones"])
+        self.assertTrue(all(zone["level"] == "similar" for zone in analysis["zones"]))
 
     def test_single_pixel_extremes_do_not_drive_statistics_or_location(self):
         from app.reports.biweekly.infield_maps import analyse_metric
@@ -302,8 +305,12 @@ class RobustStatisticsTests(unittest.TestCase):
         split = analyse_metric("ndvi", _grid_product("2026-04-09", low_side), None)
         self.assertEqual(split["spatial_split"], "split")
         lower = [zone["name"] for zone in split["zones"] if zone["level"] == "lower"]
+        similar = [zone["name"] for zone in split["zones"] if zone["level"] == "similar"]
         self.assertTrue(lower)
         self.assertTrue(all("西" in name for name in lower))
+        # 接近全田的方位也要有名字，出苗期才能写清哪里还没有苗，而不是「其余方位」。
+        self.assertTrue(similar)
+        self.assertTrue(all("西" not in name for name in similar))
 
         clear = np.ones((12, 12))
         clear[:, :4] = 0
