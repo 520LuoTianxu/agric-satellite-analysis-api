@@ -5,7 +5,7 @@ GET /v1/agri/lands/{land_id}/autumn-emergence/pixels
 POST /v1/agri/lands/{land_id}/autumn-emergence
 
 像元来自 emergence/autumn/ 对象，不读 s1s2_parcel/json 的 NDVI 列。
-POST 只排期：缺官方晴空 S2 时派发现有下载任务，API 本机不下载影像。
+POST 与更新影像一样创建 satellite_batch，由下载机领取。API 本机不下载影像。
 """
 
 from __future__ import annotations
@@ -97,7 +97,8 @@ async def get_autumn_emergence(
 ):
     """地块本季出苗摘要：状态、冻结标记、本底、噪声和逐日中位数。
 
-    未计算时 pending=true，计算由场景入库后的 outbox 完成。
+    人工拉取的进度在 job_status、job_ids、claimed_by、failure_reason
+    和分片计数上，与更新影像看 GET /v1/jobs/{job_id} 相同。
     已出苗后 emerged_flag 与 frozen 为 true，同季不再重算。
     """
     await _agri_ready(db)
@@ -118,13 +119,12 @@ async def trigger_autumn_emergence(
     ctx: Annotated[OrgContext, Depends(_writer)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """按播种日排期出苗计算。
+    """按播种日派发出苗拉取，逻辑与更新影像的 backfill-indices 相同。
 
-    已有播种日之后的官方晴空 S2 时只入队计算。否则派发 S2 下载任务，
-    等官方 S2 回执入库后再算。响应里的 pending 为 true 时，轮询 GET
-    ``/v1/agri/lands/{land_id}/autumn-emergence?season=...`` 直到 pending
-    为 false。本接口不下载影像，也不修改 crop_type。
-    该季已冻结时 pending 为 false、dispatch 为 frozen，不重新下载。
+    始终创建 satellite_batch（展示名「出苗」，date_from 为播种日，只有 S2）。
+    下载机领取；已入库的晴空景由该任务跳过而不重下。官方 S2 回执入库后，
+    或该任务完成回执后，API 再算出苗。本接口不下载影像，也不修改 crop_type。
+    进度查询返回的 job_ids：GET /v1/jobs/{job_id}。已冻结的季不重新派发。
     """
     await _agri_ready(db)
     try:
