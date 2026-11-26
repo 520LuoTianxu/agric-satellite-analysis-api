@@ -1314,3 +1314,34 @@ class NarrativeAiTests(unittest.TestCase):
             if isinstance(item, Paragraph) and "输出长度用尽" in item.getPlainText()
         )
         self.assertFalse(isinstance(story[note_at - 1], PageBreak))
+
+    def test_missing_weather_talk_is_not_left_in_the_conclusion(self) -> None:
+        self.assertIn("不要写「没有可用」", SYSTEM_PROMPT)
+        facts = _facts()
+        facts["water_risk"] = {
+            "lines": [
+                "叶子里的水：11月11日为0.00，10月28日为-0.10，变化+0.10，多了一些。",
+                "有效降雨：没有可用的降雨或蒸散记录，不能据此判断这半月是亏是余。",
+            ]
+        }
+        payload = narrative_input(facts)
+        self.assertIsNone(payload["weather"])
+        self.assertEqual(len(payload["water_risk_lines"]), 1)
+        self.assertNotIn("没有可用", "".join(payload["water_risk_lines"]))
+        cleaned = normalize_judgment(
+            {
+                "conclusion": [
+                    "本期没有可用的气温和降雨记录，冷热和有效降雨都无从对照，"
+                    "干湿只能看NDMI：0.00比上期的-0.10多了一些，水分略有改善但仍在零附近。",
+                    "本期没有可用的气温和降雨记录。",
+                ]
+            },
+            payload,
+        )
+        self.assertEqual(len(cleaned["conclusion"]), 1)
+        text = cleaned["conclusion"][0]
+        self.assertNotIn("没有可用", text)
+        self.assertNotIn("无从对照", text)
+        self.assertNotIn("没有记录", text)
+        self.assertIn("0.00", text)
+        self.assertIn("-0.10", text)

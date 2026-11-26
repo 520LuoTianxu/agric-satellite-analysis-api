@@ -97,6 +97,195 @@ def summarize_weather_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_CLIMATE_KEYS = ("precipitation_mm", "min_c", "max_c")
+
+
+def _row_has_climate(row: dict[str, Any]) -> bool:
+    return any(row.get(key) is not None for key in _CLIMATE_KEYS)
+
+
+def _rows_have_climate(rows: list[dict[str, Any]]) -> bool:
+    return any(_row_has_climate(row) for row in rows)
+
+
+def _summary_has_climate(summary: Any) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    return any(
+        summary.get(key) is not None
+        for key in ("precipitation_mm", "min_c", "max_c", "mean_c")
+    )
+
+
+def period_has_usable_weather(
+    facts: dict[str, Any], *, start: str, end_inclusive: str
+) -> bool:
+    """本期至少有一天气温或降水。只有日期、数值全空，不算已经有天气。"""
+    rows = [
+        row
+        for row in (facts.get("weather_daily") or [])
+        if isinstance(row, dict) and start <= _as_day(row.get("date")) <= end_inclusive
+    ]
+    if _rows_have_climate(rows):
+        return True
+    # 有些调用只带合计、不带逐日。合计里有气温或降水就不要再整段重拉。
+    if not rows and _summary_has_climate(facts.get("weather_period")):
+        return True
+    return False
+
+
+def merge_weather_daily(
+    existing: list[Any] | None, incoming: list[Any] | None
+) -> list[dict[str, Any]]:
+    """按日期合并。已有的非空气温、降水、蒸散保留，空位用新拉到的值补上。"""
+    by_date: dict[str, dict[str, Any]] = {}
+    for batch in (existing or [], incoming or []):
+        for row in batch:
+            if not isinstance(row, dict):
+                continue
+            day = _as_day(row.get("date"))
+            if len(day) != 10:
+                continue
+            current = by_date.get(day)
+            if current is None:
+                by_date[day] = {
+                    "date": day,
+                    "precipitation_mm": row.get("precipitation_mm"),
+                    "min_c": row.get("min_c"),
+                    "max_c": row.get("max_c"),
+                    "et0_mm": row.get("et0_mm"),
+                }
+                continue
+            for key in ("precipitation_mm", "min_c", "max_c", "et0_mm"):
+                if current.get(key) is None and row.get(key) is not None:
+                    current[key] = row[key]
+    return [by_date[day] for day in sorted(by_date)]
+
+
+def apply_fetched_weather(
+    existing: dict[str, Any],
+    fetched: dict[str, Any],
+    *,
+    start: str,
+    end_inclusive: str,
+) -> dict[str, Any]:
+    """把拉到的天气补进事实。拉取失败时保留原来已经有的气温和降水。"""
+    merged = merge_weather_daily(
+        existing.get("weather_daily"), fetched.get("weather_daily")
+    )
+    period_rows = [row for row in merged if start <= row["date"] <= end_inclusive]
+    antecedent_rows = [row for row in merged if row["date"] < start]
+    period = summarize_weather_rows(period_rows) if period_rows else None
+    antecedent = summarize_weather_rows(antecedent_rows) if antecedent_rows else None
+    if not _summary_has_climate(period) and _summary_has_climate(
+        existing.get("weather_period")
+    ):
+        period = existing.get("weather_period")
+    if period is None:
+        period = summarize_weather_rows([])
+    if not _summary_has_climate(antecedent) and _summary_has_climate(
+        existing.get("weather_antecedent")
+    ):
+        antecedent = existing.get("weather_antecedent")
+    if antecedent is None:
+        antecedent = summarize_weather_rows([])
+    prior = fetched.get("weather_same_period_prior_year")
+    if not _summary_has_climate(prior):
+        prior = existing.get("weather_same_period_prior_year")
+    usable = _summary_has_climate(period)
+    fetched_rows = [
+        row for row in (fetched.get("weather_daily") or []) if isinstance(row, dict)
+    ]
+    if usable and _rows_have_climate(fetched_rows):
+        source = fetched.get("weather_source") or existing.get("weather_source")
+    else:
+        source = existing.get("weather_source") or fetched.get("weather_source")
+    error = None
+    if not usable:
+        error = fetched.get("weather_error") or existing.get("weather_error")
+    return {
+        "weather_daily": merged,
+        "weather_period": period,
+        "weather_antecedent": antecedent,
+        "weather_same_period_prior_year": prior,
+        "weather_source": source,
+        "weather_error": error,
+    }
+
+
+def _supplement_period_climate(
+    latitude: float,
+    longitude: float,
+    period_start: str,
+    period_end: str,
+    rows: list[dict[str, Any]],
+    source: str | None,
+    error: str | None,
+    *,
+    forecast_fetcher: Any | None = None,
+    nasa_fetcher: Any | None = None,
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    """本期还没有气温和降水时，再用预报接口和 NASA POWER 补这一段。
+
+    Open-Meteo 归档经常比最近几天慢。归档窗口里已有更早日期时，整段会被当成
+    成功，本期仍是空的。这里只补空位，不覆盖已有数值，也不编造缺测日。
+    """
+    period_rows = [row for row in rows if period_start <= row["date"] <= period_end]
+    if _rows_have_climate(period_rows):
+        return rows, source, error
+    try:
+        start_day = date.fromisoformat(period_start)
+        end_day = date.fromisoformat(period_end)
+    except ValueError:
+        return rows, source, error
+    try:
+        from agric_satellite_analysis_common.weather_window import (
+            resolve_historical_weather_window,
+        )
+
+        window = resolve_historical_weather_window(
+            date_from=start_day, date_to=end_day
+        )
+    except ValueError:
+        return rows, source, error or "no_data"
+
+    merged = rows
+    try:
+        if forecast_fetcher is None:
+            from app.tasks.weather import _fetch_open_meteo as forecast_fetcher
+
+        payload = forecast_fetcher(
+            latitude, longitude, window.start, window.end, use_archive=False
+        )
+        forecast_rows = rows_from_daily_payload((payload or {}).get("daily"))
+        merged = merge_weather_daily(merged, forecast_rows)
+        period_rows = [
+            row for row in merged if period_start <= row["date"] <= period_end
+        ]
+        if _rows_have_climate(period_rows):
+            return merged, source or "open-meteo", None
+    except Exception:  # noqa: BLE001 — 预报接口失败再试 NASA，不在这里中断出报
+        pass
+
+    if source == "nasa-power":
+        return merged, source, error or "no_data"
+    try:
+        if nasa_fetcher is None:
+            from app.tasks.weather import _fetch_nasa_power as nasa_fetcher
+
+        payload = nasa_fetcher(latitude, longitude, window.start, window.end)
+        nasa_rows = rows_from_daily_payload((payload or {}).get("daily"))
+        merged = merge_weather_daily(merged, nasa_rows)
+        period_rows = [
+            row for row in merged if period_start <= row["date"] <= period_end
+        ]
+        if _rows_have_climate(period_rows):
+            return merged, "nasa-power", None
+    except Exception:  # noqa: BLE001 — 两个来源都没有时保持空，不编数
+        pass
+    return merged, source, error or "no_data"
+
+
 def centroid_from_products(
     products: list[dict[str, Any]],
 ) -> tuple[float, float] | None:
@@ -238,7 +427,20 @@ def fetch_period_weather(
     daily, source, error = loader(
         float(latitude), float(longitude), window.start, window.end
     )
-    if daily is None:
+    rows = rows_from_daily_payload(daily) if daily else []
+    # 调用方传入的 loader 负责全部取数，测试不再访问外部接口。
+    # 正式出报在归档没有本期气温和降水时，改走预报接口和 NASA POWER。
+    if daily_loader is None:
+        rows, source, error = _supplement_period_climate(
+            float(latitude),
+            float(longitude),
+            _as_day(period_start),
+            _as_day(period_end_inclusive),
+            rows,
+            source,
+            error,
+        )
+    if not rows:
         return {
             "weather_daily": [],
             "weather_period": summarize_weather_rows([]),
@@ -248,7 +450,6 @@ def fetch_period_weather(
             "weather_error": error,
         }
 
-    rows = rows_from_daily_payload(daily)
     period_rows = [
         row
         for row in rows
