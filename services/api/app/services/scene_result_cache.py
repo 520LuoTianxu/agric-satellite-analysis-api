@@ -430,19 +430,6 @@ async def consume_cached_scene_results(redis_client: Any | None = None) -> None:
                             result_id=result_id,
                             error=str(harvest_exc),
                         )
-                    # 秋季出苗同样只入队。已出苗的地块在重算时直接跳过。
-                    from app.services.autumn_emergence import (
-                        enqueue_from_scene_result as enqueue_autumn_emergence,
-                    )
-
-                    try:
-                        await enqueue_autumn_emergence(envelope, stats)
-                    except Exception as emergence_exc:
-                        logger.exception(
-                            "autumn_emergence_enqueue_failed",
-                            result_id=result_id,
-                            error=str(emergence_exc),
-                        )
 
                 if permanent_rejections:
                     await _dead_letter_result(

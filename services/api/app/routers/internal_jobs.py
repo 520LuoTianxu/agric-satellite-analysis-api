@@ -265,9 +265,6 @@ async def patch_job(
     elif body.touch_finished:
         job.finished_at = now
 
-    # 与 job 状态同一事务写入出苗计算 outbox。create_task 在请求结束后可能被回收。
-    await _enqueue_emergence_before_commit(db, job, body.status)
-
     await db.commit()
     await db.refresh(job)
     try:
@@ -284,22 +281,3 @@ async def patch_job(
             exc_info=True,
         )
     return _patch_out(job, include_progress=include_progress)
-
-
-async def _enqueue_emergence_before_commit(
-    db: AsyncSession, job: Job, reported_status: str | None
-) -> None:
-    """出苗任务成功回执写入计算 outbox。普通回填和失败状态直接返回。"""
-    if reported_status not in {"completed", "succeeded"}:
-        return
-    params = job.params_json if isinstance(job.params_json, dict) else {}
-    from app.services.autumn_emergence import enqueue_completed_pull, is_emergence_pull
-
-    if not is_emergence_pull(params):
-        return
-    await enqueue_completed_pull(
-        db,
-        land_id=str(job.land_id) if job.land_id else "",
-        params=params,
-        status=reported_status,
-    )

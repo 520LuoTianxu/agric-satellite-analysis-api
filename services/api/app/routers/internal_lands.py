@@ -436,3 +436,18 @@ async def season_growth_inputs(
         raise HTTPException(status_code=code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"season-growth-inputs failed: {exc}") from exc
+
+
+@router.get("/{land_id}/autumn-emergence-context")
+async def autumn_emergence_context(
+    land_id: str,
+    _: InternalAuth,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Download machine: land flag, sowing date, and official S2 dates."""
+    from app.services import autumn_emergence as emergence
+
+    view = await emergence.land_context(db, land_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="land parcel not found")
+    return view

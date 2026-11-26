@@ -1582,6 +1582,7 @@ def process_satellite_batch(
 ) -> dict:
     """一个组、传感器和时间分片共用下载，逐地块掩膜并报告任务进度。"""
     job: dict | None = None
+    _emergence_ctx = None
     try:
         job = get_job(job_id)
         active_attempt = _active_compensation_attempt(job.get("progress_json") or {})
@@ -1605,6 +1606,15 @@ def process_satellite_batch(
             # API汇总已将丢失的worker任务回收为失败，迟到的旧worker不再重复消耗下载资源。
             return {"job_id": job_id, "status": "stale_recovered"}
         params = job["params_json"]
+        from app.tasks.autumn_emergence_product import (
+            finalize_emergence_job,
+            is_emergence_job,
+            set_batch_context,
+            reset_batch_context,
+            update_batch_crops,
+        )
+
+        _emergence_ctx = set_batch_context(params if isinstance(params, dict) else {})
         sensor = params["sensor"]
         if sensor not in {"S1", "S2"}:
             raise ValueError(f"不支持的遥感传感器: {sensor}")
@@ -1636,6 +1646,21 @@ def process_satellite_batch(
             existing_algorithm_version=params.get("existing_algorithm_version"),
             bypass_schedule_land_filter=should_bypass_schedule_land_filter(params),
         )
+        crop_by_land = {}
+        for land in lands:
+            meta = land.get("meta") if isinstance(land, dict) else None
+            lid = None
+            if isinstance(meta, dict):
+                lid = meta.get("land_id")
+            if not lid and isinstance(land, dict):
+                lid = land.get("land_id")
+            if lid:
+                crop_by_land[str(lid)] = (
+                    (land.get("crop_type") if isinstance(land, dict) else None)
+                    or (meta.get("crop_type") if isinstance(meta, dict) else None)
+                )
+        if crop_by_land:
+            update_batch_crops(crop_by_land)
         if not lands:
             patch_job(
                 job_id,
@@ -2293,6 +2318,22 @@ def process_satellite_batch(
             )
         except Exception as exc:
             logger.warning("project_cog_hook_failed", job_id=job_id, error=str(exc)[:300])
+        try:
+            if is_emergence_job(params if isinstance(params, dict) else {}):
+                # Existing official scenes are skipped by force=false; still
+                # write daily emergence fields and notify the API.
+                if isinstance(params, dict) and not params.get("land_id"):
+                    params = {
+                        **params,
+                        "land_id": params.get("job_land_id") or job.get("land_id"),
+                    }
+                finalize_emergence_job(params)
+        except Exception as exc:
+            logger.warning(
+                "autumn_emergence_finalize_hook_failed",
+                job_id=job_id,
+                error=str(exc)[:300],
+            )
         return {"job_id": job_id, "status": status, **progress_snapshot()}
     except SoftTimeLimitExceeded as exc:
         # 12 分钟软超时：不落永久 failed，保持 running 并 Celery retry 重入队列。
@@ -2571,3 +2612,11 @@ def process_satellite_batch(
         except Exception:
             logger.exception("satellite_batch_failure_report_failed", job_id=job_id)
         raise
+    finally:
+        if _emergence_ctx is not None:
+            try:
+                from app.tasks.autumn_emergence_product import reset_batch_context
+
+                reset_batch_context(_emergence_ctx)
+            except Exception:
+                pass

@@ -4,8 +4,8 @@ GET /v1/agri/lands/{land_id}/autumn-emergence
 GET /v1/agri/lands/{land_id}/autumn-emergence/pixels
 POST /v1/agri/lands/{land_id}/autumn-emergence
 
-像元来自 emergence/autumn/ 对象，不读 s1s2_parcel/json 的 NDVI 列。
-POST 与更新影像一样创建 satellite_batch，由下载机领取。API 本机不下载影像。
+像元来自官方日指标 JSON 的 autumn_emergence 字段（已写入 parcel_scene_products）。
+POST 与更新影像一样创建 satellite_batch，由下载机领取并计算。API 不下载、不算像元。
 """
 
 from __future__ import annotations
@@ -49,16 +49,17 @@ async def _agri_ready(db: AsyncSession) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
                 "agric_satellite schema not installed; "
-                "run scripts/20261126_parcel_autumn_emergence.sql"
+                "run scripts/20261126_parcel_autumn_emergence_daily.sql"
             ),
         )
     ready = await db.execute(
         text(
             """
             SELECT 1
-            FROM information_schema.tables
+            FROM information_schema.columns
             WHERE table_schema = 'agric_satellite'
-              AND table_name = 'parcel_autumn_emergence_requests'
+              AND table_name = 'land_parcels'
+              AND column_name = 'autumn_emerged'
             LIMIT 1
             """
         )
@@ -67,8 +68,8 @@ async def _agri_ready(db: AsyncSession) -> None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "autumn emergence manual trigger is not installed; "
-                "run scripts/20261126_parcel_autumn_emergence_manual.sql"
+                "autumn emergence land flag is not installed; "
+                "run scripts/20261126_parcel_autumn_emergence_daily.sql"
             ),
         )
 
@@ -99,7 +100,7 @@ async def get_autumn_emergence(
 
     人工拉取的进度在 job_status、job_ids、claimed_by、failure_reason
     和分片计数上，与更新影像看 GET /v1/jobs/{job_id} 相同。
-    已出苗后 emerged_flag 与 frozen 为 true，同季不再重算。
+    已出苗后 emerged_flag 与 frozen 为 true，同季不再重算。逐日结果来自官方日指标。
     """
     await _agri_ready(db)
     view = await emergence.get_summary(db, land_id, _season_or_422(season))
@@ -123,7 +124,7 @@ async def trigger_autumn_emergence(
 
     始终创建 satellite_batch（展示名「出苗」，date_from 为播种日，只有 S2）。
     下载机领取；已入库的晴空景由该任务跳过而不重下。官方 S2 回执入库后，
-    或该任务完成回执在同一事务写入计算 outbox 后，API 再算出苗。
+    下载机在官方 S2 发布后写入逐日出苗字段并通知 API 入库。
     完成回执若丢失，GET 在任务已完成且尚无结果时补入计算队列。
     本接口不下载影像，也不修改 crop_type。
     进度查询返回的 job_ids：GET /v1/jobs/{job_id}。已冻结的季不重新派发。
@@ -199,3 +200,4 @@ async def get_autumn_emergence_pixels(
             EmergencePixel.model_validate(pixel) for pixel in view["pixels_lonlat"]
         ],
     )
+

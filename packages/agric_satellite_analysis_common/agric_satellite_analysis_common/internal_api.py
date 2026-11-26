@@ -33,6 +33,7 @@ __all__ = [
     "InternalApiError",
     "agri_land_meta",
     "agri_scene_dates",
+    "autumn_emergence_context",
     "agri_scenes_summary",
     "api_base_url",
     "api_path_prefix",
@@ -795,6 +796,32 @@ def agri_scene_dates(
         else:
             raise InternalApiError("agri/scene-dates returned unexpected shape")
         return [str(d)[:10] for d in dates]
+
+    if client is not None:
+        return _do(client)
+    with internal_client() as c:
+        return _do(c)
+
+
+
+def autumn_emergence_context(
+    land_id: str,
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """GET /v1/internal/lands/{id}/autumn-emergence-context."""
+
+    def _do(c: httpx.Client) -> dict[str, Any]:
+        r = request_with_retry(
+            c,
+            "GET",
+            _ipath(f"/internal/lands/{land_id}/autumn-emergence-context"),
+        )
+        _raise_for_status(r, context="lands/autumn-emergence-context")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise InternalApiError("autumn-emergence-context returned non-object")
+        return data
 
     if client is not None:
         return _do(client)
