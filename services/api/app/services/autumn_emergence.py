@@ -1,13 +1,15 @@
 """冬季小麦秋季出苗的读取、落库和出队。
 
-计算在 API 本机：场景结果入库后只写 outbox，后台再读
+计算在 API 本机：官方 S2 回执入库后只写 outbox，后台再读
 ``parcel_scene_products`` 的晴空像元。下载机不连 API Postgres。
 
 已出苗（emerged_flag）后冻结该地块该季的摘要和像元对象，后续同季场景不再重算。
 不修改 NDVI 列，不回写 ``s1s2_parcel/json``，也不改 ``land_parcels.crop_type``。
 
-人工触发只排期：已有播种日之后的官方晴空 S2 就入 outbox；否则用现有
-satellite_batch 只派发 S2。影像下载仍在下载机，API 等官方 S2 回执后再算。
+人工「拉取出苗数据」与「更新影像」同一条领取队列：API 只创建
+``satellite_batch`` / work item，下载机领取。窗口从播种日起，任务名是「出苗」，
+传感器只有 S2。库里已有的晴空景由下载机按 ``force=false`` 跳过，任务完成回执
+后再算。API 不因「景已经在库里」改走本机 outbox 而省掉这条任务。
 """
 
 from __future__ import annotations
@@ -57,6 +59,12 @@ from app.core.autumn_emergence import (
 from app.core.logging import logger
 
 SENSOR = "S2"
+# 与更新影像一样进 satellite_batch 领取队列，只用展示名和用途把任务认成出苗。
+PULL_DISPLAY_NAME = "出苗"
+PULL_PURPOSE = "autumn_emergence"
+PULL_CLAIM_TYPE = "satellite_batch"
+# 请求表检查约束仍用这个内部值。对外进度字段是 satellite_batch，不再有 compute 短路。
+REQUEST_DISPATCH = "s2_download"
 OUTBOX_POLL_SECONDS = 10
 OUTBOX_CLAIM_LIMIT = 2
 OUTBOX_LEASE_SECONDS = 600
@@ -283,6 +291,30 @@ _OPEN_JOBS = text(
     """
 )
 
+# 进度与 GET /v1/jobs/{id}、work item 领取人一致，不另做一条出苗长轮询。
+_JOB_PROGRESS = text(
+    """
+    SELECT j.id::text AS id,
+           j.status,
+           j.error,
+           j.progress_json,
+           w.status AS work_status,
+           w.lease_owner,
+           w.last_claimed_by,
+           w.error AS work_error
+    FROM agric_satellite.jobs AS j
+    LEFT JOIN LATERAL (
+        SELECT status, lease_owner, last_claimed_by, error
+        FROM agric_satellite.work_items
+        WHERE parent_job_id = j.id
+          AND type = 'satellite_batch'
+        ORDER BY updated_at DESC
+        LIMIT 1
+    ) AS w ON true
+    WHERE j.id::text = ANY(CAST(:job_ids AS text[]))
+    """
+)
+
 
 class EmergenceScheduleError(Exception):
     """人工触发无法排期。路由转成 4xx，不在 API 机下载影像。"""
@@ -387,16 +419,18 @@ async def recompute_land(
         stacks = [stack for stack in stacks if stack.day >= sowing]
     if (
         request is not None
-        and str(request.get("dispatch") or "") == "s2_download"
+        and str(request.get("dispatch") or "") == REQUEST_DISPATCH
         and not stacks
     ):
-        # 下载回执还没带来晴空景时不写“不确定”，GET 继续 pending。
-        return {
-            "action": "waiting_for_scenes",
-            "land_id": land_id,
-            "season_key": season,
-            "sowing_date": sowing.isoformat() if sowing else None,
-        }
+        # 领取队列里还有分片时不写“不确定”。全部分片结束后仍无晴空景才落库。
+        open_ids = await _open_job_ids(db, _job_id_list(request.get("job_ids")))
+        if open_ids:
+            return {
+                "action": "waiting_for_scenes",
+                "land_id": land_id,
+                "season_key": season,
+                "sowing_date": sowing.isoformat() if sowing else None,
+            }
     result = analyze(stacks)
     if result.season_key not in {None, season}:
         return {"action": "skipped_window", "land_id": land_id, "season_key": season}
@@ -445,9 +479,10 @@ async def get_summary(
     today: date | None = None,
     enqueue: bool = True,
 ) -> dict[str, Any] | None:
-    """地块不存在返回 None。未计算的冬小麦或人工请求返回 pending。
+    """地块不存在返回 None。结果字段不变，人工拉取另附任务进度。
 
-    正在等 S2 下载的人工请求不要在 GET 里提前入队，否则会在无晴空景时写成不确定。
+    进度来自 satellite_batch 任务和 work item，字段与更新影像的回填计数一致。
+    GET 不派发下载，也不在已有人工任务时再入计算队列。
     """
     land = await _load_land(db, land_id)
     if land is None:
@@ -460,22 +495,31 @@ async def get_summary(
     )
     manual = request is not None or sowing is not None
     eligible = is_winter_wheat(land.get("crop_type")) or manual
+    pull = await _pull_progress(db, request)
     base = _empty_view(land_id, season, eligible=eligible)
     base["sowing_date"] = sowing
+    base.update(pull)
     if not eligible:
         return base
     if row is None:
-        base["pending"] = True
         waiting_download = (
-            request is not None and str(request.get("dispatch") or "") == "s2_download"
+            request is not None
+            and str(request.get("dispatch") or "") == REQUEST_DISPATCH
         )
-        if enqueue and autumn_emergence_enabled() and not waiting_download:
-            start, _end = season_bounds(season)
-            await enqueue_lands(db, [land_id], start, delay_seconds=0)
+        if waiting_download:
+            # 有任务就看 job_status。失败或已完成不再用 pending=true 空转。
+            base["pending"] = pull.get("job_status") in {"pending", "running"}
+        else:
+            base["pending"] = True
+            if enqueue and autumn_emergence_enabled():
+                start, _end = season_bounds(season)
+                await enqueue_lands(db, [land_id], start, delay_seconds=0)
         return base
     view = _view_from_row(land_id, row)
     if sowing is not None:
         view["sowing_date"] = sowing
+    view.update(pull)
+    view["pending"] = False
     return view
 
 
@@ -579,36 +623,52 @@ def _schedule_payload(
     land_id: str,
     season: str,
     sowing_date: date | None,
-    pending: bool,
-    dispatch: str,
     status: str,
     date_from: date,
     date_to: date,
     sensors: list[str],
     job_ids: list[str],
     message: str,
+    pull: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "land_id": land_id,
-        "field_id": land_id,
-        "season_key": season,
-        "sowing_date": sowing_date,
-        "pending": pending,
-        "eligible": True,
-        "dispatch": dispatch,
-        "status": status,
-        "date_from": date_from,
-        "date_to": date_to,
-        "sensors": sensors,
-        "job_ids": job_ids,
-        "message": message,
-    }
+    body = _idle_pull()
+    if pull:
+        body.update(pull)
+    body.update(
+        {
+            "land_id": land_id,
+            "field_id": land_id,
+            "season_key": season,
+            "sowing_date": sowing_date,
+            "eligible": True,
+            "status": status,
+            "date_from": date_from,
+            "date_to": date_to,
+            "sensors": sensors,
+            "job_ids": list(job_ids),
+            "message": message,
+        }
+    )
+    if status == "frozen":
+        body["display_name"] = None
+        body["purpose"] = None
+        body["claim_type"] = None
+        body["dispatch"] = None
+        body["job_status"] = None
+        body["phase"] = "idle"
+    return body
 
 
-def _poll_hint(land_id: str, season: str) -> str:
+def _dispatch_message(sowing_date: date, date_to: date) -> str:
     return (
-        f"请轮询 GET /v1/agri/lands/{land_id}/autumn-emergence"
-        f"?season={season}，直到 pending 为 false 且 status 有值。"
+        "已按更新影像的同一领取队列派发出苗拉取。"
+        f"窗口从播种日 {sowing_date.isoformat()} 到 {date_to.isoformat()}，只包含 S2。"
+        "下载机领取 satellite_batch；已入库的晴空景由该任务跳过，API 不下载影像。"
+        "进度用返回的 job_ids 调用 GET /v1/jobs/{job_id}："
+        "status 为 pending、running、completed 或 failed，"
+        "progress_json 有 scenes_total 与 scenes_done，error 是失败原因。"
+        "领取人是对应 work item 的 lease_owner，结束后看 last_claimed_by。"
+        "官方 S2 回执入库后写入秋季出苗，结果仍读 GET autumn-emergence。"
     )
 
 
@@ -621,18 +681,28 @@ async def dispatch_s2_download(
     season_key: str,
     sowing_date: date,
 ) -> list[str]:
-    """创建现有 satellite_batch 任务，传感器只有 S2。不读取卫星文件。"""
+    """走更新影像同一构造器。传感器只有 S2，date_from 是播种日。
+
+    ``force=false`` 时下载机用已有日期跳过重下，完成回执仍回到 API。
+    本函数不读影像、不读已入库场景来决定是否派发。
+    """
     from agric_satellite_analysis_common.scheduled_land_filter import (
         BYPASS_SCHEDULE_LAND_FILTER_PARAM,
     )
     from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
 
+    from app.core.config import settings
     from app.models.tables import LandParcel
     from app.services.satellite_batch import create_satellite_batch_jobs
 
     land = await db.get(LandParcel, land_id)
     if land is None or getattr(land, "deleted_at", None) is not None:
         raise EmergenceScheduleError("地块不存在或已删除", 404)
+    identity = {
+        "display_name": PULL_DISPLAY_NAME,
+        "display_type": PULL_PURPOSE,
+        "purpose": PULL_PURPOSE,
+    }
     try:
         _groups, jobs, _meta = await create_satellite_batch_jobs(
             db,
@@ -642,14 +712,16 @@ async def dispatch_s2_download(
             sensors=("S2",),
             force=False,
             job_land_id=land_id,
+            chunk_days=settings.index_backfill_chunk_days,
             dispatch_priority=MANUAL_TASK_PRIORITY,
+            dispatch_extras=identity,
             extra_params={
                 # 操作员点名的一块地，不走每日/周二自动面积过滤。
                 BYPASS_SCHEDULE_LAND_FILTER_PARAM: True,
                 "autumn_emergence_manual": True,
                 "sowing_date": sowing_date.isoformat(),
                 "season_key": season_key,
-                "purpose": "autumn_emergence",
+                **identity,
             },
         )
     except ValueError as exc:
@@ -667,10 +739,10 @@ async def schedule_manual_emergence(
     *,
     today: date | None = None,
 ) -> dict[str, Any] | None:
-    """按播种日排期。地块不存在返回 None。
+    """按播种日派发一条可领取的出苗拉取。地块不存在返回 None。
 
-    已有官方晴空 S2 时只入 outbox。否则派发 S2 批次，等官方回执再算。
-    不修改 crop_type，也不在本进程下载影像。
+    不论播种日之后是否已有官方晴空 S2，都创建 satellite_batch 任务。
+    不修改 crop_type，也不在本进程下载影像。已冻结的季不派发。
     """
     land = await _load_land(db, land_id)
     if land is None:
@@ -692,110 +764,76 @@ async def schedule_manual_emergence(
             land_id=land_id,
             season=season,
             sowing_date=stored,
-            pending=False,
-            dispatch="frozen",
             status="frozen",
             date_from=stored or start,
             date_to=end,
             sensors=[],
             job_ids=[],
-            message="该季已出苗并冻结，未改播种日，也未下载或重算。请 GET 读取结果。",
+            message="该季已出苗并冻结，未改播种日，也未派发下载。请 GET 读取结果。",
         )
-    scene_rows = await _load_scene_rows(db, land_id, sowing_date, window_end)
-    stacks = [
-        stack for stack in stacks_from_rows(scene_rows) if stack.day >= sowing_date
-    ]
+    # 与更新影像相同，同一地块同时只保留一批未完成的人工拉取。
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"autumn-emergence:{land_id}"},
+    )
     request = await _load_request(db, land_id, season)
-    if not stacks:
-        same_pull = (
-            request is not None
-            and str(request.get("dispatch") or "") == "s2_download"
-            and str(request.get("status") or "") == "scheduled"
-            and _as_date(request.get("sowing_date")) == sowing_date
-        )
-        if same_pull:
-            open_ids = await _open_job_ids(db, _job_id_list(request.get("job_ids")))
-            if open_ids:
-                return _schedule_payload(
-                    land_id=land_id,
-                    season=season,
-                    sowing_date=sowing_date,
-                    pending=True,
-                    dispatch="s2_download",
-                    status="scheduled",
-                    date_from=_as_date(request.get("date_from")) or sowing_date,
-                    date_to=_as_date(request.get("date_to")) or window_end,
-                    sensors=["S2"],
-                    job_ids=open_ids,
-                    message=(
-                        "S2 下载已在队列中，未重复派发。"
-                        "下载机入库官方晴空 S2 后会自动计算。"
-                        + _poll_hint(land_id, season)
-                    ),
-                )
-        job_ids = await dispatch_s2_download(
-            db,
-            land_id,
-            date_from=sowing_date,
-            date_to=window_end,
-            season_key=season,
-            sowing_date=sowing_date,
-        )
-        await _save_request(
-            db,
-            land_id=land_id,
-            season=season,
-            sowing_date=sowing_date,
-            status="scheduled",
-            dispatch="s2_download",
-            date_from=sowing_date,
-            date_to=window_end,
-            job_ids=job_ids,
-        )
-        return _schedule_payload(
-            land_id=land_id,
-            season=season,
-            sowing_date=sowing_date,
-            pending=True,
-            dispatch="s2_download",
-            status="scheduled",
-            date_from=sowing_date,
-            date_to=window_end,
-            sensors=["S2"],
-            job_ids=job_ids,
-            message=(
-                "播种日之后没有官方晴空 S2，已只派发 S2，不派发 S1。"
-                "API 不拉影像。官方 S2 回执入库后会计算。" + _poll_hint(land_id, season)
-            ),
-        )
-    latest = max(stack.day for stack in stacks)
-    await enqueue_lands(db, [land_id], latest, delay_seconds=0)
+    if (
+        request is not None
+        and str(request.get("dispatch") or "") == REQUEST_DISPATCH
+        and str(request.get("status") or "") == "scheduled"
+    ):
+        open_ids = await _open_job_ids(db, _job_id_list(request.get("job_ids")))
+        if open_ids:
+            pull = await _pull_progress(db, request)
+            if not pull.get("job_ids"):
+                pull = _fresh_pull(open_ids)
+                pull["date_from"] = _as_date(request.get("date_from")) or sowing_date
+                pull["date_to"] = _as_date(request.get("date_to")) or window_end
+            return _schedule_payload(
+                land_id=land_id,
+                season=season,
+                sowing_date=_as_date(request.get("sowing_date")) or sowing_date,
+                status="already_running",
+                date_from=_as_date(request.get("date_from")) or sowing_date,
+                date_to=_as_date(request.get("date_to")) or window_end,
+                sensors=["S2"],
+                job_ids=open_ids,
+                message=(
+                    "已有未完成的出苗拉取，未重复派发。"
+                    "进度请查询这些 job_ids 的 GET /v1/jobs/{job_id}。"
+                ),
+                pull=pull,
+            )
+    job_ids = await dispatch_s2_download(
+        db,
+        land_id,
+        date_from=sowing_date,
+        date_to=window_end,
+        season_key=season,
+        sowing_date=sowing_date,
+    )
     await _save_request(
         db,
         land_id=land_id,
         season=season,
         sowing_date=sowing_date,
         status="scheduled",
-        dispatch="compute",
+        dispatch=REQUEST_DISPATCH,
         date_from=sowing_date,
         date_to=window_end,
-        job_ids=[],
+        job_ids=job_ids,
     )
     return _schedule_payload(
         land_id=land_id,
         season=season,
         sowing_date=sowing_date,
-        pending=True,
-        dispatch="compute",
-        status="scheduled",
+        status="dispatched",
         date_from=sowing_date,
         date_to=window_end,
-        sensors=[],
-        job_ids=[],
-        message=(
-            "播种日之后已有官方晴空 S2，只在 API 排队计算，不下载影像。"
-            + _poll_hint(land_id, season)
-        ),
+        sensors=["S2"],
+        job_ids=job_ids,
+        message=_dispatch_message(sowing_date, window_end),
+        pull=_fresh_pull(job_ids),
     )
 
 
@@ -856,6 +894,215 @@ async def enqueue_from_scene_result(
         await enqueue_lands(db, [land_id], scene_date)
         await db.commit()
     return True
+
+
+def is_emergence_pull(params: dict[str, Any] | None) -> bool:
+    """只认人工出苗任务，避免每日/周二回填完成时误算出苗。"""
+    if not isinstance(params, dict):
+        return False
+    return bool(
+        params.get("autumn_emergence_manual") or params.get("purpose") == PULL_PURPOSE
+    )
+
+
+async def enqueue_after_satellite_job(
+    land_id: str, params: dict[str, Any] | None, status: str
+) -> bool:
+    """satellite_batch 完成回执。已有景被跳过时没有新的场景 upsert，仍要算。
+
+    与官方 S2 入库钩子写入同一个 outbox。失败状态不计算，失败原因留在任务上。
+    """
+    if not autumn_emergence_enabled() or not is_emergence_pull(params):
+        return False
+    if status not in {"completed", "succeeded"}:
+        return False
+    params = params or {}
+    resolved = str(land_id or "").strip()
+    if not resolved:
+        raw_ids = params.get("land_ids")
+        if isinstance(raw_ids, list) and raw_ids:
+            resolved = str(raw_ids[0])
+    if not resolved:
+        return False
+    scene_date = _as_date(params.get("date_to")) or _as_date(params.get("sowing_date"))
+    try:
+        from app.core.database import async_session
+
+        async with async_session() as db:
+            await enqueue_lands(db, [resolved], scene_date)
+            await db.commit()
+    except Exception:
+        logger.exception("autumn_emergence_job_callback_failed", land_id=resolved)
+        return False
+    return True
+
+
+def _idle_pull() -> dict[str, Any]:
+    return {
+        "display_name": None,
+        "purpose": None,
+        "claim_type": None,
+        "dispatch": None,
+        "job_ids": [],
+        "job_status": None,
+        "claimed_by": None,
+        "pending_jobs": 0,
+        "running_jobs": 0,
+        "completed_jobs": 0,
+        "failed_jobs": 0,
+        "total_jobs": 0,
+        "percent": 0.0,
+        "phase": "idle",
+        "failure_reason": None,
+        "scenes_total": 0,
+        "scenes_done": 0,
+        "scenes_remaining": 0,
+        "progress_message": None,
+        "date_from": None,
+        "date_to": None,
+    }
+
+
+def _fresh_pull(job_ids: list[str]) -> dict[str, Any]:
+    summary = summarize_pull_jobs(
+        [{"id": job_id, "status": "pending"} for job_id in job_ids]
+    )
+    summary["job_ids"] = list(job_ids)
+    summary["display_name"] = PULL_DISPLAY_NAME
+    summary["purpose"] = PULL_PURPOSE
+    summary["claim_type"] = PULL_CLAIM_TYPE
+    summary["dispatch"] = PULL_CLAIM_TYPE
+    summary["date_from"] = None
+    summary["date_to"] = None
+    summary["progress_message"] = _pull_message(summary)
+    return summary
+
+
+def summarize_pull_jobs(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """把 satellite_batch 分片收成与回填状态相同的计数。"""
+    pending = running = completed = failed = 0
+    scenes_total = scenes_done = 0
+    failure: str | None = None
+    lease_owner: str | None = None
+    last_claimed: str | None = None
+    ids: list[str] = []
+    for row in rows:
+        job_id = str(row.get("id") or "")
+        if job_id:
+            ids.append(job_id)
+        status = str(row.get("status") or "")
+        work_status = str(row.get("work_status") or "")
+        # 计数以 Job 为准，和更新影像的 backfill-status 一样。
+        # 下载机已领取但 Job 还没改成 running 时，用 work item 的 leased 表示进行中。
+        if status in {"failed", "cancelled"}:
+            failed += 1
+            if failure is None:
+                failure = _first_text(row.get("error"), row.get("work_error"))
+        elif status in {"completed", "succeeded"}:
+            completed += 1
+        elif status == "running" or work_status == "leased":
+            running += 1
+        elif work_status == "failed":
+            failed += 1
+            if failure is None:
+                failure = _first_text(row.get("work_error"), row.get("error"))
+        else:
+            pending += 1
+        progress = _jsonish(row.get("progress_json"))
+        if isinstance(progress, dict):
+            scenes_total += _int(progress.get("scenes_total"))
+            scenes_done += _int(progress.get("scenes_done"))
+        if lease_owner is None and row.get("lease_owner"):
+            lease_owner = str(row["lease_owner"])
+        if last_claimed is None and row.get("last_claimed_by"):
+            last_claimed = str(row["last_claimed_by"])
+    if running:
+        job_status, phase = "running", "stac"
+    elif pending:
+        job_status, phase = "pending", "stac"
+    elif failed:
+        job_status, phase = "failed", "failed"
+    elif completed:
+        job_status, phase = "completed", "done"
+    else:
+        job_status, phase = None, "idle"
+    if job_status == "failed" and not failure:
+        failure = "出苗拉取失败"
+    denom = pending + running + completed
+    if scenes_total > 0:
+        percent = round(100.0 * min(scenes_done, scenes_total) / scenes_total, 1)
+    elif denom:
+        percent = round(100.0 * completed / denom, 1)
+    elif rows:
+        percent = 100.0
+    else:
+        percent = 0.0
+    return {
+        "job_ids": ids,
+        "job_status": job_status,
+        "claimed_by": lease_owner or last_claimed,
+        "pending_jobs": pending,
+        "running_jobs": running,
+        "completed_jobs": completed,
+        "failed_jobs": failed,
+        "total_jobs": pending + running + completed + failed,
+        "percent": percent,
+        "phase": phase,
+        "failure_reason": failure if job_status == "failed" else None,
+        "scenes_total": scenes_total,
+        "scenes_done": scenes_done,
+        "scenes_remaining": max(scenes_total - scenes_done, 0),
+    }
+
+
+def _pull_message(summary: dict[str, Any]) -> str | None:
+    status = summary.get("job_status")
+    if status is None:
+        return None
+    if status == "failed":
+        return summary.get("failure_reason") or "出苗拉取失败"
+    if status == "completed":
+        return "出苗影像任务已完成。官方 S2 回执写入后，结果出现在本次 GET。"
+    failed = int(summary.get("failed_jobs") or 0)
+    return (
+        "正在拉取出苗影像… "
+        f"分片任务 {int(summary.get('completed_jobs') or 0)}/"
+        f"{int(summary.get('total_jobs') or 0)}"
+        f"（进行中 {int(summary.get('running_jobs') or 0)}，"
+        f"排队 {int(summary.get('pending_jobs') or 0)}"
+        + (f"，失败 {failed}" if failed else "")
+        + f"，约 {float(summary.get('percent') or 0):.0f}%）"
+    )
+
+
+async def _pull_progress(
+    db: AsyncSession, request: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not request:
+        return _idle_pull()
+    job_ids = _job_id_list(request.get("job_ids"))
+    summary = summarize_pull_jobs(await _load_job_rows(db, job_ids))
+    if job_ids and not summary["job_ids"]:
+        summary = summarize_pull_jobs(
+            [{"id": job_id, "status": "pending"} for job_id in job_ids]
+        )
+    summary["job_ids"] = job_ids or summary["job_ids"]
+    summary["display_name"] = PULL_DISPLAY_NAME
+    summary["purpose"] = PULL_PURPOSE
+    summary["claim_type"] = PULL_CLAIM_TYPE
+    summary["dispatch"] = PULL_CLAIM_TYPE
+    summary["date_from"] = _as_date(request.get("date_from"))
+    summary["date_to"] = _as_date(request.get("date_to"))
+    summary["progress_message"] = _pull_message(summary)
+    return summary
+
+
+async def _load_job_rows(db: AsyncSession, job_ids: list[str]) -> list[dict[str, Any]]:
+    if not job_ids:
+        return []
+    rows = (await db.execute(_JOB_PROGRESS, {"job_ids": job_ids})).fetchall()
+    by_id = {str(_as_dict(row).get("id")): _as_dict(row) for row in rows}
+    return [by_id[job_id] for job_id in job_ids if job_id in by_id]
 
 
 async def run_autumn_emergence_outbox() -> None:
@@ -1271,6 +1518,23 @@ def _float(value: Any) -> float | None:
     if number != number:  # NaN
         return None
     return number
+
+
+def _int(value: Any) -> int:
+    number = _float(value)
+    if number is None:
+        return 0
+    return int(number)
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if text_value:
+            return text_value
+    return None
 
 
 def _bool(value: Any) -> bool | None:

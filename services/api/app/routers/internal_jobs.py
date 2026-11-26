@@ -187,12 +187,9 @@ async def patch_job(
     stale_recovered = isinstance(job.progress_json, dict) and job.progress_json.get(
         "stale_recovered"
     )
-    if (
-        stale_recovered
-        and (
-            body.progress_json is not None
-            or body.status in {"pending", "running", "succeeded", "completed"}
-        )
+    if stale_recovered and (
+        body.progress_json is not None
+        or body.status in {"pending", "running", "succeeded", "completed"}
     ):
         # 旧下载机即使在回收后迟到上报，也不能把已判失败的任务重新改成成功，
         # 也不能用不含回收标记的进度覆盖失败依据；否则父任务可能再次被错误地
@@ -283,4 +280,32 @@ async def patch_job(
             job.status,
             exc_info=True,
         )
+    _schedule_emergence_compute(job)
     return _patch_out(job, include_progress=include_progress)
+
+
+def _schedule_emergence_compute(job: Job) -> None:
+    """出苗拉取的完成回执进入既有计算 outbox。普通回填任务直接返回。"""
+    params = job.params_json if isinstance(job.params_json, dict) else {}
+    manual = bool(params.get("autumn_emergence_manual"))
+    named = params.get("purpose") == "autumn_emergence"
+    if not manual and not named:
+        return
+    if str(job.status or "") not in {"completed", "succeeded"}:
+        return
+    import asyncio
+
+    from app.services.autumn_emergence import enqueue_after_satellite_job
+
+    land_id = str(job.land_id) if job.land_id else ""
+    try:
+        asyncio.create_task(
+            enqueue_after_satellite_job(land_id, params, str(job.status or ""))
+        )
+    except Exception:
+        logger.warning(
+            "autumn_emergence_callback_schedule_failed job_id=%s status=%s",
+            job.id,
+            job.status,
+            exc_info=True,
+        )

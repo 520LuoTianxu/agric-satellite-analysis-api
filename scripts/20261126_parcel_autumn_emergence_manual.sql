@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS agric_satellite.parcel_autumn_emergence_requests (
 );
 
 COMMENT ON TABLE agric_satellite.parcel_autumn_emergence_requests IS
-    '前端按播种日手动触发的秋季出苗请求。API 只排期；缺晴空 S2 时派发现有 satellite_batch，算完后 status=ready。';
+    '前端按播种日手动触发的秋季出苗请求。API 只创建 satellite_batch 并接收回执，算完后 status=ready。';
 COMMENT ON COLUMN agric_satellite.parcel_autumn_emergence_requests.dispatch IS
-    'compute：库里已有播种日之后的官方晴空 S2，只入 outbox。s2_download：缺景，只派发 S2，不派发 S1。';
+    's2_download：人工拉取始终派发现有 satellite_batch，只含 S2，date_from 为播种日。compute 是旧的本机短路，新请求不再写入。';
 
 COMMIT;

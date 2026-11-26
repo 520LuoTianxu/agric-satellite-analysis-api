@@ -42,7 +42,48 @@ class EmergenceTimePoint(BaseModel):
     share_above_noise: float | None = None
 
 
-class AutumnEmergenceOut(BaseModel):
+class EmergencePullProgress(BaseModel):
+    """出苗拉取的任务进度，计数方式与更新影像的 backfill-status 相同。
+
+    前端用 job_ids 调 GET /v1/jobs/{job_id} 看 status、progress_json 和 error。
+    claimed_by 是 work item 的 lease_owner，没有租约时用 last_claimed_by。
+    不要只根据 pending 判断这次拉取是否还在进行。
+    """
+
+    display_name: str | None = Field(
+        None, description="人工拉取的展示名，固定为「出苗」。"
+    )
+    purpose: Literal["autumn_emergence"] | None = None
+    claim_type: Literal["satellite_batch"] | None = Field(
+        None, description="下载机领取的任务类型，与更新影像相同。"
+    )
+    dispatch: Literal["satellite_batch"] | None = Field(
+        None, description="与 claim_type 相同。人工拉取始终是 satellite_batch。"
+    )
+    job_ids: list[str] = Field(default_factory=list)
+    job_status: Literal["pending", "running", "completed", "failed"] | None = None
+    claimed_by: str | None = Field(
+        None, description="当前租约持有者，或最近一次领取该任务的下载机。"
+    )
+    pending_jobs: int = 0
+    running_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    total_jobs: int = 0
+    percent: float = 0.0
+    phase: Literal["idle", "stac", "done", "failed"] = "idle"
+    failure_reason: str | None = None
+    scenes_total: int = 0
+    scenes_done: int = 0
+    scenes_remaining: int = 0
+    progress_message: str | None = None
+    date_from: date | None = Field(
+        None, description="拉取窗口起点，人工触发时为播种日。"
+    )
+    date_to: date | None = None
+
+
+class AutumnEmergenceOut(EmergencePullProgress):
     """地块×秋季的出苗摘要。field_id 与 land_id 相同。"""
 
     land_id: str
@@ -134,22 +175,19 @@ class AutumnEmergenceTriggerIn(BaseModel):
     )
 
 
-class AutumnEmergenceScheduleOut(BaseModel):
-    """排期结果。pending 为 true 时轮询 GET，不要把这次响应当成出苗结论。"""
+class AutumnEmergenceScheduleOut(EmergencePullProgress):
+    """派发结果。立刻带有 satellite_batch 的 job_ids，进度走现有任务接口。"""
 
     land_id: str
     field_id: str
     season_key: str
     sowing_date: date | None = None
-    pending: bool
     eligible: bool = True
-    dispatch: Literal["compute", "s2_download", "frozen"]
-    status: Literal["scheduled", "ready", "frozen"]
+    status: Literal["dispatched", "already_running", "frozen", "failed"]
     date_from: date
     date_to: date
     sensors: list[str] = Field(
         default_factory=list,
-        description="交给下载机的传感器。只计算时为空；缺景时只有 S2。",
+        description="交给下载机的传感器。出苗拉取只有 S2。",
     )
-    job_ids: list[str] = Field(default_factory=list)
     message: str
