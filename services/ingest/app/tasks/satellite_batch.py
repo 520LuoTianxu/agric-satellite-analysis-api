@@ -398,7 +398,7 @@ def _load_lands(
                     continue
                 remote = remote_by_id[land_id]
                 # 入队后规则可能变化；执行前再过滤，避免已排除地块访问卫星数据。
-                # 用户触发的双周报补数可带 bypass 标志，仅这些任务跳过基地排除名单。
+                # 用户点名的任务（双周报补数、人工秋季出苗）可带 bypass，跳过面积过滤。
                 if not bypass_schedule_land_filter and not is_scheduled_land_allowed(
                     remote.get("base_id"), remote.get("land_area_mu")
                 ):

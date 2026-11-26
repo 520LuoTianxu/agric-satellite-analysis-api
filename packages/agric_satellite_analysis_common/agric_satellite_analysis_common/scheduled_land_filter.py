@@ -21,8 +21,9 @@ BYPASS_SCHEDULE_LAND_FILTER_PARAM = "bypass_schedule_land_filter"
 def should_bypass_schedule_land_filter(params: Any) -> bool:
     """Return whether a job payload asked to skip the scheduled-land exclusion.
 
-    Only user-triggered biweekly dispatch may set this flag. Automatic daily
-    or scheduled sync, weather, and report jobs must not pass it.
+    User-triggered jobs may set this flag (biweekly backfill, manual autumn
+    emergence). Automatic daily or scheduled sync, weather, and report jobs
+    must not pass it.
     """
     if not isinstance(params, dict):
         return False

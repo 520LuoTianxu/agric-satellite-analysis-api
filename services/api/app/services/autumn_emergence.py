@@ -4,7 +4,10 @@
 ``parcel_scene_products`` 的晴空像元。下载机不连 API Postgres。
 
 已出苗（emerged_flag）后冻结该地块该季的摘要和像元对象，后续同季场景不再重算。
-不修改 NDVI 列，不回写 ``s1s2_parcel/json``。
+不修改 NDVI 列，不回写 ``s1s2_parcel/json``，也不改 ``land_parcels.crop_type``。
+
+人工触发只排期：已有播种日之后的官方晴空 S2 就入 outbox；否则用现有
+satellite_batch 只派发 S2。影像下载仍在下载机，API 等官方 S2 回执后再算。
 """
 
 from __future__ import annotations
@@ -69,7 +72,7 @@ _LOAD_LAND = text(
 
 _LOAD_ROW = text(
     """
-    SELECT land_id, season_key, status, emerged_flag, frozen,
+    SELECT land_id, season_key, sowing_date, status, emerged_flag, frozen,
            baseline_start, baseline_end, baseline_statistic,
            noise_floor, noise_statistic, as_of_date, first_emerged_date,
            method_version, n_clear, n_pixels, median_increment,
@@ -112,7 +115,7 @@ _LOAD_SCENES = text(
 _UPSERT = text(
     """
     INSERT INTO agric_satellite.parcel_autumn_emergence (
-        land_id, season_key, status, emerged_flag, frozen,
+        land_id, season_key, sowing_date, status, emerged_flag, frozen,
         baseline_start, baseline_end, baseline_statistic,
         noise_floor, noise_statistic, as_of_date, first_emerged_date,
         method_version, n_clear, n_pixels, median_increment,
@@ -120,7 +123,7 @@ _UPSERT = text(
         ndre_share_above_noise, summary, timeseries, pixel_oss_key,
         computed_at, frozen_at
     ) VALUES (
-        :land_id, :season_key, :status, :emerged_flag, :frozen,
+        :land_id, :season_key, :sowing_date, :status, :emerged_flag, :frozen,
         :baseline_start, :baseline_end, :baseline_statistic,
         :noise_floor, :noise_statistic, :as_of_date, :first_emerged_date,
         :method_version, :n_clear, :n_pixels, :median_increment,
@@ -130,6 +133,9 @@ _UPSERT = text(
         now(), :frozen_at
     )
     ON CONFLICT (land_id, season_key) DO UPDATE SET
+        sowing_date = COALESCE(
+            EXCLUDED.sowing_date, parcel_autumn_emergence.sowing_date
+        ),
         status = EXCLUDED.status,
         emerged_flag = EXCLUDED.emerged_flag,
         frozen = EXCLUDED.frozen,
@@ -231,6 +237,61 @@ _RETRY = text(
     """
 )
 
+_LOAD_REQUEST = text(
+    """
+    SELECT land_id, season_key, sowing_date, status, dispatch,
+           date_from, date_to, job_ids
+    FROM agric_satellite.parcel_autumn_emergence_requests
+    WHERE land_id = :land_id AND season_key = :season_key
+    """
+)
+
+_UPSERT_REQUEST = text(
+    """
+    INSERT INTO agric_satellite.parcel_autumn_emergence_requests (
+        land_id, season_key, sowing_date, status, dispatch,
+        date_from, date_to, job_ids, updated_at
+    ) VALUES (
+        :land_id, :season_key, :sowing_date, :status, :dispatch,
+        :date_from, :date_to, CAST(:job_ids AS jsonb), now()
+    )
+    ON CONFLICT (land_id, season_key) DO UPDATE SET
+        sowing_date = EXCLUDED.sowing_date,
+        status = EXCLUDED.status,
+        dispatch = EXCLUDED.dispatch,
+        date_from = EXCLUDED.date_from,
+        date_to = EXCLUDED.date_to,
+        job_ids = EXCLUDED.job_ids,
+        updated_at = now()
+    """
+)
+
+_READY_REQUEST = text(
+    """
+    UPDATE agric_satellite.parcel_autumn_emergence_requests
+    SET status = 'ready', updated_at = now()
+    WHERE land_id = :land_id AND season_key = :season_key
+    """
+)
+
+_OPEN_JOBS = text(
+    """
+    SELECT id::text AS id
+    FROM agric_satellite.jobs
+    WHERE id::text = ANY(CAST(:job_ids AS text[]))
+      AND status IN ('pending', 'running')
+    """
+)
+
+
+class EmergenceScheduleError(Exception):
+    """人工触发无法排期。路由转成 4xx，不在 API 机下载影像。"""
+
+    def __init__(self, detail: str, status_code: int = 422) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
 
 def autumn_emergence_enabled() -> bool:
     raw = os.getenv("AUTUMN_EMERGENCE_ENABLED", "").strip().lower()
@@ -274,18 +335,24 @@ async def recompute_land(
     storage: Any | None = None,
     season_key: str | None = None,
 ) -> dict[str, Any]:
-    """重算一季。已冻结则直接返回，不读像元、不写表、不上传。"""
+    """重算一季。已冻结则直接返回，不读像元、不写表、不上传。
+
+    自动钩子仍要求冬小麦。人工请求或已记下的播种日不受 crop_type 限制，
+    并且只使用播种日（含）之后的官方晴空 S2。
+    """
     land = await _load_land(db, land_id)
     if land is None:
         return {"action": "skipped_missing", "land_id": land_id}
-    if not is_winter_wheat(land.get("crop_type")):
-        return {"action": "skipped_ineligible", "land_id": land_id}
-    if (
+    wheat = is_winter_wheat(land.get("crop_type"))
+    spring = (
         season_key is None
         and scene_date is not None
         and autumn_season_key(scene_date) is None
-    ):
-        # 返青窗口的新景不触发秋季出苗。
+    )
+    if spring:
+        # 返青季没有可套用的秋季播种请求。空作物保持原来的 ineligible。
+        if not wheat:
+            return {"action": "skipped_ineligible", "land_id": land_id}
         return {"action": "skipped_window", "land_id": land_id}
     season = season_key or (
         autumn_season_key(scene_date) if scene_date is not None else None
@@ -300,9 +367,37 @@ async def recompute_land(
             "season_key": season,
             "status": existing.get("status") if existing else None,
         }
+    request = await _load_request(db, land_id, season)
+    sowing = _as_date(
+        (request or {}).get("sowing_date") or (existing or {}).get("sowing_date")
+    )
+    # 有请求或已写入的播种日，就是操作员点名的这一季，空作物也要算。
+    manual = request is not None or sowing is not None
+    if not manual and not wheat:
+        return {"action": "skipped_ineligible", "land_id": land_id}
     start, end = season_bounds(season)
+    if sowing is not None:
+        # 土壤本底取播种后的早季低平台，播种前的残茬不进窗口。
+        start = max(start, sowing)
+    if start > end:
+        return {"action": "skipped_window", "land_id": land_id, "season_key": season}
     scene_rows = await _load_scene_rows(db, land_id, start, end)
-    result = analyze(stacks_from_rows(scene_rows))
+    stacks = stacks_from_rows(scene_rows)
+    if sowing is not None:
+        stacks = [stack for stack in stacks if stack.day >= sowing]
+    if (
+        request is not None
+        and str(request.get("dispatch") or "") == "s2_download"
+        and not stacks
+    ):
+        # 下载回执还没带来晴空景时不写“不确定”，GET 继续 pending。
+        return {
+            "action": "waiting_for_scenes",
+            "land_id": land_id,
+            "season_key": season,
+            "sowing_date": sowing.isoformat() if sowing else None,
+        }
+    result = analyze(stacks)
     if result.season_key not in {None, season}:
         return {"action": "skipped_window", "land_id": land_id, "season_key": season}
     payload = result.to_payload(land_id, season)
@@ -319,9 +414,12 @@ async def recompute_land(
         result=result,
         frozen=frozen,
         pixel_oss_key=key,
+        sowing_date=sowing,
     )
     if not wrote:
         return {"action": "skipped_frozen", "land_id": land_id, "season_key": season}
+    if request is not None:
+        await _mark_request_ready(db, land_id, season)
     if raw is not None and key is not None:
         store = storage if storage is not None else _default_storage()
         store.put_bytes(key, raw, content_type="application/json")
@@ -335,6 +433,7 @@ async def recompute_land(
         "pixel_oss_key": key,
         "noise_floor": result.noise_floor,
         "method_version": METHOD_VERSION,
+        "sowing_date": sowing.isoformat() if sowing else None,
     }
 
 
@@ -346,23 +445,38 @@ async def get_summary(
     today: date | None = None,
     enqueue: bool = True,
 ) -> dict[str, Any] | None:
-    """地块不存在返回 None。未计算的冬小麦返回 pending，并入队。"""
+    """地块不存在返回 None。未计算的冬小麦或人工请求返回 pending。
+
+    正在等 S2 下载的人工请求不要在 GET 里提前入队，否则会在无晴空景时写成不确定。
+    """
     land = await _load_land(db, land_id)
     if land is None:
         return None
     season = season_key or default_season_key(today or date.today())
-    eligible = is_winter_wheat(land.get("crop_type"))
+    request = await _load_request(db, land_id, season)
+    row = await _load_row(db, land_id, season)
+    sowing = _as_date(
+        (request or {}).get("sowing_date") or (row or {}).get("sowing_date")
+    )
+    manual = request is not None or sowing is not None
+    eligible = is_winter_wheat(land.get("crop_type")) or manual
     base = _empty_view(land_id, season, eligible=eligible)
+    base["sowing_date"] = sowing
     if not eligible:
         return base
-    row = await _load_row(db, land_id, season)
     if row is None:
         base["pending"] = True
-        if enqueue and autumn_emergence_enabled():
+        waiting_download = (
+            request is not None and str(request.get("dispatch") or "") == "s2_download"
+        )
+        if enqueue and autumn_emergence_enabled() and not waiting_download:
             start, _end = season_bounds(season)
             await enqueue_lands(db, [land_id], start, delay_seconds=0)
         return base
-    return _view_from_row(land_id, row)
+    view = _view_from_row(land_id, row)
+    if sowing is not None:
+        view["sowing_date"] = sowing
+    return view
 
 
 async def get_pixels(
@@ -379,7 +493,13 @@ async def get_pixels(
     if land is None:
         return None
     season = season_key or default_season_key(today or date.today())
-    eligible = is_winter_wheat(land.get("crop_type"))
+    request = await _load_request(db, land_id, season)
+    row = await _load_row(db, land_id, season)
+    sowing = _as_date(
+        (request or {}).get("sowing_date") or (row or {}).get("sowing_date")
+    )
+    manual = request is not None or sowing is not None
+    eligible = is_winter_wheat(land.get("crop_type")) or manual
     if not eligible:
         return {
             "land_id": land_id,
@@ -388,7 +508,6 @@ async def get_pixels(
             "season_key": season,
             "missing": False,
         }
-    row = await _load_row(db, land_id, season)
     if row is None or not row.get("pixel_oss_key"):
         return {
             "land_id": land_id,
@@ -453,6 +572,231 @@ async def enqueue_lands(
         )
         n += 1
     return n
+
+
+def _schedule_payload(
+    *,
+    land_id: str,
+    season: str,
+    sowing_date: date | None,
+    pending: bool,
+    dispatch: str,
+    status: str,
+    date_from: date,
+    date_to: date,
+    sensors: list[str],
+    job_ids: list[str],
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "land_id": land_id,
+        "field_id": land_id,
+        "season_key": season,
+        "sowing_date": sowing_date,
+        "pending": pending,
+        "eligible": True,
+        "dispatch": dispatch,
+        "status": status,
+        "date_from": date_from,
+        "date_to": date_to,
+        "sensors": sensors,
+        "job_ids": job_ids,
+        "message": message,
+    }
+
+
+def _poll_hint(land_id: str, season: str) -> str:
+    return (
+        f"请轮询 GET /v1/agri/lands/{land_id}/autumn-emergence"
+        f"?season={season}，直到 pending 为 false 且 status 有值。"
+    )
+
+
+async def dispatch_s2_download(
+    db: AsyncSession,
+    land_id: str,
+    *,
+    date_from: date,
+    date_to: date,
+    season_key: str,
+    sowing_date: date,
+) -> list[str]:
+    """创建现有 satellite_batch 任务，传感器只有 S2。不读取卫星文件。"""
+    from agric_satellite_analysis_common.scheduled_land_filter import (
+        BYPASS_SCHEDULE_LAND_FILTER_PARAM,
+    )
+    from agric_satellite_analysis_common.task_priority import MANUAL_TASK_PRIORITY
+
+    from app.models.tables import LandParcel
+    from app.services.satellite_batch import create_satellite_batch_jobs
+
+    land = await db.get(LandParcel, land_id)
+    if land is None or getattr(land, "deleted_at", None) is not None:
+        raise EmergenceScheduleError("地块不存在或已删除", 404)
+    try:
+        _groups, jobs, _meta = await create_satellite_batch_jobs(
+            db,
+            [land],
+            date_from=date_from,
+            date_to=date_to,
+            sensors=("S2",),
+            force=False,
+            job_land_id=land_id,
+            dispatch_priority=MANUAL_TASK_PRIORITY,
+            extra_params={
+                # 操作员点名的一块地，不走每日/周二自动面积过滤。
+                BYPASS_SCHEDULE_LAND_FILTER_PARAM: True,
+                "autumn_emergence_manual": True,
+                "sowing_date": sowing_date.isoformat(),
+                "season_key": season_key,
+                "purpose": "autumn_emergence",
+            },
+        )
+    except ValueError as exc:
+        raise EmergenceScheduleError(str(exc), 422) from exc
+    if not jobs:
+        raise EmergenceScheduleError("未能派发 S2 下载任务", 422)
+    return [str(job.id) for job in jobs]
+
+
+async def schedule_manual_emergence(
+    db: AsyncSession,
+    land_id: str,
+    sowing_date: date,
+    season_key: str | None = None,
+    *,
+    today: date | None = None,
+) -> dict[str, Any] | None:
+    """按播种日排期。地块不存在返回 None。
+
+    已有官方晴空 S2 时只入 outbox。否则派发 S2 批次，等官方回执再算。
+    不修改 crop_type，也不在本进程下载影像。
+    """
+    land = await _load_land(db, land_id)
+    if land is None:
+        return None
+    today = today or date.today()
+    season = season_key or default_season_key(today)
+    start, end = season_bounds(season)
+    if sowing_date < start or sowing_date > end:
+        raise EmergenceScheduleError(
+            f"播种日须落在 {season} 内（{start.isoformat()} 至 {end.isoformat()}）"
+        )
+    if sowing_date > today:
+        raise EmergenceScheduleError("播种日不能晚于今天")
+    window_end = min(today, end)
+    existing = await _load_row(db, land_id, season)
+    if _is_frozen(existing):
+        stored = _as_date(existing.get("sowing_date")) if existing else None
+        return _schedule_payload(
+            land_id=land_id,
+            season=season,
+            sowing_date=stored,
+            pending=False,
+            dispatch="frozen",
+            status="frozen",
+            date_from=stored or start,
+            date_to=end,
+            sensors=[],
+            job_ids=[],
+            message="该季已出苗并冻结，未改播种日，也未下载或重算。请 GET 读取结果。",
+        )
+    scene_rows = await _load_scene_rows(db, land_id, sowing_date, window_end)
+    stacks = [
+        stack for stack in stacks_from_rows(scene_rows) if stack.day >= sowing_date
+    ]
+    request = await _load_request(db, land_id, season)
+    if not stacks:
+        same_pull = (
+            request is not None
+            and str(request.get("dispatch") or "") == "s2_download"
+            and str(request.get("status") or "") == "scheduled"
+            and _as_date(request.get("sowing_date")) == sowing_date
+        )
+        if same_pull:
+            open_ids = await _open_job_ids(db, _job_id_list(request.get("job_ids")))
+            if open_ids:
+                return _schedule_payload(
+                    land_id=land_id,
+                    season=season,
+                    sowing_date=sowing_date,
+                    pending=True,
+                    dispatch="s2_download",
+                    status="scheduled",
+                    date_from=_as_date(request.get("date_from")) or sowing_date,
+                    date_to=_as_date(request.get("date_to")) or window_end,
+                    sensors=["S2"],
+                    job_ids=open_ids,
+                    message=(
+                        "S2 下载已在队列中，未重复派发。"
+                        "下载机入库官方晴空 S2 后会自动计算。"
+                        + _poll_hint(land_id, season)
+                    ),
+                )
+        job_ids = await dispatch_s2_download(
+            db,
+            land_id,
+            date_from=sowing_date,
+            date_to=window_end,
+            season_key=season,
+            sowing_date=sowing_date,
+        )
+        await _save_request(
+            db,
+            land_id=land_id,
+            season=season,
+            sowing_date=sowing_date,
+            status="scheduled",
+            dispatch="s2_download",
+            date_from=sowing_date,
+            date_to=window_end,
+            job_ids=job_ids,
+        )
+        return _schedule_payload(
+            land_id=land_id,
+            season=season,
+            sowing_date=sowing_date,
+            pending=True,
+            dispatch="s2_download",
+            status="scheduled",
+            date_from=sowing_date,
+            date_to=window_end,
+            sensors=["S2"],
+            job_ids=job_ids,
+            message=(
+                "播种日之后没有官方晴空 S2，已只派发 S2，不派发 S1。"
+                "API 不拉影像。官方 S2 回执入库后会计算。" + _poll_hint(land_id, season)
+            ),
+        )
+    latest = max(stack.day for stack in stacks)
+    await enqueue_lands(db, [land_id], latest, delay_seconds=0)
+    await _save_request(
+        db,
+        land_id=land_id,
+        season=season,
+        sowing_date=sowing_date,
+        status="scheduled",
+        dispatch="compute",
+        date_from=sowing_date,
+        date_to=window_end,
+        job_ids=[],
+    )
+    return _schedule_payload(
+        land_id=land_id,
+        season=season,
+        sowing_date=sowing_date,
+        pending=True,
+        dispatch="compute",
+        status="scheduled",
+        date_from=sowing_date,
+        date_to=window_end,
+        sensors=[],
+        job_ids=[],
+        message=(
+            "播种日之后已有官方晴空 S2，只在 API 排队计算，不下载影像。"
+            + _poll_hint(land_id, season)
+        ),
+    )
 
 
 def emergence_target_from_scene_result(
@@ -585,6 +929,63 @@ async def _drain_once(worker_id: str) -> int:
     return len(claimed)
 
 
+async def _load_request(
+    db: AsyncSession, land_id: str, season_key: str
+) -> dict[str, Any] | None:
+    row = (
+        await db.execute(_LOAD_REQUEST, {"land_id": land_id, "season_key": season_key})
+    ).fetchone()
+    if row is None:
+        return None
+    return _as_dict(row)
+
+
+async def _save_request(
+    db: AsyncSession,
+    *,
+    land_id: str,
+    season: str,
+    sowing_date: date,
+    status: str,
+    dispatch: str,
+    date_from: date,
+    date_to: date,
+    job_ids: list[str],
+) -> None:
+    await db.execute(
+        _UPSERT_REQUEST,
+        {
+            "land_id": land_id,
+            "season_key": season,
+            "sowing_date": sowing_date,
+            "status": status,
+            "dispatch": dispatch,
+            "date_from": date_from,
+            "date_to": date_to,
+            "job_ids": json.dumps(job_ids),
+        },
+    )
+
+
+async def _mark_request_ready(db: AsyncSession, land_id: str, season: str) -> None:
+    await db.execute(_READY_REQUEST, {"land_id": land_id, "season_key": season})
+
+
+def _job_id_list(value: Any) -> list[str]:
+    parsed = _jsonish(value)
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if item]
+
+
+async def _open_job_ids(db: AsyncSession, job_ids: list[str]) -> list[str]:
+    if not job_ids:
+        return []
+    rows = (await db.execute(_OPEN_JOBS, {"job_ids": job_ids})).fetchall()
+    found = {_as_dict(row).get("id") for row in rows}
+    return [job_id for job_id in job_ids if job_id in found]
+
+
 async def _load_land(db: AsyncSession, land_id: str) -> dict[str, Any] | None:
     row = (await db.execute(_LOAD_LAND, {"land_id": land_id})).fetchone()
     if row is None:
@@ -634,11 +1035,16 @@ async def _upsert_result(
     result: EmergenceResult,
     frozen: bool,
     pixel_oss_key: str | None,
+    sowing_date: date | None = None,
 ) -> bool:
     baseline_dates = result.baseline_dates
+    summary = dict(result.summary)
+    if sowing_date is not None:
+        summary["sowing_date"] = sowing_date.isoformat()
     params = {
         "land_id": land_id,
         "season_key": season,
+        "sowing_date": sowing_date,
         "status": result.status,
         "emerged_flag": frozen,
         "frozen": frozen,
@@ -657,7 +1063,7 @@ async def _upsert_result(
         "share_sustained": result.share_sustained,
         "share_ndvi_ge_0_30": result.share_ndvi_ge_0_30,
         "ndre_share_above_noise": result.ndre_share_above_noise,
-        "summary": json.dumps(result.summary, ensure_ascii=False),
+        "summary": json.dumps(summary, ensure_ascii=False),
         "timeseries": json.dumps(result.timeseries, ensure_ascii=False),
         "pixel_oss_key": pixel_oss_key,
         "frozen_at": datetime.now(timezone.utc) if frozen else None,
@@ -673,6 +1079,7 @@ def _empty_view(land_id: str, season: str, *, eligible: bool) -> dict[str, Any]:
         "eligible": eligible,
         "pending": False,
         "season_key": season,
+        "sowing_date": None,
         "status": None,
         "status_zh": None,
         "emerged_flag": False,
@@ -713,6 +1120,7 @@ def _view_from_row(land_id: str, row: dict[str, Any]) -> dict[str, Any]:
         "eligible": True,
         "pending": False,
         "season_key": row.get("season_key"),
+        "sowing_date": _as_date(row.get("sowing_date")),
         "status": status,
         "status_zh": STATUS_ZH.get(str(status), None),
         "emerged_flag": bool(row.get("emerged_flag")),

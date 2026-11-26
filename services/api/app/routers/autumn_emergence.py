@@ -1,9 +1,11 @@
-"""冬小麦秋季出苗读接口。
+"""冬小麦秋季出苗接口。
 
 GET /v1/agri/lands/{land_id}/autumn-emergence
 GET /v1/agri/lands/{land_id}/autumn-emergence/pixels
+POST /v1/agri/lands/{land_id}/autumn-emergence
 
 像元来自 emergence/autumn/ 对象，不读 s1s2_parcel/json 的 NDVI 列。
+POST 只排期：缺官方晴空 S2 时派发现有下载任务，API 本机不下载影像。
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from app.middleware.auth import OrgContext, require_roles
 from app.schemas.autumn_emergence import (
     AutumnEmergenceOut,
     AutumnEmergencePixelsOut,
+    AutumnEmergenceScheduleOut,
+    AutumnEmergenceTriggerIn,
     EmergencePixel,
     class_labels,
 )
@@ -29,6 +33,7 @@ from app.services import autumn_emergence as emergence
 router = APIRouter(prefix="/agri", tags=["autumn-emergence"])
 
 _reader = require_roles("owner", "admin", "member", "viewer")
+_writer = require_roles("owner", "admin", "member")
 _SEASON = re.compile(r"^\d{4}-autumn$")
 
 
@@ -45,6 +50,25 @@ async def _agri_ready(db: AsyncSession) -> None:
             detail=(
                 "agric_satellite schema not installed; "
                 "run scripts/20261126_parcel_autumn_emergence.sql"
+            ),
+        )
+    ready = await db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'agric_satellite'
+              AND table_name = 'parcel_autumn_emergence_requests'
+            LIMIT 1
+            """
+        )
+    )
+    if ready.scalar() is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "autumn emergence manual trigger is not installed; "
+                "run scripts/20261126_parcel_autumn_emergence_manual.sql"
             ),
         )
 
@@ -81,6 +105,41 @@ async def get_autumn_emergence(
     if view is None:
         raise HTTPException(status_code=404, detail="Land parcel not found")
     return AutumnEmergenceOut.model_validate(view)
+
+
+@router.post(
+    "/lands/{land_id}/autumn-emergence",
+    response_model=AutumnEmergenceScheduleOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_autumn_emergence(
+    land_id: str,
+    body: AutumnEmergenceTriggerIn,
+    ctx: Annotated[OrgContext, Depends(_writer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """按播种日排期出苗计算。
+
+    已有播种日之后的官方晴空 S2 时只入队计算。否则派发 S2 下载任务，
+    等官方 S2 回执入库后再算。响应里的 pending 为 true 时，轮询 GET
+    ``/v1/agri/lands/{land_id}/autumn-emergence?season=...`` 直到 pending
+    为 false。本接口不下载影像，也不修改 crop_type。
+    该季已冻结时 pending 为 false、dispatch 为 frozen，不重新下载。
+    """
+    await _agri_ready(db)
+    try:
+        scheduled = await emergence.schedule_manual_emergence(
+            db,
+            land_id,
+            body.sowing_date,
+            _season_or_422(body.season),
+        )
+    except emergence.EmergenceScheduleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if scheduled is None:
+        raise HTTPException(status_code=404, detail="Land parcel not found")
+    await db.commit()
+    return AutumnEmergenceScheduleOut.model_validate(scheduled)
 
 
 @router.get(

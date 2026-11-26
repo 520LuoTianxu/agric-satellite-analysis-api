@@ -6,6 +6,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS agric_satellite.parcel_autumn_emergence (
     land_id text NOT NULL,
     season_key text NOT NULL,
+    sowing_date date,
     status text NOT NULL,
     emerged_flag boolean NOT NULL DEFAULT false,
     frozen boolean NOT NULL DEFAULT false,
@@ -56,6 +57,13 @@ COMMENT ON COLUMN agric_satellite.parcel_autumn_emergence.pixel_oss_key IS
 COMMENT ON COLUMN agric_satellite.parcel_autumn_emergence.frozen_at IS
     '判为已出苗并冻结的时间。不自动解冻；下一播种季是新的 season_key。';
 
+-- 已执行过旧版建表脚本的库，补上播种日列。新库 CREATE 已包含该列。
+ALTER TABLE agric_satellite.parcel_autumn_emergence
+    ADD COLUMN IF NOT EXISTS sowing_date date;
+
+COMMENT ON COLUMN agric_satellite.parcel_autumn_emergence.sowing_date IS
+    '人工触发记下的播种日。观测和土壤本底从该日（含）的晴空 S2 起算，不用播种前的场景。自动季可为空。';
+
 CREATE TABLE IF NOT EXISTS agric_satellite.parcel_autumn_emergence_outbox (
     land_id text PRIMARY KEY,
     scene_date date,
@@ -84,5 +92,33 @@ CREATE INDEX IF NOT EXISTS ix_parcel_autumn_emergence_outbox_expired_lease
 
 COMMENT ON TABLE agric_satellite.parcel_autumn_emergence_outbox IS
     '待重算秋季出苗的地块。下载机只入队场景结果；计算在 API 本机，不连下载机 Postgres。';
+
+-- 人工触发在算出结果前先记下播种日。下载机不写这张表。
+CREATE TABLE IF NOT EXISTS agric_satellite.parcel_autumn_emergence_requests (
+    land_id text NOT NULL,
+    season_key text NOT NULL,
+    sowing_date date NOT NULL,
+    status text NOT NULL DEFAULT 'scheduled',
+    dispatch text NOT NULL,
+    date_from date NOT NULL,
+    date_to date NOT NULL,
+    job_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (land_id, season_key),
+    CONSTRAINT parcel_autumn_emergence_requests_season_ck
+        CHECK (season_key ~ '^[0-9]{4}-autumn$'),
+    CONSTRAINT parcel_autumn_emergence_requests_status_ck
+        CHECK (status IN ('scheduled', 'ready')),
+    CONSTRAINT parcel_autumn_emergence_requests_dispatch_ck
+        CHECK (dispatch IN ('compute', 's2_download')),
+    CONSTRAINT parcel_autumn_emergence_requests_window_ck
+        CHECK (date_from <= date_to)
+);
+
+COMMENT ON TABLE agric_satellite.parcel_autumn_emergence_requests IS
+    '前端按播种日手动触发的秋季出苗请求。API 只排期；缺晴空 S2 时派发现有 satellite_batch，算完后 status=ready。';
+COMMENT ON COLUMN agric_satellite.parcel_autumn_emergence_requests.dispatch IS
+    'compute：库里已有播种日之后的官方晴空 S2，只入 outbox。s2_download：缺景，只派发 S2，不派发 S1。';
 
 COMMIT;
