@@ -453,6 +453,43 @@ class SeasonGrowthFactsTests(unittest.TestCase):
         self.assertIsNotNone(spatial["rgb_url"])
         self.assertFalse(spatial["has_pixel_stats"])
 
+    def test_facts_for_llm_keeps_weather_without_emergence(self) -> None:
+        facts = {
+            "field": {"land_id": "1", "crop_type": "小麦"},
+            "weather": {"min_c": 2.0, "max_c": 12.0, "precipitation_mm": 8.0, "days": 10},
+            "gdd": {"base_c": 0, "period": {"sum": "80.0", "days": 10, "from": "2026-10-01", "to": "2026-10-10"}},
+            "ndvi": {"series": []},
+            "ndmi": {"series": []},
+            "drought": {},
+            "flood": {},
+        }
+        compact = facts_for_llm(facts)
+        self.assertEqual(compact["gdd"]["base_c"], 0)
+        self.assertEqual(compact["weather"]["precipitation_mm"], 8.0)
+        self.assertNotIn("autumn_emergence", compact)
+
+    def test_facts_for_llm_keeps_emergence_without_weather(self) -> None:
+        facts = {
+            "field": {"land_id": "1"},
+            "autumn_emergence": {
+                "source": "algorithm",
+                "method_version": "ww_autumn_soil_baseline_v1",
+                "status": "emerged",
+                "status_zh": "已出苗",
+                "emerged_flag": True,
+                "first_emerged_date": "2026-11-08",
+            },
+            "ndvi": {"series": []},
+            "ndmi": {"series": []},
+            "drought": {},
+            "flood": {},
+        }
+        compact = facts_for_llm(facts)
+        self.assertEqual(compact["autumn_emergence"]["status_zh"], "已出苗")
+        self.assertNotIn("weather", compact)
+        self.assertNotIn("gdd", compact)
+
+
 
 if __name__ == "__main__":
     unittest.main()

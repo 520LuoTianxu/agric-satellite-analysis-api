@@ -406,6 +406,29 @@ def _sync_load_season_growth_inputs(
                         "rgb_oss_key": item.get("rgb_oss_key"),
                     }
                 )
+        from agric_satellite_analysis_common.ai_context_load import (
+            load_autumn_emergence_for_model,
+            load_land_flags,
+            load_weather_daily,
+            weather_and_gdd_for_model,
+        )
+
+        weather_daily = load_weather_daily(session, land_id, start, end)
+        land_flags = load_land_flags(session, land_id) or {}
+        autumn_emergence = load_autumn_emergence_for_model(
+            session, land_id, as_of=end
+        )
+        sowing = None
+        if isinstance(autumn_emergence, dict):
+            sowing = autumn_emergence.get("sowing_date")
+        sowing = sowing or land_flags.get("autumn_sowing_date")
+        context = weather_and_gdd_for_model(
+            weather_daily,
+            start=start,
+            end=end,
+            crop_type=land_meta.get("crop_type") or land_flags.get("crop_type"),
+            sowing_date=sowing,
+        )
         return {
             "land": land_meta,
             "land_id": land_id,
@@ -415,6 +438,10 @@ def _sync_load_season_growth_inputs(
             "s1_rows": s1_rows,
             "prior_s2_rows": [],
             "prior_window": {},
+            "weather_daily": weather_daily,
+            "weather": context.get("weather"),
+            "gdd": context.get("gdd"),
+            "autumn_emergence": autumn_emergence,
         }
     finally:
         session.close()

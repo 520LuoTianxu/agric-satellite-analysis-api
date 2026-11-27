@@ -498,6 +498,32 @@ def load_weather(session: Session, land_id: str) -> tuple[dict, dict]:
         else None,
         "data_source": "open-meteo",
     }
+    try:
+        from agric_satellite_analysis_common.ai_context_load import load_land_flags
+        from agric_satellite_analysis_common.weather_gdd import gdd_for_model
+
+        flags = load_land_flags(session, land_id) or {}
+        daily = [
+            {
+                "date": r.date.isoformat() if hasattr(r.date, "isoformat") else str(r.date),
+                "temperature_2m_min": r.temperature_2m_min,
+                "temperature_2m_max": r.temperature_2m_max,
+                "temperature_2m_mean": r.temperature_2m_mean,
+                "precipitation_sum": r.precipitation_sum,
+            }
+            for r in rows
+        ]
+        gdd = gdd_for_model(
+            daily,
+            start=summary["period_start"],
+            end=summary["period_end"],
+            crop_type=flags.get("crop_type"),
+            sowing_date=flags.get("autumn_sowing_date"),
+        )
+        if gdd:
+            summary["gdd"] = gdd
+    except Exception:
+        pass
 
     awc = None
     soil = load_soil(session, land_id)

@@ -46,7 +46,7 @@ SYSTEM_PROMPT = """你是农业遥感与农学评估分析师，为农技人员�
 1. 程序综合分（scorecard.overall.score）不得改写或替换；ai_reference_score 为独立参考分（0–100），须权衡多源证据并说明冲突，仅供参考，不可作为准入结论。
 2. 不得编造未提供的数值；不得给出亩产数字、价格、成本、金额及具体施肥量/灌溉量；产量潜力只写 高/中/低 或 null。
 3. 区分"风险提示"与"已发生灾害"：无明水面景、成灾记录等硬证据，不得判定洪涝或旱灾已发生；不确定处用"提示/可能/疑似/待核实"。
-4. 长势判断须结合生育阶段、天气、水分与土壤，不得凭单一指数下结论；单景空间异常须注明需多时相确认。
+4. 长势判断须结合生育阶段、天气、水分与土壤，不得凭单一指数下结论；单景空间异常须注明需多时相确认。weather_summary.gdd 是按作物基数由逐日气温重算的积温（小麦 0℃，其他常见为 10℃），不是天气表里默认 10℃ 的累计值；有就写，没有不要编。autumn_emergence 是 ww_autumn_soil_baseline_v1 对当前季冬小麦秋季出苗的算法证据，与 analysis.emergence（历史长势估计出苗日）不是同一来源；有算法结果就按 status 和首次确认日期写，不要写成苗数；没有就不要写算法出苗结论。天气/积温和出苗算法相互独立，缺出苗时已有积温仍要写。
 5. 土壤指标名称一律使用中文（黏壤土、排水良好、根系层有效持水量(mm)），禁止英文术语。
 6. 正文不得出现英文字段名或 JSON 键；不做平台或产品宣传。
 7. 只输出合法 JSON，结构见分节说明。"""
@@ -765,6 +765,7 @@ def facts_for_llm(
     analysis: dict[str, Any] | None = None,
     flood_evidence: dict[str, Any] | None = None,
     site_admission: dict[str, Any] | None = None,
+    autumn_emergence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compact program facts for the Bailian prompt (no chart binaries)."""
     analysis = analysis or {}
@@ -811,7 +812,7 @@ def facts_for_llm(
         keys = sorted(months.keys())[-24:]
         months = {k: months[k] for k in keys}
 
-    return {
+    out = {
         "field": {
             "name": field.get("name"),
             "location": field.get("location"),
@@ -891,6 +892,7 @@ def facts_for_llm(
             "risk_events_evidence": (analysis.get("risk_events_evidence") or [])[:8],
         },
         "flood_evidence": fe,
+        "autumn_emergence": autumn_emergence or None,
         "site_admission": (
             {
                 "group_id": site_admission.get("group_id"),
@@ -930,6 +932,9 @@ def facts_for_llm(
             "程序综合分不可改写；可另给 ai_reference_score（仅参考，不可作为准入结论）。",
         ],
     }
+    if not out.get("autumn_emergence"):
+        out.pop("autumn_emergence", None)
+    return out
 
 
 def _bailian_chat(
@@ -1000,6 +1005,8 @@ def _section_facts(facts: dict[str, Any], section_key: str) -> dict[str, Any]:
         base["rs"] = facts.get("rs")
         base["soil"] = facts.get("soil")
         base["weather_summary"] = facts.get("weather_summary")
+        if facts.get("autumn_emergence"):
+            base["autumn_emergence"] = facts.get("autumn_emergence")
         base["analysis"] = {
             k: (facts.get("analysis") or {}).get(k)
             for k in (
@@ -1015,6 +1022,8 @@ def _section_facts(facts: dict[str, Any], section_key: str) -> dict[str, Any]:
         base["risk"] = facts.get("risk")
         base["soil"] = facts.get("soil")
         base["weather_summary"] = facts.get("weather_summary")
+        if facts.get("autumn_emergence"):
+            base["autumn_emergence"] = facts.get("autumn_emergence")
         base["analysis"] = {
             k: (facts.get("analysis") or {}).get(k)
             for k in (
@@ -1044,6 +1053,8 @@ def _section_facts(facts: dict[str, Any], section_key: str) -> dict[str, Any]:
         base["field"] = facts.get("field")
     if section_key == "climate":
         base["weather_summary"] = facts.get("weather_summary")
+        if facts.get("autumn_emergence"):
+            base["autumn_emergence"] = facts.get("autumn_emergence")
         base["rs"] = {
             k: (facts.get("rs") or {}).get(k)
             for k in (

@@ -450,6 +450,51 @@ class LandAssessmentAiTests(unittest.TestCase):
         self.assertEqual(facts["soil"]["drainage_class"], "排水良好")
         self.assertIn("根系层有效持水量", facts["soil"]["rootzone_awc_label"])
 
+        self.assertNotIn("autumn_emergence", facts)
+
+    def test_facts_for_llm_keeps_gdd_without_emergence(self) -> None:
+        facts = ai_analysis.facts_for_llm(
+            field={"name": "A", "area_ha": 1.0, "crop_label": "小麦"},
+            scorecard={"overall": {"score": 70}, "dimensions": []},
+            rs={},
+            risk={},
+            soil={},
+            weather_summary={
+                "avg_temperature": 8.0,
+                "total_precipitation": 12.0,
+                "gdd": {"base_c": 0, "period": {"sum": "40.0", "days": 10, "from": "2026-10-01", "to": "2026-10-10"}},
+            },
+            analysis={"emergence": {"date": "2025-10-12"}},
+        )
+        self.assertEqual(facts["weather_summary"]["gdd"]["base_c"], 0)
+        self.assertNotIn("autumn_emergence", facts)
+        climate = ai_analysis._section_facts(facts, "climate")
+        self.assertEqual(climate["weather_summary"]["gdd"]["period"]["sum"], "40.0")
+        self.assertNotIn("autumn_emergence", climate)
+
+    def test_facts_for_llm_includes_algorithm_emergence(self) -> None:
+        facts = ai_analysis.facts_for_llm(
+            field={"name": "A", "area_ha": 1.0, "crop_label": "小麦"},
+            scorecard={"overall": {"score": 70}, "dimensions": []},
+            rs={},
+            risk={},
+            soil={},
+            weather_summary={},
+            analysis={"emergence": {"date": "2025-10-12"}},
+            autumn_emergence={
+                "source": "algorithm",
+                "method_version": "ww_autumn_soil_baseline_v1",
+                "status": "emerging",
+                "status_zh": "出苗中",
+                "emerged_flag": False,
+            },
+        )
+        self.assertEqual(facts["autumn_emergence"]["status_zh"], "出苗中")
+        self.assertEqual((facts["analysis"] or {}).get("emergence", {}).get("date"), "2025-10-12")
+        climate = ai_analysis._section_facts(facts, "climate")
+        self.assertEqual(climate["autumn_emergence"]["method_version"], "ww_autumn_soil_baseline_v1")
+        self.assertIn("ww_autumn_soil_baseline_v1", ai_analysis.SYSTEM_PROMPT)
+
 
     def test_normalize_ai_reference_fields(self) -> None:
         out = ai_analysis.normalize_ai(

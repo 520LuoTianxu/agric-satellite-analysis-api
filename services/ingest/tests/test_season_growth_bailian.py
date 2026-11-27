@@ -140,6 +140,8 @@ class BailianClientTests(unittest.TestCase):
         self.assertIn("无人机", prompt)
         self.assertIn("拔节", prompt)
         self.assertIn("actions_next_season", prompt)
+        self.assertIn("ww_autumn_soil_baseline_v1", prompt)
+        self.assertIn("缺出苗时已有积温仍要写", prompt)
 
 
     def test_sanitize_replaces_remote_ops_next_season(self) -> None:
