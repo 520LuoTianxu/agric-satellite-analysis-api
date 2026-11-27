@@ -13,6 +13,12 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from agric_satellite_analysis_common.weather_gdd import (
+    daily_gdd as _shared_daily_gdd,
+    gdd_base_c as crop_gdd_base_c,
+    gdd_between as shared_gdd_between,
+)
+
 # 出苗判断最多往前看这么多天的气温。再早的播期只覆盖有记录的那一段。
 MAX_SOWING_LOOKBACK_DAYS = 150
 _SOWING_CODES = {"PRECISION_SOWING"}
@@ -143,58 +149,17 @@ def _stage_names(facts: dict[str, Any]) -> list[str]:
 
 def gdd_base_c(facts: dict[str, Any]) -> float:
     """小麦出苗按 0℃。玉米和其余作物按天气任务的 10℃。"""
-    crop = str(facts.get("crop_type") or "").lower()
-    if any(token in crop for token in ("玉米", "maize", "corn")):
-        return 10.0
-    if any(token in crop for token in ("小麦", "wheat")):
-        return 0.0
-    if any(name in _WHEAT_STAGES for name in _stage_names(facts)):
-        return 0.0
-    return 10.0
+    return crop_gdd_base_c(facts.get("crop_type"), _stage_names(facts))
 
 
 def _daily_gdd(row: dict[str, Any], base: float) -> float | None:
-    if row.get("min_c") is None or row.get("max_c") is None:
-        return None
-    try:
-        mean = (float(row["min_c"]) + float(row["max_c"])) / 2.0
-    except (TypeError, ValueError):
-        return None
-    if mean != mean:
-        return None
-    return max(0.0, mean - base)
+    return _shared_daily_gdd(row, base)
 
 
 def gdd_between(
     rows: list[Any], start: str, end: str, base: float
 ) -> dict[str, Any] | None:
-    total = 0.0
-    days = 0
-    first: str | None = None
-    last: str | None = None
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        day = _iso_day(row.get("date"))
-        if not day or day < start or day > end:
-            continue
-        value = _daily_gdd(row, base)
-        if value is None:
-            continue
-        total += value
-        days += 1
-        if first is None or day < first:
-            first = day
-        if last is None or day > last:
-            last = day
-    if days == 0 or first is None or last is None:
-        return None
-    return {
-        "sum": f"{total:.1f}",
-        "days": days,
-        "from": first,
-        "to": last,
-    }
+    return shared_gdd_between(rows, start, end, base)
 
 
 def _latest_day(facts: dict[str, Any]) -> str | None:

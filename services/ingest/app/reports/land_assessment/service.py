@@ -168,6 +168,20 @@ def generate_assessment_pdf(
         bundle = load_land_bundle(session, land_id)
 
     field = bundle["field"]
+    land_id = field.get("land_id") or land_id
+    if bundle.get("autumn_emergence") is None and session is not None and land_id:
+        try:
+            from datetime import date as date_type
+
+            from agric_satellite_analysis_common.ai_context_load import (
+                load_autumn_emergence_for_model,
+            )
+
+            bundle["autumn_emergence"] = load_autumn_emergence_for_model(
+                session, str(land_id), as_of=date_type.today()
+            )
+        except Exception:
+            bundle["autumn_emergence"] = None
     computed = compute_assessment(
         indices=bundle["indices"],
         soil=bundle["soil"],
@@ -334,6 +348,7 @@ def generate_assessment_pdf(
         analysis=analysis,
         flood_evidence=flood_evidence,
         site_admission=bundle.get("site_admission"),
+        autumn_emergence=bundle.get("autumn_emergence"),
     )
     ai = generate_land_assessment_narrative(llm_facts, timeout=180.0, parallel=True)
 

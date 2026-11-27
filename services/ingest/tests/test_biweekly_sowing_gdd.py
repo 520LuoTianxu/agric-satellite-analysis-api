@@ -214,3 +214,100 @@ class SowingGddTests(unittest.TestCase):
         days = [row["date"] for row in filled["weather_daily"]]
         self.assertIn("2026-10-01", days)
         self.assertIn("2026-11-21", days)
+
+    def test_payload_keeps_gdd_without_emergence(self) -> None:
+        payload = narrative_input(_facts())
+        self.assertIsNotNone(payload["gdd"])
+        self.assertIsNone(payload.get("autumn_emergence"))
+        self.assertIn("积温", "\n".join(payload["conclusion_task"]))
+        self.assertNotIn("ww_autumn_soil_baseline_v1", "\n".join(payload["conclusion_task"]))
+
+    def test_payload_includes_algorithm_emergence(self) -> None:
+        facts = _facts()
+        facts["autumn_emergence"] = {
+            "kind": "autumn_emergence",
+            "method_version": "ww_autumn_soil_baseline_v1",
+            "status": "emerging",
+            "status_zh": "出苗中",
+            "emerged_flag": False,
+            "sowing_date": "2026-10-08",
+            "as_of_date": "2026-11-11",
+            "median_increment": 0.041,
+            "class_counts": {"0": 38, "1": 31, "2": 31},
+            "pixels": {"lon": [115.0], "lat": [34.8], "class": [1]},
+        }
+        payload = narrative_input(facts)
+        emergence = payload["autumn_emergence"]
+        assert emergence is not None
+        self.assertEqual(emergence["status_zh"], "出苗中")
+        self.assertEqual(emergence["method_version"], "ww_autumn_soil_baseline_v1")
+        self.assertNotIn("pixels", emergence)
+        self.assertIsNotNone(payload["gdd"])
+        task = "\n".join(payload["conclusion_task"])
+        self.assertIn("积温", task)
+        self.assertIn("出苗算法", task)
+        self.assertIn("autumn_emergence", payload["parameter_guide"])
+        gaps = conclusion_gaps(
+            {"conclusion": ["10月8日播种，到11月11日过了34天，积温9.0，偏低，出苗会慢。"]},
+            payload,
+        )
+        self.assertIn("autumn_emergence", gaps)
+        covered = conclusion_gaps(
+            {
+                "conclusion": [
+                    "10月8日播种，到11月11日过了34天，积温9.0，偏低，出苗会慢。"
+                    "算法判定目前为出苗中，还不能确认全田已出苗。"
+                ]
+            },
+            payload,
+        )
+        self.assertNotIn("autumn_emergence", covered)
+        self.assertNotIn("gdd", covered)
+        self.assertNotIn("sowing", covered)
+
+    def test_enrichment_attaches_emergence_from_products(self) -> None:
+        from agric_satellite_analysis_common.autumn_emergence import attach_daily_field
+        from app.reports.biweekly.enrichment import enrich_official_report_facts
+
+        field = {
+            "kind": "autumn_emergence",
+            "method_version": "ww_autumn_soil_baseline_v1",
+            "sowing_date": "2026-10-08",
+            "as_of_date": "2026-11-11",
+            "status": "emerging",
+            "status_zh": "出苗中",
+            "emerged_flag": False,
+            "n_pixels": 40,
+            "median_increment": 0.04,
+            "class_counts": {"0": 20, "1": 10, "2": 10},
+            "pixels": {"lon": [115.0], "lat": [34.8], "class": [0]},
+        }
+        product = attach_daily_field(
+            {
+                "date": "2026-11-11",
+                "sensor": "S2",
+                "source": "stac_direct",
+                "pixel_data": {"format": "lonlat_columns_v1", "columns": {"lon": [115.0], "lat": [34.8]}},
+            },
+            field,
+        )
+        facts = _facts()
+        with tempfile.TemporaryDirectory() as tmp:
+            filled = enrich_official_report_facts(
+                facts,
+                figures_dir=tmp,
+                products=[product],
+                latitude=34.8,
+                longitude=115.0,
+                offline=True,
+                fetch_weather=lambda **_k: {"weather_error": "offline"},
+                fetch_truecolor=lambda **_k: None,
+            )
+        self.assertIsNotNone(filled.get("weather_daily"))
+        emergence = filled["autumn_emergence"]
+        self.assertEqual(emergence["status_zh"], "出苗中")
+        self.assertNotIn("pixels", emergence)
+        payload = narrative_input(filled)
+        self.assertEqual(payload["autumn_emergence"]["status"], "emerging")
+        self.assertIsNotNone(payload["gdd"])
+

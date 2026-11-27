@@ -609,6 +609,7 @@ def enrich_official_report_facts(
             filled["prior_observations"] = [_observation_from_product(item) for item in earlier]
 
     product_by_date = attach_report_inputs(filled, loaded)
+    _attach_autumn_emergence(filled, loaded)
     plan = filled["report_metrics"]
     comparison = filled["comparison"]
     # 库里有日期但气温、降水全空，或只有本期之前的日子，都要再拉。
@@ -823,3 +824,24 @@ SURROUNDING_MISSING_REASONS = {
     "truecolor_unavailable": "未能取得覆盖周边1—2公里的同期真彩色影像",
     "classification_failed": "同期真彩色影像中未能识别出周边农田",
 }
+
+def _attach_autumn_emergence(facts: dict[str, Any], products: list[dict[str, Any]]) -> None:
+    """Attach compact algorithm evidence. Leave weather/积温 untouched when it is missing."""
+    from agric_satellite_analysis_common.autumn_emergence import (
+        daily_fields_from_products,
+        summary_for_model,
+    )
+
+    fields = daily_fields_from_products(products)
+    if fields:
+        facts["autumn_emergence_days"] = {
+            day: {key: value for key, value in field.items() if key != "pixels"}
+            for day, field in fields.items()
+        }
+    summary = summary_for_model(
+        daily_fields=fields,
+        land=facts.get("field") if isinstance(facts.get("field"), dict) else facts,
+    )
+    if summary:
+        facts["autumn_emergence"] = summary
+

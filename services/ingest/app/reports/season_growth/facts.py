@@ -1689,6 +1689,65 @@ def build_spatial_block(
     return spatial
 
 
+
+def _attach_weather_and_emergence(
+    facts: dict[str, Any],
+    *,
+    session: "Session | None",
+    land_id: str,
+    start: date,
+    end: date,
+    crop_type: str | None,
+    http_inputs: dict[str, Any] | None,
+) -> None:
+    """Attach weather/积温 and autumn emergence independently when available."""
+    from agric_satellite_analysis_common.ai_context_load import (
+        load_autumn_emergence_for_model,
+        load_land_flags,
+        load_weather_daily,
+        weather_and_gdd_for_model,
+    )
+    from agric_satellite_analysis_common.autumn_emergence import summary_for_model
+
+    weather_daily = list((http_inputs or {}).get("weather_daily") or [])
+    emergence = (http_inputs or {}).get("autumn_emergence")
+    if session is not None:
+        if not weather_daily:
+            weather_daily = load_weather_daily(session, land_id, start, end)
+        if not emergence:
+            emergence = load_autumn_emergence_for_model(session, land_id, as_of=end)
+    sowing = None
+    if isinstance(emergence, dict):
+        sowing = emergence.get("sowing_date")
+        if emergence.get("source") != "algorithm" or "pixels" in emergence:
+            emergence = summary_for_model(
+                latest=emergence,
+                timeseries=emergence.get("timeseries") if isinstance(emergence.get("timeseries"), list) else None,
+            )
+    if sowing is None and session is not None:
+        flags = load_land_flags(session, land_id) or {}
+        sowing = flags.get("autumn_sowing_date")
+    # HTTP may already have compact weather/gdd; recompute from daily rows when present
+    # so the 积温基数与作物一致。无逐日天气时保留 HTTP 已算好的块。
+    context = weather_and_gdd_for_model(
+        weather_daily,
+        start=start,
+        end=end,
+        crop_type=crop_type,
+        sowing_date=sowing,
+    )
+    if not context.get("weather") and isinstance((http_inputs or {}).get("weather"), dict):
+        context["weather"] = http_inputs.get("weather")
+    if not context.get("gdd") and isinstance((http_inputs or {}).get("gdd"), dict):
+        context["gdd"] = http_inputs.get("gdd")
+    if context.get("weather"):
+        facts["weather"] = context["weather"]
+    if context.get("gdd"):
+        facts["gdd"] = context["gdd"]
+    if emergence:
+        facts["autumn_emergence"] = emergence
+
+
 def build_season_facts(
     session: "Session | None",
     land_id: str,
@@ -1989,6 +2048,15 @@ def build_season_facts(
             ndvi_latest=latest,
         ),
     }
+    _attach_weather_and_emergence(
+        facts,
+        session=session,
+        land_id=land_id,
+        start=start,
+        end=end,
+        crop_type=field_meta.get("crop_type"),
+        http_inputs=http_inputs,
+    )
     return facts
 
 
@@ -2159,7 +2227,7 @@ def facts_for_llm(
         harvest_out["wording_hint"] = (
             "疑似进入成熟后期或收获准备阶段（需田间确认，不得写立即收割）"
         )
-    return {
+    payload = {
         "field": facts.get("field"),
         "window": facts.get("window"),
         "season_months": facts.get("season_months"),
@@ -2191,6 +2259,8 @@ def facts_for_llm(
             "yoy_only": "只能写峰值日期提前/推后，禁止写生育进程提前一个月",
             "harvest_wording": "疑似进入成熟后期或收获准备阶段，需田间确认",
             "september_drought": "绿度下降与干旱共现=成熟脱水+天气偏干可能同时存在，不能定量",
+            "weather_gdd": "有 weather/gdd 就必须用；没有则不要写天气或积温。积温与出苗算法相互独立",
+            "autumn_emergence": "有 autumn_emergence 时按 ww_autumn_soil_baseline_v1 算法结果写，不是苗数；没有则不要写算法出苗结论",
             "ban": [
                 "生物量积累达标",
                 "生物量达标",
@@ -2204,6 +2274,13 @@ def facts_for_llm(
             ],
         },
     }
+    if facts.get("weather"):
+        payload["weather"] = facts.get("weather")
+    if facts.get("gdd"):
+        payload["gdd"] = facts.get("gdd")
+    if facts.get("autumn_emergence"):
+        payload["autumn_emergence"] = facts.get("autumn_emergence")
+    return payload
 
 
 # ── Agronomy helpers for next-season / farming-risk pages ─────────────

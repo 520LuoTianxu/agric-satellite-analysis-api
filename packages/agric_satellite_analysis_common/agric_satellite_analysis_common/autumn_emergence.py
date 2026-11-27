@@ -1145,3 +1145,258 @@ def official_stack_from_product(product: dict) -> tuple[DateStack | None, int]:
     if int(stack.ndvi.size) / total < MIN_CLEAR_FRACTION:
         return None, total
     return stack, total
+
+# ── Compact evidence for LLM prompts (no per-pixel arrays) ───────────
+
+_CLASS_SHARE_KEYS = {
+    "0": "within_noise",
+    "1": "above_noise",
+    "2": "sustained",
+}
+_MAX_TIMESERIES = 16
+_PIXEL_KEYS = {"pixels", "columns"}
+
+
+def class_shares_for_model(counts: Any) -> dict[str, Any] | None:
+    """Convert class_counts into shares. Returns None when there are no pixels."""
+    if not isinstance(counts, dict):
+        return None
+    numbers: dict[str, int] = {}
+    total = 0
+    for key in ("0", "1", "2"):
+        try:
+            value = int(counts.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value < 0:
+            value = 0
+        numbers[key] = value
+        total += value
+    if total <= 0:
+        return None
+    shares = {name: round(numbers[key] / total, 4) for key, name in _CLASS_SHARE_KEYS.items()}
+    shares["n_pixels"] = total
+    return shares
+
+
+def daily_point_for_model(field: dict[str, Any] | None, *, date_value: str | None = None) -> dict[str, Any] | None:
+    """One clear day's algorithm summary, without pixel arrays."""
+    if not isinstance(field, dict) or not field:
+        return None
+    day = _iso(_as_day(date_value or field.get("as_of_date") or field.get("date")))
+    point: dict[str, Any] = {}
+    if day:
+        point["date"] = day
+    status = field.get("status")
+    if status:
+        point["status"] = status
+        point["status_zh"] = field.get("status_zh") or STATUS_ZH.get(str(status), None)
+    if field.get("emerged_flag") is not None:
+        point["emerged_flag"] = bool(field.get("emerged_flag"))
+    if "in_baseline" in field:
+        point["in_baseline"] = bool(field.get("in_baseline"))
+    for key in (
+        "median_ndvi",
+        "median_increment",
+        "share_above_noise",
+        "share_sustained",
+        "share_ndvi_ge_0_30",
+        "n_pixels",
+        "n_clear",
+    ):
+        if field.get(key) is not None:
+            point[key] = field.get(key)
+    shares = class_shares_for_model(field.get("class_counts"))
+    if shares:
+        point["class_shares"] = shares
+    return point or None
+
+
+def daily_fields_from_products(products: list[Any] | None) -> dict[str, dict[str, Any]]:
+    """Map as-of date → stored daily emergence field from official products."""
+    out: dict[str, dict[str, Any]] = {}
+    for product in products or []:
+        if not isinstance(product, dict):
+            continue
+        field = daily_field_of(product)
+        if not field:
+            continue
+        day = _iso(_as_day(field.get("as_of_date") or product.get("date")))
+        if not day:
+            continue
+        previous = out.get(day)
+        if previous is None or int(field.get("n_pixels") or 0) >= int(previous.get("n_pixels") or 0):
+            out[day] = field
+    return dict(sorted(out.items()))
+
+
+def daily_fields_from_rows(rows: Any) -> dict[str, dict[str, Any]]:
+    """Map as-of date → daily field from parcel_scene_products rows."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            try:
+                row = dict(row)
+            except (TypeError, ValueError):
+                continue
+        field = daily_field_of({"pixel_data": row.get("pixel_data"), "autumn_emergence": row.get("autumn_emergence")})
+        if not field:
+            continue
+        day = _iso(_as_day(field.get("as_of_date") or row.get("date")))
+        if not day:
+            continue
+        previous = out.get(day)
+        if previous is None or int(field.get("n_pixels") or 0) >= int(previous.get("n_pixels") or 0):
+            out[day] = field
+    return dict(sorted(out.items()))
+
+
+def official_daily_fields_sql(alias: str = "p") -> str:
+    """Official S2 rows that may already carry autumn_emergence in pixel_data."""
+    from agric_satellite_analysis_common.agri_classify import official_s2_sql
+
+    return f"""
+    SELECT {alias}.date, {alias}.pixel_data
+    FROM agric_satellite.parcel_scene_products AS {alias}
+    WHERE {alias}.land_id = :land_id
+      AND {alias}.sensor = 'S2'
+      AND {alias}.date >= :date_from AND {alias}.date <= :date_to
+      AND {official_s2_sql(alias)}
+    ORDER BY {alias}.date ASC, {alias}.scene_id ASC
+    """
+
+
+def land_flags_for_model(land: dict[str, Any] | None) -> dict[str, Any]:
+    """Season-level flags stored on land_parcels. Empty when none are set."""
+    if not isinstance(land, dict):
+        return {}
+    body: dict[str, Any] = {}
+    sowing = _iso(_as_day(land.get("autumn_sowing_date") or land.get("sowing_date")))
+    season = land.get("autumn_emerged_season") or land.get("autumn_sowing_season") or land.get("season_key")
+    if sowing:
+        body["sowing_date"] = sowing
+    if season:
+        body["season_key"] = season
+    if land.get("autumn_emerged"):
+        body["emerged_flag"] = True
+        body["frozen"] = True
+        body["status"] = STATUS_EMERGED
+        body["status_zh"] = STATUS_ZH[STATUS_EMERGED]
+        body["first_emerged_date"] = _iso(_as_day(land.get("autumn_emerged_date") or land.get("first_emerged_date")))
+        frozen_at = land.get("autumn_emerged_at") or land.get("frozen_at")
+        if frozen_at is not None:
+            body["frozen_at"] = frozen_at if isinstance(frozen_at, str) else str(frozen_at)
+    return body
+
+
+def summary_for_model(
+    *,
+    daily_fields: dict[str, dict[str, Any]] | None = None,
+    latest: dict[str, Any] | None = None,
+    timeseries: list[dict[str, Any]] | None = None,
+    land: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Algorithm-backed autumn emergence evidence for an LLM prompt.
+
+    Drops per-pixel arrays. Returns None when there is no daily result and no
+    land-level emerged flag, so a missing source does not emit an empty stub.
+    """
+    fields = dict(daily_fields or {})
+    if latest and not fields:
+        day = _iso(_as_day(latest.get("as_of_date") or latest.get("date")))
+        if day:
+            fields[day] = latest
+        else:
+            fields["_"] = latest
+    last_field: dict[str, Any] | None = None
+    points: list[dict[str, Any]] = []
+    if timeseries:
+        for row in timeseries:
+            point = daily_point_for_model(row, date_value=row.get("date") if isinstance(row, dict) else None)
+            if point:
+                points.append(point)
+    elif fields:
+        for day, field in fields.items():
+            if day == "_":
+                continue
+            point = daily_point_for_model(field, date_value=day)
+            if point:
+                points.append(point)
+    if fields:
+        last_key = [key for key in fields if key != "_"]
+        last_field = fields[last_key[-1]] if last_key else fields.get("_")
+    if points and _MAX_TIMESERIES and len(points) > _MAX_TIMESERIES:
+        points = points[-_MAX_TIMESERIES:]
+
+    flags = land_flags_for_model(land)
+    if last_field is None and not flags and not points:
+        return None
+
+    body: dict[str, Any] = {
+        "source": "algorithm",
+        "method_version": METHOD_VERSION,
+        "algorithm_name_zh": "冬小麦秋季土壤本底出苗算法",
+        "rule_zh": RULE_ZH,
+        "disclaimer_zh": DISCLAIMER_ZH,
+    }
+    if last_field:
+        compact = {key: value for key, value in last_field.items() if key not in _PIXEL_KEYS}
+        body["method_version"] = compact.get("method_version") or METHOD_VERSION
+        body["status"] = compact.get("status")
+        body["status_zh"] = compact.get("status_zh") or STATUS_ZH.get(str(compact.get("status") or ""), None)
+        body["emerged_flag"] = bool(compact.get("emerged_flag"))
+        for key in (
+            "season_key",
+            "sowing_date",
+            "as_of_date",
+            "first_emerged_date",
+            "n_clear",
+            "n_pixels",
+            "median_increment",
+            "share_above_noise",
+            "share_sustained",
+            "share_ndvi_ge_0_30",
+            "ndre_share_above_noise",
+            "noise_floor",
+            "reason",
+        ):
+            if compact.get(key) is not None:
+                body[key] = compact.get(key)
+        if body.get("share_ndvi_ge_0_30") is not None:
+            body["share_ndvi_ge_0_30_note"] = "对照比例，不参与出苗判定"
+        shares = class_shares_for_model(compact.get("class_counts"))
+        if shares:
+            body["class_shares"] = shares
+        if compact.get("class_labels"):
+            body["class_labels_zh"] = dict(compact.get("class_labels") or CLASS_LABELS_ZH)
+        else:
+            body["class_labels_zh"] = dict(CLASS_LABELS_ZH)
+        baseline = compact.get("baseline_dates")
+        if baseline:
+            body["baseline_dates"] = list(baseline)
+        obs = compact.get("obs_dates")
+        if obs:
+            body["obs_dates"] = list(obs)
+        if compact.get("disclaimer_zh"):
+            body["disclaimer_zh"] = compact["disclaimer_zh"]
+    if flags:
+        if flags.get("sowing_date") and not body.get("sowing_date"):
+            body["sowing_date"] = flags["sowing_date"]
+        if flags.get("season_key") and not body.get("season_key"):
+            body["season_key"] = flags["season_key"]
+        if flags.get("emerged_flag"):
+            body["emerged_flag"] = True
+            body["frozen"] = True
+            body["status"] = flags.get("status") or body.get("status") or STATUS_EMERGED
+            body["status_zh"] = flags.get("status_zh") or body.get("status_zh") or STATUS_ZH[STATUS_EMERGED]
+            if flags.get("first_emerged_date") and not body.get("first_emerged_date"):
+                body["first_emerged_date"] = flags["first_emerged_date"]
+            if flags.get("frozen_at"):
+                body["frozen_at"] = flags["frozen_at"]
+            if last_field is None:
+                body["detail_source"] = "land_flag"
+    if points:
+        body["timeseries"] = points
+    if not body.get("status") and not body.get("emerged_flag") and not points:
+        return None
+    return body
